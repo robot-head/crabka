@@ -806,7 +806,9 @@ pub(crate) fn event_command_tag(stmt: &parsed::Statement) -> &'static str {
         Statement::CreateForeignTable { .. } => "CREATE FOREIGN TABLE",
         Statement::DropForeignTable { .. } => "DROP FOREIGN TABLE",
         Statement::GrantTablePrivileges { .. } => "GRANT",
+        Statement::GrantSchemaPrivileges { .. } => "GRANT",
         Statement::RevokeTablePrivileges { .. } => "REVOKE",
+        Statement::RevokeSchemaPrivileges { .. } => "REVOKE",
         Statement::ImportForeignSchema { .. } => "IMPORT FOREIGN SCHEMA",
         Statement::Utility(parsed::UtilityStatement::TextSearch(ddl)) => match ddl {
             parsed::TextSearchDdl::Create {

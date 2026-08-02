@@ -447,18 +447,22 @@ fn body_text(body: &RoutineBody) -> (String, BodyForm) {
 fn build_routine(kv: &dyn Kv, stmt: &CreateRoutineStmt, owner: &str) -> Result<Routine, ExecError> {
     let kind = object_kind(stmt.object).expect("CREATE ROUTINE is not PostgreSQL syntax");
     let options = Options::collect(&stmt.options)?;
-    let language = options
-        .language
-        .ok_or_else(|| invalid_definition("no language specified"))?;
+    let body = options
+        .body
+        .ok_or_else(|| invalid_definition("no function body specified"))?;
+    let language = options.language.unwrap_or_else(|| match body {
+        RoutineBody::Return { .. } => "sql".into(),
+        _ => String::new(),
+    });
+    if language.is_empty() {
+        return Err(invalid_definition("no language specified"));
+    }
     if !LANGUAGES.contains(&language.as_str()) {
         return Err(ExecError::FunctionError {
             sqlstate: "42704",
             message: format!("language \"{language}\" does not exist"),
         });
     }
-    let body = options
-        .body
-        .ok_or_else(|| invalid_definition("no function body specified"))?;
     let mut params = Vec::with_capacity(stmt.args.len());
     let mut seen_default = false;
     for arg in &stmt.args {
@@ -2956,6 +2960,16 @@ mod tests {
         assert!(routine.parallel == 'u');
         assert!(!routine.strict);
         assert!((routine.cost - 100.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn sql_standard_return_body_implies_sql_language() {
+        let routine = defined(
+            &MemKv::default(),
+            "CREATE FUNCTION f(x int) RETURNS int IMMUTABLE RETURN x + 1",
+        );
+        assert!(routine.language == "sql");
+        assert!(routine.body_form == BodyForm::Return);
     }
 
     #[test]
