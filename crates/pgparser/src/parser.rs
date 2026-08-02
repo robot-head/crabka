@@ -3508,9 +3508,27 @@ impl Parser {
         } else {
             self.expect_ident_eq("role")?;
         }
+        let name = self.expect_object_name()?;
+        let mut member_of = Vec::new();
+        while !matches!(self.peek(), Token::Semicolon | Token::Eof) {
+            if self.eat_keyword(Keyword::In) {
+                self.expect_ident_eq("role")?;
+                loop {
+                    member_of.push(self.expect_object_name()?);
+                    if !self.eat_comma() {
+                        break;
+                    }
+                }
+            } else {
+                // Role attributes such as NOSUPERUSER are accepted metadata;
+                // only membership currently affects authorization.
+                self.bump();
+            }
+        }
         Ok(crate::ast::Statement::CreateRole {
-            name: self.expect_object_name()?,
+            name,
             can_login,
+            member_of,
         })
     }
 

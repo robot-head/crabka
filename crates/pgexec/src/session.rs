@@ -3829,6 +3829,14 @@ impl SqlSession {
                 crabka_pgcatalog::CatalogError::UndefinedObject(next_role.to_string()).into(),
             );
         }
+        if self.session_user != self.authenticated_user
+            && !crabka_pgcatalog::role_can_set(&*self.catalog_kv, &self.session_user, next_role)?
+        {
+            return Err(ExecError::Remote(PgError::error(
+                "42501",
+                format!("permission denied to set role \"{next_role}\""),
+            )));
+        }
         self.current_role = next_role.to_string();
         Ok(QueryResult::Command {
             tag: reset_or_set_tag(reset),
@@ -5002,7 +5010,16 @@ impl SqlSession {
                     }
                 }
                 .map_err(|_| operator_object_missing(*kind, &name.name, &method))?;
-                if owner != self.current_role && self.current_role != "postgres" {
+                let superuser = self.current_role == self.authenticated_user
+                    || self.current_role == "postgres";
+                if owner != self.current_role
+                    && !superuser
+                    && !crabka_pgcatalog::role_can_set(
+                        &*self.catalog_kv,
+                        &self.current_role,
+                        &owner,
+                    )?
+                {
                     return Err(operator_object_not_owner(*kind, &name.name));
                 }
                 let target_name = match action {
@@ -5032,6 +5049,20 @@ impl SqlSession {
                                 owner.clone(),
                             )
                             .into());
+                        }
+                        if !superuser
+                            && !crabka_pgcatalog::role_can_set(
+                                &*self.catalog_kv,
+                                &self.current_role,
+                                owner,
+                            )?
+                        {
+                            return Err(ExecError::Remote(
+                                crabka_pgwire::error::PgError::error(
+                                    "42501",
+                                    format!("must be able to SET ROLE \"{owner}\""),
+                                ),
+                            ));
                         }
                         owner.clone()
                     }
@@ -16900,6 +16931,35 @@ mod session_conformance_tests {
     }
 
     #[tokio::test]
+    async fn create_user_in_role_authorizes_set_role() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE ROLE parent_role; \
+                 CREATE USER member_role IN ROLE parent_role; \
+                 CREATE ROLE unrelated_role",
+            )
+            .await
+            .expect("create role membership");
+        session
+            .simple_query("SET SESSION AUTHORIZATION member_role")
+            .await
+            .expect("become member");
+        session
+            .simple_query("SET ROLE parent_role")
+            .await
+            .expect("assume granted role");
+        assert!(scalar(&mut session, "SELECT current_user").await == "parent_role");
+        session
+            .simple_query("RESET ROLE")
+            .await
+            .expect("return to member");
+        assert!(scalar(&mut session, "SELECT current_user").await == "member_role");
+        assert!(state(&mut session, "SET ROLE unrelated_role").await == "42501");
+    }
+
+    #[tokio::test]
     async fn transaction_isolation_reports_the_level_the_block_runs_at() {
         let engine = SqlEngine::new();
         let mut s = engine.connect();
@@ -17278,6 +17338,15 @@ mod session_conformance_tests {
                 == "42704"
         );
         session
+            .simple_query(
+                "CREATE ROLE operator_owner; \
+                 CREATE USER operator_member IN ROLE operator_owner; \
+                 CREATE ROLE operator_unrelated; \
+                 SET SESSION AUTHORIZATION operator_member",
+            )
+            .await
+            .expect("create operator owner membership");
+        session
             .simple_query("CREATE OPERATOR FAMILY explicit_family USING hash")
             .await
             .expect("create family");
@@ -17326,10 +17395,14 @@ mod session_conformance_tests {
             .simple_query("CREATE SCHEMA operator_archive")
             .await
             .expect("create destination schema");
-        session
-            .simple_query("CREATE ROLE operator_owner")
+        assert!(
+            state(
+                &mut session,
+                "ALTER OPERATOR FAMILY explicit_family USING hash OWNER TO operator_unrelated",
+            )
             .await
-            .expect("create owner");
+                == "42501"
+        );
         for sql in [
             "ALTER OPERATOR FAMILY explicit_family USING hash RENAME TO renamed_family",
             "ALTER OPERATOR CLASS explicit_class USING hash RENAME TO renamed_class",
@@ -17337,6 +17410,8 @@ mod session_conformance_tests {
             "ALTER OPERATOR CLASS renamed_class USING hash SET SCHEMA operator_archive",
             "ALTER OPERATOR FAMILY operator_archive.renamed_family USING hash OWNER TO operator_owner",
             "ALTER OPERATOR CLASS operator_archive.renamed_class USING hash OWNER TO operator_owner",
+            "ALTER OPERATOR FAMILY operator_archive.renamed_family USING hash SET SCHEMA operator_archive",
+            "ALTER OPERATOR CLASS operator_archive.renamed_class USING hash SET SCHEMA operator_archive",
         ] {
             session.simple_query(sql).await.expect(sql);
         }

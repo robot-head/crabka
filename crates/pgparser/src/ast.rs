@@ -461,6 +461,7 @@ pub enum Statement {
     /* SQL parity matrix row: CREATE ROLE / CREATE USER. */ CreateRole {
         name: String,
         can_login: bool,
+        member_of: Vec<String>,
     },
     /* SQL parity matrix row: DROP ROLE / DROP USER. */ DropRole {
         name: String,

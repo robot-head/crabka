@@ -1027,8 +1027,17 @@ pub(crate) fn execute_ddl(
                 vec![crabka_pgcatalog::set_relation_tablespace_op(name, oid)],
             ))
         }
-        Statement::CreateRole { name, can_login } => {
-            let ops = crabka_pgcatalog::create_role_ops(kv, name, *can_login)?;
+        Statement::CreateRole {
+            name,
+            can_login,
+            member_of,
+        } => {
+            let ops = crabka_pgcatalog::create_role_with_memberships_ops(
+                kv,
+                name,
+                *can_login,
+                member_of,
+            )?;
             Ok((command("CREATE ROLE"), ops))
         }
         Statement::DropRole { name } => {
