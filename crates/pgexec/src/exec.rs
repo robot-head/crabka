@@ -919,6 +919,7 @@ pub(crate) fn execute_ddl(
                 ));
             }
             let table_meta = crabka_pgcatalog::get_table(kv, table)?;
+            validate_index_expressions(&table_meta, keys, *unique, placement, index_method)?;
             validate_index_method(&table_meta, columns, *unique, placement, index_method)?;
             let (id, mut ops) = crabka_pgcatalog::create_index_with_method_ops(
                 kv,
@@ -1606,12 +1607,8 @@ fn index_name_or_default(
     format!("{}_{}_idx", table.name, parts.join("_"))
 }
 
-/// The plain column list an index can be built from.
-///
-/// A key that is not a bare ascending column reference, or a partial-index
-/// predicate, would produce an index the scanner would read as if it covered
-/// every row. So the engine refuses those and does not build them wrong in
-/// silence.
+/// The durable key list an index can be built from. Expression source uses the
+/// catalog's NUL-prefixed encoding, which cannot collide with a SQL identifier.
 fn index_key_columns(
     keys: &[crabka_pgparser::ast::IndexKey],
     predicate: Option<&str>,
@@ -1625,13 +1622,6 @@ fn index_key_columns(
     }
     keys.iter()
         .map(|key| {
-            let Some(column) = key.column.clone() else {
-                return Err(ExecError::Unsupported(
-                    "expression indexes are not supported: index entries store column values, \
-                     not computed keys"
-                        .into(),
-                ));
-            };
             if key.descending || key.nulls_first == Some(true) {
                 return Err(ExecError::Unsupported(
                     "DESC and NULLS FIRST index keys are not supported: index entries are \
@@ -1639,9 +1629,64 @@ fn index_key_columns(
                         .into(),
                 ));
             }
-            Ok(column)
+            Ok(key.column.clone().unwrap_or_else(|| {
+                crabka_pgcatalog::expression_index_key(&key.text)
+            }))
         })
         .collect()
+}
+
+fn validate_index_expressions(
+    table: &Table,
+    keys: &[crabka_pgparser::ast::IndexKey],
+    unique: bool,
+    placement: crabka_pgcatalog::IndexPlacement,
+    method: crabka_pgcatalog::IndexMethod,
+) -> Result<(), ExecError> {
+    use crabka_pgparser::ast::Expr;
+
+    let expressions: Vec<&str> = keys
+        .iter()
+        .filter_map(|key| key.column.is_none().then_some(key.text.as_str()))
+        .collect();
+    if expressions.is_empty() {
+        return Ok(());
+    }
+    // GiST/SP-GiST are exact-scan metadata today, so expression keys need no
+    // physical entry evaluator. Other methods do maintain/probe stored keys.
+    if unique
+        || placement != crabka_pgcatalog::IndexPlacement::Local
+        || !matches!(
+            method,
+            crabka_pgcatalog::IndexMethod::Gist | crabka_pgcatalog::IndexMethod::Spgist
+        )
+    {
+        return Err(ExecError::Unsupported(
+            "expression indexes currently require a non-unique local GiST or SP-GiST index"
+                .into(),
+        ));
+    }
+    let scope = Scope::single(table, &table.name.name);
+    for source in expressions {
+        let expr = crabka_pgparser::parser::parse_expression(source)?;
+        crate::eval::infer_type(&expr, &scope)?;
+        let mut invalid = false;
+        crate::grouping::visit_expr(&expr, &mut |node| {
+            invalid |= matches!(
+                node,
+                Expr::ScalarSubquery(_)
+                    | Expr::Exists(_)
+                    | Expr::InSubquery { .. }
+                    | Expr::Quantified { .. }
+            ) || matches!(node, Expr::Func(call) if !is_immutable_function(&call.name));
+        });
+        if invalid || crate::agg::contains_aggregate(&expr) {
+            return Err(ExecError::InvalidObjectDefinition(
+                "functions in index expression must be marked IMMUTABLE".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_index_method(
@@ -17075,7 +17120,10 @@ fn rebuild_indexes_on_column(
         }
     }
     affected.retain(|index| {
-        index.columns.iter().any(|name| name == column)
+        index
+            .columns
+            .iter()
+            .any(|key| index_key_reads_column(&state.table, key, column))
             && !state.dropped_indexes.contains(&index.name)
     });
     if affected.is_empty() {
@@ -17173,7 +17221,11 @@ fn drop_table_column(
         }
     }
     for index_meta in crabka_pgcatalog::list_table_indexes(kv, &table_name)? {
-        if index_meta.columns.iter().any(|name| name == column) {
+        if index_meta
+            .columns
+            .iter()
+            .any(|key| index_key_reads_column(&state.table, key, column))
+        {
             drop_index_by_name(
                 kv,
                 state,
@@ -17273,12 +17325,20 @@ fn rename_column_dependencies(
         check.expr = rewrite_identifier_tokens(&check.expr, old_name, new_name);
     }
     for mut index in crabka_pgcatalog::list_table_indexes(kv, &table_name)? {
-        if !index.columns.iter().any(|column| column == old_name) {
+        if !index
+            .columns
+            .iter()
+            .any(|key| index_key_reads_column(&state.table, key, old_name))
+        {
             continue;
         }
-        for column in &mut index.columns {
-            if column == old_name {
-                *column = new_name.to_string();
+        for key in &mut index.columns {
+            if key == old_name {
+                *key = new_name.to_string();
+            } else if let Some(source) = crabka_pgcatalog::index_key_expression(key) {
+                *key = crabka_pgcatalog::expression_index_key(&rewrite_identifier_tokens(
+                    source, old_name, new_name,
+                ));
             }
         }
         state.ops.extend(crabka_pgcatalog::put_index_ops(&index));
@@ -17400,6 +17460,32 @@ fn generated_columns_reading(table: &Table, column: &str) -> Vec<String> {
         })
         .map(|candidate| candidate.name.clone())
         .collect()
+}
+
+fn index_key_reads_column(table: &Table, key: &str, column: &str) -> bool {
+    use crabka_pgparser::ast::Expr;
+
+    let Some(source) = crabka_pgcatalog::index_key_expression(key) else {
+        return key == column;
+    };
+    let Ok(expr) = crabka_pgparser::parser::parse_expression(source) else {
+        return true;
+    };
+    let scope = Scope::single(table, &table.name.name);
+    let target = table.column_index(column);
+    let mut reads = false;
+    crate::grouping::visit_expr(&expr, &mut |node| {
+        if let Expr::Column {
+            table: qualifier,
+            name,
+        } = node
+            && scope.resolve(qualifier.as_deref(), name).ok() == target
+            && target.is_some()
+        {
+            reads = true;
+        }
+    });
+    reads
 }
 
 /// Whether a stored view's definition reads `table` at all.
@@ -18508,7 +18594,6 @@ mod tests {
         run_s(&mut session, "CREATE TABLE t (a int4, b text)").await;
         for sql in [
             "CREATE INDEX i ON t (a) WHERE a > 5",
-            "CREATE INDEX i ON t (lower(b))",
             "CREATE INDEX i ON t (a DESC)",
             "CREATE INDEX i ON t (a NULLS FIRST)",
             "CREATE INDEX i ON t (a) INCLUDE (b)",
@@ -18527,6 +18612,48 @@ mod tests {
         assert!(
             crabka_pgcatalog::get_index(engine.catalog_kv(), &RelationName::public("t_a_idx"))
                 .is_ok()
+        );
+
+        run_s(
+            &mut session,
+            "CREATE INDEX ON t USING spgist (int4range(a, a + 10))",
+        )
+        .await;
+        run_s(&mut session, "INSERT INTO t VALUES (5, 'x'), (25, 'y')").await;
+        assert!(
+            text_rows_of(
+                &mut session,
+                "SELECT count(*) FROM t WHERE int4range(a, a + 10) <@ int4range(1, 20)",
+            )
+            .await
+                == vec![text_row(&["1"])]
+        );
+        let expression = crabka_pgcatalog::get_index(
+            engine.catalog_kv(),
+            &RelationName::public("t_expr_idx"),
+        )
+        .expect("expression index");
+        assert!(
+            crabka_pgcatalog::index_key_expression(&expression.columns[0])
+                == Some("int4range(a, a + 10)")
+        );
+        run_s(&mut session, "ALTER TABLE t RENAME COLUMN a TO n").await;
+        let renamed = crabka_pgcatalog::get_index(
+            engine.catalog_kv(),
+            &RelationName::public("t_expr_idx"),
+        )
+        .expect("renamed expression index");
+        assert!(
+            crabka_pgcatalog::index_key_expression(&renamed.columns[0])
+                == Some("int4range(n, n + 10)")
+        );
+        run_s(&mut session, "ALTER TABLE t DROP COLUMN n").await;
+        assert!(
+            crabka_pgcatalog::get_index(
+                engine.catalog_kv(),
+                &RelationName::public("t_expr_idx")
+            )
+            .is_err()
         );
     }
 
