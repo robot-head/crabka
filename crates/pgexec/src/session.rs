@@ -10219,6 +10219,42 @@ fn invalid_parameter_encoding(_: std::str::Utf8Error) -> PgError {
     PgError::error("22021", "invalid byte sequence for encoding \"UTF8\"")
 }
 
+/// Add PostgreSQL's caret only when the source proves which range cast failed.
+/// General runtime errors and ambiguous repeated literals remain undecorated.
+fn attach_range_literal_position(sql: &str, error: PgError) -> PgError {
+    use crabka_pgparser::token::Token;
+
+    if error
+        .diagnostics
+        .as_ref()
+        .is_some_and(|diagnostics| diagnostics.position.is_some())
+        || !(error.message.starts_with("malformed range literal:")
+            || error.message.starts_with("range lower bound must be"))
+    {
+        return error;
+    }
+    let Ok(tokens) = crabka_pgparser::lexer::lex(sql) else {
+        return error;
+    };
+    let positions: Vec<usize> = tokens
+        .windows(3)
+        .filter_map(|triple| match (&triple[0].0, &triple[1].0, &triple[2].0) {
+            (Token::StringLit(value), Token::TypeCast, Token::Ident(type_name))
+                if type_name.ends_with("range")
+                    && (error.message.starts_with("range lower bound must be")
+                        || error.message.contains(&format!("\"{value}\""))) =>
+            {
+                Some(sql[..triple[0].1].chars().count() + 1)
+            }
+            _ => None,
+        })
+        .collect();
+    match positions.as_slice() {
+        [position] => error.with_position(*position),
+        _ => error,
+    }
+}
+
 impl Session for SqlSession {
     async fn startup_parameter(&mut self, name: &str, value: &str) -> Result<(), PgError> {
         if name == "options" {
@@ -10298,8 +10334,19 @@ impl Session for SqlSession {
             return Ok(vec![QueryResult::Empty]);
         }
         let mut results = Vec::with_capacity(statements.len());
+        let single = statements.len() == 1;
         for stmt in statements {
-            results.push(self.run_one(&stmt).await.map_err(ExecError::into_pg)?);
+            match self.run_one(&stmt).await {
+                Ok(result) => results.push(result),
+                Err(error) => {
+                    let error = error.into_pg();
+                    return Err(if single {
+                        attach_range_literal_position(sql, error)
+                    } else {
+                        error
+                    });
+                }
+            }
         }
         Ok(results)
     }
@@ -10337,7 +10384,18 @@ impl Session for SqlSession {
                     .map_err(ExecError::into_pg)?;
                 continue;
             }
-            match self.run_one(stmt).await.map_err(ExecError::into_pg)? {
+            let result = self
+                .run_one(stmt)
+                .await
+                .map_err(ExecError::into_pg)
+                .map_err(|error| {
+                    if statements.len() == 1 {
+                        attach_range_literal_position(sql, error)
+                    } else {
+                        error
+                    }
+                })?;
+            match result {
                 QueryResult::Rows { fields, rows, tag } => {
                     let mut fields = Some(fields);
                     if rows.is_empty() {
@@ -16029,6 +16087,51 @@ mod session_conformance_tests {
         }
         // A non-integer key is still a resolution failure.
         assert!(state(&mut s, "SELECT pg_advisory_lock('x')").await == "42883");
+    }
+
+    #[tokio::test]
+    async fn range_cast_errors_point_at_the_unique_literal() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        let error = session
+            .simple_query("SELECT ''::int4range")
+            .await
+            .expect_err("invalid range");
+        assert!(
+            error
+                .diagnostics
+                .as_ref()
+                .and_then(|diagnostics| diagnostics.position)
+                == Some(8)
+        );
+
+        let undecorated = super::attach_range_literal_position(
+            "SELECT ''::int4range, ''::int4range",
+            crabka_pgwire::error::PgError::error("22P02", "malformed range literal: \"\""),
+        );
+        assert!(
+            undecorated
+                .diagnostics
+                .as_ref()
+                .and_then(|diagnostics| diagnostics.position)
+                .is_none(),
+            "an ambiguous literal is not guessed"
+        );
+        let unrelated = super::attach_range_literal_position(
+            "SELECT make_bad_range('a', 'Z') @> 'b'::text",
+            crabka_pgwire::error::PgError::error(
+                "22000",
+                "range lower bound must be less than or equal to range upper bound",
+            ),
+        );
+        assert!(
+            unrelated
+                .diagnostics
+                .as_ref()
+                .and_then(|diagnostics| diagnostics.position)
+                .is_none(),
+            "an unrelated text cast is not blamed"
+        );
     }
 
     #[test]
