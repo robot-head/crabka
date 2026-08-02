@@ -568,11 +568,18 @@ fn cast_user_type(
     style: crate::encoding::OutputStyle<'_>,
 ) -> Result<Option<Datum>, TypeError> {
     if let ColumnType::Range(range) = to {
+        if let Datum::Range(existing) = value {
+            return if existing.ty == range {
+                Ok(Some(Datum::Range(existing.clone())))
+            } else {
+                Err(cannot_cast(value, to))
+            };
+        }
         let Datum::Text(text) = value else {
             return Err(cannot_cast(value, to));
         };
-        return crate::range::canonicalize(text, *range.subtype, style.time_zone)
-            .map(Datum::Text)
+        return crate::range::parse(text, range, style.time_zone)
+            .map(Datum::Range)
             .map(Some);
     }
     // Casting *to* a domain is casting to its base: the constraint check is the
@@ -600,8 +607,11 @@ fn cast_user_type(
             Ok(Some(value.clone()))
         }
         (Datum::Enum(e), _) if to.is_string() => Ok(Some(string_result(e.label.clone(), to)?)),
+        (Datum::Range(_), _) if to.is_string() => {
+            Ok(Some(string_result(text_of(value, style), to)?))
+        }
         // Either operand is a user type and no rule above applies.
-        (Datum::Record(_) | Datum::Enum(_), _)
+        (Datum::Record(_) | Datum::Enum(_) | Datum::Range(_), _)
         | (_, ColumnType::Record(_) | ColumnType::Enum(_)) => Err(cannot_cast(value, to)),
         _ => Ok(None),
     }

@@ -997,6 +997,17 @@ fn coerce_untyped_literal_operands(
                 _ => None,
             };
         }
+        if let Datum::Range(range) = other {
+            return match op {
+                BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge => Some(range.column_type()),
+                _ => None,
+            };
+        }
         if !matches!(other, Datum::Jsonb(_)) {
             return match (op, other) {
                 (BinaryOp::JsonPathMatch, Datum::TsVector(_)) => Some(ColumnType::TsQuery),
@@ -1099,7 +1110,12 @@ pub(crate) fn apply_binary(
         BinaryOp::JsonPathMatch => json_fn::eval_json_operator(JsonOp::PathMatch, l, r),
         // `@>` / `<@` are defined for BOTH jsonb and arrays.
         BinaryOp::Contains | BinaryOp::ContainedBy => apply_containment(op, l, r),
-        // `&&` is array-only; `array_overlap` already yields NULL for a NULL side.
+        BinaryOp::Overlaps if matches!((l, r), (Datum::Range(_), Datum::Range(_))) => {
+            let (Datum::Range(left), Datum::Range(right)) = (l, r) else {
+                unreachable!()
+            };
+            Ok(Datum::Bool(crabka_pgtypes::range::overlaps(left, right)?))
+        }
         BinaryOp::Overlaps if matches!((l, r), (Datum::TsQuery(_), Datum::TsQuery(_))) => {
             let (Datum::TsQuery(left), Datum::TsQuery(right)) = (l, r) else {
                 unreachable!()
@@ -1109,6 +1125,7 @@ pub(crate) fn apply_binary(
                 Box::new(right.clone()),
             )))
         }
+        // Array overlap; NULL handling lives in the array function.
         BinaryOp::Overlaps => array_fn::array_overlap(l, r),
         BinaryOp::Phrase => match (l, r) {
             (Datum::TsQuery(left), Datum::TsQuery(right)) => Ok(Datum::TsQuery(
@@ -1143,6 +1160,24 @@ pub(crate) fn apply_binary(
 /// SQL NULLs need no family at all.
 fn apply_containment(op: BinaryOp, l: &Datum, r: &Datum) -> Result<Datum, ExecError> {
     let contains = op == BinaryOp::Contains;
+    if let (Datum::Range(left), Datum::Range(right)) = (l, r) {
+        return Ok(Datum::Bool(if contains {
+            crabka_pgtypes::range::contains_range(left, right)?
+        } else {
+            crabka_pgtypes::range::contains_range(right, left)?
+        }));
+    }
+    if contains {
+        if let Datum::Range(range) = l {
+            return Ok(Datum::Bool(crabka_pgtypes::range::contains_element(
+                range, r,
+            )?));
+        }
+    } else if let Datum::Range(range) = r {
+        return Ok(Datum::Bool(crabka_pgtypes::range::contains_element(
+            range, l,
+        )?));
+    }
     if matches!(l, Datum::Jsonb(_)) || matches!(r, Datum::Jsonb(_)) {
         let json_op = if contains {
             JsonOp::Contains
@@ -1245,7 +1280,7 @@ fn adopt_string_literal_type(
     let adopts = |t: ColumnType| {
         matches!(
             t,
-            ColumnType::Jsonb | ColumnType::TsVector | ColumnType::TsQuery
+            ColumnType::Jsonb | ColumnType::TsVector | ColumnType::TsQuery | ColumnType::Range(_)
         )
     };
     if untyped(left) && adopts(rt) {
@@ -1278,6 +1313,12 @@ fn adopt_json_operand_types(
             return (lt, lt);
         }
         if matches!(left, Expr::StringLiteral(_)) && rt.array_element().is_some() {
+            return (rt, rt);
+        }
+        if matches!(right, Expr::StringLiteral(_)) && matches!(lt, ColumnType::Range(_)) {
+            return (lt, lt);
+        }
+        if matches!(left, Expr::StringLiteral(_)) && matches!(rt, ColumnType::Range(_)) {
             return (rt, rt);
         }
     }
@@ -2215,6 +2256,20 @@ fn json_or_array_operator_result_type(
         && le == re
     {
         return Some(ColumnType::Bool);
+    }
+    match (op, lt, rt) {
+        (
+            BinaryOp::Contains | BinaryOp::ContainedBy | BinaryOp::Overlaps,
+            ColumnType::Range(left),
+            ColumnType::Range(right),
+        ) if left == right => return Some(ColumnType::Bool),
+        (BinaryOp::Contains, ColumnType::Range(range), element) if *range.subtype == element => {
+            return Some(ColumnType::Bool);
+        }
+        (BinaryOp::ContainedBy, element, ColumnType::Range(range)) if element == *range.subtype => {
+            return Some(ColumnType::Bool);
+        }
+        _ => {}
     }
     None
 }

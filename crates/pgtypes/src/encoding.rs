@@ -147,6 +147,11 @@ pub fn encode_text_in(d: &Datum, style: OutputStyle<'_>) -> Vec<u8> {
         Datum::Regclass(r) => r.name.as_bytes().to_vec(),
         Datum::TsVector(vector) => vector.to_string().into_bytes(),
         Datum::TsQuery(query) => query.to_string().into_bytes(),
+        Datum::Range(range) => crate::range::to_text(range, |bound| {
+            String::from_utf8(encode_text_in(bound, style))
+                .expect("a Datum's text encoding is always valid UTF-8")
+        })
+        .into_bytes(),
     }
 }
 
@@ -214,6 +219,35 @@ pub fn encode_binary(d: &Datum) -> Vec<u8> {
         Datum::Int4(n) => n.to_be_bytes().to_vec(),
         Datum::Int8(n) => n.to_be_bytes().to_vec(),
         Datum::Text(s) => s.clone().into_bytes(),
+        Datum::Range(range) => {
+            if range.empty {
+                return vec![0x01];
+            }
+            let mut flags = 0;
+            if range.lower_inclusive {
+                flags |= 0x02;
+            }
+            if range.upper_inclusive {
+                flags |= 0x04;
+            }
+            if range.lower.is_none() {
+                flags |= 0x08;
+            }
+            if range.upper.is_none() {
+                flags |= 0x10;
+            }
+            let mut out = vec![flags];
+            for bound in [&range.lower, &range.upper].into_iter().flatten() {
+                let bytes = encode_binary(bound);
+                out.extend_from_slice(
+                    &i32::try_from(bytes.len())
+                        .expect("range bound exceeds PostgreSQL's wire limit")
+                        .to_be_bytes(),
+                );
+                out.extend_from_slice(&bytes);
+            }
+            out
+        }
         // IEEE-754 big-endian, matching PostgreSQL's float4send / float8send.
         Datum::Float4(f) => f.to_be_bytes().to_vec(),
         Datum::Float8(f) => f.to_be_bytes().to_vec(),

@@ -771,12 +771,32 @@ pub enum Datum {
     Record(RecordValue),
     /// A value of a `CREATE TYPE … AS ENUM` type.
     Enum(EnumValue),
+    /// A built-in or user-defined range with typed bounds.
+    Range(RangeValue),
     /// PostgreSQL `regclass` — a relation's `pg_class` oid plus the name
     /// `regclassout` prints for it.
     Regclass(RegclassValue),
     /// PostgreSQL full-text document/query values.
     TsVector(crate::text_search::TsVector),
     TsQuery(crate::text_search::TsQuery),
+}
+
+/// A PostgreSQL range value.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RangeValue {
+    pub ty: RangeRef,
+    pub lower: Option<Box<Datum>>,
+    pub upper: Option<Box<Datum>>,
+    pub lower_inclusive: bool,
+    pub upper_inclusive: bool,
+    pub empty: bool,
+}
+
+impl RangeValue {
+    #[must_use]
+    pub fn column_type(&self) -> ColumnType {
+        ColumnType::Range(self.ty)
+    }
 }
 
 /// A `regclass` value: the relation oid, and the relation name that oid
@@ -1124,6 +1144,7 @@ impl PartialEq for Datum {
             (Datum::Regclass(a), Datum::Regclass(b)) => a.oid == b.oid,
             (Datum::TsVector(a), Datum::TsVector(b)) => a == b,
             (Datum::TsQuery(a), Datum::TsQuery(b)) => a == b,
+            (Datum::Range(a), Datum::Range(b)) => a == b,
             _ => false,
         }
     }
@@ -1192,6 +1213,7 @@ impl std::hash::Hash for Datum {
             Datum::Regclass(r) => r.oid.hash(state),
             Datum::TsVector(v) => v.hash(state),
             Datum::TsQuery(q) => q.hash(state),
+            Datum::Range(range) => range.hash(state),
         }
     }
 }
@@ -1226,6 +1248,7 @@ impl Datum {
             Datum::Regclass(_) => Some(ColumnType::Regclass),
             Datum::TsVector(_) => Some(ColumnType::TsVector),
             Datum::TsQuery(_) => Some(ColumnType::TsQuery),
+            Datum::Range(range) => Some(range.column_type()),
         }
     }
 

@@ -577,6 +577,18 @@ const COMMAND_PROBES: &[CommandProbe] = &[
         refusal: None,
     },
     CommandProbe {
+        command: "CREATE TABLESPACE",
+        sql: "CREATE TABLESPACE parser_commands_space LOCATION ''",
+        expected_statement: "CreateTablespace",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "CREATE OPERATOR CLASS",
+        sql: "CREATE OPERATOR CLASS parser_commands_ops FOR TYPE uuid USING hash AS STORAGE uuid",
+        expected_statement: "CreateOperatorClass",
+        refusal: None,
+    },
+    CommandProbe {
         command: "ALTER SYSTEM",
         sql: "ALTER SYSTEM RESET work_mem",
         expected_statement: "AlterSystem",
@@ -950,6 +962,8 @@ fn statement_shape(statement: &Statement) -> &'static str {
             crabka_pgparser::ast::UtilityStatement::Cluster => "Cluster",
             crabka_pgparser::ast::UtilityStatement::Reindex => "Reindex",
             crabka_pgparser::ast::UtilityStatement::Checkpoint => "Checkpoint",
+            crabka_pgparser::ast::UtilityStatement::CreateTablespace => "CreateTablespace",
+            crabka_pgparser::ast::UtilityStatement::CreateOperatorClass => "CreateOperatorClass",
             crabka_pgparser::ast::UtilityStatement::AlterSystem { .. } => "AlterSystem",
             crabka_pgparser::ast::UtilityStatement::SetConstraints { .. } => "SetConstraints",
             crabka_pgparser::ast::UtilityStatement::SetSessionAuthorization { .. } => {

@@ -11808,7 +11808,11 @@ fn format_default_value(value: &Datum, ty: ColumnType) -> String {
         }
         // A jsonb/array default renders like PostgreSQL's `pg_get_expr` output:
         // the value's own text, quoted and cast to the column type.
-        Datum::Jsonb(_) | Datum::Array(_) | Datum::TsVector(_) | Datum::TsQuery(_) => {
+        Datum::Jsonb(_)
+        | Datum::Array(_)
+        | Datum::Range(_)
+        | Datum::TsVector(_)
+        | Datum::TsQuery(_) => {
             match zone_independent_text(value) {
                 Some(literal) => {
                     let mut out = String::new();
@@ -11844,6 +11848,11 @@ fn zone_independent_text(value: &Datum) -> Option<String> {
         match value {
             Datum::Timestamptz(_) => true,
             Datum::Array(array) => array.elems.iter().any(zone_dependent),
+            Datum::Range(range) => range
+                .lower
+                .iter()
+                .chain(&range.upper)
+                .any(|bound| zone_dependent(bound)),
             _ => false,
         }
     }

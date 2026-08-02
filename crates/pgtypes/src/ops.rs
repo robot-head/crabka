@@ -623,6 +623,7 @@ pub fn compare(a: &Datum, b: &Datum) -> Result<Option<Ordering>, TypeError> {
         // An enum orders by its labels' declared positions, which is what
         // `pg_enum.enumsortorder` records.
         (Datum::Enum(x), Datum::Enum(y)) => compare_enums(x, y)?,
+        (Datum::Range(x), Datum::Range(y)) => compare_ranges(x, y)?,
         // SP30: any numeric pair with a float promotes to float comparison (NaN is
         // the largest value and equals itself; `-0.0 == +0.0` — PG's float ordering).
         _ if is_float(a) || is_float(b) => match (as_f64(a), as_f64(b)) {
@@ -640,6 +641,79 @@ pub fn compare(a: &Datum, b: &Datum) -> Result<Option<Ordering>, TypeError> {
         },
     };
     Ok(Some(ord))
+}
+
+fn compare_ranges(a: &crate::RangeValue, b: &crate::RangeValue) -> Result<Ordering, TypeError> {
+    if a.ty != b.ty {
+        return Err(TypeError::TypeMismatch {
+            message: "cannot compare ranges of different types".into(),
+        });
+    }
+    match (a.empty, b.empty) {
+        (true, true) => return Ok(Ordering::Equal),
+        (true, false) => return Ok(Ordering::Less),
+        (false, true) => return Ok(Ordering::Greater),
+        (false, false) => {}
+    }
+    let lower = compare_range_bounds(
+        a.lower.as_deref(),
+        a.lower_inclusive,
+        b.lower.as_deref(),
+        b.lower_inclusive,
+        false,
+    )?;
+    if lower != Ordering::Equal {
+        return Ok(lower);
+    }
+    compare_range_bounds(
+        a.upper.as_deref(),
+        a.upper_inclusive,
+        b.upper.as_deref(),
+        b.upper_inclusive,
+        true,
+    )
+}
+
+fn compare_range_bounds(
+    a: Option<&Datum>,
+    a_inclusive: bool,
+    b: Option<&Datum>,
+    b_inclusive: bool,
+    upper: bool,
+) -> Result<Ordering, TypeError> {
+    match (a, b) {
+        (None, None) => Ok(Ordering::Equal),
+        (None, Some(_)) => Ok(if upper {
+            Ordering::Greater
+        } else {
+            Ordering::Less
+        }),
+        (Some(_), None) => Ok(if upper {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        }),
+        (Some(a), Some(b)) => match compare(a, b)?.expect("finite range bounds are non-null") {
+            Ordering::Equal => Ok(match (a_inclusive, b_inclusive) {
+                (true, false) => {
+                    if upper {
+                        Ordering::Greater
+                    } else {
+                        Ordering::Less
+                    }
+                }
+                (false, true) => {
+                    if upper {
+                        Ordering::Less
+                    } else {
+                        Ordering::Greater
+                    }
+                }
+                _ => Ordering::Equal,
+            }),
+            ordering => Ok(ordering),
+        },
+    }
 }
 
 /// PostgreSQL's array btree order (`array_cmp`): element-wise over the common

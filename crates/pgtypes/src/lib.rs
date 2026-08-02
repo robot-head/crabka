@@ -21,8 +21,8 @@ pub mod usertype;
 pub mod uuid;
 
 pub use datum::{
-    ArrayDim, ArrayValue, ColumnType, Datum, ElemType, EnumValue, MAX_ARRAY_DIM, RecordValue,
-    RegclassValue, canonicalize_for_key, canonicalize_row_for_key, oids,
+    ArrayDim, ArrayValue, ColumnType, Datum, ElemType, EnumValue, MAX_ARRAY_DIM, RangeValue,
+    RecordValue, RegclassValue, canonicalize_for_key, canonicalize_row_for_key, oids,
 };
 pub use error::TypeError;
 pub use geometry::{Path, Point};

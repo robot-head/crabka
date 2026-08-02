@@ -1,6 +1,157 @@
 use std::cmp::Ordering;
 
-use crate::{ColumnType, Datum, TypeError};
+use crate::{ColumnType, Datum, RangeValue, TypeError, usertype::RangeRef};
+
+pub fn parse(input: &str, ty: RangeRef, tz: &jiff::tz::TimeZone) -> Result<RangeValue, TypeError> {
+    let canonical = canonicalize(input, *ty.subtype, tz)?;
+    if canonical == "empty" {
+        return Ok(RangeValue {
+            ty,
+            lower: None,
+            upper: None,
+            lower_inclusive: false,
+            upper_inclusive: false,
+            empty: true,
+        });
+    }
+    let bytes = canonical.as_bytes();
+    let inner = &canonical[1..canonical.len() - 1];
+    let comma = separator(inner, &canonical)?;
+    Ok(RangeValue {
+        ty,
+        lower: bound(&inner[..comma], *ty.subtype, tz, &canonical)?.map(Box::new),
+        upper: bound(&inner[comma + 1..], *ty.subtype, tz, &canonical)?.map(Box::new),
+        lower_inclusive: bytes[0] == b'[',
+        upper_inclusive: bytes[bytes.len() - 1] == b']',
+        empty: false,
+    })
+}
+
+pub fn to_text(range: &RangeValue, mut encode: impl FnMut(&Datum) -> String) -> String {
+    if range.empty {
+        return "empty".into();
+    }
+    let lower = range
+        .lower
+        .as_deref()
+        .map(|value| quote_bound(&encode(value)))
+        .unwrap_or_default();
+    let upper = range
+        .upper
+        .as_deref()
+        .map(|value| quote_bound(&encode(value)))
+        .unwrap_or_default();
+    format!(
+        "{}{},{}{}",
+        if range.lower_inclusive { '[' } else { '(' },
+        lower,
+        upper,
+        if range.upper_inclusive { ']' } else { ')' }
+    )
+}
+
+pub fn contains_range(outer: &RangeValue, inner: &RangeValue) -> Result<bool, TypeError> {
+    if outer.ty != inner.ty {
+        return Err(TypeError::TypeMismatch {
+            message: "range types do not match".into(),
+        });
+    }
+    if inner.empty {
+        return Ok(true);
+    }
+    if outer.empty {
+        return Ok(false);
+    }
+    Ok(lower_contains(outer, inner)? && upper_contains(outer, inner)?)
+}
+
+pub fn contains_element(range: &RangeValue, value: &Datum) -> Result<bool, TypeError> {
+    if range.empty {
+        return Ok(false);
+    }
+    let above_lower = match range.lower.as_deref() {
+        None => true,
+        Some(lower) => match crate::ops::compare(value, lower)?.expect("range bound is non-null") {
+            Ordering::Greater => true,
+            Ordering::Equal => range.lower_inclusive,
+            Ordering::Less => false,
+        },
+    };
+    let below_upper = match range.upper.as_deref() {
+        None => true,
+        Some(upper) => match crate::ops::compare(value, upper)?.expect("range bound is non-null") {
+            Ordering::Less => true,
+            Ordering::Equal => range.upper_inclusive,
+            Ordering::Greater => false,
+        },
+    };
+    Ok(above_lower && below_upper)
+}
+
+pub fn overlaps(a: &RangeValue, b: &RangeValue) -> Result<bool, TypeError> {
+    if a.ty != b.ty {
+        return Err(TypeError::TypeMismatch {
+            message: "range types do not match".into(),
+        });
+    }
+    if a.empty || b.empty {
+        return Ok(false);
+    }
+    Ok(!strictly_left(a, b)? && !strictly_left(b, a)?)
+}
+
+fn lower_contains(outer: &RangeValue, inner: &RangeValue) -> Result<bool, TypeError> {
+    match (outer.lower.as_deref(), inner.lower.as_deref()) {
+        (None, _) => Ok(true),
+        (Some(_), None) => Ok(false),
+        (Some(a), Some(b)) => Ok(
+            match crate::ops::compare(a, b)?.expect("bounds are non-null") {
+                Ordering::Less => true,
+                Ordering::Greater => false,
+                Ordering::Equal => outer.lower_inclusive || !inner.lower_inclusive,
+            },
+        ),
+    }
+}
+
+fn upper_contains(outer: &RangeValue, inner: &RangeValue) -> Result<bool, TypeError> {
+    match (outer.upper.as_deref(), inner.upper.as_deref()) {
+        (None, _) => Ok(true),
+        (Some(_), None) => Ok(false),
+        (Some(a), Some(b)) => Ok(
+            match crate::ops::compare(a, b)?.expect("bounds are non-null") {
+                Ordering::Greater => true,
+                Ordering::Less => false,
+                Ordering::Equal => outer.upper_inclusive || !inner.upper_inclusive,
+            },
+        ),
+    }
+}
+
+fn strictly_left(a: &RangeValue, b: &RangeValue) -> Result<bool, TypeError> {
+    let (Some(upper), Some(lower)) = (a.upper.as_deref(), b.lower.as_deref()) else {
+        return Ok(false);
+    };
+    Ok(
+        match crate::ops::compare(upper, lower)?.expect("bounds are non-null") {
+            Ordering::Less => true,
+            Ordering::Greater => false,
+            Ordering::Equal => !(a.upper_inclusive && b.lower_inclusive),
+        },
+    )
+}
+
+fn quote_bound(text: &str) -> String {
+    if text.is_empty()
+        || text.bytes().any(|b| {
+            b.is_ascii_whitespace() || matches!(b, b'"' | b'\\' | b',' | b'(' | b')' | b'[' | b']')
+        })
+    {
+        format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
+    } else {
+        text.to_string()
+    }
+}
 
 pub fn canonicalize(
     input: &str,
@@ -141,15 +292,7 @@ fn bound(
 
 fn render(value: &Datum, tz: &jiff::tz::TimeZone) -> String {
     let text = String::from_utf8_lossy(&crate::encoding::encode_text(value, tz)).into_owned();
-    if text.is_empty()
-        || text.bytes().any(|b| {
-            b.is_ascii_whitespace() || matches!(b, b'"' | b'\\' | b',' | b'(' | b')' | b'[' | b']')
-        })
-    {
-        format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
-    } else {
-        text
-    }
+    quote_bound(&text)
 }
 
 fn malformed(value: &str) -> TypeError {
