@@ -7604,12 +7604,18 @@ impl Parser {
 
     fn operator_family_type_list(
         &mut self,
-    ) -> Result<Vec<crabka_pgtypes::ColumnType>, ParseError> {
+    ) -> Result<Vec<crate::ast::OperatorFamilyFunctionType>, ParseError> {
+        use crate::ast::OperatorFamilyFunctionType;
+
         self.expect(&Token::LParen)?;
         let mut types = Vec::new();
         if *self.peek() != Token::RParen {
             loop {
-                types.push(self.parse_type_name()?);
+                types.push(if self.eat_ident_eq("internal") {
+                    OperatorFamilyFunctionType::Internal
+                } else {
+                    OperatorFamilyFunctionType::Builtin(self.parse_type_name()?)
+                });
                 if !self.eat_comma() {
                     break;
                 }
@@ -17866,7 +17872,10 @@ mod q1_statement_completeness_tests {
 
     #[test]
     fn alter_operator_family_members_preserve_catalog_keys() {
-        use crate::ast::{OperatorFamilyMember, OperatorFamilyMemberKey, OperatorObjectAlterAction};
+        use crate::ast::{
+            OperatorFamilyFunctionType, OperatorFamilyMember, OperatorFamilyMemberKey,
+            OperatorObjectAlterAction,
+        };
         use crabka_pgtypes::ColumnType;
 
         let Statement::Utility(crate::ast::UtilityStatement::AlterOperatorObject {
@@ -17894,7 +17903,24 @@ mod q1_statement_completeness_tests {
                 number: 1,
                 argument_types,
                 ..
-            } if argument_types == &[ColumnType::Int4, ColumnType::Int2]
+            } if argument_types == &[
+                OperatorFamilyFunctionType::Builtin(ColumnType::Int4),
+                OperatorFamilyFunctionType::Builtin(ColumnType::Int2),
+            ]
+        ));
+        let Statement::Utility(crate::ast::UtilityStatement::AlterOperatorObject {
+            action: OperatorObjectAlterAction::AddMembers(add),
+            ..
+        }) = one(
+            "ALTER OPERATOR FAMILY f USING btree ADD \
+             FUNCTION 6 (int4, int2) btint4skipsupport(internal)",
+        ) else {
+            panic!("expected internal support function");
+        };
+        assert!(matches!(
+            &add[0],
+            OperatorFamilyMember::Function { argument_types, .. }
+                if argument_types == &[OperatorFamilyFunctionType::Internal]
         ));
 
         let Statement::Utility(crate::ast::UtilityStatement::AlterOperatorObject {

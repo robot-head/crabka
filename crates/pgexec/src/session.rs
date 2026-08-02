@@ -5139,9 +5139,53 @@ impl SqlSession {
                                         "hash function 1 must have one argument",
                                     )));
                                 }
+                                let named = crabka_pgcatalog::routine::routines_named(
+                                    &*self.catalog_kv,
+                                    &function.name,
+                                )?;
+                                if method == "btree" && *number == 5 {
+                                    if left_type.is_some() && left_type != right_type {
+                                        return Err(ExecError::Remote(PgError::error(
+                                            "42P17",
+                                            "left and right associated data types for operator class options parsing functions must match",
+                                        )));
+                                    }
+                                    let valid = argument_types
+                                        == &[crabka_pgparser::ast::OperatorFamilyFunctionType::Internal]
+                                        && named.iter().any(|routine| {
+                                            routine.input_type_names() == ["internal"]
+                                                && crate::routine::declared_returns_void(routine)
+                                        });
+                                    if !valid {
+                                        if left_type.is_none() {
+                                            let signature = argument_types
+                                                .iter()
+                                                .map(|ty| ty.name())
+                                                .collect::<Vec<_>>()
+                                                .join(", ");
+                                            return Err(ExecError::Remote(PgError::error(
+                                                "42883",
+                                                format!(
+                                                    "function {}({signature}) does not exist",
+                                                    function.name
+                                                ),
+                                            )));
+                                        }
+                                        return Err(ExecError::Remote(
+                                            PgError::error(
+                                                "42P17",
+                                                "invalid operator class options parsing function",
+                                            )
+                                            .with_hint(
+                                                "Valid signature of operator class options parsing function is (internal) RETURNS void.",
+                                            ),
+                                        ));
+                                    }
+                                }
                                 let left = left_type
                                     .as_ref()
-                                    .or_else(|| argument_types.first())
+                                    .copied()
+                                    .or_else(|| argument_types.first().and_then(|ty| ty.column()))
                                     .ok_or_else(|| {
                                         ExecError::Remote(PgError::error(
                                             "42601",
@@ -5150,7 +5194,8 @@ impl SqlSession {
                                     })?;
                                 let right = right_type
                                     .as_ref()
-                                    .or_else(|| argument_types.get(1))
+                                    .copied()
+                                    .or_else(|| argument_types.get(1).and_then(|ty| ty.column()))
                                     .unwrap_or(left);
                                 if method == "btree"
                                     && matches!(*number, 4 | 6)
@@ -5163,22 +5208,18 @@ impl SqlSession {
                                     };
                                     return Err(ExecError::Remote(PgError::error("42P17", message)));
                                 }
-                                let named = crabka_pgcatalog::routine::routines_named(
-                                    &*self.catalog_kv,
-                                    &function.name,
-                                )?;
                                 if matches!((method.as_str(), *number), ("btree", 1) | ("hash", 1))
                                     && named.iter().any(|routine| {
                                         routine
                                             .input_params()
                                             .map(|param| param.ty.column)
-                                            .eq(argument_types.iter().copied().map(Some))
+                                            .eq(argument_types.iter().map(|ty| ty.column()))
                                     })
                                     && !named.iter().any(|routine| {
                                         routine
                                             .input_params()
                                             .map(|param| param.ty.column)
-                                            .eq(argument_types.iter().copied().map(Some))
+                                            .eq(argument_types.iter().map(|ty| ty.column()))
                                             && crate::routine::declared_scalar_result_type(routine)
                                                 == Some(crabka_pgtypes::ColumnType::Int4)
                                     })
@@ -5197,7 +5238,7 @@ impl SqlSession {
                                     right_type_oid: right.oid(),
                                     argument_type_oids: argument_types
                                         .iter()
-                                        .map(|ty| ty.clone().oid())
+                                        .map(|ty| ty.oid())
                                         .collect(),
                                 }
                             }
@@ -11514,6 +11555,9 @@ fn attach_known_runtime_position(sql: &str, error: PgError) -> PgError {
 fn attach_undefined_function_position(sql: &str, error: PgError) -> PgError {
     use crabka_pgparser::token::Token;
 
+    if sql.trim_start().to_ascii_lowercase().starts_with("alter operator family") {
+        return error;
+    }
     if error.code != "42883"
         || error
             .diagnostics
@@ -17549,6 +17593,20 @@ mod session_conformance_tests {
                 .is_none(),
             "an ambiguous call is not guessed"
         );
+        let utility_signature = super::attach_undefined_function_position(
+            "ALTER OPERATOR FAMILY f USING btree ADD FUNCTION 5 missing(internal)",
+            crabka_pgwire::error::PgError::error(
+                "42883",
+                "function missing(internal) does not exist",
+            ),
+        );
+        assert!(
+            utility_signature
+                .diagnostics
+                .as_ref()
+                .and_then(|diagnostics| diagnostics.position)
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -17891,6 +17949,69 @@ mod session_conformance_tests {
             .await
             .expect_err("wrong btree result");
         assert!(bad_result.message == "ordering comparison functions must return integer");
+        session
+            .simple_query(
+                "CREATE FUNCTION options_func(internal) RETURNS void \
+                 AS 'ignored', 'options_func' LANGUAGE C; \
+                 CREATE OPERATOR FAMILY options_family USING btree",
+            )
+            .await
+            .expect("create options support function");
+        let cross_type = session
+            .simple_query(
+                "ALTER OPERATOR FAMILY options_family USING btree ADD \
+                 FUNCTION 6 (int4, int2) btint4skipsupport(internal)",
+            )
+            .await
+            .expect_err("cross-type skip support");
+        assert!(cross_type.message == "btree skip support functions must not be cross-type");
+        let missing_options = session
+            .simple_query(
+                "ALTER OPERATOR FAMILY options_family USING btree ADD \
+                 FUNCTION 5 options_func(internal, text[], bool)",
+            )
+            .await
+            .expect_err("wrong options signature");
+        assert!(
+            missing_options.message
+                == "function options_func(internal, text[], boolean) does not exist"
+        );
+        let invalid_options = session
+            .simple_query(
+                "ALTER OPERATOR FAMILY options_family USING btree ADD \
+                 FUNCTION 5 (int4) btint42cmp(int4, int2)",
+            )
+            .await
+            .expect_err("invalid options parser");
+        assert!(invalid_options.message == "invalid operator class options parsing function");
+        assert!(
+            invalid_options
+                .diagnostics
+                .as_ref()
+                .and_then(|fields| fields.hint.as_deref())
+                == Some(
+                    "Valid signature of operator class options parsing function is (internal) RETURNS void."
+                )
+        );
+        let mismatched_options = session
+            .simple_query(
+                "ALTER OPERATOR FAMILY options_family USING btree ADD \
+                 FUNCTION 5 (int4, int2) btint42cmp(int4, int2)",
+            )
+            .await
+            .expect_err("mismatched options types");
+        assert!(
+            mismatched_options.message
+                == "left and right associated data types for operator class options parsing functions must match"
+        );
+        session
+            .simple_query(
+                "ALTER OPERATOR FAMILY options_family USING btree ADD \
+                 FUNCTION 5 (int4) options_func(internal); \
+                 ALTER OPERATOR FAMILY options_family USING btree DROP FUNCTION 5 (int4)",
+            )
+            .await
+            .expect("valid options support function");
         session
             .simple_query(
                 "ALTER OPERATOR FAMILY member_family USING btree ADD OPERATOR 1 < (int4, int2); \
