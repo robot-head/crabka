@@ -1746,6 +1746,24 @@ fn pg_description_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             ])
         })
         .collect::<Result<Vec<_>, ExecError>>()?;
+    let descriptions =
+        zstd::decode_all(crate::builtin_operator_descriptions::BUILTIN_OPERATOR_DESCRIPTIONS)
+            .map_err(|_| corrupt())?;
+    let descriptions = std::str::from_utf8(&descriptions).map_err(|_| corrupt())?;
+    rows.extend(
+        descriptions
+            .lines()
+            .map(|line| {
+                let (oid, description) = line.split_once('\t').ok_or_else(&corrupt)?;
+                Ok(vec![
+                    int(oid.parse::<i32>().map_err(|_| corrupt())?),
+                    int(relation_oid("pg_operator")),
+                    int(0),
+                    text(description),
+                ])
+            })
+            .collect::<Result<Vec<_>, ExecError>>()?,
+    );
     for table in crabka_pgcatalog::list_tables(kv)? {
         let relid = i32::try_from(table.id)
             .map_err(|_| ExecError::Unsupported("oid exceeds int4 range".into()))?;

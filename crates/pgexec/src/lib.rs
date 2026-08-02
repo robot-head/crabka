@@ -44,6 +44,7 @@ mod array_fn;
 mod builtin_amop;
 mod builtin_amproc;
 mod builtin_opclasses;
+mod builtin_operator_descriptions;
 mod builtin_opfamilies;
 mod builtin_operators;
 mod builtin_proc_descriptions;
