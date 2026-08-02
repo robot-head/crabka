@@ -2954,7 +2954,11 @@ pub(crate) fn pg_proc_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 BodyForm::Source => Datum::Text(routine.body.clone()),
                 BodyForm::Atomic | BodyForm::Return => Datum::Text(String::new()),
             },
-            Datum::Null,
+            if routine.language == "c" {
+                Datum::Text(routine.body.clone())
+            } else {
+                Datum::Null
+            },
             match routine.body_form {
                 BodyForm::Source => Datum::Null,
                 BodyForm::Atomic | BodyForm::Return => Datum::Text(routine.body.clone()),
@@ -3043,7 +3047,11 @@ pub(crate) fn builtin_pg_proc_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
                 Datum::Null,
                 Datum::Null,
                 Datum::Text((*name).to_string()),
-                Datum::Null,
+                if int(language)? == 13 {
+                    Datum::Text((*name).to_string())
+                } else {
+                    Datum::Null
+                },
                 Datum::Null,
                 Datum::Null,
                 Datum::Null,
@@ -3248,6 +3256,18 @@ mod tests {
     use crabka_pgparser::ast::Statement;
 
     use super::*;
+
+    #[test]
+    fn builtin_c_routines_have_a_nonempty_probin() {
+        let rows = builtin_pg_proc_rows().expect("built-in pg_proc rows");
+        assert!(rows.iter().all(|row| {
+            if row[4] == Datum::Int4(13) {
+                matches!(&row[26], Datum::Text(value) if !value.is_empty() && value != "-")
+            } else {
+                row[26] == Datum::Null
+            }
+        }));
+    }
 
     /// Run `sql` as a definition against `kv`, returning the completion tag.
     fn define(kv: &MemKv, sql: &str) -> Result<String, ExecError> {
