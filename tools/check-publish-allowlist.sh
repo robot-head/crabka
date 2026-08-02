@@ -32,6 +32,7 @@ allowlist = {
     "crabka-protocol",
     "crabka-schema-serde",
     "crabka-security",
+    "crabka-units",
 }
 
 metadata_path = pathlib.Path(sys.argv[1])
