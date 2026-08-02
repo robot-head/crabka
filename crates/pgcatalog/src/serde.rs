@@ -1432,6 +1432,13 @@ pub fn serialize_user_type(ty: &UserType) -> Vec<u8> {
                 }
                 None => out.push(0),
             }
+            match &range.multirange_name {
+                Some(name) => {
+                    out.push(1);
+                    write_str(&mut out, name);
+                }
+                None => out.push(0),
+            }
         }
         UserTypeBody::Domain(domain) => {
             out.push(USER_TYPE_DOMAIN);
@@ -1490,13 +1497,23 @@ pub fn deserialize_user_type(bytes: &[u8]) -> Result<UserType, KvError> {
             }
             UserTypeBody::Enum(labels)
         }
-        USER_TYPE_RANGE => UserTypeBody::Range(RangeBody {
-            subtype: read_type(&mut cur)?,
-            collation: match take_u8(&mut cur)? {
+        USER_TYPE_RANGE => {
+            let subtype = read_type(&mut cur)?;
+            let collation = match take_u8(&mut cur)? {
                 0 => None,
                 _ => Some(read_string(&mut cur)?),
-            },
-        }),
+            };
+            let multirange_name = if cur.is_empty() || take_u8(&mut cur)? == 0 {
+                None
+            } else {
+                Some(read_string(&mut cur)?)
+            };
+            UserTypeBody::Range(RangeBody {
+                subtype,
+                collation,
+                multirange_name,
+            })
+        }
         USER_TYPE_DOMAIN => {
             let base = read_type(&mut cur)?;
             let not_null = take_u8(&mut cur)? != 0;
@@ -2053,6 +2070,7 @@ mod tests {
             body: UserTypeBody::Range(RangeBody {
                 subtype: ColumnType::Text,
                 collation: Some("C".into()),
+                multirange_name: Some("multirange_of_text".into()),
             }),
         };
         assert_eq!(deserialize_user_type(&serialize_user_type(&ty)), Ok(ty));

@@ -52,9 +52,16 @@ pub fn create_type(
             UserTypeBody::Composite(composite_fields(fields)?)
         }
         CreateTypeDefinition::Enum(labels) => UserTypeBody::Enum(enum_labels(name, labels)?),
-        CreateTypeDefinition::Range { subtype, collation } => UserTypeBody::Range(RangeBody {
+        CreateTypeDefinition::Range {
+            subtype,
+            collation,
+            multirange_type_name,
+        } => UserTypeBody::Range(RangeBody {
             subtype: *subtype,
             collation: collation.clone(),
+            multirange_name: multirange_type_name
+                .as_ref()
+                .map(|companion| companion_name(name, companion)),
         }),
         CreateTypeDefinition::Shell => {
             return Err(ExecError::Unsupported(
@@ -183,6 +190,22 @@ fn register(
     body: UserTypeBody,
     tag: &str,
 ) -> Result<(QueryResult, Vec<WriteOp>), ExecError> {
+    if ColumnType::from_sql_name(name).is_some() {
+        return Err(ExecError::DuplicateObject(format!(
+            "type \"{name}\" already exists"
+        )));
+    }
+    if let UserTypeBody::Range(range) = &body {
+        let companion = range
+            .multirange_name
+            .clone()
+            .unwrap_or_else(|| usertype::default_multirange_name(name));
+        if ColumnType::from_sql_name(&companion).is_some() {
+            return Err(ExecError::DuplicateObject(format!(
+                "type \"{companion}\" already exists"
+            )));
+        }
+    }
     // A type and a relation share one namespace in `PostgreSQL`, so a name a
     // relation already holds is 42P07 rather than a duplicate type. A user type
     // carries no schema of its own here, so `public` is the only namespace it
@@ -200,6 +223,16 @@ fn register(
         },
         ops,
     ))
+}
+
+fn companion_name(range_name: &str, companion: &crabka_pgparser::ast::RelationRef) -> String {
+    if companion.schema.is_some() {
+        return companion.to_string();
+    }
+    range_name.rsplit_once('.').map_or_else(
+        || companion.name.clone(),
+        |(schema, _)| format!("{schema}.{}", companion.name),
+    )
 }
 
 /// `ALTER TYPE name <action>`.
@@ -579,6 +612,8 @@ fn value_scope(base: ColumnType) -> crate::scope::Scope {
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use crabka_pgkv::MemKv;
+    use crabka_pgparser::ast::RelationRef;
 
     use super::*;
 
@@ -630,5 +665,36 @@ mod tests {
         let long = "x".repeat(64);
         let err = check_label_length("e", &long).expect_err("too long");
         assert!(err.into_pg().code == "22023");
+    }
+
+    #[test]
+    fn range_companion_names_are_preserved_and_collisions_rejected() {
+        let kv = MemKv::default();
+        create_type(
+            &kv,
+            "named_range_test",
+            &CreateTypeDefinition::Range {
+                subtype: ColumnType::Text,
+                collation: None,
+                multirange_type_name: Some(RelationRef::bare("named_multirange_test")),
+            },
+        )
+        .expect("explicit companion");
+        assert!(matches!(
+            ColumnType::from_sql_name("named_multirange_test"),
+            Some(ColumnType::Multirange(_))
+        ));
+
+        let error = create_type(
+            &kv,
+            "invalid_companion_range_test",
+            &CreateTypeDefinition::Range {
+                subtype: ColumnType::Text,
+                collation: None,
+                multirange_type_name: Some(RelationRef::bare("int")),
+            },
+        )
+        .expect_err("builtin companion collision");
+        assert!(error.into_pg().code == "42710");
     }
 }

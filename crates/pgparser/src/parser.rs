@@ -7234,12 +7234,16 @@ impl Parser {
             self.expect(&Token::LParen)?;
             let mut subtype = None;
             let mut collation = None;
+            let mut multirange_type_name = None;
             while *self.peek() != Token::RParen {
                 let option = self.expect_ident()?;
                 self.expect(&Token::Eq)?;
                 match option.as_str() {
                     "subtype" => subtype = Some(self.parse_type_name()?),
                     "collation" => collation = Some(self.expect_collation_name()?),
+                    "multirange_type_name" => {
+                        multirange_type_name = Some(self.relation_ref()?);
+                    }
                     // The remaining options name support functions or an
                     // explicit multirange type. Preserve the semantic options
                     // above and consume these object names for later catalog
@@ -7260,6 +7264,7 @@ impl Parser {
                         ParseError::new("range subtype is required", self.peek_pos())
                     })?,
                     collation,
+                    multirange_type_name,
                 },
             });
         }
@@ -11425,11 +11430,23 @@ mod tests {
 
     #[test]
     fn shared_setup_catalog_ddl_parses_to_supported_statements() {
-        use crate::ast::{CreateTypeDefinition, UtilityStatement};
+        use crate::ast::{CreateTypeDefinition, RelationRef, UtilityStatement};
 
         assert!(matches!(
             one("CREATE TABLESPACE regress_tblspace LOCATION ''"),
             Statement::Utility(UtilityStatement::CreateTablespace)
+        ));
+        assert!(matches!(
+            one(
+                "CREATE TYPE textrange AS RANGE (SUBTYPE = text, MULTIRANGE_TYPE_NAME = multirange_of_text)"
+            ),
+            Statement::CreateType {
+                definition: CreateTypeDefinition::Range {
+                    multirange_type_name: Some(RelationRef { ref name, schema: None }),
+                    ..
+                },
+                ..
+            } if name == "multirange_of_text"
         ));
         assert!(matches!(
             one(
@@ -11443,6 +11460,7 @@ mod tests {
                 definition: CreateTypeDefinition::Range {
                     subtype: ColumnType::Text,
                     collation: Some(ref name),
+                    multirange_type_name: None,
                 },
                 ..
             } if name == "C"
