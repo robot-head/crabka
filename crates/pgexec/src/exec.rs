@@ -21,7 +21,9 @@ use zerocopy::{FromBytes, byteorder::big_endian::U64};
 use crate::{
     error::ExecError,
     foreign::{ForeignScanner, ScanBounds},
-    join::{Relation, join_relations},
+    join::{
+        PreparedJoinIndex, Relation, join_relations, join_relations_prepared, prepare_join_index,
+    },
     relname::{SchemaDisposition, is_missing_schema, resolve_relation, resolve_relations},
     scanner::{
         JoinExecutionStrategy, JoinKind as ScannerJoinKind, JoinRangeRequest, JoinRow,
@@ -8474,21 +8476,76 @@ fn lateral_join(
     let mut rows: Vec<Vec<Datum>> = Vec::new();
     let mut scope: Option<Scope> = None;
     let mut bytes = 0usize;
+    struct CachedRight {
+        specialized: crabka_pgparser::ast::TableExpr,
+        relation: Relation,
+        index: PreparedJoinIndex,
+    }
+    let mut cache: Vec<CachedRight> = Vec::new();
+    let mut cache_bytes = 0usize;
     for outer_row in &acc.rows {
         let (specialized, _) = binder.bind(te, &acc.scope, outer_row);
-        let right = build_table_expr(read_ctx, &specialized, None, None)?;
         let one = Relation {
             scope: acc.scope.clone(),
             rows: vec![outer_row.clone()],
         };
-        let joined = join_relations(
-            one,
-            right,
-            kind,
-            constraint,
-            ctx,
-            read_ctx.blocking_query_memory,
-        )?;
+        let joined = if let Some(cached) = cache
+            .iter()
+            .find(|cached| cached.specialized == specialized)
+        {
+            join_relations_prepared(
+                one,
+                &cached.relation,
+                kind,
+                constraint,
+                ctx,
+                read_ctx.blocking_query_memory,
+                &cached.index,
+            )?
+        } else {
+            let right = build_table_expr(read_ctx, &specialized, None, None)?;
+            let right_bytes = right
+                .rows
+                .iter()
+                .map(|row| crate::scanner::datum_row_bytes(row))
+                .sum::<usize>();
+            // ponytail: cap memoization; a planner-level lateral flattening is
+            // the upgrade if workloads need more than 64 stable variants.
+            let can_cache = lateral_cacheable(te)
+                && cache.len() < 64
+                && !crate::scanner::exceeds_query_memory(
+                    cache_bytes.saturating_add(right_bytes),
+                    read_ctx.blocking_query_memory,
+                );
+            if can_cache {
+                let index = prepare_join_index(&acc, &right, constraint)?;
+                cache.push(CachedRight {
+                    specialized,
+                    relation: right,
+                    index,
+                });
+                cache_bytes = cache_bytes.saturating_add(right_bytes);
+                let cached = cache.last().expect("the cache entry was just pushed");
+                join_relations_prepared(
+                    one,
+                    &cached.relation,
+                    kind,
+                    constraint,
+                    ctx,
+                    read_ctx.blocking_query_memory,
+                    &cached.index,
+                )?
+            } else {
+                join_relations(
+                    one,
+                    right,
+                    kind,
+                    constraint,
+                    ctx,
+                    read_ctx.blocking_query_memory,
+                )?
+            }
+        };
         for row in &joined.rows {
             bytes = bytes.saturating_add(crate::scanner::datum_row_bytes(row));
         }
@@ -8522,6 +8579,66 @@ fn lateral_join(
         }
     };
     Ok(Relation { scope, rows })
+}
+
+fn lateral_cacheable(te: &crabka_pgparser::ast::TableExpr) -> bool {
+    use crabka_pgparser::ast::{DistinctClause, QueryBody, SetExpr, TableExpr};
+    let TableExpr::Derived {
+        subquery,
+        lateral: true,
+        ..
+    } = te
+    else {
+        return false;
+    };
+    let SetExpr::Query(QueryBody::Select(select)) = &subquery.body else {
+        return false;
+    };
+    subquery.with.is_none()
+        && subquery.order_by.is_empty()
+        && subquery.limit.is_none()
+        && subquery
+            .offset
+            .as_ref()
+            .is_none_or(|offset| matches!(offset, Expr::IntLiteral(value) if value == "0"))
+        && subquery.locking.is_none()
+        && select.from.len() == 1
+        && matches!(&select.from[0], TableExpr::Table { .. })
+        && matches!(select.distinct, DistinctClause::All)
+        && select.group_by.is_empty()
+        && select.grouping.is_none()
+        && select.having.is_none()
+        && select.windows.is_empty()
+        && select.window_calls.is_empty()
+        && select.order_by.is_empty()
+        && select.limit.is_none()
+        && select.offset.is_none()
+        && select.locking.is_none()
+        && select.projection.iter().all(|item| match item {
+            SelectItem::Wildcard | SelectItem::QualifiedWildcard(_) => true,
+            SelectItem::Expr { expr, .. } => lateral_cacheable_expr(expr),
+        })
+        && select.filter.as_ref().is_none_or(lateral_cacheable_expr)
+}
+
+fn lateral_cacheable_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::IntLiteral(_)
+        | Expr::NumericLiteral(_)
+        | Expr::StringLiteral(_)
+        | Expr::BoolLiteral(_)
+        | Expr::NullLiteral
+        | Expr::Column { .. }
+        | Expr::Param(_)
+        | Expr::Const { .. } => true,
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Collate { expr, .. } => {
+            lateral_cacheable_expr(expr)
+        }
+        Expr::Binary { left, right, .. } => {
+            lateral_cacheable_expr(left) && lateral_cacheable_expr(right)
+        }
+        _ => false,
+    }
 }
 
 /// Does `expr` name a column that resolves in `scope`?
@@ -18427,6 +18544,27 @@ mod tests {
             },
             other => panic!("expected select, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn lateral_cache_accepts_only_a_noop_offset() {
+        let select = parsed_select(
+            "SELECT * FROM outer_t, LATERAL (SELECT inner_t.id FROM inner_t \
+             WHERE inner_t.id = outer_t.id OFFSET 0) q",
+        );
+        assert!(super::lateral_cacheable(&select.from[1]));
+
+        let select = parsed_select(
+            "SELECT * FROM outer_t, LATERAL (SELECT inner_t.id FROM inner_t \
+             WHERE inner_t.id = outer_t.id OFFSET 1) q",
+        );
+        assert!(!super::lateral_cacheable(&select.from[1]));
+
+        let select = parsed_select(
+            "SELECT * FROM outer_t, LATERAL (SELECT random() FROM inner_t \
+             WHERE inner_t.id = outer_t.id OFFSET 0) q",
+        );
+        assert!(!super::lateral_cacheable(&select.from[1]));
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 **Goal:** Make the unmodified PostgreSQL 18.4 core regression schedule pass against Gres, replacing the partial adopted-corpus percentage with a literal upstream `pg_regress` result.
 
-**Current state:** The adopted 50-file corpus matches 9323 / 14272 statements (65.3%). PostgreSQL 18.4's core schedule contains 231 test files, so the adopted percentage remains a development signal rather than the final compatibility claim. The first deterministic baseline-eligible upstream serial run passes 6 / 231 tests (`comments`, `infinite_recurse`, `collate.icu.utf8`, `psql_crosstab`, `collate.linux.utf8`, and `collate.windows.win1252`) with 225 semantic failures, 172573 changed diff lines across 4322 hunks, zero worker panics or connection loss, a successful postflight, and a complete 231-test status list. The pinned `REL_18_4` schedule fingerprint is `63419f82d4a5faaf711658608a3b7b6b45ccc5c2a64e1b4e5c111ed9de648118`. The preceding diagnostic exposed and drove fixes for oversized positional-parameter allocation, oversized timestamp/interval panics, `pg_size_pretty(bigint)` overflow, the missing database-encoding identity, and nondeterministic backend-id/random-stream evidence.
+**Current state:** The adopted 50-file corpus matches 9323 / 14272 statements (65.3%). PostgreSQL 18.4's core schedule contains 231 test files, so the adopted percentage remains a development signal rather than the final compatibility claim. The checked-in monotone baseline remains the first deterministic run: 6 / 231 tests (`comments`, `infinite_recurse`, `collate.icu.utf8`, `psql_crosstab`, `collate.linux.utf8`, and `collate.windows.win1252`) with 225 semantic failures, 172573 changed diff lines across 4322 hunks. The latest infrastructure-clean serial review run passes 7 / 231 by additionally passing `portals_p2`, leaving 224 semantic failures. It improves 26 recorded failures and removes one, but server-side file COPY also makes official fixture rows visible to downstream tests: five tests have larger diffs and four have equal-sized changed fingerprints, for 185983 changed lines across 4377 hunks. That run is evidence of progress, not a legal ratchet replacement; the larger and changed surfaces must be resolved before updating the checked-in baseline. Both PostgreSQL self-check modes pass, Gres completes the whole schedule with zero infrastructure failures, and the pinned `REL_18_4` schedule fingerprint is `63419f82d4a5faaf711658608a3b7b6b45ccc5c2a64e1b4e5c111ed9de648118`.
 
 **Architecture:** Use PostgreSQL's own `pg_regress`, `psql`, schedule, SQL, data, expected output, and `resultmap` as the authority. Keep `crabka-gres-conformance` as the fast statement-level diagnostic tool while mismatches remain; do not grow it into a second implementation of `pg_regress`.
 
@@ -37,10 +37,13 @@
 **Files:** Primarily `crates/pgwire`, `crates/pgexec`, `crates/pgcatalog`, and `crates/gres-conformance`; exact files follow each minimized failure.
 
 - [ ] Make `test_setup` and PostgreSQL's shared data files load before dependent tests.
+- [x] Implement server-side `COPY table FROM 'file'` through the same atomic text-import path as wire `COPY FROM STDIN`; missing files report `58P01`.
 - [ ] Match complete wire-visible outcomes needed by `psql`: notices, warnings, diagnostics, command tags, row counts, headings, and COPY state transitions.
 - [ ] Eliminate nondeterministic unordered results rather than weakening comparisons.
 - [x] Treat every crash, I/O loss, or timeout as a harness failure, never as an SQL mismatch or a match on two dead connections.
 - [x] Reject positional parameter numbers outside PostgreSQL's signed-32-bit lexer range before allocating parameter-shape vectors; the upstream `numerology` case now returns `42601` rather than consuming unbounded CPU and memory.
+- [x] Keep regress-scale lateral derived joins bounded by caching only conservative, nonvolatile specializations (including the semantic no-op `OFFSET 0`) and reusing their equijoin indexes under the blocking-query memory limit.
+- [x] Evaluate default-frame window `count` and `sum` incrementally by peer group; retain the general frame evaluator for every other aggregate and explicit frame.
 - [ ] Re-run the full serial schedule after each shared fix and ratchet only tests whose recorded mismatch surface shrank.
 
 **Gate:** Every remaining failure reproduces as an engine semantic difference; infrastructure failures are zero.
@@ -51,6 +54,7 @@ For each item, first add one focused test at the shared layer that fails before 
 
 - [ ] Split the 1089 wrong-row mismatches by statement family; fix the largest coherent family first rather than treating it as one issue.
 - [ ] Fix the earliest error in each transaction-abort cascade before touching its downstream `25P02` statements.
+- [ ] Resolve the fixture-enabled baseline changes before ratcheting: worsened `join`, `groupingsets`, `misc`, `tidscan`, and `cluster`; changed equal-size fingerprints for `copy`, `copyencoding`, `insert`, and `create_view`.
 - [ ] Complete bit strings, composite/record values, `bytea`, `reg*` object identifiers, and exact float special-value behavior.
 - [ ] Implement aggregate `ORDER BY`, ordered-set aggregates, record-returning function column definitions, and recursive CTE `SEARCH`/`CYCLE`.
 - [ ] Complete expression/partial indexes, stored views over general queries, sequence lifecycle, array-slice assignment, and partitioned-table update semantics.

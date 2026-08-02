@@ -23,7 +23,7 @@ use std::{
 use crabka_pgkv::{Kv, WriteOp};
 use crabka_pgmvcc::{clog::XidStatus, visibility::Snapshot};
 use crabka_pgparser::ast::{
-    BinaryOp, CopyFormat, CopyStmt, CursorTarget, DiscardTarget, ExplainOptions, Expr,
+    BinaryOp, CopyFormat, CopySource, CopyStmt, CursorTarget, DiscardTarget, ExplainOptions, Expr,
     FetchDirection, FuncArgs, IsolationLevel, JoinConstraint, OnConflict, OnConflictAction,
     OnConflictTarget, QueryBody, QueryExpr, ResetTarget, SelectItem, SetExpr, Statement, TableExpr,
     TableLockMode, UnaryOp, UnlistenTarget, UtilityStatement,
@@ -5301,9 +5301,25 @@ impl SqlSession {
                     tag: "VACUUM".into(),
                 })
             }
-            Statement::Set { name, .. } if name == crabka_pgparser::ast::COPY_FROM_STDIN_SENTINEL => Err(ExecError::Unsupported(
-                "COPY FROM STDIN requires pgwire CopyData messages".into(),
-            )),
+            Statement::Set { name, value, .. }
+                if name == crabka_pgparser::ast::COPY_FROM_STDIN_SENTINEL =>
+            {
+                let copy = decode_copy_stmt(value).map_err(ExecError::Remote)?;
+                match &copy.source {
+                    CopySource::Stdin => Err(ExecError::Unsupported(
+                        "COPY FROM STDIN requires pgwire CopyData messages".into(),
+                    )),
+                    CopySource::File(path) => {
+                        let data = tokio::fs::read(path).await.map_err(|error| {
+                            ExecError::Remote(PgError::error(
+                                "58P01",
+                                format!("could not open file \"{path}\" for reading: {error}"),
+                            ))
+                        })?;
+                        self.run_copy_in(&copy, vec![bytes::Bytes::from(data)]).await
+                    }
+                }
+            }
             Statement::Query(q) if q.locking.is_some() => self.run_query_locking(q).await,
             // A `WITH` list that modifies data makes the whole statement a
             // write, even though its outer body is a query.
@@ -8311,23 +8327,25 @@ fn parse_single_extended_statement(sql: &str) -> Result<Statement, PgError> {
 fn parse_single_copy_statement(sql: &str) -> Result<Option<CopyStmt>, PgError> {
     let statements = crabka_pgparser::parse(sql).map_err(|e| ExecError::from(e).into_pg())?;
     match statements.as_slice() {
-        [Statement::Set { name, value, .. }]
-            if name == crabka_pgparser::ast::COPY_FROM_STDIN_SENTINEL =>
-        {
-            decode_copy_stmt(value).map(Some)
-        }
-        [_] => Ok(None),
+        [stmt] => match copy_sentinel_stmt(stmt)? {
+            Some(copy) if matches!(copy.source, CopySource::Stdin) => Ok(Some(copy)),
+            _ => Ok(None),
+        },
         [] => Ok(None),
-        statements if statements.iter().any(is_copy_sentinel) => Err(PgError::error(
-            sqlstate::SYNTAX_ERROR,
-            "COPY FROM STDIN must be the only statement in a simple query",
-        )),
-        _ => Ok(None),
+        statements => {
+            for stmt in statements {
+                if copy_sentinel_stmt(stmt)?
+                    .is_some_and(|copy| matches!(copy.source, CopySource::Stdin))
+                {
+                    return Err(PgError::error(
+                        sqlstate::SYNTAX_ERROR,
+                        "COPY FROM STDIN must be the only statement in a simple query",
+                    ));
+                }
+            }
+            Ok(None)
+        }
     }
-}
-
-fn is_copy_sentinel(stmt: &Statement) -> bool {
-    matches!(stmt, Statement::Set { name, .. } if name == crabka_pgparser::ast::COPY_FROM_STDIN_SENTINEL)
 }
 
 /// Decode the COPY statement carried by a parsed COPY FROM STDIN sentinel;
@@ -8390,6 +8408,16 @@ fn decode_copy_stmt(value: &crabka_pgparser::ast::SetValue) -> Result<CopyStmt, 
         .filter(|schema| !schema.is_empty())
         .map(decode_copy_part)
         .transpose()?;
+    let source = match (parts.next(), parts.next()) {
+        (Some("stdin"), Some("")) => CopySource::Stdin,
+        (Some("file"), Some(path)) => CopySource::File(decode_copy_part(path)?),
+        _ => {
+            return Err(PgError::error(
+                sqlstate::SYNTAX_ERROR,
+                "invalid COPY source",
+            ));
+        }
+    };
     if parts.next().is_some() {
         return Err(PgError::error(
             sqlstate::SYNTAX_ERROR,
@@ -8402,6 +8430,7 @@ fn decode_copy_stmt(value: &crabka_pgparser::ast::SetValue) -> Result<CopyStmt, 
             name: table,
         },
         columns,
+        source,
         format,
     })
 }
@@ -10715,6 +10744,7 @@ impl Session for SqlSession {
             let statement = self.portals.get(portal).and_then(|p| p.statement.clone());
             if let Some(stmt) = &statement
                 && let Some(copy) = copy_sentinel_stmt(stmt)?
+                && matches!(copy.source, CopySource::Stdin)
             {
                 // Extended-protocol COPY FROM STDIN: answer with a
                 // CopyInResponse; the buffered rows arrive via
@@ -10983,6 +11013,7 @@ fn row_result_bytes(row: &[Option<crabka_pgwire::engine::Cell>]) -> Result<usize
 mod tests {
     use std::{
         collections::BTreeMap,
+        io::Write as _,
         sync::{
             Arc,
             atomic::{AtomicBool, AtomicU64, Ordering},
@@ -12665,6 +12696,35 @@ mod tests {
         assert_eq!(rows[0][2].as_ref().expect("note").text, "hello\nworld");
         assert_eq!(rows[1][0].as_ref().expect("id").text, "2");
         assert!(rows[1][2].is_none());
+    }
+
+    #[tokio::test]
+    async fn copy_from_file_reuses_the_text_import_path() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query("CREATE TABLE t (id int4, note text)")
+            .await
+            .expect("create");
+        let mut file = tempfile::NamedTempFile::new().expect("temp file");
+        file.write_all(b"1\tone\n2\t\\N\n").expect("write rows");
+
+        session
+            .simple_query(&format!("COPY t FROM '{}'", file.path().display()))
+            .await
+            .expect("copy file");
+
+        let results = session
+            .simple_query("SELECT id, note FROM t ORDER BY id")
+            .await
+            .expect("select");
+        let QueryResult::Rows { rows, .. } = &results[0] else {
+            panic!("expected rows");
+        };
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][0].as_ref().expect("id").text, "1");
+        assert_eq!(rows[0][1].as_ref().expect("note").text, "one");
+        assert!(rows[1][1].is_none());
     }
 
     #[tokio::test]

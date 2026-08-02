@@ -109,9 +109,12 @@ python3 scripts/gres-pg-regress-baseline.py update \
 
 The adopted-corpus score (`9323/14272`) remains useful diagnostic evidence, but
 it is not the compatibility headline. Compatibility is the upstream 231-test
-serial and parallel result. The current baseline-eligible serial run is `6/231`
-with 225 semantic failures and no harness, panic, connection-loss, or postflight
-failure. It passes the progressive serial baseline gate, not the 231/231
+serial and parallel result. The checked-in baseline-eligible serial run is
+`6/231` with 225 semantic failures. The latest infrastructure-clean review run
+is `7/231` with 224 semantic failures after `portals_p2` passed; it improves 26
+other tests, but fixture loading also enlarges five diffs and changes four
+equal-sized fingerprints. It therefore records current observed conformance
+without replacing the monotone baseline. Neither result satisfies the 231/231
 completion gate.
 
 `corpus-regress/` contains PostgreSQL `src/test/regress` SQL files adopted with
@@ -137,6 +140,11 @@ line. Sending either down the simple query path instead leaves the connection
 in copy mode, which corrupts every later statement in the run *in both
 directions* — two dead connections compare equal and score as matches — so this
 routing is load-bearing for the measurement, not a convenience.
+
+Server-side `COPY table FROM 'file'` reads PostgreSQL's official fixture files
+inside Gres and feeds the bytes through the same atomic text importer. This is
+distinct from the wire copy-in state and is required before downstream tests
+can exercise the data that `test_setup` creates.
 
 ## Relation names must be unique across the whole corpus
 

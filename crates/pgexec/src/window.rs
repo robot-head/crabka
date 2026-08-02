@@ -1035,6 +1035,19 @@ fn evaluate_call(
         let mut ordered = partition;
         ordered.sort_by(|a, b| order_cmp(&sort_keys[*a], &sort_keys[*b], order_by));
         let peers = peer_groups(&ordered, &sort_keys, order_by);
+        let partition = Partition {
+            ordered: &ordered,
+            peers: &peers,
+            sort_keys: &sort_keys,
+        };
+        if let Some(prefix) =
+            evaluate_default_prefix_aggregate(call, &frame, &partition, scope, rows, ctx)?
+        {
+            for (row, value) in prefix {
+                values[row] = value;
+            }
+            continue;
+        }
         // `ntile` is the one window function whose argument PostgreSQL reads
         // once per PARTITION rather than once per row, so its bucket run is
         // carried across the positions below.
@@ -1045,11 +1058,7 @@ fn evaluate_call(
                     call,
                     frame: &frame,
                 },
-                &Partition {
-                    ordered: &ordered,
-                    peers: &peers,
-                    sort_keys: &sort_keys,
-                },
+                &partition,
                 position,
                 &mut buckets,
                 scope,
@@ -1060,6 +1069,70 @@ fn evaluate_call(
         }
     }
     Ok(values)
+}
+
+fn evaluate_default_prefix_aggregate(
+    call: &PlannedCall,
+    frame: &ResolvedFrame,
+    partition: &Partition<'_>,
+    scope: &Scope,
+    rows: &[Vec<Datum>],
+    ctx: &EvalCtx,
+) -> Result<Option<Vec<(usize, Datum)>>, ExecError> {
+    if call.func != WindowFunc::Aggregate
+        || !matches!(frame, ResolvedFrame::Default)
+        || !matches!(call.call.name.as_str(), "count" | "sum")
+    {
+        return Ok(None);
+    }
+    let is_count = call.call.name == "count";
+    let argument = match &call.call.args {
+        FuncArgs::Star if is_count => None,
+        FuncArgs::Exprs(args) => args.first(),
+        FuncArgs::Star => return Ok(None),
+    };
+    let mut count = 0i64;
+    let mut sum: Option<Datum> = None;
+    let mut values = Vec::with_capacity(partition.ordered.len());
+    let mut consumed = 0usize;
+    for &(first, last) in &partition.peers.bounds {
+        for position in consumed..=last {
+            let row = &rows[partition.ordered[position]];
+            if let Some(filter) = &call.filter
+                && crate::eval::eval(filter, scope, row, ctx)? != Datum::Bool(true)
+            {
+                continue;
+            }
+            let value = argument
+                .map(|argument| crate::eval::eval(argument, scope, row, ctx))
+                .transpose()?;
+            if is_count {
+                if value.as_ref().is_none_or(|value| !value.is_null()) {
+                    count = count
+                        .checked_add(1)
+                        .ok_or(crabka_pgtypes::TypeError::Overflow)?;
+                }
+            } else if let Some(value) = value
+                && !value.is_null()
+            {
+                let value = crabka_pgtypes::cast::cast(&value, call.result_ty, &ctx.time_zone)?;
+                sum = Some(match sum {
+                    Some(current) => crabka_pgtypes::ops::add(&current, &value)?,
+                    None => value,
+                });
+            }
+        }
+        consumed = last + 1;
+        let value = if is_count {
+            Datum::Int8(count)
+        } else {
+            sum.clone().unwrap_or(Datum::Null)
+        };
+        for position in first..=last {
+            values.push((partition.ordered[position], value.clone()));
+        }
+    }
+    Ok(Some(values))
 }
 
 /// One partition's rows in window order, with their peer-group structure.
