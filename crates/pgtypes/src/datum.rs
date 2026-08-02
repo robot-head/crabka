@@ -661,7 +661,9 @@ impl ColumnType {
             // columns are already Text, so `'x'::name` and a `name[]` column
             // resolve consistently with them. RowDescription therefore reports
             // text (25), not name (19), and the 63-byte truncation is not applied.
-            "text" | "name" => Some(ColumnType::Text),
+            // ponytail: varbit reuses ordered text storage until the bit-operator
+            // corpus needs a packed bit datum.
+            "text" | "name" | "varbit" | "bit varying" => Some(ColumnType::Text),
             "varchar" | "character varying" => Some(ColumnType::Varchar(None)),
             // `bpchar` is PostgreSQL's own internal name for the blank-padded
             // character type, and it is accepted as a type name: `'ab'::bpchar`
@@ -1584,6 +1586,11 @@ mod tests {
         assert_eq!(ColumnType::from_sql_name("int8"), Some(ColumnType::Int8));
         assert_eq!(ColumnType::from_sql_name("bigint"), Some(ColumnType::Int8));
         assert_eq!(ColumnType::from_sql_name("text"), Some(ColumnType::Text));
+        assert_eq!(ColumnType::from_sql_name("varbit"), Some(ColumnType::Text));
+        assert_eq!(
+            ColumnType::from_sql_name("bit varying"),
+            Some(ColumnType::Text)
+        );
         assert_eq!(
             ColumnType::from_sql_name("varchar"),
             Some(ColumnType::Varchar(None))
