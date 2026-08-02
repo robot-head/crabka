@@ -37,15 +37,15 @@ impl Encode for DescribeGroupsRequest {
                 crate::primitives::array::put_array_len(buf, (self.groups).len(), flex);
                 for it in &self.groups {
                     if flex {
-                        let () = put_compact_string(buf, it);
+                        let () = put_compact_string(buf, &*it);
                     } else {
-                        let () = put_string(buf, it);
-                    }
+                        let () = put_string(buf, &*it);
+                    };
                 }
             }
         }
         if version >= 3 {
-            put_bool(buf, self.include_authorized_operations);
+            put_bool(buf, self.include_authorized_operations)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -64,9 +64,9 @@ impl Encode for DescribeGroupsRequest {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(it)
+                            compact_string_len(&*it)
                         } else {
-                            string_len(it)
+                            string_len(&*it)
                         }
                     })
                     .sum();
@@ -83,7 +83,7 @@ impl Encode for DescribeGroupsRequest {
         n
     }
 }
-impl Decode<'_> for DescribeGroupsRequest {
+impl<'de> Decode<'de> for DescribeGroupsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {

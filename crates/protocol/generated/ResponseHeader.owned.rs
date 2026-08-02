@@ -26,7 +26,7 @@ impl Encode for ResponseHeader {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.correlation_id);
+            put_i32(buf, self.correlation_id)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -47,7 +47,7 @@ impl Encode for ResponseHeader {
         n
     }
 }
-impl Decode<'_> for ResponseHeader {
+impl<'de> Decode<'de> for ResponseHeader {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(
@@ -80,7 +80,7 @@ impl ResponseHeader {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("correlationId".to_string(), ::serde_json::json!(0));
     ::serde_json::Value::Object(obj)

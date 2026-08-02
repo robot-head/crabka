@@ -20,7 +20,7 @@ pub const FLEXIBLE_MIN: i16 = 2;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateDelegationTokenRequest<'a> {
     pub owner_principal_type: Option<&'a str>,
     pub owner_principal_name: Option<&'a str>,
@@ -28,27 +28,34 @@ pub struct CreateDelegationTokenRequest<'a> {
     pub max_lifetime_ms: i64,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl CreateDelegationTokenRequest<'_> {
+impl<'a> Default for CreateDelegationTokenRequest<'a> {
+    fn default() -> Self {
+        Self {
+            owner_principal_type: None,
+            owner_principal_name: None,
+            renewers: Vec::new(),
+            max_lifetime_ms: 0i64,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> CreateDelegationTokenRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::create_delegation_token_request::CreateDelegationTokenRequest {
         crate::owned::create_delegation_token_request::CreateDelegationTokenRequest {
-            owner_principal_type: (self.owner_principal_type).map(std::string::ToString::to_string),
-            owner_principal_name: (self.owner_principal_name).map(std::string::ToString::to_string),
-            renewers: (self.renewers)
-                .iter()
-                .map(CreatableRenewers::to_owned)
-                .collect(),
+            owner_principal_type: (self.owner_principal_type).map(|s| s.to_string()),
+            owner_principal_name: (self.owner_principal_name).map(|s| s.to_string()),
+            renewers: (self.renewers).iter().map(|it| it.to_owned()).collect(),
             max_lifetime_ms: (self.max_lifetime_ms),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for CreateDelegationTokenRequest<'_> {
+impl<'a> Encode for CreateDelegationTokenRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -80,7 +87,7 @@ impl Encode for CreateDelegationTokenRequest<'_> {
             }
         }
         if version >= 0 {
-            put_i64(buf, self.max_lifetime_ms);
+            put_i64(buf, self.max_lifetime_ms)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -189,17 +196,25 @@ impl CreateDelegationTokenRequest<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreatableRenewers<'a> {
     pub principal_type: &'a str,
     pub principal_name: &'a str,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl CreatableRenewers<'_> {
+impl<'a> Default for CreatableRenewers<'a> {
+    fn default() -> Self {
+        Self {
+            principal_type: "",
+            principal_name: "",
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> CreatableRenewers<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::create_delegation_token_request::CreatableRenewers {
         crate::owned::create_delegation_token_request::CreatableRenewers {
             principal_type: (self.principal_type).to_string(),
@@ -208,7 +223,7 @@ impl CreatableRenewers<'_> {
         }
     }
 }
-impl Encode for CreatableRenewers<'_> {
+impl<'a> Encode for CreatableRenewers<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {

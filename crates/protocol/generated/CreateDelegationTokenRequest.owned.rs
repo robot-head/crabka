@@ -58,7 +58,7 @@ impl Encode for CreateDelegationTokenRequest {
             }
         }
         if version >= 0 {
-            put_i64(buf, self.max_lifetime_ms);
+            put_i64(buf, self.max_lifetime_ms)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -104,7 +104,7 @@ impl Encode for CreateDelegationTokenRequest {
         n
     }
 }
-impl Decode<'_> for CreateDelegationTokenRequest {
+impl<'de> Decode<'de> for CreateDelegationTokenRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -220,7 +220,7 @@ impl Encode for CreatableRenewers {
         n
     }
 }
-impl Decode<'_> for CreatableRenewers {
+impl<'de> Decode<'de> for CreatableRenewers {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();

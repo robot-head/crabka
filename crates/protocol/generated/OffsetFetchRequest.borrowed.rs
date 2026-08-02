@@ -20,7 +20,7 @@ pub const FLEXIBLE_MIN: i16 = 6;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OffsetFetchRequest<'a> {
     pub group_id: &'a str,
     pub topics: Option<Vec<OffsetFetchRequestTopic<'a>>>,
@@ -28,27 +28,34 @@ pub struct OffsetFetchRequest<'a> {
     pub require_stable: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl OffsetFetchRequest<'_> {
+impl<'a> Default for OffsetFetchRequest<'a> {
+    fn default() -> Self {
+        Self {
+            group_id: "",
+            topics: None,
+            groups: Vec::new(),
+            require_stable: false,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> OffsetFetchRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_fetch_request::OffsetFetchRequest {
         crate::owned::offset_fetch_request::OffsetFetchRequest {
             group_id: (self.group_id).to_string(),
             topics: (self.topics)
                 .as_ref()
-                .map(|v| v.iter().map(OffsetFetchRequestTopic::to_owned).collect()),
-            groups: (self.groups)
-                .iter()
-                .map(OffsetFetchRequestGroup::to_owned)
-                .collect(),
+                .map(|v| v.iter().map(|it| it.to_owned()).collect()),
+            groups: (self.groups).iter().map(|it| it.to_owned()).collect(),
             require_stable: (self.require_stable),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for OffsetFetchRequest<'_> {
+impl<'a> Encode for OffsetFetchRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -77,7 +84,7 @@ impl Encode for OffsetFetchRequest<'_> {
                 }
             } else {
                 {
-                    let v = (self.topics).as_deref().unwrap_or(&[]);
+                    let v = (self.topics).as_ref().map(Vec::as_slice).unwrap_or(&[]);
                     crate::primitives::array::put_array_len(buf, v.len(), flex);
                     for it in v {
                         it.encode(buf, version)?;
@@ -94,7 +101,7 @@ impl Encode for OffsetFetchRequest<'_> {
             }
         }
         if version >= 7 {
-            put_bool(buf, self.require_stable);
+            put_bool(buf, self.require_stable)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -117,7 +124,7 @@ impl Encode for OffsetFetchRequest<'_> {
                 {
                     let opt: Option<&Vec<_>> = (self.topics).as_ref();
                     let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                        opt.map(std::vec::Vec::len),
+                        opt.map(|v| v.len()),
                         flex,
                     );
                     let body: usize =
@@ -126,7 +133,7 @@ impl Encode for OffsetFetchRequest<'_> {
                 }
             } else {
                 {
-                    let v = (self.topics).as_deref().unwrap_or(&[]);
+                    let v = (self.topics).as_ref().map(Vec::as_slice).unwrap_or(&[]);
                     let prefix = crate::primitives::array::array_len_prefix_len(v.len(), flex);
                     let body: usize = v.iter().map(|it| it.encoded_len(version)).sum();
                     prefix + body
@@ -233,17 +240,25 @@ impl OffsetFetchRequest<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OffsetFetchRequestTopic<'a> {
     pub name: &'a str,
     pub partition_indexes: Vec<i32>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl OffsetFetchRequestTopic<'_> {
+impl<'a> Default for OffsetFetchRequestTopic<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            partition_indexes: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> OffsetFetchRequestTopic<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_fetch_request::OffsetFetchRequestTopic {
         crate::owned::offset_fetch_request::OffsetFetchRequestTopic {
             name: (self.name).to_string(),
@@ -252,7 +267,7 @@ impl OffsetFetchRequestTopic<'_> {
         }
     }
 }
-impl Encode for OffsetFetchRequestTopic<'_> {
+impl<'a> Encode for OffsetFetchRequestTopic<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 6;
         if (0..=7).contains(&version) {
@@ -352,7 +367,7 @@ pub struct OffsetFetchRequestGroup<'a> {
     pub topics: Option<Vec<OffsetFetchRequestTopics<'a>>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for OffsetFetchRequestGroup<'_> {
+impl<'a> Default for OffsetFetchRequestGroup<'a> {
     fn default() -> Self {
         Self {
             group_id: "",
@@ -363,24 +378,23 @@ impl Default for OffsetFetchRequestGroup<'_> {
         }
     }
 }
-impl OffsetFetchRequestGroup<'_> {
+impl<'a> OffsetFetchRequestGroup<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_fetch_request::OffsetFetchRequestGroup {
         crate::owned::offset_fetch_request::OffsetFetchRequestGroup {
             group_id: (self.group_id).to_string(),
-            member_id: (self.member_id).map(std::string::ToString::to_string),
+            member_id: (self.member_id).map(|s| s.to_string()),
             member_epoch: (self.member_epoch),
             topics: (self.topics)
                 .as_ref()
-                .map(|v| v.iter().map(OffsetFetchRequestTopics::to_owned).collect()),
+                .map(|v| v.iter().map(|it| it.to_owned()).collect()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for OffsetFetchRequestGroup<'_> {
+impl<'a> Encode for OffsetFetchRequestGroup<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 6;
         if version >= 8 {
@@ -398,7 +412,7 @@ impl Encode for OffsetFetchRequestGroup<'_> {
             }
         }
         if version >= 9 {
-            put_i32(buf, self.member_epoch);
+            put_i32(buf, self.member_epoch)
         }
         if version >= 8 {
             {
@@ -441,7 +455,7 @@ impl Encode for OffsetFetchRequestGroup<'_> {
             n += {
                 let opt: Option<&Vec<_>> = (self.topics).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
+                    opt.map(|v| v.len()),
                     flex,
                 );
                 let body: usize =
@@ -518,18 +532,27 @@ impl OffsetFetchRequestGroup<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OffsetFetchRequestTopics<'a> {
     pub name: &'a str,
     pub topic_id: crate::primitives::uuid::Uuid,
     pub partition_indexes: Vec<i32>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl OffsetFetchRequestTopics<'_> {
+impl<'a> Default for OffsetFetchRequestTopics<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            topic_id: crate::primitives::uuid::Uuid::default(),
+            partition_indexes: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> OffsetFetchRequestTopics<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_fetch_request::OffsetFetchRequestTopics {
         crate::owned::offset_fetch_request::OffsetFetchRequestTopics {
             name: (self.name).to_string(),
@@ -539,7 +562,7 @@ impl OffsetFetchRequestTopics<'_> {
         }
     }
 }
-impl Encode for OffsetFetchRequestTopics<'_> {
+impl<'a> Encode for OffsetFetchRequestTopics<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 6;
         if (8..=9).contains(&version) {
@@ -550,7 +573,7 @@ impl Encode for OffsetFetchRequestTopics<'_> {
             }
         }
         if version >= 10 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+            crate::primitives::uuid::put_uuid(buf, self.topic_id)
         }
         if version >= 8 {
             {

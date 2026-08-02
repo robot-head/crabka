@@ -20,7 +20,7 @@ pub const FLEXIBLE_MIN: i16 = 3;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FindCoordinatorResponse<'a> {
     pub throttle_time_ms: i32,
     pub error_code: i16,
@@ -31,28 +31,38 @@ pub struct FindCoordinatorResponse<'a> {
     pub coordinators: Vec<Coordinator<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl FindCoordinatorResponse<'_> {
+impl<'a> Default for FindCoordinatorResponse<'a> {
+    fn default() -> Self {
+        Self {
+            throttle_time_ms: 0i32,
+            error_code: 0i16,
+            error_message: None,
+            node_id: 0i32,
+            host: "",
+            port: 0i32,
+            coordinators: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> FindCoordinatorResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::find_coordinator_response::FindCoordinatorResponse {
         crate::owned::find_coordinator_response::FindCoordinatorResponse {
             throttle_time_ms: (self.throttle_time_ms),
             error_code: (self.error_code),
-            error_message: (self.error_message).map(std::string::ToString::to_string),
+            error_message: (self.error_message).map(|s| s.to_string()),
             node_id: (self.node_id),
             host: (self.host).to_string(),
             port: (self.port),
-            coordinators: (self.coordinators)
-                .iter()
-                .map(Coordinator::to_owned)
-                .collect(),
+            coordinators: (self.coordinators).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for FindCoordinatorResponse<'_> {
+impl<'a> Encode for FindCoordinatorResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -62,10 +72,10 @@ impl Encode for FindCoordinatorResponse<'_> {
         }
         let flex = is_flexible(version);
         if version >= 1 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if (0..=3).contains(&version) {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if (1..=3).contains(&version) {
             if flex {
@@ -75,7 +85,7 @@ impl Encode for FindCoordinatorResponse<'_> {
             }
         }
         if (0..=3).contains(&version) {
-            put_i32(buf, self.node_id);
+            put_i32(buf, self.node_id)
         }
         if (0..=3).contains(&version) {
             if flex {
@@ -85,7 +95,7 @@ impl Encode for FindCoordinatorResponse<'_> {
             }
         }
         if (0..=3).contains(&version) {
-            put_i32(buf, self.port);
+            put_i32(buf, self.port)
         }
         if version >= 4 {
             {
@@ -229,7 +239,7 @@ impl FindCoordinatorResponse<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Coordinator<'a> {
     pub key: &'a str,
     pub node_id: i32,
@@ -239,11 +249,23 @@ pub struct Coordinator<'a> {
     pub error_message: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Coordinator<'_> {
+impl<'a> Default for Coordinator<'a> {
+    fn default() -> Self {
+        Self {
+            key: "",
+            node_id: 0i32,
+            host: "",
+            port: 0i32,
+            error_code: 0i16,
+            error_message: None,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> Coordinator<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::find_coordinator_response::Coordinator {
         crate::owned::find_coordinator_response::Coordinator {
             key: (self.key).to_string(),
@@ -251,12 +273,12 @@ impl Coordinator<'_> {
             host: (self.host).to_string(),
             port: (self.port),
             error_code: (self.error_code),
-            error_message: (self.error_message).map(std::string::ToString::to_string),
+            error_message: (self.error_message).map(|s| s.to_string()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for Coordinator<'_> {
+impl<'a> Encode for Coordinator<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 3;
         if version >= 4 {
@@ -267,7 +289,7 @@ impl Encode for Coordinator<'_> {
             }
         }
         if version >= 4 {
-            put_i32(buf, self.node_id);
+            put_i32(buf, self.node_id)
         }
         if version >= 4 {
             if flex {
@@ -277,10 +299,10 @@ impl Encode for Coordinator<'_> {
             }
         }
         if version >= 4 {
-            put_i32(buf, self.port);
+            put_i32(buf, self.port)
         }
         if version >= 4 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 4 {
             if flex {

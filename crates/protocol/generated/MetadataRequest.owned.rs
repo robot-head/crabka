@@ -59,7 +59,7 @@ impl Encode for MetadataRequest {
                 }
             } else {
                 {
-                    let v = (self.topics).as_deref().unwrap_or(&[]);
+                    let v = (self.topics).as_ref().map(Vec::as_slice).unwrap_or(&[]);
                     crate::primitives::array::put_array_len(buf, v.len(), flex);
                     for it in v {
                         it.encode(buf, version)?;
@@ -68,13 +68,13 @@ impl Encode for MetadataRequest {
             }
         }
         if version >= 4 {
-            put_bool(buf, self.allow_auto_topic_creation);
+            put_bool(buf, self.allow_auto_topic_creation)
         }
         if (8..=10).contains(&version) {
-            put_bool(buf, self.include_cluster_authorized_operations);
+            put_bool(buf, self.include_cluster_authorized_operations)
         }
         if version >= 8 {
-            put_bool(buf, self.include_topic_authorized_operations);
+            put_bool(buf, self.include_topic_authorized_operations)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -90,7 +90,7 @@ impl Encode for MetadataRequest {
                 {
                     let opt: Option<&Vec<_>> = (self.topics).as_ref();
                     let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                        opt.map(std::vec::Vec::len),
+                        opt.map(|v| v.len()),
                         flex,
                     );
                     let body: usize =
@@ -99,7 +99,7 @@ impl Encode for MetadataRequest {
                 }
             } else {
                 {
-                    let v = (self.topics).as_deref().unwrap_or(&[]);
+                    let v = (self.topics).as_ref().map(Vec::as_slice).unwrap_or(&[]);
                     let prefix = crate::primitives::array::array_len_prefix_len(v.len(), flex);
                     let body: usize = v.iter().map(|it| it.encoded_len(version)).sum();
                     prefix + body
@@ -122,7 +122,7 @@ impl Encode for MetadataRequest {
         n
     }
 }
-impl Decode<'_> for MetadataRequest {
+impl<'de> Decode<'de> for MetadataRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -203,7 +203,7 @@ impl Encode for MetadataRequestTopic {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 9;
         if version >= 10 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+            crate::primitives::uuid::put_uuid(buf, self.topic_id)
         }
         if version >= 0 {
             if version >= 10 {
@@ -254,7 +254,7 @@ impl Encode for MetadataRequestTopic {
         n
     }
 }
-impl Decode<'_> for MetadataRequestTopic {
+impl<'de> Decode<'de> for MetadataRequestTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 9;
         let mut out = Self::default();
@@ -316,7 +316,7 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
             ::serde_json::Value::Bool(true),
         );
     }
-    if (8..=10).contains(&version) {
+    if version >= 8 && version <= 10 {
         obj.insert(
             "includeClusterAuthorizedOperations".to_string(),
             ::serde_json::Value::Bool(false),

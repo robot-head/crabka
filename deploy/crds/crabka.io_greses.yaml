@@ -128,12 +128,12 @@ spec:
                     type: object
                   thresholds:
                     default:
-                      cooldownEpochs: 2
+                      sizeCeiling: 1GiB
+                      mergeFloor: 64MiB
+                      splitStrideRows: 1000000
                       loadSkewHysteresis: 25%
                       maxOperations: 32
-                      mergeFloor: 64MiB
-                      sizeCeiling: 1GiB
-                      splitStrideRows: 1000000
+                      cooldownEpochs: 2
                     description: Threshold and cooldown knobs used by future live planner input.
                     properties:
                       cooldownEpochs:

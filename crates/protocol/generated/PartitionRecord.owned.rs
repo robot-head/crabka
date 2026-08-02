@@ -54,12 +54,12 @@ impl Default for PartitionRecord {
 impl PartitionRecord {
     fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.partition_id);
+            put_i32(buf, self.partition_id)
         }
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+            crate::primitives::uuid::put_uuid(buf, self.topic_id)
         }
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -104,17 +104,17 @@ impl PartitionRecord {
     }
     fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.leader);
+            put_i32(buf, self.leader)
         }
     }
     fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.leader_epoch);
+            put_i32(buf, self.leader_epoch)
         }
     }
     fn encode_field_8<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.partition_epoch);
+            put_i32(buf, self.partition_epoch)
         }
     }
     fn encode_field_9<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -127,22 +127,22 @@ impl PartitionRecord {
             }
         }
     }
-    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
+    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if flex {
             let mut tagged = WriteTaggedFields::new();
-            if self.leader_recovery_state != 0i8 {
+            if !(self.leader_recovery_state == 0i8) {
                 let payload = encode_to_bytes(1, |b| {
                     put_i8(b, self.leader_recovery_state);
                     Ok(())
                 });
                 tagged.add(0, payload);
             }
-            if self.eligible_leader_replicas.is_some() {
+            if !(self.eligible_leader_replicas.is_none()) {
                 let payload = encode_to_bytes(
                     {
                         let opt: Option<&Vec<_>> = (self.eligible_leader_replicas).as_ref();
                         let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                            opt.map(std::vec::Vec::len),
+                            opt.map(|v| v.len()),
                             flex,
                         );
                         let body: usize = opt.map_or(0, |v| v.iter().map(|_| 4).sum());
@@ -163,12 +163,12 @@ impl PartitionRecord {
                 );
                 tagged.add(1, payload);
             }
-            if self.last_known_elr.is_some() {
+            if !(self.last_known_elr.is_none()) {
                 let payload = encode_to_bytes(
                     {
                         let opt: Option<&Vec<_>> = (self.last_known_elr).as_ref();
                         let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                            opt.map(std::vec::Vec::len),
+                            opt.map(|v| v.len()),
                             flex,
                         );
                         let body: usize = opt.map_or(0, |v| v.iter().map(|_| 4).sum());
@@ -340,7 +340,7 @@ impl PartitionRecord {
     fn decode_tagged_fields<B: Buf>(
         out: &mut Self,
         buf: &mut B,
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -492,25 +492,25 @@ impl Encode for PartitionRecord {
         }
         if flex {
             let mut known_pairs: Vec<(u32, usize)> = Vec::new();
-            if self.leader_recovery_state != 0i8 {
+            if !(self.leader_recovery_state == 0i8) {
                 known_pairs.push((0, 1));
             }
-            if self.eligible_leader_replicas.is_some() {
+            if !(self.eligible_leader_replicas.is_none()) {
                 known_pairs.push((1, {
                     let opt: Option<&Vec<_>> = (self.eligible_leader_replicas).as_ref();
                     let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                        opt.map(std::vec::Vec::len),
+                        opt.map(|v| v.len()),
                         flex,
                     );
                     let body: usize = opt.map_or(0, |v| v.iter().map(|_| 4).sum());
                     prefix + body
                 }));
             }
-            if self.last_known_elr.is_some() {
+            if !(self.last_known_elr.is_none()) {
                 known_pairs.push((2, {
                     let opt: Option<&Vec<_>> = (self.last_known_elr).as_ref();
                     let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                        opt.map(std::vec::Vec::len),
+                        opt.map(|v| v.len()),
                         flex,
                     );
                     let body: usize = opt.map_or(0, |v| v.iter().map(|_| 4).sum());
@@ -522,7 +522,7 @@ impl Encode for PartitionRecord {
         n
     }
 }
-impl Decode<'_> for PartitionRecord {
+impl<'de> Decode<'de> for PartitionRecord {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(

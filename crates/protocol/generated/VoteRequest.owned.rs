@@ -52,7 +52,7 @@ impl Encode for VoteRequest {
             }
         }
         if version >= 1 {
-            put_i32(buf, self.voter_id);
+            put_i32(buf, self.voter_id)
         }
         if version >= 0 {
             {
@@ -96,7 +96,7 @@ impl Encode for VoteRequest {
         n
     }
 }
-impl Decode<'_> for VoteRequest {
+impl<'de> Decode<'de> for VoteRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -207,7 +207,7 @@ impl Encode for TopicData {
         n
     }
 }
-impl Decode<'_> for TopicData {
+impl<'de> Decode<'de> for TopicData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -263,45 +263,45 @@ pub struct PartitionData {
 impl PartitionData {
     fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.replica_epoch);
+            put_i32(buf, self.replica_epoch)
         }
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.replica_id);
+            put_i32(buf, self.replica_id)
         }
     }
     fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 1 {
-            crate::primitives::uuid::put_uuid(buf, self.replica_directory_id);
+            crate::primitives::uuid::put_uuid(buf, self.replica_directory_id)
         }
     }
     fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 1 {
-            crate::primitives::uuid::put_uuid(buf, self.voter_directory_id);
+            crate::primitives::uuid::put_uuid(buf, self.voter_directory_id)
         }
     }
     fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.last_offset_epoch);
+            put_i32(buf, self.last_offset_epoch)
         }
     }
     fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i64(buf, self.last_offset);
+            put_i64(buf, self.last_offset)
         }
     }
     fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 2 {
-            put_bool(buf, self.pre_vote);
+            put_bool(buf, self.pre_vote)
         }
     }
-    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
+    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -398,7 +398,7 @@ impl PartitionData {
     fn decode_tagged_fields<B: Buf>(
         out: &mut Self,
         buf: &mut B,
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -455,7 +455,7 @@ impl Encode for PartitionData {
         n
     }
 }
-impl Decode<'_> for PartitionData {
+impl<'de> Decode<'de> for PartitionData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

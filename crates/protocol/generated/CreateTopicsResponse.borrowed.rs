@@ -24,29 +24,34 @@ pub const FLEXIBLE_MIN: i16 = 5;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateTopicsResponse<'a> {
     pub throttle_time_ms: i32,
     pub topics: Vec<CreatableTopicResult<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl CreateTopicsResponse<'_> {
+impl<'a> Default for CreateTopicsResponse<'a> {
+    fn default() -> Self {
+        Self {
+            throttle_time_ms: 0i32,
+            topics: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> CreateTopicsResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::create_topics_response::CreateTopicsResponse {
         crate::owned::create_topics_response::CreateTopicsResponse {
             throttle_time_ms: (self.throttle_time_ms),
-            topics: (self.topics)
-                .iter()
-                .map(CreatableTopicResult::to_owned)
-                .collect(),
+            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for CreateTopicsResponse<'_> {
+impl<'a> Encode for CreateTopicsResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -56,7 +61,7 @@ impl Encode for CreateTopicsResponse<'_> {
         }
         let flex = is_flexible(version);
         if version >= 2 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 0 {
             {
@@ -148,7 +153,7 @@ pub struct CreatableTopicResult<'a> {
     pub topic_config_error_code: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for CreatableTopicResult<'_> {
+impl<'a> Default for CreatableTopicResult<'a> {
     fn default() -> Self {
         Self {
             name: "",
@@ -167,18 +172,17 @@ impl<'a> CreatableTopicResult<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::create_topics_response::CreatableTopicResult {
         crate::owned::create_topics_response::CreatableTopicResult {
             name: (self.name).to_string(),
             topic_id: (self.topic_id),
             error_code: (self.error_code),
-            error_message: (self.error_message).map(std::string::ToString::to_string),
+            error_message: (self.error_message).map(|s| s.to_string()),
             num_partitions: (self.num_partitions),
             replication_factor: (self.replication_factor),
             configs: (self.configs)
                 .as_ref()
-                .map(|v| v.iter().map(CreatableTopicConfigs::to_owned).collect()),
+                .map(|v| v.iter().map(|it| it.to_owned()).collect()),
             topic_config_error_code: (self.topic_config_error_code),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
@@ -194,12 +198,12 @@ impl<'a> CreatableTopicResult<'a> {
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 7 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+            crate::primitives::uuid::put_uuid(buf, self.topic_id)
         }
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
     }
     fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -213,12 +217,12 @@ impl<'a> CreatableTopicResult<'a> {
     }
     fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 5 {
-            put_i32(buf, self.num_partitions);
+            put_i32(buf, self.num_partitions)
         }
     }
     fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 5 {
-            put_i16(buf, self.replication_factor);
+            put_i16(buf, self.replication_factor)
         }
     }
     fn encode_field_6<B: BufMut>(
@@ -353,7 +357,7 @@ impl<'a> CreatableTopicResult<'a> {
     fn decode_tagged_fields(
         out: &mut Self,
         buf: &mut &'a [u8],
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -375,7 +379,7 @@ impl<'a> CreatableTopicResult<'a> {
         Ok(())
     }
 }
-impl Encode for CreatableTopicResult<'_> {
+impl<'a> Encode for CreatableTopicResult<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 5;
         self.encode_field_0(buf, version, flex);
@@ -421,7 +425,7 @@ impl Encode for CreatableTopicResult<'_> {
             n += {
                 let opt: Option<&Vec<_>> = (self.configs).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
+                    opt.map(|v| v.len()),
                     flex,
                 );
                 let body: usize =
@@ -495,7 +499,7 @@ pub struct CreatableTopicConfigs<'a> {
     pub is_sensitive: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for CreatableTopicConfigs<'_> {
+impl<'a> Default for CreatableTopicConfigs<'a> {
     fn default() -> Self {
         Self {
             name: "",
@@ -507,15 +511,14 @@ impl Default for CreatableTopicConfigs<'_> {
         }
     }
 }
-impl CreatableTopicConfigs<'_> {
+impl<'a> CreatableTopicConfigs<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::create_topics_response::CreatableTopicConfigs {
         crate::owned::create_topics_response::CreatableTopicConfigs {
             name: (self.name).to_string(),
-            value: (self.value).map(std::string::ToString::to_string),
+            value: (self.value).map(|s| s.to_string()),
             read_only: (self.read_only),
             config_source: (self.config_source),
             is_sensitive: (self.is_sensitive),
@@ -523,7 +526,7 @@ impl CreatableTopicConfigs<'_> {
         }
     }
 }
-impl Encode for CreatableTopicConfigs<'_> {
+impl<'a> Encode for CreatableTopicConfigs<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 5;
         if version >= 5 {
@@ -541,13 +544,13 @@ impl Encode for CreatableTopicConfigs<'_> {
             }
         }
         if version >= 5 {
-            put_bool(buf, self.read_only);
+            put_bool(buf, self.read_only)
         }
         if version >= 5 {
-            put_i8(buf, self.config_source);
+            put_i8(buf, self.config_source)
         }
         if version >= 5 {
-            put_bool(buf, self.is_sensitive);
+            put_bool(buf, self.is_sensitive)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

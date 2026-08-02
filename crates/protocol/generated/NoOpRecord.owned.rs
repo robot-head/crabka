@@ -39,7 +39,7 @@ impl Encode for NoOpRecord {
         n
     }
 }
-impl Decode<'_> for NoOpRecord {
+impl<'de> Decode<'de> for NoOpRecord {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(
@@ -65,7 +65,7 @@ impl NoOpRecord {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
-    let obj = ::serde_json::Map::new();
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
     ::serde_json::Value::Object(obj)
 }

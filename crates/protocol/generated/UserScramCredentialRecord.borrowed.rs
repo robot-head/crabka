@@ -17,7 +17,7 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserScramCredentialRecord<'a> {
     pub name: &'a str,
     pub mechanism: i8,
@@ -27,11 +27,23 @@ pub struct UserScramCredentialRecord<'a> {
     pub iterations: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl UserScramCredentialRecord<'_> {
+impl<'a> Default for UserScramCredentialRecord<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            mechanism: 0i8,
+            salt: &[],
+            stored_key: &[],
+            server_key: &[],
+            iterations: 0i32,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> UserScramCredentialRecord<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::user_scram_credential_record::UserScramCredentialRecord {
@@ -46,7 +58,7 @@ impl UserScramCredentialRecord<'_> {
         }
     }
 }
-impl Encode for UserScramCredentialRecord<'_> {
+impl<'a> Encode for UserScramCredentialRecord<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(
@@ -62,7 +74,7 @@ impl Encode for UserScramCredentialRecord<'_> {
             }
         }
         if version >= 0 {
-            put_i8(buf, self.mechanism);
+            put_i8(buf, self.mechanism)
         }
         if version >= 0 {
             if flex {
@@ -86,7 +98,7 @@ impl Encode for UserScramCredentialRecord<'_> {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.iterations);
+            put_i32(buf, self.iterations)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

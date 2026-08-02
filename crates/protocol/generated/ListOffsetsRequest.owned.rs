@@ -35,10 +35,10 @@ impl Encode for ListOffsetsRequest {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.replica_id);
+            put_i32(buf, self.replica_id)
         }
         if version >= 2 {
-            put_i8(buf, self.isolation_level);
+            put_i8(buf, self.isolation_level)
         }
         if version >= 0 {
             {
@@ -49,7 +49,7 @@ impl Encode for ListOffsetsRequest {
             }
         }
         if version >= 10 {
-            put_i32(buf, self.timeout_ms);
+            put_i32(buf, self.timeout_ms)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -84,7 +84,7 @@ impl Encode for ListOffsetsRequest {
         n
     }
 }
-impl Decode<'_> for ListOffsetsRequest {
+impl<'de> Decode<'de> for ListOffsetsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -197,7 +197,7 @@ impl Encode for ListOffsetsTopic {
         n
     }
 }
-impl Decode<'_> for ListOffsetsTopic {
+impl<'de> Decode<'de> for ListOffsetsTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 6;
         let mut out = Self::default();
@@ -259,13 +259,13 @@ impl Encode for ListOffsetsPartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 6;
         if version >= 0 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
         if version >= 4 {
-            put_i32(buf, self.current_leader_epoch);
+            put_i32(buf, self.current_leader_epoch)
         }
         if version >= 0 {
-            put_i64(buf, self.timestamp);
+            put_i64(buf, self.timestamp)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -292,7 +292,7 @@ impl Encode for ListOffsetsPartition {
         n
     }
 }
-impl Decode<'_> for ListOffsetsPartition {
+impl<'de> Decode<'de> for ListOffsetsPartition {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 6;
         let mut out = Self::default();

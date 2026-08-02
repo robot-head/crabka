@@ -20,31 +20,36 @@ pub const FLEXIBLE_MIN: i16 = 1;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribeClientQuotasRequest<'a> {
     pub components: Vec<ComponentData<'a>>,
     pub strict: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl DescribeClientQuotasRequest<'_> {
+impl<'a> Default for DescribeClientQuotasRequest<'a> {
+    fn default() -> Self {
+        Self {
+            components: Vec::new(),
+            strict: false,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> DescribeClientQuotasRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::describe_client_quotas_request::DescribeClientQuotasRequest {
         crate::owned::describe_client_quotas_request::DescribeClientQuotasRequest {
-            components: (self.components)
-                .iter()
-                .map(ComponentData::to_owned)
-                .collect(),
+            components: (self.components).iter().map(|it| it.to_owned()).collect(),
             strict: (self.strict),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for DescribeClientQuotasRequest<'_> {
+impl<'a> Encode for DescribeClientQuotasRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -62,7 +67,7 @@ impl Encode for DescribeClientQuotasRequest<'_> {
             }
         }
         if version >= 0 {
-            put_bool(buf, self.strict);
+            put_bool(buf, self.strict)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -137,28 +142,37 @@ impl DescribeClientQuotasRequest<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComponentData<'a> {
     pub entity_type: &'a str,
     pub match_type: i8,
     pub match_: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl ComponentData<'_> {
+impl<'a> Default for ComponentData<'a> {
+    fn default() -> Self {
+        Self {
+            entity_type: "",
+            match_type: 0i8,
+            match_: None,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> ComponentData<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_client_quotas_request::ComponentData {
         crate::owned::describe_client_quotas_request::ComponentData {
             entity_type: (self.entity_type).to_string(),
             match_type: (self.match_type),
-            match_: (self.match_).map(std::string::ToString::to_string),
+            match_: (self.match_).map(|s| s.to_string()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for ComponentData<'_> {
+impl<'a> Encode for ComponentData<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
         if version >= 0 {
@@ -169,7 +183,7 @@ impl Encode for ComponentData<'_> {
             }
         }
         if version >= 0 {
-            put_i8(buf, self.match_type);
+            put_i8(buf, self.match_type)
         }
         if version >= 0 {
             if flex {

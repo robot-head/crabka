@@ -38,7 +38,7 @@ impl Encode for DescribeDelegationTokenResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
             {
@@ -49,7 +49,7 @@ impl Encode for DescribeDelegationTokenResponse {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -81,7 +81,7 @@ impl Encode for DescribeDelegationTokenResponse {
         n
     }
 }
-impl Decode<'_> for DescribeDelegationTokenResponse {
+impl<'de> Decode<'de> for DescribeDelegationTokenResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -183,17 +183,17 @@ impl DescribedDelegationToken {
     }
     fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i64(buf, self.issue_timestamp);
+            put_i64(buf, self.issue_timestamp)
         }
     }
     fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i64(buf, self.expiry_timestamp);
+            put_i64(buf, self.expiry_timestamp)
         }
     }
     fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i64(buf, self.max_timestamp);
+            put_i64(buf, self.max_timestamp)
         }
     }
     fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -230,7 +230,7 @@ impl DescribedDelegationToken {
         }
         Ok(())
     }
-    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
+    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -380,7 +380,7 @@ impl DescribedDelegationToken {
     fn decode_tagged_fields<B: Buf>(
         out: &mut Self,
         buf: &mut B,
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -477,7 +477,7 @@ impl Encode for DescribedDelegationToken {
         n
     }
 }
-impl Decode<'_> for DescribedDelegationToken {
+impl<'de> Decode<'de> for DescribedDelegationToken {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();
@@ -586,7 +586,7 @@ impl Encode for DescribedDelegationTokenRenewer {
         n
     }
 }
-impl Decode<'_> for DescribedDelegationTokenRenewer {
+impl<'de> Decode<'de> for DescribedDelegationTokenRenewer {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();
@@ -628,7 +628,7 @@ impl DescribedDelegationTokenRenewer {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("errorCode".to_string(), ::serde_json::json!(0));
     obj.insert("tokens".to_string(), ::serde_json::Value::Array(vec![]));

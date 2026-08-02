@@ -34,7 +34,7 @@ impl Encode for StreamsGroupDescribeResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 0 {
             {
@@ -71,7 +71,7 @@ impl Encode for StreamsGroupDescribeResponse {
         n
     }
 }
-impl Decode<'_> for StreamsGroupDescribeResponse {
+impl<'de> Decode<'de> for StreamsGroupDescribeResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -146,7 +146,7 @@ impl Default for DescribedGroup {
 impl DescribedGroup {
     fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -178,12 +178,12 @@ impl DescribedGroup {
     }
     fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.group_epoch);
+            put_i32(buf, self.group_epoch)
         }
     }
     fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.assignment_epoch);
+            put_i32(buf, self.assignment_epoch)
         }
     }
     fn encode_field_6<B: BufMut>(
@@ -223,10 +223,10 @@ impl DescribedGroup {
     }
     fn encode_field_8<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.authorized_operations);
+            put_i32(buf, self.authorized_operations)
         }
     }
-    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
+    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -357,7 +357,7 @@ impl DescribedGroup {
     fn decode_tagged_fields<B: Buf>(
         out: &mut Self,
         buf: &mut B,
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -438,7 +438,7 @@ impl Encode for DescribedGroup {
         n
     }
 }
-impl Decode<'_> for DescribedGroup {
+impl<'de> Decode<'de> for DescribedGroup {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -500,7 +500,7 @@ impl Encode for Topology {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.epoch);
+            put_i32(buf, self.epoch)
         }
         if version >= 0 {
             {
@@ -529,7 +529,7 @@ impl Encode for Topology {
             n += {
                 let opt: Option<&Vec<_>> = (self.subtopologies).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
+                    opt.map(|v| v.len()),
                     flex,
                 );
                 let body: usize =
@@ -544,7 +544,7 @@ impl Encode for Topology {
         n
     }
 }
-impl Decode<'_> for Topology {
+impl<'de> Decode<'de> for Topology {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -612,10 +612,10 @@ impl Encode for Subtopology {
                 crate::primitives::array::put_array_len(buf, (self.source_topics).len(), flex);
                 for it in &self.source_topics {
                     if flex {
-                        let () = put_compact_string(buf, it);
+                        let () = put_compact_string(buf, &*it);
                     } else {
-                        let () = put_string(buf, it);
-                    }
+                        let () = put_string(buf, &*it);
+                    };
                 }
             }
         }
@@ -628,10 +628,10 @@ impl Encode for Subtopology {
                 );
                 for it in &self.repartition_sink_topics {
                     if flex {
-                        let () = put_compact_string(buf, it);
+                        let () = put_compact_string(buf, &*it);
                     } else {
-                        let () = put_string(buf, it);
-                    }
+                        let () = put_string(buf, &*it);
+                    };
                 }
             }
         }
@@ -685,9 +685,9 @@ impl Encode for Subtopology {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(it)
+                            compact_string_len(&*it)
                         } else {
-                            string_len(it)
+                            string_len(&*it)
                         }
                     })
                     .sum();
@@ -704,9 +704,9 @@ impl Encode for Subtopology {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(it)
+                            compact_string_len(&*it)
                         } else {
-                            string_len(it)
+                            string_len(&*it)
                         }
                     })
                     .sum();
@@ -746,7 +746,7 @@ impl Encode for Subtopology {
         n
     }
 }
-impl Decode<'_> for Subtopology {
+impl<'de> Decode<'de> for Subtopology {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -874,7 +874,7 @@ impl Member {
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.member_epoch);
+            put_i32(buf, self.member_epoch)
         }
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -915,7 +915,7 @@ impl Member {
     }
     fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.topology_epoch);
+            put_i32(buf, self.topology_epoch)
         }
     }
     fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -1001,7 +1001,7 @@ impl Member {
         _flex: bool,
     ) -> Result<(), ProtocolError> {
         if version >= 0 {
-            self.assignment.encode(buf, version)?;
+            self.assignment.encode(buf, version)?
         }
         Ok(())
     }
@@ -1012,16 +1012,16 @@ impl Member {
         _flex: bool,
     ) -> Result<(), ProtocolError> {
         if version >= 0 {
-            self.target_assignment.encode(buf, version)?;
+            self.target_assignment.encode(buf, version)?
         }
         Ok(())
     }
     fn encode_field_14<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_bool(buf, self.is_classic);
+            put_bool(buf, self.is_classic)
         }
     }
-    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
+    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -1254,7 +1254,7 @@ impl Member {
     fn decode_tagged_fields<B: Buf>(
         out: &mut Self,
         buf: &mut B,
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -1392,7 +1392,7 @@ impl Encode for Member {
         n
     }
 }
-impl Decode<'_> for Member {
+impl<'de> Decode<'de> for Member {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -1494,7 +1494,7 @@ impl Member {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("throttleTimeMs".to_string(), ::serde_json::json!(0));
     obj.insert("groups".to_string(), ::serde_json::Value::Array(vec![]));

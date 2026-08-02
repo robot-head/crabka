@@ -38,7 +38,7 @@ impl Encode for DescribeGroupsResponse {
         }
         let flex = is_flexible(version);
         if version >= 1 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 0 {
             {
@@ -75,7 +75,7 @@ impl Encode for DescribeGroupsResponse {
         n
     }
 }
-impl Decode<'_> for DescribeGroupsResponse {
+impl<'de> Decode<'de> for DescribeGroupsResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -148,7 +148,7 @@ impl Default for DescribedGroup {
 impl DescribedGroup {
     fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -214,10 +214,10 @@ impl DescribedGroup {
     }
     fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 3 {
-            put_i32(buf, self.authorized_operations);
+            put_i32(buf, self.authorized_operations)
         }
     }
-    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
+    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -341,7 +341,7 @@ impl DescribedGroup {
     fn decode_tagged_fields<B: Buf>(
         out: &mut Self,
         buf: &mut B,
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -426,7 +426,7 @@ impl Encode for DescribedGroup {
         n
     }
 }
-impl Decode<'_> for DescribedGroup {
+impl<'de> Decode<'de> for DescribedGroup {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 5;
         let mut out = Self::default();
@@ -587,7 +587,7 @@ impl Encode for DescribedGroupMember {
         n
     }
 }
-impl Decode<'_> for DescribedGroupMember {
+impl<'de> Decode<'de> for DescribedGroupMember {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 5;
         let mut out = Self::default();

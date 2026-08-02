@@ -12,17 +12,25 @@ pub const FLEXIBLE_MIN: i16 = 3;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddOffsetsToTxnResponse {
     pub throttle_time_ms: i32,
     pub error_code: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl Default for AddOffsetsToTxnResponse {
+    fn default() -> Self {
+        Self {
+            throttle_time_ms: 0i32,
+            error_code: 0i16,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl AddOffsetsToTxnResponse {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::add_offsets_to_txn_response::AddOffsetsToTxnResponse {
         crate::owned::add_offsets_to_txn_response::AddOffsetsToTxnResponse {
             throttle_time_ms: (self.throttle_time_ms),
@@ -41,10 +49,10 @@ impl Encode for AddOffsetsToTxnResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

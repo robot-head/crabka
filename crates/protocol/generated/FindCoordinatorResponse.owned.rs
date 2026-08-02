@@ -39,10 +39,10 @@ impl Encode for FindCoordinatorResponse {
         }
         let flex = is_flexible(version);
         if version >= 1 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if (0..=3).contains(&version) {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if (1..=3).contains(&version) {
             if flex {
@@ -52,7 +52,7 @@ impl Encode for FindCoordinatorResponse {
             }
         }
         if (0..=3).contains(&version) {
-            put_i32(buf, self.node_id);
+            put_i32(buf, self.node_id)
         }
         if (0..=3).contains(&version) {
             if flex {
@@ -62,7 +62,7 @@ impl Encode for FindCoordinatorResponse {
             }
         }
         if (0..=3).contains(&version) {
-            put_i32(buf, self.port);
+            put_i32(buf, self.port)
         }
         if version >= 4 {
             {
@@ -125,7 +125,7 @@ impl Encode for FindCoordinatorResponse {
         n
     }
 }
-impl Decode<'_> for FindCoordinatorResponse {
+impl<'de> Decode<'de> for FindCoordinatorResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -227,7 +227,7 @@ impl Encode for Coordinator {
             }
         }
         if version >= 4 {
-            put_i32(buf, self.node_id);
+            put_i32(buf, self.node_id)
         }
         if version >= 4 {
             if flex {
@@ -237,10 +237,10 @@ impl Encode for Coordinator {
             }
         }
         if version >= 4 {
-            put_i32(buf, self.port);
+            put_i32(buf, self.port)
         }
         if version >= 4 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 4 {
             if flex {
@@ -295,7 +295,7 @@ impl Encode for Coordinator {
         n
     }
 }
-impl Decode<'_> for Coordinator {
+impl<'de> Decode<'de> for Coordinator {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 3;
         let mut out = Self::default();
@@ -373,7 +373,7 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     if version <= 3 {
         obj.insert("errorCode".to_string(), ::serde_json::json!(0));
     }
-    if (1..=3).contains(&version) {
+    if version >= 1 && version <= 3 {
         obj.insert("errorMessage".to_string(), ::serde_json::Value::Null);
     }
     if version <= 3 {

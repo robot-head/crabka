@@ -28,19 +28,19 @@ impl Encode for ReplicaState {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.replica_id);
+            put_i32(buf, self.replica_id)
         }
         if version >= 2 {
-            crate::primitives::uuid::put_uuid(buf, self.replica_directory_id);
+            crate::primitives::uuid::put_uuid(buf, self.replica_directory_id)
         }
         if version >= 0 {
-            put_i64(buf, self.log_end_offset);
+            put_i64(buf, self.log_end_offset)
         }
         if version >= 1 {
-            put_i64(buf, self.last_fetch_timestamp);
+            put_i64(buf, self.last_fetch_timestamp)
         }
         if version >= 1 {
-            put_i64(buf, self.last_caught_up_timestamp);
+            put_i64(buf, self.last_caught_up_timestamp)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -73,7 +73,7 @@ impl Encode for ReplicaState {
         n
     }
 }
-impl Decode<'_> for ReplicaState {
+impl<'de> Decode<'de> for ReplicaState {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

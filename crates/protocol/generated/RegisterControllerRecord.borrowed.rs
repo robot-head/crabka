@@ -17,7 +17,7 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisterControllerRecord<'a> {
     pub controller_id: i32,
     pub incarnation_id: crate::primitives::uuid::Uuid,
@@ -26,29 +26,34 @@ pub struct RegisterControllerRecord<'a> {
     pub features: Vec<ControllerFeature<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl RegisterControllerRecord<'_> {
+impl<'a> Default for RegisterControllerRecord<'a> {
+    fn default() -> Self {
+        Self {
+            controller_id: 0i32,
+            incarnation_id: crate::primitives::uuid::Uuid::default(),
+            zk_migration_ready: false,
+            end_points: Vec::new(),
+            features: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> RegisterControllerRecord<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::register_controller_record::RegisterControllerRecord {
         crate::owned::register_controller_record::RegisterControllerRecord {
             controller_id: (self.controller_id),
             incarnation_id: (self.incarnation_id),
             zk_migration_ready: (self.zk_migration_ready),
-            end_points: (self.end_points)
-                .iter()
-                .map(ControllerEndpoint::to_owned)
-                .collect(),
-            features: (self.features)
-                .iter()
-                .map(ControllerFeature::to_owned)
-                .collect(),
+            end_points: (self.end_points).iter().map(|it| it.to_owned()).collect(),
+            features: (self.features).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for RegisterControllerRecord<'_> {
+impl<'a> Encode for RegisterControllerRecord<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(
@@ -57,13 +62,13 @@ impl Encode for RegisterControllerRecord<'_> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.controller_id);
+            put_i32(buf, self.controller_id)
         }
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.incarnation_id);
+            crate::primitives::uuid::put_uuid(buf, self.incarnation_id)
         }
         if version >= 0 {
-            put_bool(buf, self.zk_migration_ready);
+            put_bool(buf, self.zk_migration_ready)
         }
         if version >= 0 {
             {
@@ -195,7 +200,7 @@ impl RegisterControllerRecord<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControllerEndpoint<'a> {
     pub name: &'a str,
     pub host: &'a str,
@@ -203,11 +208,21 @@ pub struct ControllerEndpoint<'a> {
     pub security_protocol: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl ControllerEndpoint<'_> {
+impl<'a> Default for ControllerEndpoint<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            host: "",
+            port: 0u16,
+            security_protocol: 0i16,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> ControllerEndpoint<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::register_controller_record::ControllerEndpoint {
         crate::owned::register_controller_record::ControllerEndpoint {
             name: (self.name).to_string(),
@@ -218,7 +233,7 @@ impl ControllerEndpoint<'_> {
         }
     }
 }
-impl Encode for ControllerEndpoint<'_> {
+impl<'a> Encode for ControllerEndpoint<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
@@ -236,10 +251,10 @@ impl Encode for ControllerEndpoint<'_> {
             }
         }
         if version >= 0 {
-            put_u16(buf, self.port);
+            put_u16(buf, self.port)
         }
         if version >= 0 {
-            put_i16(buf, self.security_protocol);
+            put_i16(buf, self.security_protocol)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -327,18 +342,27 @@ impl ControllerEndpoint<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControllerFeature<'a> {
     pub name: &'a str,
     pub min_supported_version: i16,
     pub max_supported_version: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl ControllerFeature<'_> {
+impl<'a> Default for ControllerFeature<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            min_supported_version: 0i16,
+            max_supported_version: 0i16,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> ControllerFeature<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::register_controller_record::ControllerFeature {
         crate::owned::register_controller_record::ControllerFeature {
             name: (self.name).to_string(),
@@ -348,7 +372,7 @@ impl ControllerFeature<'_> {
         }
     }
 }
-impl Encode for ControllerFeature<'_> {
+impl<'a> Encode for ControllerFeature<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
@@ -359,10 +383,10 @@ impl Encode for ControllerFeature<'_> {
             }
         }
         if version >= 0 {
-            put_i16(buf, self.min_supported_version);
+            put_i16(buf, self.min_supported_version)
         }
         if version >= 0 {
-            put_i16(buf, self.max_supported_version);
+            put_i16(buf, self.max_supported_version)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

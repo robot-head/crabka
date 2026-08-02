@@ -16,7 +16,7 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListTransactionsResponse<'a> {
     pub throttle_time_ms: i32,
     pub error_code: i16,
@@ -24,28 +24,38 @@ pub struct ListTransactionsResponse<'a> {
     pub transaction_states: Vec<TransactionState<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl ListTransactionsResponse<'_> {
+impl<'a> Default for ListTransactionsResponse<'a> {
+    fn default() -> Self {
+        Self {
+            throttle_time_ms: 0i32,
+            error_code: 0i16,
+            unknown_state_filters: Vec::new(),
+            transaction_states: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> ListTransactionsResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::list_transactions_response::ListTransactionsResponse {
         crate::owned::list_transactions_response::ListTransactionsResponse {
             throttle_time_ms: (self.throttle_time_ms),
             error_code: (self.error_code),
             unknown_state_filters: (self.unknown_state_filters)
                 .iter()
-                .map(std::string::ToString::to_string)
+                .map(|s| s.to_string())
                 .collect(),
             transaction_states: (self.transaction_states)
                 .iter()
-                .map(TransactionState::to_owned)
+                .map(|it| it.to_owned())
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for ListTransactionsResponse<'_> {
+impl<'a> Encode for ListTransactionsResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -55,10 +65,10 @@ impl Encode for ListTransactionsResponse<'_> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
             {
@@ -69,10 +79,10 @@ impl Encode for ListTransactionsResponse<'_> {
                 );
                 for it in &self.unknown_state_filters {
                     if flex {
-                        let () = put_compact_string(buf, it);
+                        let () = put_compact_string(buf, *it);
                     } else {
-                        let () = put_string(buf, it);
-                    }
+                        let () = put_string(buf, *it);
+                    };
                 }
             }
         }
@@ -109,9 +119,9 @@ impl Encode for ListTransactionsResponse<'_> {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(it)
+                            compact_string_len(*it)
                         } else {
-                            string_len(it)
+                            string_len(*it)
                         }
                     })
                     .sum();
@@ -204,18 +214,27 @@ impl ListTransactionsResponse<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransactionState<'a> {
     pub transactional_id: &'a str,
     pub producer_id: i64,
     pub transaction_state: &'a str,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl TransactionState<'_> {
+impl<'a> Default for TransactionState<'a> {
+    fn default() -> Self {
+        Self {
+            transactional_id: "",
+            producer_id: 0i64,
+            transaction_state: "",
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> TransactionState<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::list_transactions_response::TransactionState {
         crate::owned::list_transactions_response::TransactionState {
             transactional_id: (self.transactional_id).to_string(),
@@ -225,7 +244,7 @@ impl TransactionState<'_> {
         }
     }
 }
-impl Encode for TransactionState<'_> {
+impl<'a> Encode for TransactionState<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
@@ -236,7 +255,7 @@ impl Encode for TransactionState<'_> {
             }
         }
         if version >= 0 {
-            put_i64(buf, self.producer_id);
+            put_i64(buf, self.producer_id)
         }
         if version >= 0 {
             if flex {

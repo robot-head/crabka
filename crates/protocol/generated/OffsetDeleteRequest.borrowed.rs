@@ -15,29 +15,34 @@ pub const FLEXIBLE_MIN: i16 = 32767;
 pub fn is_flexible(version: i16) -> bool {
     version == FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OffsetDeleteRequest<'a> {
     pub group_id: &'a str,
     pub topics: Vec<OffsetDeleteRequestTopic<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl OffsetDeleteRequest<'_> {
+impl<'a> Default for OffsetDeleteRequest<'a> {
+    fn default() -> Self {
+        Self {
+            group_id: "",
+            topics: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> OffsetDeleteRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_delete_request::OffsetDeleteRequest {
         crate::owned::offset_delete_request::OffsetDeleteRequest {
             group_id: (self.group_id).to_string(),
-            topics: (self.topics)
-                .iter()
-                .map(OffsetDeleteRequestTopic::to_owned)
-                .collect(),
+            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for OffsetDeleteRequest<'_> {
+impl<'a> Encode for OffsetDeleteRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -128,29 +133,34 @@ impl OffsetDeleteRequest<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OffsetDeleteRequestTopic<'a> {
     pub name: &'a str,
     pub partitions: Vec<OffsetDeleteRequestPartition>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl OffsetDeleteRequestTopic<'_> {
+impl<'a> Default for OffsetDeleteRequestTopic<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            partitions: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> OffsetDeleteRequestTopic<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_delete_request::OffsetDeleteRequestTopic {
         crate::owned::offset_delete_request::OffsetDeleteRequestTopic {
             name: (self.name).to_string(),
-            partitions: (self.partitions)
-                .iter()
-                .map(OffsetDeleteRequestPartition::to_owned)
-                .collect(),
+            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for OffsetDeleteRequestTopic<'_> {
+impl<'a> Encode for OffsetDeleteRequestTopic<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version == i16::MAX;
         if version >= 0 {
@@ -232,16 +242,23 @@ impl OffsetDeleteRequestTopic<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OffsetDeleteRequestPartition {
     pub partition_index: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
+}
+impl Default for OffsetDeleteRequestPartition {
+    fn default() -> Self {
+        Self {
+            partition_index: 0i32,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
 }
 impl OffsetDeleteRequestPartition {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_delete_request::OffsetDeleteRequestPartition {
         crate::owned::offset_delete_request::OffsetDeleteRequestPartition {
             partition_index: (self.partition_index),
@@ -252,7 +269,7 @@ impl OffsetDeleteRequestPartition {
 impl Encode for OffsetDeleteRequestPartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if version >= 0 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
         Ok(())
     }

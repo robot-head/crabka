@@ -18,7 +18,7 @@ pub const FLEXIBLE_MIN: i16 = 2;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateDelegationTokenResponse<'a> {
     pub error_code: i16,
     pub principal_type: &'a str,
@@ -33,11 +33,28 @@ pub struct CreateDelegationTokenResponse<'a> {
     pub throttle_time_ms: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl<'a> Default for CreateDelegationTokenResponse<'a> {
+    fn default() -> Self {
+        Self {
+            error_code: 0i16,
+            principal_type: "",
+            principal_name: "",
+            token_requester_principal_type: "",
+            token_requester_principal_name: "",
+            issue_timestamp_ms: 0i64,
+            expiry_timestamp_ms: 0i64,
+            max_timestamp_ms: 0i64,
+            token_id: "",
+            hmac: &[],
+            throttle_time_ms: 0i32,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl<'a> CreateDelegationTokenResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::create_delegation_token_response::CreateDelegationTokenResponse {
@@ -58,7 +75,7 @@ impl<'a> CreateDelegationTokenResponse<'a> {
     }
     fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -99,17 +116,17 @@ impl<'a> CreateDelegationTokenResponse<'a> {
     }
     fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i64(buf, self.issue_timestamp_ms);
+            put_i64(buf, self.issue_timestamp_ms)
         }
     }
     fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i64(buf, self.expiry_timestamp_ms);
+            put_i64(buf, self.expiry_timestamp_ms)
         }
     }
     fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i64(buf, self.max_timestamp_ms);
+            put_i64(buf, self.max_timestamp_ms)
         }
     }
     fn encode_field_8<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -132,7 +149,7 @@ impl<'a> CreateDelegationTokenResponse<'a> {
     }
     fn encode_field_10<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
     }
     fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
@@ -289,7 +306,7 @@ impl<'a> CreateDelegationTokenResponse<'a> {
     fn decode_tagged_fields(
         out: &mut Self,
         buf: &mut &'a [u8],
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -298,7 +315,7 @@ impl<'a> CreateDelegationTokenResponse<'a> {
         Ok(())
     }
 }
-impl Encode for CreateDelegationTokenResponse<'_> {
+impl<'a> Encode for CreateDelegationTokenResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {

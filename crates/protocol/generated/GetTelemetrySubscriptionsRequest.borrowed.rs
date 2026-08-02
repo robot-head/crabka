@@ -11,16 +11,23 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GetTelemetrySubscriptionsRequest {
     pub client_instance_id: crate::primitives::uuid::Uuid,
     pub unknown_tagged_fields: UnknownTaggedFields,
+}
+impl Default for GetTelemetrySubscriptionsRequest {
+    fn default() -> Self {
+        Self {
+            client_instance_id: crate::primitives::uuid::Uuid::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
 }
 impl GetTelemetrySubscriptionsRequest {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::get_telemetry_subscriptions_request::GetTelemetrySubscriptionsRequest {
@@ -40,7 +47,7 @@ impl Encode for GetTelemetrySubscriptionsRequest {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.client_instance_id);
+            crate::primitives::uuid::put_uuid(buf, self.client_instance_id)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

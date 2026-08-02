@@ -63,7 +63,7 @@ impl Encode for DescribeShareGroupOffsetsRequest {
         n
     }
 }
-impl Decode<'_> for DescribeShareGroupOffsetsRequest {
+impl<'de> Decode<'de> for DescribeShareGroupOffsetsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -147,7 +147,7 @@ impl Encode for DescribeShareGroupOffsetsRequestGroup {
             n += {
                 let opt: Option<&Vec<_>> = (self.topics).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
+                    opt.map(|v| v.len()),
                     flex,
                 );
                 let body: usize =
@@ -162,7 +162,7 @@ impl Encode for DescribeShareGroupOffsetsRequestGroup {
         n
     }
 }
-impl Decode<'_> for DescribeShareGroupOffsetsRequestGroup {
+impl<'de> Decode<'de> for DescribeShareGroupOffsetsRequestGroup {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -265,7 +265,7 @@ impl Encode for DescribeShareGroupOffsetsRequestTopic {
         n
     }
 }
-impl Decode<'_> for DescribeShareGroupOffsetsRequestTopic {
+impl<'de> Decode<'de> for DescribeShareGroupOffsetsRequestTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -310,7 +310,7 @@ impl DescribeShareGroupOffsetsRequestTopic {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("groups".to_string(), ::serde_json::Value::Array(vec![]));
     ::serde_json::Value::Object(obj)

@@ -18,33 +18,39 @@ pub const FLEXIBLE_MIN: i16 = 2;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribeDelegationTokenResponse<'a> {
     pub error_code: i16,
     pub tokens: Vec<DescribedDelegationToken<'a>>,
     pub throttle_time_ms: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl DescribeDelegationTokenResponse<'_> {
+impl<'a> Default for DescribeDelegationTokenResponse<'a> {
+    fn default() -> Self {
+        Self {
+            error_code: 0i16,
+            tokens: Vec::new(),
+            throttle_time_ms: 0i32,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> DescribeDelegationTokenResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::describe_delegation_token_response::DescribeDelegationTokenResponse {
         crate::owned::describe_delegation_token_response::DescribeDelegationTokenResponse {
             error_code: (self.error_code),
-            tokens: (self.tokens)
-                .iter()
-                .map(DescribedDelegationToken::to_owned)
-                .collect(),
+            tokens: (self.tokens).iter().map(|it| it.to_owned()).collect(),
             throttle_time_ms: (self.throttle_time_ms),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for DescribeDelegationTokenResponse<'_> {
+impl<'a> Encode for DescribeDelegationTokenResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -54,7 +60,7 @@ impl Encode for DescribeDelegationTokenResponse<'_> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
             {
@@ -65,7 +71,7 @@ impl Encode for DescribeDelegationTokenResponse<'_> {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -146,7 +152,7 @@ impl DescribeDelegationTokenResponse<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribedDelegationToken<'a> {
     pub principal_type: &'a str,
     pub principal_name: &'a str,
@@ -160,11 +166,27 @@ pub struct DescribedDelegationToken<'a> {
     pub renewers: Vec<DescribedDelegationTokenRenewer<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl<'a> Default for DescribedDelegationToken<'a> {
+    fn default() -> Self {
+        Self {
+            principal_type: "",
+            principal_name: "",
+            token_requester_principal_type: "",
+            token_requester_principal_name: "",
+            issue_timestamp: 0i64,
+            expiry_timestamp: 0i64,
+            max_timestamp: 0i64,
+            token_id: "",
+            hmac: &[],
+            renewers: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl<'a> DescribedDelegationToken<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::describe_delegation_token_response::DescribedDelegationToken {
@@ -178,10 +200,7 @@ impl<'a> DescribedDelegationToken<'a> {
             max_timestamp: (self.max_timestamp),
             token_id: (self.token_id).to_string(),
             hmac: Bytes::copy_from_slice(self.hmac),
-            renewers: (self.renewers)
-                .iter()
-                .map(DescribedDelegationTokenRenewer::to_owned)
-                .collect(),
+            renewers: (self.renewers).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
@@ -223,17 +242,17 @@ impl<'a> DescribedDelegationToken<'a> {
     }
     fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i64(buf, self.issue_timestamp);
+            put_i64(buf, self.issue_timestamp)
         }
     }
     fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i64(buf, self.expiry_timestamp);
+            put_i64(buf, self.expiry_timestamp)
         }
     }
     fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i64(buf, self.max_timestamp);
+            put_i64(buf, self.max_timestamp)
         }
     }
     fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -422,7 +441,7 @@ impl<'a> DescribedDelegationToken<'a> {
     fn decode_tagged_fields(
         out: &mut Self,
         buf: &mut &'a [u8],
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -431,7 +450,7 @@ impl<'a> DescribedDelegationToken<'a> {
         Ok(())
     }
 }
-impl Encode for DescribedDelegationToken<'_> {
+impl<'a> Encode for DescribedDelegationToken<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         self.encode_field_0(buf, version, flex);
@@ -577,17 +596,25 @@ impl DescribedDelegationToken<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribedDelegationTokenRenewer<'a> {
     pub principal_type: &'a str,
     pub principal_name: &'a str,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl DescribedDelegationTokenRenewer<'_> {
+impl<'a> Default for DescribedDelegationTokenRenewer<'a> {
+    fn default() -> Self {
+        Self {
+            principal_type: "",
+            principal_name: "",
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> DescribedDelegationTokenRenewer<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::describe_delegation_token_response::DescribedDelegationTokenRenewer {
@@ -598,7 +625,7 @@ impl DescribedDelegationTokenRenewer<'_> {
         }
     }
 }
-impl Encode for DescribedDelegationTokenRenewer<'_> {
+impl<'a> Encode for DescribedDelegationTokenRenewer<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {

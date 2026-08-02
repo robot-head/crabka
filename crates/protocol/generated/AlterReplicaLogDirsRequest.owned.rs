@@ -63,7 +63,7 @@ impl Encode for AlterReplicaLogDirsRequest {
         n
     }
 }
-impl Decode<'_> for AlterReplicaLogDirsRequest {
+impl<'de> Decode<'de> for AlterReplicaLogDirsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -155,7 +155,7 @@ impl Encode for AlterReplicaLogDir {
         n
     }
 }
-impl Decode<'_> for AlterReplicaLogDir {
+impl<'de> Decode<'de> for AlterReplicaLogDir {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();
@@ -251,7 +251,7 @@ impl Encode for AlterReplicaLogDirTopic {
         n
     }
 }
-impl Decode<'_> for AlterReplicaLogDirTopic {
+impl<'de> Decode<'de> for AlterReplicaLogDirTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();
@@ -296,7 +296,7 @@ impl AlterReplicaLogDirTopic {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("dirs".to_string(), ::serde_json::Value::Array(vec![]));
     ::serde_json::Value::Object(obj)

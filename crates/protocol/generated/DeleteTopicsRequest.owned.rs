@@ -47,15 +47,15 @@ impl Encode for DeleteTopicsRequest {
                 crate::primitives::array::put_array_len(buf, (self.topic_names).len(), flex);
                 for it in &self.topic_names {
                     if flex {
-                        let () = put_compact_string(buf, it);
+                        let () = put_compact_string(buf, &*it);
                     } else {
-                        let () = put_string(buf, it);
-                    }
+                        let () = put_string(buf, &*it);
+                    };
                 }
             }
         }
         if version >= 0 {
-            put_i32(buf, self.timeout_ms);
+            put_i32(buf, self.timeout_ms)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -82,9 +82,9 @@ impl Encode for DeleteTopicsRequest {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(it)
+                            compact_string_len(&*it)
                         } else {
-                            string_len(it)
+                            string_len(&*it)
                         }
                     })
                     .sum();
@@ -101,7 +101,7 @@ impl Encode for DeleteTopicsRequest {
         n
     }
 }
-impl Decode<'_> for DeleteTopicsRequest {
+impl<'de> Decode<'de> for DeleteTopicsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -178,7 +178,7 @@ impl Encode for DeleteTopicState {
             }
         }
         if version >= 6 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+            crate::primitives::uuid::put_uuid(buf, self.topic_id)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -206,7 +206,7 @@ impl Encode for DeleteTopicState {
         n
     }
 }
-impl Decode<'_> for DeleteTopicState {
+impl<'de> Decode<'de> for DeleteTopicState {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 4;
         let mut out = Self::default();

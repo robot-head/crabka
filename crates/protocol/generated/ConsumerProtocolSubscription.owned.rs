@@ -54,10 +54,10 @@ impl Encode for ConsumerProtocolSubscription {
                 crate::primitives::array::put_array_len(buf, (self.topics).len(), flex);
                 for it in &self.topics {
                     if flex {
-                        let () = put_compact_string(buf, it);
+                        let () = put_compact_string(buf, &*it);
                     } else {
-                        let () = put_string(buf, it);
-                    }
+                        let () = put_string(buf, &*it);
+                    };
                 }
             }
         }
@@ -77,7 +77,7 @@ impl Encode for ConsumerProtocolSubscription {
             }
         }
         if version >= 2 {
-            put_i32(buf, self.generation_id);
+            put_i32(buf, self.generation_id)
         }
         if version >= 3 {
             if flex {
@@ -99,9 +99,9 @@ impl Encode for ConsumerProtocolSubscription {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(it)
+                            compact_string_len(&*it)
                         } else {
-                            string_len(it)
+                            string_len(&*it)
                         }
                     })
                     .sum();
@@ -141,7 +141,7 @@ impl Encode for ConsumerProtocolSubscription {
         n
     }
 }
-impl Decode<'_> for ConsumerProtocolSubscription {
+impl<'de> Decode<'de> for ConsumerProtocolSubscription {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(
@@ -264,7 +264,7 @@ impl Encode for TopicPartition {
         n
     }
 }
-impl Decode<'_> for TopicPartition {
+impl<'de> Decode<'de> for TopicPartition {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version == i16::MAX;
         let mut out = Self::default();

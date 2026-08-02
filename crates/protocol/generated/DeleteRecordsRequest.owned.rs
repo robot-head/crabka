@@ -41,7 +41,7 @@ impl Encode for DeleteRecordsRequest {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.timeout_ms);
+            put_i32(buf, self.timeout_ms)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -70,7 +70,7 @@ impl Encode for DeleteRecordsRequest {
         n
     }
 }
-impl Decode<'_> for DeleteRecordsRequest {
+impl<'de> Decode<'de> for DeleteRecordsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -171,7 +171,7 @@ impl Encode for DeleteRecordsTopic {
         n
     }
 }
-impl Decode<'_> for DeleteRecordsTopic {
+impl<'de> Decode<'de> for DeleteRecordsTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();
@@ -222,10 +222,10 @@ impl Encode for DeleteRecordsPartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
         if version >= 0 {
-            put_i64(buf, self.offset);
+            put_i64(buf, self.offset)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -249,7 +249,7 @@ impl Encode for DeleteRecordsPartition {
         n
     }
 }
-impl Decode<'_> for DeleteRecordsPartition {
+impl<'de> Decode<'de> for DeleteRecordsPartition {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();
@@ -283,7 +283,7 @@ impl DeleteRecordsPartition {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("topics".to_string(), ::serde_json::Value::Array(vec![]));
     obj.insert("timeoutMs".to_string(), ::serde_json::json!(0));

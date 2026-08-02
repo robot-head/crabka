@@ -16,31 +16,40 @@ pub const FLEXIBLE_MIN: i16 = 3;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FindCoordinatorRequest<'a> {
     pub key: &'a str,
     pub key_type: i8,
     pub coordinator_keys: Vec<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl FindCoordinatorRequest<'_> {
+impl<'a> Default for FindCoordinatorRequest<'a> {
+    fn default() -> Self {
+        Self {
+            key: "",
+            key_type: 0i8,
+            coordinator_keys: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> FindCoordinatorRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::find_coordinator_request::FindCoordinatorRequest {
         crate::owned::find_coordinator_request::FindCoordinatorRequest {
             key: (self.key).to_string(),
             key_type: (self.key_type),
             coordinator_keys: (self.coordinator_keys)
                 .iter()
-                .map(std::string::ToString::to_string)
+                .map(|s| s.to_string())
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for FindCoordinatorRequest<'_> {
+impl<'a> Encode for FindCoordinatorRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -57,17 +66,17 @@ impl Encode for FindCoordinatorRequest<'_> {
             }
         }
         if version >= 1 {
-            put_i8(buf, self.key_type);
+            put_i8(buf, self.key_type)
         }
         if version >= 4 {
             {
                 crate::primitives::array::put_array_len(buf, (self.coordinator_keys).len(), flex);
                 for it in &self.coordinator_keys {
                     if flex {
-                        let () = put_compact_string(buf, it);
+                        let () = put_compact_string(buf, *it);
                     } else {
-                        let () = put_string(buf, it);
-                    }
+                        let () = put_string(buf, *it);
+                    };
                 }
             }
         }
@@ -100,9 +109,9 @@ impl Encode for FindCoordinatorRequest<'_> {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(it)
+                            compact_string_len(*it)
                         } else {
-                            string_len(it)
+                            string_len(*it)
                         }
                     })
                     .sum();

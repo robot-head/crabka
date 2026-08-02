@@ -22,7 +22,7 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribeQuorumResponse<'a> {
     pub error_code: i16,
     pub error_message: Option<&'a str>,
@@ -30,22 +30,32 @@ pub struct DescribeQuorumResponse<'a> {
     pub nodes: Vec<Node<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl DescribeQuorumResponse<'_> {
+impl<'a> Default for DescribeQuorumResponse<'a> {
+    fn default() -> Self {
+        Self {
+            error_code: 0i16,
+            error_message: None,
+            topics: Vec::new(),
+            nodes: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> DescribeQuorumResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_quorum_response::DescribeQuorumResponse {
         crate::owned::describe_quorum_response::DescribeQuorumResponse {
             error_code: (self.error_code),
-            error_message: (self.error_message).map(std::string::ToString::to_string),
-            topics: (self.topics).iter().map(TopicData::to_owned).collect(),
-            nodes: (self.nodes).iter().map(Node::to_owned).collect(),
+            error_message: (self.error_message).map(|s| s.to_string()),
+            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
+            nodes: (self.nodes).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for DescribeQuorumResponse<'_> {
+impl<'a> Encode for DescribeQuorumResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -55,7 +65,7 @@ impl Encode for DescribeQuorumResponse<'_> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 2 {
             if flex {
@@ -188,29 +198,34 @@ impl DescribeQuorumResponse<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicData<'a> {
     pub topic_name: &'a str,
     pub partitions: Vec<PartitionData<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl TopicData<'_> {
+impl<'a> Default for TopicData<'a> {
+    fn default() -> Self {
+        Self {
+            topic_name: "",
+            partitions: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> TopicData<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_quorum_response::TopicData {
         crate::owned::describe_quorum_response::TopicData {
             topic_name: (self.topic_name).to_string(),
-            partitions: (self.partitions)
-                .iter()
-                .map(PartitionData::to_owned)
-                .collect(),
+            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for TopicData<'_> {
+impl<'a> Encode for TopicData<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
@@ -303,7 +318,7 @@ impl TopicData<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionData<'a> {
     pub partition_index: i32,
     pub error_code: i16,
@@ -315,38 +330,49 @@ pub struct PartitionData<'a> {
     pub observers: Vec<super::common::describe_quorum_response::replica_state::ReplicaState>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl<'a> Default for PartitionData<'a> {
+    fn default() -> Self {
+        Self {
+            partition_index: 0i32,
+            error_code: 0i16,
+            error_message: None,
+            leader_id: 0i32,
+            leader_epoch: 0i32,
+            high_watermark: 0i64,
+            current_voters: Vec::new(),
+            observers: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl<'a> PartitionData<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_quorum_response::PartitionData {
         crate::owned::describe_quorum_response::PartitionData {
             partition_index: (self.partition_index),
             error_code: (self.error_code),
-            error_message: (self.error_message).map(std::string::ToString::to_string),
+            error_message: (self.error_message).map(|s| s.to_string()),
             leader_id: (self.leader_id),
             leader_epoch: (self.leader_epoch),
             high_watermark: (self.high_watermark),
             current_voters: (self.current_voters)
                 .iter()
-                .map(super::common::describe_quorum_response::replica_state::ReplicaState::to_owned)
+                .map(|it| it.to_owned())
                 .collect(),
-            observers: (self.observers)
-                .iter()
-                .map(super::common::describe_quorum_response::replica_state::ReplicaState::to_owned)
-                .collect(),
+            observers: (self.observers).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
     fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -360,17 +386,17 @@ impl<'a> PartitionData<'a> {
     }
     fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.leader_id);
+            put_i32(buf, self.leader_id)
         }
     }
     fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.leader_epoch);
+            put_i32(buf, self.leader_epoch)
         }
     }
     fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i64(buf, self.high_watermark);
+            put_i64(buf, self.high_watermark)
         }
     }
     fn encode_field_6<B: BufMut>(
@@ -520,7 +546,7 @@ impl<'a> PartitionData<'a> {
     fn decode_tagged_fields(
         out: &mut Self,
         buf: &mut &'a [u8],
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -529,7 +555,7 @@ impl<'a> PartitionData<'a> {
         Ok(())
     }
 }
-impl Encode for PartitionData<'_> {
+impl<'a> Encode for PartitionData<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         self.encode_field_0(buf, version, flex);
@@ -655,30 +681,38 @@ impl PartitionData<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Node<'a> {
     pub node_id: i32,
     pub listeners: Vec<Listener<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Node<'_> {
+impl<'a> Default for Node<'a> {
+    fn default() -> Self {
+        Self {
+            node_id: 0i32,
+            listeners: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> Node<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_quorum_response::Node {
         crate::owned::describe_quorum_response::Node {
             node_id: (self.node_id),
-            listeners: (self.listeners).iter().map(Listener::to_owned).collect(),
+            listeners: (self.listeners).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for Node<'_> {
+impl<'a> Encode for Node<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 2 {
-            put_i32(buf, self.node_id);
+            put_i32(buf, self.node_id)
         }
         if version >= 2 {
             {
@@ -755,18 +789,27 @@ impl Node<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Listener<'a> {
     pub name: &'a str,
     pub host: &'a str,
     pub port: u16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Listener<'_> {
+impl<'a> Default for Listener<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            host: "",
+            port: 0u16,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> Listener<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_quorum_response::Listener {
         crate::owned::describe_quorum_response::Listener {
             name: (self.name).to_string(),
@@ -776,7 +819,7 @@ impl Listener<'_> {
         }
     }
 }
-impl Encode for Listener<'_> {
+impl<'a> Encode for Listener<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 2 {
@@ -794,7 +837,7 @@ impl Encode for Listener<'_> {
             }
         }
         if version >= 2 {
-            put_u16(buf, self.port);
+            put_u16(buf, self.port)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

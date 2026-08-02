@@ -24,7 +24,7 @@ impl Encode for Endpoint {
             }
         }
         if version >= 0 {
-            put_u16(buf, self.port);
+            put_u16(buf, self.port)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -52,7 +52,7 @@ impl Encode for Endpoint {
         n
     }
 }
-impl Decode<'_> for Endpoint {
+impl<'de> Decode<'de> for Endpoint {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

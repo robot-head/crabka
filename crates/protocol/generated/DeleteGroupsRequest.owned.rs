@@ -35,10 +35,10 @@ impl Encode for DeleteGroupsRequest {
                 crate::primitives::array::put_array_len(buf, (self.groups_names).len(), flex);
                 for it in &self.groups_names {
                     if flex {
-                        let () = put_compact_string(buf, it);
+                        let () = put_compact_string(buf, &*it);
                     } else {
-                        let () = put_string(buf, it);
-                    }
+                        let () = put_string(buf, &*it);
+                    };
                 }
             }
         }
@@ -59,9 +59,9 @@ impl Encode for DeleteGroupsRequest {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(it)
+                            compact_string_len(&*it)
                         } else {
-                            string_len(it)
+                            string_len(&*it)
                         }
                     })
                     .sum();
@@ -75,7 +75,7 @@ impl Encode for DeleteGroupsRequest {
         n
     }
 }
-impl Decode<'_> for DeleteGroupsRequest {
+impl<'de> Decode<'de> for DeleteGroupsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -120,7 +120,7 @@ impl DeleteGroupsRequest {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert(
         "groupsNames".to_string(),

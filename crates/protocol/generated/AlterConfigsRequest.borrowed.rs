@@ -20,29 +20,34 @@ pub const FLEXIBLE_MIN: i16 = 2;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterConfigsRequest<'a> {
     pub resources: Vec<AlterConfigsResource<'a>>,
     pub validate_only: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl AlterConfigsRequest<'_> {
+impl<'a> Default for AlterConfigsRequest<'a> {
+    fn default() -> Self {
+        Self {
+            resources: Vec::new(),
+            validate_only: false,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> AlterConfigsRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::alter_configs_request::AlterConfigsRequest {
         crate::owned::alter_configs_request::AlterConfigsRequest {
-            resources: (self.resources)
-                .iter()
-                .map(AlterConfigsResource::to_owned)
-                .collect(),
+            resources: (self.resources).iter().map(|it| it.to_owned()).collect(),
             validate_only: (self.validate_only),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for AlterConfigsRequest<'_> {
+impl<'a> Encode for AlterConfigsRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -60,7 +65,7 @@ impl Encode for AlterConfigsRequest<'_> {
             }
         }
         if version >= 0 {
-            put_bool(buf, self.validate_only);
+            put_bool(buf, self.validate_only)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -135,35 +140,41 @@ impl AlterConfigsRequest<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterConfigsResource<'a> {
     pub resource_type: i8,
     pub resource_name: &'a str,
     pub configs: Vec<AlterableConfig<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl AlterConfigsResource<'_> {
+impl<'a> Default for AlterConfigsResource<'a> {
+    fn default() -> Self {
+        Self {
+            resource_type: 0i8,
+            resource_name: "",
+            configs: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> AlterConfigsResource<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::alter_configs_request::AlterConfigsResource {
         crate::owned::alter_configs_request::AlterConfigsResource {
             resource_type: (self.resource_type),
             resource_name: (self.resource_name).to_string(),
-            configs: (self.configs)
-                .iter()
-                .map(AlterableConfig::to_owned)
-                .collect(),
+            configs: (self.configs).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for AlterConfigsResource<'_> {
+impl<'a> Encode for AlterConfigsResource<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
-            put_i8(buf, self.resource_type);
+            put_i8(buf, self.resource_type)
         }
         if version >= 0 {
             if flex {
@@ -264,26 +275,34 @@ impl AlterConfigsResource<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterableConfig<'a> {
     pub name: &'a str,
     pub value: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl AlterableConfig<'_> {
+impl<'a> Default for AlterableConfig<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            value: None,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> AlterableConfig<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::alter_configs_request::AlterableConfig {
         crate::owned::alter_configs_request::AlterableConfig {
             name: (self.name).to_string(),
-            value: (self.value).map(std::string::ToString::to_string),
+            value: (self.value).map(|s| s.to_string()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for AlterableConfig<'_> {
+impl<'a> Encode for AlterableConfig<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {

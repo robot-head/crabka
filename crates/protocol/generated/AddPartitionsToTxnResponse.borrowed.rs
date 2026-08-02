@@ -16,7 +16,7 @@ pub const FLEXIBLE_MIN: i16 = 3;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddPartitionsToTxnResponse<'a> {
     pub throttle_time_ms: i32,
     pub error_code: i16,
@@ -24,24 +24,40 @@ pub struct AddPartitionsToTxnResponse<'a> {
     pub results_by_topic_v3_and_below: Vec<super::common::add_partitions_to_txn_response::add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl AddPartitionsToTxnResponse<'_> {
+impl<'a> Default for AddPartitionsToTxnResponse<'a> {
+    fn default() -> Self {
+        Self {
+            throttle_time_ms: 0i32,
+            error_code: 0i16,
+            results_by_transaction: Vec::new(),
+            results_by_topic_v3_and_below: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> AddPartitionsToTxnResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::add_partitions_to_txn_response::AddPartitionsToTxnResponse {
         crate::owned::add_partitions_to_txn_response::AddPartitionsToTxnResponse {
             throttle_time_ms: (self.throttle_time_ms),
             error_code: (self.error_code),
-            results_by_transaction: (self.results_by_transaction).iter().map(AddPartitionsToTxnResult::to_owned).collect(),
-            results_by_topic_v3_and_below: (self.results_by_topic_v3_and_below).iter().map(super::common::add_partitions_to_txn_response::add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult::to_owned).collect(),
+            results_by_transaction: (self.results_by_transaction)
+                .iter()
+                .map(|it| it.to_owned())
+                .collect(),
+            results_by_topic_v3_and_below: (self.results_by_topic_v3_and_below)
+                .iter()
+                .map(|it| it.to_owned())
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for AddPartitionsToTxnResponse<'_> {
+impl<'a> Encode for AddPartitionsToTxnResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -51,10 +67,10 @@ impl Encode for AddPartitionsToTxnResponse<'_> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 4 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 4 {
             {
@@ -190,28 +206,39 @@ impl AddPartitionsToTxnResponse<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddPartitionsToTxnResult<'a> {
     pub transactional_id: &'a str,
     pub topic_results: Vec<super::common::add_partitions_to_txn_response::add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl AddPartitionsToTxnResult<'_> {
+impl<'a> Default for AddPartitionsToTxnResult<'a> {
+    fn default() -> Self {
+        Self {
+            transactional_id: "",
+            topic_results: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> AddPartitionsToTxnResult<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::add_partitions_to_txn_response::AddPartitionsToTxnResult {
         crate::owned::add_partitions_to_txn_response::AddPartitionsToTxnResult {
             transactional_id: (self.transactional_id).to_string(),
-            topic_results: (self.topic_results).iter().map(super::common::add_partitions_to_txn_response::add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult::to_owned).collect(),
+            topic_results: (self.topic_results)
+                .iter()
+                .map(|it| it.to_owned())
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for AddPartitionsToTxnResult<'_> {
+impl<'a> Encode for AddPartitionsToTxnResult<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 3;
         if version >= 4 {

@@ -58,7 +58,7 @@ impl Encode for OffsetCommitRequest {
             }
         }
         if version >= 1 {
-            put_i32(buf, self.generation_id_or_member_epoch);
+            put_i32(buf, self.generation_id_or_member_epoch)
         }
         if version >= 1 {
             if flex {
@@ -75,7 +75,7 @@ impl Encode for OffsetCommitRequest {
             }
         }
         if (2..=4).contains(&version) {
-            put_i64(buf, self.retention_time_ms);
+            put_i64(buf, self.retention_time_ms)
         }
         if version >= 0 {
             {
@@ -136,7 +136,7 @@ impl Encode for OffsetCommitRequest {
         n
     }
 }
-impl Decode<'_> for OffsetCommitRequest {
+impl<'de> Decode<'de> for OffsetCommitRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -233,7 +233,7 @@ impl Encode for OffsetCommitRequestTopic {
             }
         }
         if version >= 10 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+            crate::primitives::uuid::put_uuid(buf, self.topic_id)
         }
         if version >= 0 {
             {
@@ -280,7 +280,7 @@ impl Encode for OffsetCommitRequestTopic {
         n
     }
 }
-impl Decode<'_> for OffsetCommitRequestTopic {
+impl<'de> Decode<'de> for OffsetCommitRequestTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 8;
         let mut out = Self::default();
@@ -350,13 +350,13 @@ impl Encode for OffsetCommitRequestPartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 8;
         if version >= 0 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
         if version >= 0 {
-            put_i64(buf, self.committed_offset);
+            put_i64(buf, self.committed_offset)
         }
         if version >= 6 {
-            put_i32(buf, self.committed_leader_epoch);
+            put_i32(buf, self.committed_leader_epoch)
         }
         if version >= 0 {
             if flex {
@@ -397,7 +397,7 @@ impl Encode for OffsetCommitRequestPartition {
         n
     }
 }
-impl Decode<'_> for OffsetCommitRequestPartition {
+impl<'de> Decode<'de> for OffsetCommitRequestPartition {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 8;
         let mut out = Self::default();
@@ -468,7 +468,7 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     if version >= 7 {
         obj.insert("groupInstanceId".to_string(), ::serde_json::Value::Null);
     }
-    if (2..=4).contains(&version) {
+    if version >= 2 && version <= 4 {
         obj.insert("retentionTimeMs".to_string(), ::serde_json::json!(-1));
     }
     obj.insert("topics".to_string(), ::serde_json::Value::Array(vec![]));

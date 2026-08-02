@@ -20,7 +20,7 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListPartitionReassignmentsResponse<'a> {
     pub throttle_time_ms: i32,
     pub error_code: i16,
@@ -28,11 +28,21 @@ pub struct ListPartitionReassignmentsResponse<'a> {
     pub topics: Vec<OngoingTopicReassignment<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl ListPartitionReassignmentsResponse<'_> {
+impl<'a> Default for ListPartitionReassignmentsResponse<'a> {
+    fn default() -> Self {
+        Self {
+            throttle_time_ms: 0i32,
+            error_code: 0i16,
+            error_message: None,
+            topics: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> ListPartitionReassignmentsResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::list_partition_reassignments_response::ListPartitionReassignmentsResponse
@@ -40,16 +50,13 @@ impl ListPartitionReassignmentsResponse<'_> {
         crate::owned::list_partition_reassignments_response::ListPartitionReassignmentsResponse {
             throttle_time_ms: (self.throttle_time_ms),
             error_code: (self.error_code),
-            error_message: (self.error_message).map(std::string::ToString::to_string),
-            topics: (self.topics)
-                .iter()
-                .map(OngoingTopicReassignment::to_owned)
-                .collect(),
+            error_message: (self.error_message).map(|s| s.to_string()),
+            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for ListPartitionReassignmentsResponse<'_> {
+impl<'a> Encode for ListPartitionReassignmentsResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -59,10 +66,10 @@ impl Encode for ListPartitionReassignmentsResponse<'_> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
             if flex {
@@ -175,31 +182,36 @@ impl ListPartitionReassignmentsResponse<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OngoingTopicReassignment<'a> {
     pub name: &'a str,
     pub partitions: Vec<OngoingPartitionReassignment>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl OngoingTopicReassignment<'_> {
+impl<'a> Default for OngoingTopicReassignment<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            partitions: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> OngoingTopicReassignment<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::list_partition_reassignments_response::OngoingTopicReassignment {
         crate::owned::list_partition_reassignments_response::OngoingTopicReassignment {
             name: (self.name).to_string(),
-            partitions: (self.partitions)
-                .iter()
-                .map(OngoingPartitionReassignment::to_owned)
-                .collect(),
+            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for OngoingTopicReassignment<'_> {
+impl<'a> Encode for OngoingTopicReassignment<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
@@ -292,7 +304,7 @@ impl OngoingTopicReassignment<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OngoingPartitionReassignment {
     pub partition_index: i32,
     pub replicas: Vec<i32>,
@@ -300,11 +312,21 @@ pub struct OngoingPartitionReassignment {
     pub removing_replicas: Vec<i32>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl Default for OngoingPartitionReassignment {
+    fn default() -> Self {
+        Self {
+            partition_index: 0i32,
+            replicas: Vec::new(),
+            adding_replicas: Vec::new(),
+            removing_replicas: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl OngoingPartitionReassignment {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::list_partition_reassignments_response::OngoingPartitionReassignment {
@@ -321,7 +343,7 @@ impl Encode for OngoingPartitionReassignment {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
         if version >= 0 {
             {

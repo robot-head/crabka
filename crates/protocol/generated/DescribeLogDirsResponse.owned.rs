@@ -36,10 +36,10 @@ impl Encode for DescribeLogDirsResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 3 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
             {
@@ -82,7 +82,7 @@ impl Encode for DescribeLogDirsResponse {
         n
     }
 }
-impl Decode<'_> for DescribeLogDirsResponse {
+impl<'de> Decode<'de> for DescribeLogDirsResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -158,7 +158,7 @@ impl Encode for DescribeLogDirsResult {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
             if flex {
@@ -176,13 +176,13 @@ impl Encode for DescribeLogDirsResult {
             }
         }
         if version >= 4 {
-            put_i64(buf, self.total_bytes);
+            put_i64(buf, self.total_bytes)
         }
         if version >= 4 {
-            put_i64(buf, self.usable_bytes);
+            put_i64(buf, self.usable_bytes)
         }
         if version >= 5 {
-            put_bool(buf, self.is_cordoned);
+            put_bool(buf, self.is_cordoned)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -227,7 +227,7 @@ impl Encode for DescribeLogDirsResult {
         n
     }
 }
-impl Decode<'_> for DescribeLogDirsResult {
+impl<'de> Decode<'de> for DescribeLogDirsResult {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();
@@ -350,7 +350,7 @@ impl Encode for DescribeLogDirsTopic {
         n
     }
 }
-impl Decode<'_> for DescribeLogDirsTopic {
+impl<'de> Decode<'de> for DescribeLogDirsTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();
@@ -403,16 +403,16 @@ impl Encode for DescribeLogDirsPartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
         if version >= 0 {
-            put_i64(buf, self.partition_size);
+            put_i64(buf, self.partition_size)
         }
         if version >= 0 {
-            put_i64(buf, self.offset_lag);
+            put_i64(buf, self.offset_lag)
         }
         if version >= 0 {
-            put_bool(buf, self.is_future_key);
+            put_bool(buf, self.is_future_key)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -442,7 +442,7 @@ impl Encode for DescribeLogDirsPartition {
         n
     }
 }
-impl Decode<'_> for DescribeLogDirsPartition {
+impl<'de> Decode<'de> for DescribeLogDirsPartition {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();

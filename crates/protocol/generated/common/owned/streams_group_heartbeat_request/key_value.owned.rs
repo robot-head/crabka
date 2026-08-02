@@ -59,7 +59,7 @@ impl Encode for KeyValue {
         n
     }
 }
-impl Decode<'_> for KeyValue {
+impl<'de> Decode<'de> for KeyValue {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

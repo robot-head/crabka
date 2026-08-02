@@ -51,10 +51,10 @@ impl Encode for AddPartitionsToTxnRequest {
             }
         }
         if (0..=3).contains(&version) {
-            put_i64(buf, self.v3_and_below_producer_id);
+            put_i64(buf, self.v3_and_below_producer_id)
         }
         if (0..=3).contains(&version) {
-            put_i16(buf, self.v3_and_below_producer_epoch);
+            put_i16(buf, self.v3_and_below_producer_epoch)
         }
         if (0..=3).contains(&version) {
             {
@@ -121,7 +121,7 @@ impl Encode for AddPartitionsToTxnRequest {
         n
     }
 }
-impl Decode<'_> for AddPartitionsToTxnRequest {
+impl<'de> Decode<'de> for AddPartitionsToTxnRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -213,13 +213,13 @@ impl Encode for AddPartitionsToTxnTransaction {
             }
         }
         if version >= 4 {
-            put_i64(buf, self.producer_id);
+            put_i64(buf, self.producer_id)
         }
         if version >= 4 {
-            put_i16(buf, self.producer_epoch);
+            put_i16(buf, self.producer_epoch)
         }
         if version >= 4 {
-            put_bool(buf, self.verify_only);
+            put_bool(buf, self.verify_only)
         }
         if version >= 4 {
             {
@@ -269,7 +269,7 @@ impl Encode for AddPartitionsToTxnTransaction {
         n
     }
 }
-impl Decode<'_> for AddPartitionsToTxnTransaction {
+impl<'de> Decode<'de> for AddPartitionsToTxnTransaction {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 3;
         let mut out = Self::default();

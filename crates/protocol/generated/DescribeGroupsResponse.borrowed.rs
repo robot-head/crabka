@@ -22,26 +22,34 @@ pub const FLEXIBLE_MIN: i16 = 5;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribeGroupsResponse<'a> {
     pub throttle_time_ms: i32,
     pub groups: Vec<DescribedGroup<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl DescribeGroupsResponse<'_> {
+impl<'a> Default for DescribeGroupsResponse<'a> {
+    fn default() -> Self {
+        Self {
+            throttle_time_ms: 0i32,
+            groups: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> DescribeGroupsResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_groups_response::DescribeGroupsResponse {
         crate::owned::describe_groups_response::DescribeGroupsResponse {
             throttle_time_ms: (self.throttle_time_ms),
-            groups: (self.groups).iter().map(DescribedGroup::to_owned).collect(),
+            groups: (self.groups).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for DescribeGroupsResponse<'_> {
+impl<'a> Encode for DescribeGroupsResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -51,7 +59,7 @@ impl Encode for DescribeGroupsResponse<'_> {
         }
         let flex = is_flexible(version);
         if version >= 1 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 0 {
             {
@@ -143,7 +151,7 @@ pub struct DescribedGroup<'a> {
     pub authorized_operations: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for DescribedGroup<'_> {
+impl<'a> Default for DescribedGroup<'a> {
     fn default() -> Self {
         Self {
             error_code: 0i16,
@@ -162,26 +170,22 @@ impl<'a> DescribedGroup<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_groups_response::DescribedGroup {
         crate::owned::describe_groups_response::DescribedGroup {
             error_code: (self.error_code),
-            error_message: (self.error_message).map(std::string::ToString::to_string),
+            error_message: (self.error_message).map(|s| s.to_string()),
             group_id: (self.group_id).to_string(),
             group_state: (self.group_state).to_string(),
             protocol_type: (self.protocol_type).to_string(),
             protocol_data: (self.protocol_data).to_string(),
-            members: (self.members)
-                .iter()
-                .map(DescribedGroupMember::to_owned)
-                .collect(),
+            members: (self.members).iter().map(|it| it.to_owned()).collect(),
             authorized_operations: (self.authorized_operations),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
     fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -247,7 +251,7 @@ impl<'a> DescribedGroup<'a> {
     }
     fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 3 {
-            put_i32(buf, self.authorized_operations);
+            put_i32(buf, self.authorized_operations)
         }
     }
     fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
@@ -374,7 +378,7 @@ impl<'a> DescribedGroup<'a> {
     fn decode_tagged_fields(
         out: &mut Self,
         buf: &mut &'a [u8],
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -383,7 +387,7 @@ impl<'a> DescribedGroup<'a> {
         Ok(())
     }
 }
-impl Encode for DescribedGroup<'_> {
+impl<'a> Encode for DescribedGroup<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 5;
         self.encode_field_0(buf, version, flex);
@@ -507,7 +511,7 @@ impl DescribedGroup<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribedGroupMember<'a> {
     pub member_id: &'a str,
     pub group_instance_id: Option<&'a str>,
@@ -517,15 +521,27 @@ pub struct DescribedGroupMember<'a> {
     pub member_assignment: &'a [u8],
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl DescribedGroupMember<'_> {
+impl<'a> Default for DescribedGroupMember<'a> {
+    fn default() -> Self {
+        Self {
+            member_id: "",
+            group_instance_id: None,
+            client_id: "",
+            client_host: "",
+            member_metadata: &[],
+            member_assignment: &[],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> DescribedGroupMember<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_groups_response::DescribedGroupMember {
         crate::owned::describe_groups_response::DescribedGroupMember {
             member_id: (self.member_id).to_string(),
-            group_instance_id: (self.group_instance_id).map(std::string::ToString::to_string),
+            group_instance_id: (self.group_instance_id).map(|s| s.to_string()),
             client_id: (self.client_id).to_string(),
             client_host: (self.client_host).to_string(),
             member_metadata: Bytes::copy_from_slice(self.member_metadata),
@@ -534,7 +550,7 @@ impl DescribedGroupMember<'_> {
         }
     }
 }
-impl Encode for DescribedGroupMember<'_> {
+impl<'a> Encode for DescribedGroupMember<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 5;
         if version >= 0 {

@@ -35,10 +35,10 @@ impl Encode for ElectLeadersResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 1 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
             {
@@ -87,7 +87,7 @@ impl Encode for ElectLeadersResponse {
         n
     }
 }
-impl Decode<'_> for ElectLeadersResponse {
+impl<'de> Decode<'de> for ElectLeadersResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -196,7 +196,7 @@ impl Encode for ReplicaElectionResult {
         n
     }
 }
-impl Decode<'_> for ReplicaElectionResult {
+impl<'de> Decode<'de> for ReplicaElectionResult {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();
@@ -248,10 +248,10 @@ impl Encode for PartitionResult {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
-            put_i32(buf, self.partition_id);
+            put_i32(buf, self.partition_id)
         }
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
             if flex {
@@ -289,7 +289,7 @@ impl Encode for PartitionResult {
         n
     }
 }
-impl Decode<'_> for PartitionResult {
+impl<'de> Decode<'de> for PartitionResult {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();

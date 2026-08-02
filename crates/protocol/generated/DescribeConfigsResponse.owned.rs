@@ -36,7 +36,7 @@ impl Encode for DescribeConfigsResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 0 {
             {
@@ -76,7 +76,7 @@ impl Encode for DescribeConfigsResponse {
         n
     }
 }
-impl Decode<'_> for DescribeConfigsResponse {
+impl<'de> Decode<'de> for DescribeConfigsResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -132,7 +132,7 @@ impl Encode for DescribeConfigsResult {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 4;
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
             if flex {
@@ -142,7 +142,7 @@ impl Encode for DescribeConfigsResult {
             }
         }
         if version >= 0 {
-            put_i8(buf, self.resource_type);
+            put_i8(buf, self.resource_type)
         }
         if version >= 0 {
             if flex {
@@ -206,7 +206,7 @@ impl Encode for DescribeConfigsResult {
         n
     }
 }
-impl Decode<'_> for DescribeConfigsResult {
+impl<'de> Decode<'de> for DescribeConfigsResult {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 4;
         let mut out = Self::default();
@@ -317,17 +317,17 @@ impl DescribeConfigsResourceResult {
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_bool(buf, self.read_only);
+            put_bool(buf, self.read_only)
         }
     }
     fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 1 {
-            put_i8(buf, self.config_source);
+            put_i8(buf, self.config_source)
         }
     }
     fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_bool(buf, self.is_sensitive);
+            put_bool(buf, self.is_sensitive)
         }
     }
     fn encode_field_5<B: BufMut>(
@@ -348,7 +348,7 @@ impl DescribeConfigsResourceResult {
     }
     fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 3 {
-            put_i8(buf, self.config_type);
+            put_i8(buf, self.config_type)
         }
     }
     fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -360,7 +360,7 @@ impl DescribeConfigsResourceResult {
             }
         }
     }
-    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
+    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -476,7 +476,7 @@ impl DescribeConfigsResourceResult {
     fn decode_tagged_fields<B: Buf>(
         out: &mut Self,
         buf: &mut B,
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -553,7 +553,7 @@ impl Encode for DescribeConfigsResourceResult {
         n
     }
 }
-impl Decode<'_> for DescribeConfigsResourceResult {
+impl<'de> Decode<'de> for DescribeConfigsResourceResult {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 4;
         let mut out = Self::default();
@@ -626,7 +626,7 @@ impl Encode for DescribeConfigsSynonym {
             }
         }
         if version >= 1 {
-            put_i8(buf, self.source);
+            put_i8(buf, self.source)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -661,7 +661,7 @@ impl Encode for DescribeConfigsSynonym {
         n
     }
 }
-impl Decode<'_> for DescribeConfigsSynonym {
+impl<'de> Decode<'de> for DescribeConfigsSynonym {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 4;
         let mut out = Self::default();
@@ -709,7 +709,7 @@ impl DescribeConfigsSynonym {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("throttleTimeMs".to_string(), ::serde_json::json!(0));
     obj.insert("results".to_string(), ::serde_json::Value::Array(vec![]));

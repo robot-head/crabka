@@ -20,31 +20,37 @@ pub const FLEXIBLE_MIN: i16 = 4;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeaveGroupResponse<'a> {
     pub throttle_time_ms: i32,
     pub error_code: i16,
     pub members: Vec<MemberResponse<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl LeaveGroupResponse<'_> {
+impl<'a> Default for LeaveGroupResponse<'a> {
+    fn default() -> Self {
+        Self {
+            throttle_time_ms: 0i32,
+            error_code: 0i16,
+            members: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> LeaveGroupResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::leave_group_response::LeaveGroupResponse {
         crate::owned::leave_group_response::LeaveGroupResponse {
             throttle_time_ms: (self.throttle_time_ms),
             error_code: (self.error_code),
-            members: (self.members)
-                .iter()
-                .map(MemberResponse::to_owned)
-                .collect(),
+            members: (self.members).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for LeaveGroupResponse<'_> {
+impl<'a> Encode for LeaveGroupResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -54,10 +60,10 @@ impl Encode for LeaveGroupResponse<'_> {
         }
         let flex = is_flexible(version);
         if version >= 1 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 3 {
             {
@@ -149,28 +155,37 @@ impl LeaveGroupResponse<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemberResponse<'a> {
     pub member_id: &'a str,
     pub group_instance_id: Option<&'a str>,
     pub error_code: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl MemberResponse<'_> {
+impl<'a> Default for MemberResponse<'a> {
+    fn default() -> Self {
+        Self {
+            member_id: "",
+            group_instance_id: None,
+            error_code: 0i16,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> MemberResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::leave_group_response::MemberResponse {
         crate::owned::leave_group_response::MemberResponse {
             member_id: (self.member_id).to_string(),
-            group_instance_id: (self.group_instance_id).map(std::string::ToString::to_string),
+            group_instance_id: (self.group_instance_id).map(|s| s.to_string()),
             error_code: (self.error_code),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for MemberResponse<'_> {
+impl<'a> Encode for MemberResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 4;
         if version >= 3 {
@@ -188,7 +203,7 @@ impl Encode for MemberResponse<'_> {
             }
         }
         if version >= 3 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

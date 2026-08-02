@@ -38,13 +38,13 @@ impl Encode for RemoteLogSegmentMetadataUpdateRecord {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            self.remote_log_segment_id.encode(buf, version)?;
+            self.remote_log_segment_id.encode(buf, version)?
         }
         if version >= 0 {
-            put_i32(buf, self.broker_id);
+            put_i32(buf, self.broker_id)
         }
         if version >= 0 {
-            put_i64(buf, self.event_timestamp_ms);
+            put_i64(buf, self.event_timestamp_ms)
         }
         if version >= 0 {
             if flex {
@@ -54,7 +54,7 @@ impl Encode for RemoteLogSegmentMetadataUpdateRecord {
             }
         }
         if version >= 0 {
-            put_i8(buf, self.remote_log_segment_state);
+            put_i8(buf, self.remote_log_segment_state)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -91,7 +91,7 @@ impl Encode for RemoteLogSegmentMetadataUpdateRecord {
         n
     }
 }
-impl Decode<'_> for RemoteLogSegmentMetadataUpdateRecord {
+impl<'de> Decode<'de> for RemoteLogSegmentMetadataUpdateRecord {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(
@@ -158,10 +158,10 @@ impl Encode for RemoteLogSegmentIdEntry {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            self.topic_id_partition.encode(buf, version)?;
+            self.topic_id_partition.encode(buf, version)?
         }
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.id);
+            crate::primitives::uuid::put_uuid(buf, self.id)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -185,7 +185,7 @@ impl Encode for RemoteLogSegmentIdEntry {
         n
     }
 }
-impl Decode<'_> for RemoteLogSegmentIdEntry {
+impl<'de> Decode<'de> for RemoteLogSegmentIdEntry {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -233,10 +233,10 @@ impl Encode for TopicIdPartitionEntry {
             }
         }
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.id);
+            crate::primitives::uuid::put_uuid(buf, self.id)
         }
         if version >= 0 {
-            put_i32(buf, self.partition);
+            put_i32(buf, self.partition)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -267,7 +267,7 @@ impl Encode for TopicIdPartitionEntry {
         n
     }
 }
-impl Decode<'_> for TopicIdPartitionEntry {
+impl<'de> Decode<'de> for TopicIdPartitionEntry {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -311,7 +311,7 @@ impl TopicIdPartitionEntry {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("remoteLogSegmentId".to_string(), {
         let mut m = ::serde_json::Map::new();

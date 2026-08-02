@@ -3,11 +3,12 @@ use crate::primitives::fixed::{
     get_bool, get_i8, get_i32, get_i64, put_bool, put_i8, put_i32, put_i64,
 };
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, nullable_string_len, put_compact_nullable_string,
-    put_nullable_string,
+    compact_nullable_string_len, compact_string_len, nullable_string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
 use crate::primitives::string_bytes_borrowed::{
-    get_compact_nullable_string_borrowed, get_nullable_string_borrowed,
+    get_compact_nullable_string_borrowed, get_compact_string_borrowed,
+    get_nullable_string_borrowed, get_string_borrowed,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
@@ -21,7 +22,7 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShareAcknowledgeRequest<'a> {
     pub group_id: Option<&'a str>,
     pub member_id: Option<&'a str>,
@@ -30,26 +31,34 @@ pub struct ShareAcknowledgeRequest<'a> {
     pub topics: Vec<AcknowledgeTopic>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl ShareAcknowledgeRequest<'_> {
+impl<'a> Default for ShareAcknowledgeRequest<'a> {
+    fn default() -> Self {
+        Self {
+            group_id: None,
+            member_id: None,
+            share_session_epoch: 0i32,
+            is_renew_ack: false,
+            topics: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> ShareAcknowledgeRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::share_acknowledge_request::ShareAcknowledgeRequest {
         crate::owned::share_acknowledge_request::ShareAcknowledgeRequest {
-            group_id: (self.group_id).map(std::string::ToString::to_string),
-            member_id: (self.member_id).map(std::string::ToString::to_string),
+            group_id: (self.group_id).map(|s| s.to_string()),
+            member_id: (self.member_id).map(|s| s.to_string()),
             share_session_epoch: (self.share_session_epoch),
             is_renew_ack: (self.is_renew_ack),
-            topics: (self.topics)
-                .iter()
-                .map(AcknowledgeTopic::to_owned)
-                .collect(),
+            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for ShareAcknowledgeRequest<'_> {
+impl<'a> Encode for ShareAcknowledgeRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -73,10 +82,10 @@ impl Encode for ShareAcknowledgeRequest<'_> {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.share_session_epoch);
+            put_i32(buf, self.share_session_epoch)
         }
         if version >= 2 {
-            put_bool(buf, self.is_renew_ack);
+            put_bool(buf, self.is_renew_ack)
         }
         if version >= 0 {
             {
@@ -199,24 +208,29 @@ impl ShareAcknowledgeRequest<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcknowledgeTopic {
     pub topic_id: crate::primitives::uuid::Uuid,
     pub partitions: Vec<AcknowledgePartition>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl Default for AcknowledgeTopic {
+    fn default() -> Self {
+        Self {
+            topic_id: crate::primitives::uuid::Uuid::default(),
+            partitions: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl AcknowledgeTopic {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::share_acknowledge_request::AcknowledgeTopic {
         crate::owned::share_acknowledge_request::AcknowledgeTopic {
             topic_id: (self.topic_id),
-            partitions: (self.partitions)
-                .iter()
-                .map(AcknowledgePartition::to_owned)
-                .collect(),
+            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
@@ -225,7 +239,7 @@ impl Encode for AcknowledgeTopic {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+            crate::primitives::uuid::put_uuid(buf, self.topic_id)
         }
         if version >= 0 {
             {
@@ -302,23 +316,31 @@ impl AcknowledgeTopic {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcknowledgePartition {
     pub partition_index: i32,
     pub acknowledgement_batches: Vec<AcknowledgementBatch>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl Default for AcknowledgePartition {
+    fn default() -> Self {
+        Self {
+            partition_index: 0i32,
+            acknowledgement_batches: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl AcknowledgePartition {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::share_acknowledge_request::AcknowledgePartition {
         crate::owned::share_acknowledge_request::AcknowledgePartition {
             partition_index: (self.partition_index),
             acknowledgement_batches: (self.acknowledgement_batches)
                 .iter()
-                .map(AcknowledgementBatch::to_owned)
+                .map(|it| it.to_owned())
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
@@ -328,7 +350,7 @@ impl Encode for AcknowledgePartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
         if version >= 0 {
             {
@@ -411,18 +433,27 @@ impl AcknowledgePartition {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcknowledgementBatch {
     pub first_offset: i64,
     pub last_offset: i64,
     pub acknowledge_types: Vec<i8>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl Default for AcknowledgementBatch {
+    fn default() -> Self {
+        Self {
+            first_offset: 0i64,
+            last_offset: 0i64,
+            acknowledge_types: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl AcknowledgementBatch {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::share_acknowledge_request::AcknowledgementBatch {
         crate::owned::share_acknowledge_request::AcknowledgementBatch {
             first_offset: (self.first_offset),
@@ -436,10 +467,10 @@ impl Encode for AcknowledgementBatch {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i64(buf, self.first_offset);
+            put_i64(buf, self.first_offset)
         }
         if version >= 0 {
-            put_i64(buf, self.last_offset);
+            put_i64(buf, self.last_offset)
         }
         if version >= 0 {
             {

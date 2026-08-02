@@ -2,8 +2,9 @@
 
 use crate::primitives::fixed::{get_i16, get_i32, put_i16, put_i32};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, get_compact_nullable_string_owned, get_nullable_string_owned,
-    nullable_string_len, put_compact_nullable_string, put_nullable_string,
+    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
+    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
@@ -66,7 +67,7 @@ impl Encode for InitializeShareGroupStateResponse {
         n
     }
 }
-impl Decode<'_> for InitializeShareGroupStateResponse {
+impl<'de> Decode<'de> for InitializeShareGroupStateResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -113,7 +114,7 @@ impl Encode for InitializeStateResult {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+            crate::primitives::uuid::put_uuid(buf, self.topic_id)
         }
         if version >= 0 {
             {
@@ -153,7 +154,7 @@ impl Encode for InitializeStateResult {
         n
     }
 }
-impl Decode<'_> for InitializeStateResult {
+impl<'de> Decode<'de> for InitializeStateResult {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -201,10 +202,10 @@ impl Encode for PartitionResult {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition);
+            put_i32(buf, self.partition)
         }
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
             if flex {
@@ -242,7 +243,7 @@ impl Encode for PartitionResult {
         n
     }
 }
-impl Decode<'_> for PartitionResult {
+impl<'de> Decode<'de> for PartitionResult {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -286,7 +287,7 @@ impl PartitionResult {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("results".to_string(), ::serde_json::Value::Array(vec![]));
     ::serde_json::Value::Object(obj)

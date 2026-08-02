@@ -52,7 +52,7 @@ impl Encode for DescribeTopicPartitionsRequest {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.response_partition_limit);
+            put_i32(buf, self.response_partition_limit)
         }
         if version >= 0 {
             match &self.cursor {
@@ -95,7 +95,7 @@ impl Encode for DescribeTopicPartitionsRequest {
         n
     }
 }
-impl Decode<'_> for DescribeTopicPartitionsRequest {
+impl<'de> Decode<'de> for DescribeTopicPartitionsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -186,7 +186,7 @@ impl Encode for TopicRequest {
         n
     }
 }
-impl Decode<'_> for TopicRequest {
+impl<'de> Decode<'de> for TopicRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -231,7 +231,7 @@ impl Encode for Cursor {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -259,7 +259,7 @@ impl Encode for Cursor {
         n
     }
 }
-impl Decode<'_> for Cursor {
+impl<'de> Decode<'de> for Cursor {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -297,7 +297,7 @@ impl Cursor {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("topics".to_string(), ::serde_json::Value::Array(vec![]));
     obj.insert(

@@ -54,17 +54,17 @@ impl Default for JoinGroupResponse {
 impl JoinGroupResponse {
     fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 2 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.generation_id);
+            put_i32(buf, self.generation_id)
         }
     }
     fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -104,7 +104,7 @@ impl JoinGroupResponse {
     }
     fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 9 {
-            put_bool(buf, self.skip_assignment);
+            put_bool(buf, self.skip_assignment)
         }
     }
     fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -132,7 +132,7 @@ impl JoinGroupResponse {
         }
         Ok(())
     }
-    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
+    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -271,7 +271,7 @@ impl JoinGroupResponse {
     fn decode_tagged_fields<B: Buf>(
         out: &mut Self,
         buf: &mut B,
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -370,7 +370,7 @@ impl Encode for JoinGroupResponse {
         n
     }
 }
-impl Decode<'_> for JoinGroupResponse {
+impl<'de> Decode<'de> for JoinGroupResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -496,7 +496,7 @@ impl Encode for JoinGroupResponseMember {
         n
     }
 }
-impl Decode<'_> for JoinGroupResponseMember {
+impl<'de> Decode<'de> for JoinGroupResponseMember {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 6;
         let mut out = Self::default();

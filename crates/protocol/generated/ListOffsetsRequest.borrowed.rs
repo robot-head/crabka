@@ -16,7 +16,7 @@ pub const FLEXIBLE_MIN: i16 = 6;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListOffsetsRequest<'a> {
     pub replica_id: i32,
     pub isolation_level: i8,
@@ -24,25 +24,32 @@ pub struct ListOffsetsRequest<'a> {
     pub timeout_ms: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl ListOffsetsRequest<'_> {
+impl<'a> Default for ListOffsetsRequest<'a> {
+    fn default() -> Self {
+        Self {
+            replica_id: 0i32,
+            isolation_level: 0i8,
+            topics: Vec::new(),
+            timeout_ms: 0i32,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> ListOffsetsRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::list_offsets_request::ListOffsetsRequest {
         crate::owned::list_offsets_request::ListOffsetsRequest {
             replica_id: (self.replica_id),
             isolation_level: (self.isolation_level),
-            topics: (self.topics)
-                .iter()
-                .map(ListOffsetsTopic::to_owned)
-                .collect(),
+            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
             timeout_ms: (self.timeout_ms),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for ListOffsetsRequest<'_> {
+impl<'a> Encode for ListOffsetsRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -52,10 +59,10 @@ impl Encode for ListOffsetsRequest<'_> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.replica_id);
+            put_i32(buf, self.replica_id)
         }
         if version >= 2 {
-            put_i8(buf, self.isolation_level);
+            put_i8(buf, self.isolation_level)
         }
         if version >= 0 {
             {
@@ -66,7 +73,7 @@ impl Encode for ListOffsetsRequest<'_> {
             }
         }
         if version >= 10 {
-            put_i32(buf, self.timeout_ms);
+            put_i32(buf, self.timeout_ms)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -156,29 +163,34 @@ impl ListOffsetsRequest<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListOffsetsTopic<'a> {
     pub name: &'a str,
     pub partitions: Vec<ListOffsetsPartition>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl ListOffsetsTopic<'_> {
+impl<'a> Default for ListOffsetsTopic<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            partitions: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> ListOffsetsTopic<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::list_offsets_request::ListOffsetsTopic {
         crate::owned::list_offsets_request::ListOffsetsTopic {
             name: (self.name).to_string(),
-            partitions: (self.partitions)
-                .iter()
-                .map(ListOffsetsPartition::to_owned)
-                .collect(),
+            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for ListOffsetsTopic<'_> {
+impl<'a> Encode for ListOffsetsTopic<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 6;
         if version >= 0 {
@@ -292,7 +304,6 @@ impl ListOffsetsPartition {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::list_offsets_request::ListOffsetsPartition {
         crate::owned::list_offsets_request::ListOffsetsPartition {
             partition_index: (self.partition_index),
@@ -306,13 +317,13 @@ impl Encode for ListOffsetsPartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 6;
         if version >= 0 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
         if version >= 4 {
-            put_i32(buf, self.current_leader_epoch);
+            put_i32(buf, self.current_leader_epoch)
         }
         if version >= 0 {
-            put_i64(buf, self.timestamp);
+            put_i64(buf, self.timestamp)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

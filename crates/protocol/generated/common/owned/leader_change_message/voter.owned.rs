@@ -13,10 +13,10 @@ impl Encode for Voter {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.voter_id);
+            put_i32(buf, self.voter_id)
         }
         if version >= 1 {
-            crate::primitives::uuid::put_uuid(buf, self.voter_directory_id);
+            crate::primitives::uuid::put_uuid(buf, self.voter_directory_id)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -40,7 +40,7 @@ impl Encode for Voter {
         n
     }
 }
-impl Decode<'_> for Voter {
+impl<'de> Decode<'de> for Voter {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

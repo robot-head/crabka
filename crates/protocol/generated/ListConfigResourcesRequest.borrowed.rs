@@ -12,16 +12,23 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListConfigResourcesRequest {
     pub resource_types: Vec<i8>,
     pub unknown_tagged_fields: UnknownTaggedFields,
+}
+impl Default for ListConfigResourcesRequest {
+    fn default() -> Self {
+        Self {
+            resource_types: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
 }
 impl ListConfigResourcesRequest {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::list_config_resources_request::ListConfigResourcesRequest {

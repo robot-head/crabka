@@ -69,7 +69,7 @@ impl Encode for OffsetDeleteRequest {
         n
     }
 }
-impl Decode<'_> for OffsetDeleteRequest {
+impl<'de> Decode<'de> for OffsetDeleteRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -163,7 +163,7 @@ impl Encode for OffsetDeleteRequestTopic {
         n
     }
 }
-impl Decode<'_> for OffsetDeleteRequestTopic {
+impl<'de> Decode<'de> for OffsetDeleteRequestTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version == i16::MAX;
         let mut out = Self::default();
@@ -209,7 +209,7 @@ pub struct OffsetDeleteRequestPartition {
 impl Encode for OffsetDeleteRequestPartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if version >= 0 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
         Ok(())
     }
@@ -221,7 +221,7 @@ impl Encode for OffsetDeleteRequestPartition {
         n
     }
 }
-impl Decode<'_> for OffsetDeleteRequestPartition {
+impl<'de> Decode<'de> for OffsetDeleteRequestPartition {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let mut out = Self::default();
         if version >= 0 {
@@ -245,7 +245,7 @@ impl OffsetDeleteRequestPartition {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert(
         "groupId".to_string(),

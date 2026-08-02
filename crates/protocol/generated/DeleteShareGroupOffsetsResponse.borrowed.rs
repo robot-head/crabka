@@ -20,7 +20,7 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeleteShareGroupOffsetsResponse<'a> {
     pub throttle_time_ms: i32,
     pub error_code: i16,
@@ -28,27 +28,34 @@ pub struct DeleteShareGroupOffsetsResponse<'a> {
     pub responses: Vec<DeleteShareGroupOffsetsResponseTopic<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl DeleteShareGroupOffsetsResponse<'_> {
+impl<'a> Default for DeleteShareGroupOffsetsResponse<'a> {
+    fn default() -> Self {
+        Self {
+            throttle_time_ms: 0i32,
+            error_code: 0i16,
+            error_message: None,
+            responses: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> DeleteShareGroupOffsetsResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::delete_share_group_offsets_response::DeleteShareGroupOffsetsResponse {
         crate::owned::delete_share_group_offsets_response::DeleteShareGroupOffsetsResponse {
             throttle_time_ms: (self.throttle_time_ms),
             error_code: (self.error_code),
-            error_message: (self.error_message).map(std::string::ToString::to_string),
-            responses: (self.responses)
-                .iter()
-                .map(DeleteShareGroupOffsetsResponseTopic::to_owned)
-                .collect(),
+            error_message: (self.error_message).map(|s| s.to_string()),
+            responses: (self.responses).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for DeleteShareGroupOffsetsResponse<'_> {
+impl<'a> Encode for DeleteShareGroupOffsetsResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -58,10 +65,10 @@ impl Encode for DeleteShareGroupOffsetsResponse<'_> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
             if flex {
@@ -179,7 +186,7 @@ impl DeleteShareGroupOffsetsResponse<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeleteShareGroupOffsetsResponseTopic<'a> {
     pub topic_name: &'a str,
     pub topic_id: crate::primitives::uuid::Uuid,
@@ -187,11 +194,21 @@ pub struct DeleteShareGroupOffsetsResponseTopic<'a> {
     pub error_message: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl DeleteShareGroupOffsetsResponseTopic<'_> {
+impl<'a> Default for DeleteShareGroupOffsetsResponseTopic<'a> {
+    fn default() -> Self {
+        Self {
+            topic_name: "",
+            topic_id: crate::primitives::uuid::Uuid::default(),
+            error_code: 0i16,
+            error_message: None,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> DeleteShareGroupOffsetsResponseTopic<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::delete_share_group_offsets_response::DeleteShareGroupOffsetsResponseTopic
@@ -200,12 +217,12 @@ impl DeleteShareGroupOffsetsResponseTopic<'_> {
             topic_name: (self.topic_name).to_string(),
             topic_id: (self.topic_id),
             error_code: (self.error_code),
-            error_message: (self.error_message).map(std::string::ToString::to_string),
+            error_message: (self.error_message).map(|s| s.to_string()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for DeleteShareGroupOffsetsResponseTopic<'_> {
+impl<'a> Encode for DeleteShareGroupOffsetsResponseTopic<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
@@ -216,10 +233,10 @@ impl Encode for DeleteShareGroupOffsetsResponseTopic<'_> {
             }
         }
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+            crate::primitives::uuid::put_uuid(buf, self.topic_id)
         }
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
             if flex {

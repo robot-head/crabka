@@ -15,17 +15,25 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoveUserScramCredentialRecord<'a> {
     pub name: &'a str,
     pub mechanism: i8,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl RemoveUserScramCredentialRecord<'_> {
+impl<'a> Default for RemoveUserScramCredentialRecord<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            mechanism: 0i8,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> RemoveUserScramCredentialRecord<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::remove_user_scram_credential_record::RemoveUserScramCredentialRecord {
@@ -36,7 +44,7 @@ impl RemoveUserScramCredentialRecord<'_> {
         }
     }
 }
-impl Encode for RemoveUserScramCredentialRecord<'_> {
+impl<'a> Encode for RemoveUserScramCredentialRecord<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(
@@ -52,7 +60,7 @@ impl Encode for RemoveUserScramCredentialRecord<'_> {
             }
         }
         if version >= 0 {
-            put_i8(buf, self.mechanism);
+            put_i8(buf, self.mechanism)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

@@ -18,34 +18,36 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterUserScramCredentialsRequest<'a> {
     pub deletions: Vec<ScramCredentialDeletion<'a>>,
     pub upsertions: Vec<ScramCredentialUpsertion<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl AlterUserScramCredentialsRequest<'_> {
+impl<'a> Default for AlterUserScramCredentialsRequest<'a> {
+    fn default() -> Self {
+        Self {
+            deletions: Vec::new(),
+            upsertions: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> AlterUserScramCredentialsRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::alter_user_scram_credentials_request::AlterUserScramCredentialsRequest {
         crate::owned::alter_user_scram_credentials_request::AlterUserScramCredentialsRequest {
-            deletions: (self.deletions)
-                .iter()
-                .map(ScramCredentialDeletion::to_owned)
-                .collect(),
-            upsertions: (self.upsertions)
-                .iter()
-                .map(ScramCredentialUpsertion::to_owned)
-                .collect(),
+            deletions: (self.deletions).iter().map(|it| it.to_owned()).collect(),
+            upsertions: (self.upsertions).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for AlterUserScramCredentialsRequest<'_> {
+impl<'a> Encode for AlterUserScramCredentialsRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -158,17 +160,25 @@ impl AlterUserScramCredentialsRequest<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScramCredentialDeletion<'a> {
     pub name: &'a str,
     pub mechanism: i8,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl ScramCredentialDeletion<'_> {
+impl<'a> Default for ScramCredentialDeletion<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            mechanism: 0i8,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> ScramCredentialDeletion<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::alter_user_scram_credentials_request::ScramCredentialDeletion {
@@ -179,7 +189,7 @@ impl ScramCredentialDeletion<'_> {
         }
     }
 }
-impl Encode for ScramCredentialDeletion<'_> {
+impl<'a> Encode for ScramCredentialDeletion<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
@@ -190,7 +200,7 @@ impl Encode for ScramCredentialDeletion<'_> {
             }
         }
         if version >= 0 {
-            put_i8(buf, self.mechanism);
+            put_i8(buf, self.mechanism)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -252,7 +262,7 @@ impl ScramCredentialDeletion<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScramCredentialUpsertion<'a> {
     pub name: &'a str,
     pub mechanism: i8,
@@ -261,11 +271,22 @@ pub struct ScramCredentialUpsertion<'a> {
     pub salted_password: &'a [u8],
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl ScramCredentialUpsertion<'_> {
+impl<'a> Default for ScramCredentialUpsertion<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            mechanism: 0i8,
+            iterations: 0i32,
+            salt: &[],
+            salted_password: &[],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> ScramCredentialUpsertion<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::alter_user_scram_credentials_request::ScramCredentialUpsertion {
@@ -279,7 +300,7 @@ impl ScramCredentialUpsertion<'_> {
         }
     }
 }
-impl Encode for ScramCredentialUpsertion<'_> {
+impl<'a> Encode for ScramCredentialUpsertion<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
@@ -290,10 +311,10 @@ impl Encode for ScramCredentialUpsertion<'_> {
             }
         }
         if version >= 0 {
-            put_i8(buf, self.mechanism);
+            put_i8(buf, self.mechanism)
         }
         if version >= 0 {
-            put_i32(buf, self.iterations);
+            put_i32(buf, self.iterations)
         }
         if version >= 0 {
             if flex {

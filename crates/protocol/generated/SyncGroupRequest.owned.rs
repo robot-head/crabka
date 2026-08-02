@@ -50,7 +50,7 @@ impl Encode for SyncGroupRequest {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.generation_id);
+            put_i32(buf, self.generation_id)
         }
         if version >= 0 {
             if flex {
@@ -153,7 +153,7 @@ impl Encode for SyncGroupRequest {
         n
     }
 }
-impl Decode<'_> for SyncGroupRequest {
+impl<'de> Decode<'de> for SyncGroupRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -299,7 +299,7 @@ impl Encode for SyncGroupRequestAssignment {
         n
     }
 }
-impl Decode<'_> for SyncGroupRequestAssignment {
+impl<'de> Decode<'de> for SyncGroupRequestAssignment {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 4;
         let mut out = Self::default();

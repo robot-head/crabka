@@ -20,31 +20,36 @@ pub const FLEXIBLE_MIN: i16 = 1;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IncrementalAlterConfigsResponse<'a> {
     pub throttle_time_ms: i32,
     pub responses: Vec<AlterConfigsResourceResponse<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl IncrementalAlterConfigsResponse<'_> {
+impl<'a> Default for IncrementalAlterConfigsResponse<'a> {
+    fn default() -> Self {
+        Self {
+            throttle_time_ms: 0i32,
+            responses: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> IncrementalAlterConfigsResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::incremental_alter_configs_response::IncrementalAlterConfigsResponse {
         crate::owned::incremental_alter_configs_response::IncrementalAlterConfigsResponse {
             throttle_time_ms: (self.throttle_time_ms),
-            responses: (self.responses)
-                .iter()
-                .map(AlterConfigsResourceResponse::to_owned)
-                .collect(),
+            responses: (self.responses).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for IncrementalAlterConfigsResponse<'_> {
+impl<'a> Encode for IncrementalAlterConfigsResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -54,7 +59,7 @@ impl Encode for IncrementalAlterConfigsResponse<'_> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 0 {
             {
@@ -137,7 +142,7 @@ impl IncrementalAlterConfigsResponse<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterConfigsResourceResponse<'a> {
     pub error_code: i16,
     pub error_message: Option<&'a str>,
@@ -145,28 +150,38 @@ pub struct AlterConfigsResourceResponse<'a> {
     pub resource_name: &'a str,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl AlterConfigsResourceResponse<'_> {
+impl<'a> Default for AlterConfigsResourceResponse<'a> {
+    fn default() -> Self {
+        Self {
+            error_code: 0i16,
+            error_message: None,
+            resource_type: 0i8,
+            resource_name: "",
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> AlterConfigsResourceResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::incremental_alter_configs_response::AlterConfigsResourceResponse {
         crate::owned::incremental_alter_configs_response::AlterConfigsResourceResponse {
             error_code: (self.error_code),
-            error_message: (self.error_message).map(std::string::ToString::to_string),
+            error_message: (self.error_message).map(|s| s.to_string()),
             resource_type: (self.resource_type),
             resource_name: (self.resource_name).to_string(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for AlterConfigsResourceResponse<'_> {
+impl<'a> Encode for AlterConfigsResourceResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
             if flex {
@@ -176,7 +191,7 @@ impl Encode for AlterConfigsResourceResponse<'_> {
             }
         }
         if version >= 0 {
-            put_i8(buf, self.resource_type);
+            put_i8(buf, self.resource_type)
         }
         if version >= 0 {
             if flex {

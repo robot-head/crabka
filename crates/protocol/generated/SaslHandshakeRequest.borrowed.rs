@@ -14,16 +14,23 @@ pub const FLEXIBLE_MIN: i16 = 32767;
 pub fn is_flexible(version: i16) -> bool {
     version == FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SaslHandshakeRequest<'a> {
     pub mechanism: &'a str,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl SaslHandshakeRequest<'_> {
+impl<'a> Default for SaslHandshakeRequest<'a> {
+    fn default() -> Self {
+        Self {
+            mechanism: "",
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> SaslHandshakeRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::sasl_handshake_request::SaslHandshakeRequest {
         crate::owned::sasl_handshake_request::SaslHandshakeRequest {
             mechanism: (self.mechanism).to_string(),
@@ -31,7 +38,7 @@ impl SaslHandshakeRequest<'_> {
         }
     }
 }
-impl Encode for SaslHandshakeRequest<'_> {
+impl<'a> Encode for SaslHandshakeRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {

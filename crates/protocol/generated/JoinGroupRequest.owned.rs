@@ -61,12 +61,12 @@ impl JoinGroupRequest {
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.session_timeout_ms);
+            put_i32(buf, self.session_timeout_ms)
         }
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 1 {
-            put_i32(buf, self.rebalance_timeout_ms);
+            put_i32(buf, self.rebalance_timeout_ms)
         }
     }
     fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -121,7 +121,7 @@ impl JoinGroupRequest {
             }
         }
     }
-    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
+    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -245,7 +245,7 @@ impl JoinGroupRequest {
     fn decode_tagged_fields<B: Buf>(
         out: &mut Self,
         buf: &mut B,
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -336,7 +336,7 @@ impl Encode for JoinGroupRequest {
         n
     }
 }
-impl Decode<'_> for JoinGroupRequest {
+impl<'de> Decode<'de> for JoinGroupRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -443,7 +443,7 @@ impl Encode for JoinGroupRequestProtocol {
         n
     }
 }
-impl Decode<'_> for JoinGroupRequestProtocol {
+impl<'de> Decode<'de> for JoinGroupRequestProtocol {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 6;
         let mut out = Self::default();

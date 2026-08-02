@@ -14,17 +14,25 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicRecord<'a> {
     pub name: &'a str,
     pub topic_id: crate::primitives::uuid::Uuid,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl TopicRecord<'_> {
+impl<'a> Default for TopicRecord<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            topic_id: crate::primitives::uuid::Uuid::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> TopicRecord<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::topic_record::TopicRecord {
         crate::owned::topic_record::TopicRecord {
             name: (self.name).to_string(),
@@ -33,7 +41,7 @@ impl TopicRecord<'_> {
         }
     }
 }
-impl Encode for TopicRecord<'_> {
+impl<'a> Encode for TopicRecord<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(
@@ -49,7 +57,7 @@ impl Encode for TopicRecord<'_> {
             }
         }
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+            crate::primitives::uuid::put_uuid(buf, self.topic_id)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

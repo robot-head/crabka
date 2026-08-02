@@ -33,6 +33,13 @@ ignore = [
     # dependency used by the new internal profiles crates; no fixed release is
     # available through that DataFusion revision.
     "RUSTSEC-2024-0436",
+    # wasm-bindgen-cli's local build helper pulls in the unmaintained
+    # rouille/multipart stack. It never ships in Crabka runtime artifacts, and
+    # none of these advisories has a fixed release in that dependency chain.
+    "RUSTSEC-2021-0146",
+    "RUSTSEC-2023-0028",
+    "RUSTSEC-2023-0050",
+    "RUSTSEC-2023-0081",
 ]
 
 [licenses]

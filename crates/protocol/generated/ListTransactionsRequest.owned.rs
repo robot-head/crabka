@@ -51,10 +51,10 @@ impl Encode for ListTransactionsRequest {
                 crate::primitives::array::put_array_len(buf, (self.state_filters).len(), flex);
                 for it in &self.state_filters {
                     if flex {
-                        let () = put_compact_string(buf, it);
+                        let () = put_compact_string(buf, &*it);
                     } else {
-                        let () = put_string(buf, it);
-                    }
+                        let () = put_string(buf, &*it);
+                    };
                 }
             }
         }
@@ -71,7 +71,7 @@ impl Encode for ListTransactionsRequest {
             }
         }
         if version >= 1 {
-            put_i64(buf, self.duration_filter);
+            put_i64(buf, self.duration_filter)
         }
         if version >= 2 {
             if flex {
@@ -99,9 +99,9 @@ impl Encode for ListTransactionsRequest {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(it)
+                            compact_string_len(&*it)
                         } else {
-                            string_len(it)
+                            string_len(&*it)
                         }
                     })
                     .sum();
@@ -135,7 +135,7 @@ impl Encode for ListTransactionsRequest {
         n
     }
 }
-impl Decode<'_> for ListTransactionsRequest {
+impl<'de> Decode<'de> for ListTransactionsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {

@@ -62,7 +62,7 @@ impl Encode for TaskIds {
         n
     }
 }
-impl Decode<'_> for TaskIds {
+impl<'de> Decode<'de> for TaskIds {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

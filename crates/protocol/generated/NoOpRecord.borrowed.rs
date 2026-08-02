@@ -10,15 +10,21 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoOpRecord {
     pub unknown_tagged_fields: UnknownTaggedFields,
+}
+impl Default for NoOpRecord {
+    fn default() -> Self {
+        Self {
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
 }
 impl NoOpRecord {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::no_op_record::NoOpRecord {
         crate::owned::no_op_record::NoOpRecord {
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),

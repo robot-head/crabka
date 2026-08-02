@@ -20,7 +20,7 @@ pub const FLEXIBLE_MIN: i16 = 4;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeartbeatRequest<'a> {
     pub group_id: &'a str,
     pub generation_id: i32,
@@ -28,22 +28,32 @@ pub struct HeartbeatRequest<'a> {
     pub group_instance_id: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl HeartbeatRequest<'_> {
+impl<'a> Default for HeartbeatRequest<'a> {
+    fn default() -> Self {
+        Self {
+            group_id: "",
+            generation_id: 0i32,
+            member_id: "",
+            group_instance_id: None,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> HeartbeatRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::heartbeat_request::HeartbeatRequest {
         crate::owned::heartbeat_request::HeartbeatRequest {
             group_id: (self.group_id).to_string(),
             generation_id: (self.generation_id),
             member_id: (self.member_id).to_string(),
-            group_instance_id: (self.group_instance_id).map(std::string::ToString::to_string),
+            group_instance_id: (self.group_instance_id).map(|s| s.to_string()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for HeartbeatRequest<'_> {
+impl<'a> Encode for HeartbeatRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -60,7 +70,7 @@ impl Encode for HeartbeatRequest<'_> {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.generation_id);
+            put_i32(buf, self.generation_id)
         }
         if version >= 0 {
             if flex {

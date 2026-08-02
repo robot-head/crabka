@@ -55,7 +55,7 @@ impl Encode for OffsetFetchRequest {
                 }
             } else {
                 {
-                    let v = (self.topics).as_deref().unwrap_or(&[]);
+                    let v = (self.topics).as_ref().map(Vec::as_slice).unwrap_or(&[]);
                     crate::primitives::array::put_array_len(buf, v.len(), flex);
                     for it in v {
                         it.encode(buf, version)?;
@@ -72,7 +72,7 @@ impl Encode for OffsetFetchRequest {
             }
         }
         if version >= 7 {
-            put_bool(buf, self.require_stable);
+            put_bool(buf, self.require_stable)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -95,7 +95,7 @@ impl Encode for OffsetFetchRequest {
                 {
                     let opt: Option<&Vec<_>> = (self.topics).as_ref();
                     let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                        opt.map(std::vec::Vec::len),
+                        opt.map(|v| v.len()),
                         flex,
                     );
                     let body: usize =
@@ -104,7 +104,7 @@ impl Encode for OffsetFetchRequest {
                 }
             } else {
                 {
-                    let v = (self.topics).as_deref().unwrap_or(&[]);
+                    let v = (self.topics).as_ref().map(Vec::as_slice).unwrap_or(&[]);
                     let prefix = crate::primitives::array::array_len_prefix_len(v.len(), flex);
                     let body: usize = v.iter().map(|it| it.encoded_len(version)).sum();
                     prefix + body
@@ -129,7 +129,7 @@ impl Encode for OffsetFetchRequest {
         n
     }
 }
-impl Decode<'_> for OffsetFetchRequest {
+impl<'de> Decode<'de> for OffsetFetchRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -268,7 +268,7 @@ impl Encode for OffsetFetchRequestTopic {
         n
     }
 }
-impl Decode<'_> for OffsetFetchRequestTopic {
+impl<'de> Decode<'de> for OffsetFetchRequestTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 6;
         let mut out = Self::default();
@@ -346,7 +346,7 @@ impl Encode for OffsetFetchRequestGroup {
             }
         }
         if version >= 9 {
-            put_i32(buf, self.member_epoch);
+            put_i32(buf, self.member_epoch)
         }
         if version >= 8 {
             {
@@ -389,7 +389,7 @@ impl Encode for OffsetFetchRequestGroup {
             n += {
                 let opt: Option<&Vec<_>> = (self.topics).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
+                    opt.map(|v| v.len()),
                     flex,
                 );
                 let body: usize =
@@ -404,7 +404,7 @@ impl Encode for OffsetFetchRequestGroup {
         n
     }
 }
-impl Decode<'_> for OffsetFetchRequestGroup {
+impl<'de> Decode<'de> for OffsetFetchRequestGroup {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 6;
         let mut out = Self::default();
@@ -484,7 +484,7 @@ impl Encode for OffsetFetchRequestTopics {
             }
         }
         if version >= 10 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+            crate::primitives::uuid::put_uuid(buf, self.topic_id)
         }
         if version >= 8 {
             {
@@ -530,7 +530,7 @@ impl Encode for OffsetFetchRequestTopics {
         n
     }
 }
-impl Decode<'_> for OffsetFetchRequestTopics {
+impl<'de> Decode<'de> for OffsetFetchRequestTopics {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 6;
         let mut out = Self::default();
@@ -592,7 +592,7 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     if version <= 7 {
         obj.insert(
             "topics".to_string(),
-            if (2..=7).contains(&version) {
+            if version >= 2 && version <= 7 {
                 ::serde_json::Value::Null
             } else {
                 ::serde_json::Value::Array(vec![])

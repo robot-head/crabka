@@ -75,7 +75,7 @@ impl Encode for ApiVersionsRequest {
         n
     }
 }
-impl Decode<'_> for ApiVersionsRequest {
+impl<'de> Decode<'de> for ApiVersionsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {

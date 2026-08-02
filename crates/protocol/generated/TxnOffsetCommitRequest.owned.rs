@@ -38,7 +38,7 @@ impl Default for TxnOffsetCommitRequest {
             producer_id: 0i64,
             producer_epoch: 0i16,
             generation_id: -1i32,
-            member_id: String::new(),
+            member_id: "".to_string(),
             group_instance_id: None,
             topics: Vec::new(),
             unknown_tagged_fields: UnknownTaggedFields::default(),
@@ -66,17 +66,17 @@ impl TxnOffsetCommitRequest {
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i64(buf, self.producer_id);
+            put_i64(buf, self.producer_id)
         }
     }
     fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i16(buf, self.producer_epoch);
+            put_i16(buf, self.producer_epoch)
         }
     }
     fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 3 {
-            put_i32(buf, self.generation_id);
+            put_i32(buf, self.generation_id)
         }
     }
     fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -113,7 +113,7 @@ impl TxnOffsetCommitRequest {
         }
         Ok(())
     }
-    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
+    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -233,7 +233,7 @@ impl TxnOffsetCommitRequest {
     fn decode_tagged_fields<B: Buf>(
         out: &mut Self,
         buf: &mut B,
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -317,7 +317,7 @@ impl Encode for TxnOffsetCommitRequest {
         n
     }
 }
-impl Decode<'_> for TxnOffsetCommitRequest {
+impl<'de> Decode<'de> for TxnOffsetCommitRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -429,7 +429,7 @@ impl Encode for TxnOffsetCommitRequestTopic {
         n
     }
 }
-impl Decode<'_> for TxnOffsetCommitRequestTopic {
+impl<'de> Decode<'de> for TxnOffsetCommitRequestTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 3;
         let mut out = Self::default();
@@ -493,13 +493,13 @@ impl Encode for TxnOffsetCommitRequestPartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 3;
         if version >= 0 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
         if version >= 0 {
-            put_i64(buf, self.committed_offset);
+            put_i64(buf, self.committed_offset)
         }
         if version >= 2 {
-            put_i32(buf, self.committed_leader_epoch);
+            put_i32(buf, self.committed_leader_epoch)
         }
         if version >= 0 {
             if flex {
@@ -540,7 +540,7 @@ impl Encode for TxnOffsetCommitRequestPartition {
         n
     }
 }
-impl Decode<'_> for TxnOffsetCommitRequestPartition {
+impl<'de> Decode<'de> for TxnOffsetCommitRequestPartition {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 3;
         let mut out = Self::default();
@@ -608,7 +608,7 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     if version >= 3 {
         obj.insert(
             "memberId".to_string(),
-            ::serde_json::Value::String(String::new()),
+            ::serde_json::Value::String("".to_string()),
         );
     }
     if version >= 3 {

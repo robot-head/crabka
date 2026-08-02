@@ -13,7 +13,7 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrokerRegistrationChangeRecord {
     pub broker_id: i32,
     pub broker_epoch: i64,
@@ -23,11 +23,23 @@ pub struct BrokerRegistrationChangeRecord {
     pub cordoned_log_dirs: Option<Vec<crate::primitives::uuid::Uuid>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl Default for BrokerRegistrationChangeRecord {
+    fn default() -> Self {
+        Self {
+            broker_id: 0i32,
+            broker_epoch: 0i64,
+            fenced: 0i8,
+            in_controlled_shutdown: 0i8,
+            log_dirs: Vec::new(),
+            cordoned_log_dirs: None,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl BrokerRegistrationChangeRecord {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::broker_registration_change_record::BrokerRegistrationChangeRecord {
@@ -51,10 +63,10 @@ impl Encode for BrokerRegistrationChangeRecord {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.broker_id);
+            put_i32(buf, self.broker_id)
         }
         if version >= 0 {
-            put_i64(buf, self.broker_epoch);
+            put_i64(buf, self.broker_epoch)
         }
         if flex {
             let mut tagged = WriteTaggedFields::new();
@@ -94,12 +106,12 @@ impl Encode for BrokerRegistrationChangeRecord {
                 );
                 tagged.add(2, payload);
             }
-            if self.cordoned_log_dirs.is_some() {
+            if !(self.cordoned_log_dirs.is_none()) {
                 let payload = encode_to_bytes(
                     {
                         let opt: Option<&Vec<_>> = (self.cordoned_log_dirs).as_ref();
                         let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                            opt.map(std::vec::Vec::len),
+                            opt.map(|v| v.len()),
                             flex,
                         );
                         let body: usize = opt.map_or(0, |v| v.iter().map(|_| 16).sum());
@@ -149,11 +161,11 @@ impl Encode for BrokerRegistrationChangeRecord {
                     prefix + body
                 }));
             }
-            if self.cordoned_log_dirs.is_some() {
+            if !(self.cordoned_log_dirs.is_none()) {
                 known_pairs.push((3, {
                     let opt: Option<&Vec<_>> = (self.cordoned_log_dirs).as_ref();
                     let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                        opt.map(std::vec::Vec::len),
+                        opt.map(|v| v.len()),
                         flex,
                     );
                     let body: usize = opt.map_or(0, |v| v.iter().map(|_| 16).sum());

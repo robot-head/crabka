@@ -39,7 +39,7 @@ pub struct CreateDelegationTokenResponse {
 impl CreateDelegationTokenResponse {
     fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -80,17 +80,17 @@ impl CreateDelegationTokenResponse {
     }
     fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i64(buf, self.issue_timestamp_ms);
+            put_i64(buf, self.issue_timestamp_ms)
         }
     }
     fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i64(buf, self.expiry_timestamp_ms);
+            put_i64(buf, self.expiry_timestamp_ms)
         }
     }
     fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i64(buf, self.max_timestamp_ms);
+            put_i64(buf, self.max_timestamp_ms)
         }
     }
     fn encode_field_8<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -113,10 +113,10 @@ impl CreateDelegationTokenResponse {
     }
     fn encode_field_10<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
     }
-    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
+    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -270,7 +270,7 @@ impl CreateDelegationTokenResponse {
     fn decode_tagged_fields<B: Buf>(
         out: &mut Self,
         buf: &mut B,
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -369,7 +369,7 @@ impl Encode for CreateDelegationTokenResponse {
         n
     }
 }
-impl Decode<'_> for CreateDelegationTokenResponse {
+impl<'de> Decode<'de> for CreateDelegationTokenResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {

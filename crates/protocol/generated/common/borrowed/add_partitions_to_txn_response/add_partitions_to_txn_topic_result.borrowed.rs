@@ -6,27 +6,35 @@ use crate::primitives::string_bytes_borrowed::{get_compact_string_borrowed, get_
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 use bytes::BufMut;
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddPartitionsToTxnTopicResult<'a> {
     pub name: &'a str,
     pub results_by_partition:
         Vec<super::add_partitions_to_txn_partition_result::AddPartitionsToTxnPartitionResult>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl AddPartitionsToTxnTopicResult<'_> {
+impl<'a> Default for AddPartitionsToTxnTopicResult<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            results_by_partition: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> AddPartitionsToTxnTopicResult<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::common::add_partitions_to_txn_response::add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult{
         crate::owned::common::add_partitions_to_txn_response::add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult {
             name: (self.name).to_string(),
-            results_by_partition: (self.results_by_partition).iter().map(super::add_partitions_to_txn_partition_result::AddPartitionsToTxnPartitionResult::to_owned).collect(),
+            results_by_partition: (self.results_by_partition).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for AddPartitionsToTxnTopicResult<'_> {
+impl<'a> Encode for AddPartitionsToTxnTopicResult<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 3;
         if version >= 0 {

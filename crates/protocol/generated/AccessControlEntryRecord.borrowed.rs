@@ -15,7 +15,7 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccessControlEntryRecord<'a> {
     pub id: crate::primitives::uuid::Uuid,
     pub resource_type: i8,
@@ -27,11 +27,25 @@ pub struct AccessControlEntryRecord<'a> {
     pub permission_type: i8,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl<'a> Default for AccessControlEntryRecord<'a> {
+    fn default() -> Self {
+        Self {
+            id: crate::primitives::uuid::Uuid::default(),
+            resource_type: 0i8,
+            resource_name: "",
+            pattern_type: 0i8,
+            principal: "",
+            host: "",
+            operation: 0i8,
+            permission_type: 0i8,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl<'a> AccessControlEntryRecord<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::access_control_entry_record::AccessControlEntryRecord {
         crate::owned::access_control_entry_record::AccessControlEntryRecord {
             id: (self.id),
@@ -47,12 +61,12 @@ impl<'a> AccessControlEntryRecord<'a> {
     }
     fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.id);
+            crate::primitives::uuid::put_uuid(buf, self.id)
         }
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i8(buf, self.resource_type);
+            put_i8(buf, self.resource_type)
         }
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -66,7 +80,7 @@ impl<'a> AccessControlEntryRecord<'a> {
     }
     fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i8(buf, self.pattern_type);
+            put_i8(buf, self.pattern_type)
         }
     }
     fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -89,12 +103,12 @@ impl<'a> AccessControlEntryRecord<'a> {
     }
     fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i8(buf, self.operation);
+            put_i8(buf, self.operation)
         }
     }
     fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i8(buf, self.permission_type);
+            put_i8(buf, self.permission_type)
         }
     }
     fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
@@ -206,7 +220,7 @@ impl<'a> AccessControlEntryRecord<'a> {
     fn decode_tagged_fields(
         out: &mut Self,
         buf: &mut &'a [u8],
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -215,7 +229,7 @@ impl<'a> AccessControlEntryRecord<'a> {
         Ok(())
     }
 }
-impl Encode for AccessControlEntryRecord<'_> {
+impl<'a> Encode for AccessControlEntryRecord<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(

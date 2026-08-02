@@ -20,28 +20,36 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamsGroupDescribeResponse<'a> {
     pub throttle_time_ms: i32,
     pub groups: Vec<DescribedGroup<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl StreamsGroupDescribeResponse<'_> {
+impl<'a> Default for StreamsGroupDescribeResponse<'a> {
+    fn default() -> Self {
+        Self {
+            throttle_time_ms: 0i32,
+            groups: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> StreamsGroupDescribeResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::streams_group_describe_response::StreamsGroupDescribeResponse {
         crate::owned::streams_group_describe_response::StreamsGroupDescribeResponse {
             throttle_time_ms: (self.throttle_time_ms),
-            groups: (self.groups).iter().map(DescribedGroup::to_owned).collect(),
+            groups: (self.groups).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for StreamsGroupDescribeResponse<'_> {
+impl<'a> Encode for StreamsGroupDescribeResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -51,7 +59,7 @@ impl Encode for StreamsGroupDescribeResponse<'_> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 0 {
             {
@@ -144,7 +152,7 @@ pub struct DescribedGroup<'a> {
     pub authorized_operations: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for DescribedGroup<'_> {
+impl<'a> Default for DescribedGroup<'a> {
     fn default() -> Self {
         Self {
             error_code: 0i16,
@@ -164,24 +172,23 @@ impl<'a> DescribedGroup<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::streams_group_describe_response::DescribedGroup {
         crate::owned::streams_group_describe_response::DescribedGroup {
             error_code: (self.error_code),
-            error_message: (self.error_message).map(std::string::ToString::to_string),
+            error_message: (self.error_message).map(|s| s.to_string()),
             group_id: (self.group_id).to_string(),
             group_state: (self.group_state).to_string(),
             group_epoch: (self.group_epoch),
             assignment_epoch: (self.assignment_epoch),
-            topology: (self.topology).as_ref().map(Topology::to_owned),
-            members: (self.members).iter().map(Member::to_owned).collect(),
+            topology: (self.topology).as_ref().map(|v| v.to_owned()),
+            members: (self.members).iter().map(|it| it.to_owned()).collect(),
             authorized_operations: (self.authorized_operations),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
     fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -213,12 +220,12 @@ impl<'a> DescribedGroup<'a> {
     }
     fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.group_epoch);
+            put_i32(buf, self.group_epoch)
         }
     }
     fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.assignment_epoch);
+            put_i32(buf, self.assignment_epoch)
         }
     }
     fn encode_field_6<B: BufMut>(
@@ -258,7 +265,7 @@ impl<'a> DescribedGroup<'a> {
     }
     fn encode_field_8<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.authorized_operations);
+            put_i32(buf, self.authorized_operations)
         }
     }
     fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
@@ -392,7 +399,7 @@ impl<'a> DescribedGroup<'a> {
     fn decode_tagged_fields(
         out: &mut Self,
         buf: &mut &'a [u8],
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -401,7 +408,7 @@ impl<'a> DescribedGroup<'a> {
         Ok(())
     }
 }
-impl Encode for DescribedGroup<'_> {
+impl<'a> Encode for DescribedGroup<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         self.encode_field_0(buf, version, flex);
@@ -525,32 +532,40 @@ impl DescribedGroup<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Topology<'a> {
     pub epoch: i32,
     pub subtopologies: Option<Vec<Subtopology<'a>>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Topology<'_> {
+impl<'a> Default for Topology<'a> {
+    fn default() -> Self {
+        Self {
+            epoch: 0i32,
+            subtopologies: None,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> Topology<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::streams_group_describe_response::Topology {
         crate::owned::streams_group_describe_response::Topology {
             epoch: (self.epoch),
             subtopologies: (self.subtopologies)
                 .as_ref()
-                .map(|v| v.iter().map(Subtopology::to_owned).collect()),
+                .map(|v| v.iter().map(|it| it.to_owned()).collect()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for Topology<'_> {
+impl<'a> Encode for Topology<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.epoch);
+            put_i32(buf, self.epoch)
         }
         if version >= 0 {
             {
@@ -579,7 +594,7 @@ impl Encode for Topology<'_> {
             n += {
                 let opt: Option<&Vec<_>> = (self.subtopologies).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
+                    opt.map(|v| v.len()),
                     flex,
                 );
                 let body: usize =
@@ -636,7 +651,7 @@ impl Topology<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Subtopology<'a> {
     pub subtopology_id: &'a str,
     pub source_topics: Vec<&'a str>,
@@ -647,39 +662,43 @@ pub struct Subtopology<'a> {
         Vec<super::common::streams_group_describe_response::topic_info::TopicInfo<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Subtopology<'_> {
+impl<'a> Default for Subtopology<'a> {
+    fn default() -> Self {
+        Self {
+            subtopology_id: "",
+            source_topics: Vec::new(),
+            repartition_sink_topics: Vec::new(),
+            state_changelog_topics: Vec::new(),
+            repartition_source_topics: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> Subtopology<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::streams_group_describe_response::Subtopology {
         crate::owned::streams_group_describe_response::Subtopology {
             subtopology_id: (self.subtopology_id).to_string(),
-            source_topics: (self.source_topics)
-                .iter()
-                .map(std::string::ToString::to_string)
-                .collect(),
+            source_topics: (self.source_topics).iter().map(|s| s.to_string()).collect(),
             repartition_sink_topics: (self.repartition_sink_topics)
                 .iter()
-                .map(std::string::ToString::to_string)
+                .map(|s| s.to_string())
                 .collect(),
             state_changelog_topics: (self.state_changelog_topics)
                 .iter()
-                .map(
-                    super::common::streams_group_describe_response::topic_info::TopicInfo::to_owned,
-                )
+                .map(|it| it.to_owned())
                 .collect(),
             repartition_source_topics: (self.repartition_source_topics)
                 .iter()
-                .map(
-                    super::common::streams_group_describe_response::topic_info::TopicInfo::to_owned,
-                )
+                .map(|it| it.to_owned())
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for Subtopology<'_> {
+impl<'a> Encode for Subtopology<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
@@ -694,10 +713,10 @@ impl Encode for Subtopology<'_> {
                 crate::primitives::array::put_array_len(buf, (self.source_topics).len(), flex);
                 for it in &self.source_topics {
                     if flex {
-                        let () = put_compact_string(buf, it);
+                        let () = put_compact_string(buf, *it);
                     } else {
-                        let () = put_string(buf, it);
-                    }
+                        let () = put_string(buf, *it);
+                    };
                 }
             }
         }
@@ -710,10 +729,10 @@ impl Encode for Subtopology<'_> {
                 );
                 for it in &self.repartition_sink_topics {
                     if flex {
-                        let () = put_compact_string(buf, it);
+                        let () = put_compact_string(buf, *it);
                     } else {
-                        let () = put_string(buf, it);
-                    }
+                        let () = put_string(buf, *it);
+                    };
                 }
             }
         }
@@ -767,9 +786,9 @@ impl Encode for Subtopology<'_> {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(it)
+                            compact_string_len(*it)
                         } else {
-                            string_len(it)
+                            string_len(*it)
                         }
                     })
                     .sum();
@@ -786,9 +805,9 @@ impl Encode for Subtopology<'_> {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(it)
+                            compact_string_len(*it)
                         } else {
-                            string_len(it)
+                            string_len(*it)
                         }
                     })
                     .sum();
@@ -924,7 +943,7 @@ impl Subtopology<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Member<'a> {
     pub member_id: &'a str,
     pub member_epoch: i32,
@@ -947,25 +966,49 @@ pub struct Member<'a> {
     pub is_classic: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl<'a> Default for Member<'a> {
+    fn default() -> Self {
+        Self {
+            member_id: "",
+            member_epoch: 0i32,
+            instance_id: None,
+            rack_id: None,
+            client_id: "",
+            client_host: "",
+            topology_epoch: 0i32,
+            process_id: "",
+            user_endpoint: None,
+            client_tags: Vec::new(),
+            task_offsets: Vec::new(),
+            task_end_offsets: Vec::new(),
+            assignment: <super::common::streams_group_describe_response::assignment::Assignment<'a>>::default(),
+            target_assignment: <super::common::streams_group_describe_response::assignment::Assignment<'a>>::default(),
+            is_classic: false,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl<'a> Member<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::streams_group_describe_response::Member {
         crate::owned::streams_group_describe_response::Member {
             member_id: (self.member_id).to_string(),
             member_epoch: (self.member_epoch),
-            instance_id: (self.instance_id).map(std::string::ToString::to_string),
-            rack_id: (self.rack_id).map(std::string::ToString::to_string),
+            instance_id: (self.instance_id).map(|s| s.to_string()),
+            rack_id: (self.rack_id).map(|s| s.to_string()),
             client_id: (self.client_id).to_string(),
             client_host: (self.client_host).to_string(),
             topology_epoch: (self.topology_epoch),
             process_id: (self.process_id).to_string(),
-            user_endpoint: (self.user_endpoint).as_ref().map(super::common::streams_group_describe_response::endpoint::Endpoint::to_owned),
-            client_tags: (self.client_tags).iter().map(super::common::streams_group_describe_response::key_value::KeyValue::to_owned).collect(),
-            task_offsets: (self.task_offsets).iter().map(super::common::streams_group_describe_response::task_offset::TaskOffset::to_owned).collect(),
-            task_end_offsets: (self.task_end_offsets).iter().map(super::common::streams_group_describe_response::task_offset::TaskOffset::to_owned).collect(),
+            user_endpoint: (self.user_endpoint).as_ref().map(|v| v.to_owned()),
+            client_tags: (self.client_tags).iter().map(|it| it.to_owned()).collect(),
+            task_offsets: (self.task_offsets).iter().map(|it| it.to_owned()).collect(),
+            task_end_offsets: (self.task_end_offsets)
+                .iter()
+                .map(|it| it.to_owned())
+                .collect(),
             assignment: (self.assignment).to_owned(),
             target_assignment: (self.target_assignment).to_owned(),
             is_classic: (self.is_classic),
@@ -983,7 +1026,7 @@ impl<'a> Member<'a> {
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.member_epoch);
+            put_i32(buf, self.member_epoch)
         }
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -1024,7 +1067,7 @@ impl<'a> Member<'a> {
     }
     fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.topology_epoch);
+            put_i32(buf, self.topology_epoch)
         }
     }
     fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -1110,7 +1153,7 @@ impl<'a> Member<'a> {
         _flex: bool,
     ) -> Result<(), ProtocolError> {
         if version >= 0 {
-            self.assignment.encode(buf, version)?;
+            self.assignment.encode(buf, version)?
         }
         Ok(())
     }
@@ -1121,13 +1164,13 @@ impl<'a> Member<'a> {
         _flex: bool,
     ) -> Result<(), ProtocolError> {
         if version >= 0 {
-            self.target_assignment.encode(buf, version)?;
+            self.target_assignment.encode(buf, version)?
         }
         Ok(())
     }
     fn encode_field_14<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_bool(buf, self.is_classic);
+            put_bool(buf, self.is_classic)
         }
     }
     fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
@@ -1353,7 +1396,7 @@ impl<'a> Member<'a> {
     fn decode_tagged_fields(
         out: &mut Self,
         buf: &mut &'a [u8],
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -1362,7 +1405,7 @@ impl<'a> Member<'a> {
         Ok(())
     }
 }
-impl Encode for Member<'_> {
+impl<'a> Encode for Member<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         self.encode_field_0(buf, version, flex);

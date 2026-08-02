@@ -11,16 +11,23 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotFooterRecord {
     pub version: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
+}
+impl Default for SnapshotFooterRecord {
+    fn default() -> Self {
+        Self {
+            version: 0i16,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
 }
 impl SnapshotFooterRecord {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::snapshot_footer_record::SnapshotFooterRecord {
         crate::owned::snapshot_footer_record::SnapshotFooterRecord {
             version: (self.version),
@@ -37,7 +44,7 @@ impl Encode for SnapshotFooterRecord {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i16(buf, self.version);
+            put_i16(buf, self.version)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

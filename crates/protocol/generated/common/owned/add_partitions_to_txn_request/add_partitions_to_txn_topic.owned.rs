@@ -62,7 +62,7 @@ impl Encode for AddPartitionsToTxnTopic {
         n
     }
 }
-impl Decode<'_> for AddPartitionsToTxnTopic {
+impl<'de> Decode<'de> for AddPartitionsToTxnTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 3;
         let mut out = Self::default();

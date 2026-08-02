@@ -68,7 +68,7 @@ impl Encode for WriteTxnMarkersRequest {
         n
     }
 }
-impl Decode<'_> for WriteTxnMarkersRequest {
+impl<'de> Decode<'de> for WriteTxnMarkersRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -119,13 +119,13 @@ impl Encode for WritableTxnMarker {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
         if version >= 0 {
-            put_i64(buf, self.producer_id);
+            put_i64(buf, self.producer_id)
         }
         if version >= 0 {
-            put_i16(buf, self.producer_epoch);
+            put_i16(buf, self.producer_epoch)
         }
         if version >= 0 {
-            put_bool(buf, self.transaction_result);
+            put_bool(buf, self.transaction_result)
         }
         if version >= 0 {
             {
@@ -136,10 +136,10 @@ impl Encode for WritableTxnMarker {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.coordinator_epoch);
+            put_i32(buf, self.coordinator_epoch)
         }
         if version >= 2 {
-            put_i8(buf, self.transaction_version);
+            put_i8(buf, self.transaction_version)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -180,7 +180,7 @@ impl Encode for WritableTxnMarker {
         n
     }
 }
-impl Decode<'_> for WritableTxnMarker {
+impl<'de> Decode<'de> for WritableTxnMarker {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 1;
         let mut out = Self::default();
@@ -298,7 +298,7 @@ impl Encode for WritableTxnMarkerTopic {
         n
     }
 }
-impl Decode<'_> for WritableTxnMarkerTopic {
+impl<'de> Decode<'de> for WritableTxnMarkerTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 1;
         let mut out = Self::default();
@@ -343,7 +343,7 @@ impl WritableTxnMarkerTopic {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("markers".to_string(), ::serde_json::Value::Array(vec![]));
     ::serde_json::Value::Object(obj)

@@ -16,17 +16,25 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribeTransactionsResponse<'a> {
     pub throttle_time_ms: i32,
     pub transaction_states: Vec<TransactionState<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl DescribeTransactionsResponse<'_> {
+impl<'a> Default for DescribeTransactionsResponse<'a> {
+    fn default() -> Self {
+        Self {
+            throttle_time_ms: 0i32,
+            transaction_states: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> DescribeTransactionsResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::describe_transactions_response::DescribeTransactionsResponse {
@@ -34,13 +42,13 @@ impl DescribeTransactionsResponse<'_> {
             throttle_time_ms: (self.throttle_time_ms),
             transaction_states: (self.transaction_states)
                 .iter()
-                .map(TransactionState::to_owned)
+                .map(|it| it.to_owned())
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for DescribeTransactionsResponse<'_> {
+impl<'a> Encode for DescribeTransactionsResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -50,7 +58,7 @@ impl Encode for DescribeTransactionsResponse<'_> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 0 {
             {
@@ -135,7 +143,7 @@ impl DescribeTransactionsResponse<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransactionState<'a> {
     pub error_code: i16,
     pub transactional_id: &'a str,
@@ -147,11 +155,25 @@ pub struct TransactionState<'a> {
     pub topics: Vec<TopicData<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl<'a> Default for TransactionState<'a> {
+    fn default() -> Self {
+        Self {
+            error_code: 0i16,
+            transactional_id: "",
+            transaction_state: "",
+            transaction_timeout_ms: 0i32,
+            transaction_start_time_ms: 0i64,
+            producer_id: 0i64,
+            producer_epoch: 0i16,
+            topics: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl<'a> TransactionState<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_transactions_response::TransactionState {
         crate::owned::describe_transactions_response::TransactionState {
             error_code: (self.error_code),
@@ -161,13 +183,13 @@ impl<'a> TransactionState<'a> {
             transaction_start_time_ms: (self.transaction_start_time_ms),
             producer_id: (self.producer_id),
             producer_epoch: (self.producer_epoch),
-            topics: (self.topics).iter().map(TopicData::to_owned).collect(),
+            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
     fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -190,22 +212,22 @@ impl<'a> TransactionState<'a> {
     }
     fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.transaction_timeout_ms);
+            put_i32(buf, self.transaction_timeout_ms)
         }
     }
     fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i64(buf, self.transaction_start_time_ms);
+            put_i64(buf, self.transaction_start_time_ms)
         }
     }
     fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i64(buf, self.producer_id);
+            put_i64(buf, self.producer_id)
         }
     }
     fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i16(buf, self.producer_epoch);
+            put_i16(buf, self.producer_epoch)
         }
     }
     fn encode_field_7<B: BufMut>(
@@ -336,7 +358,7 @@ impl<'a> TransactionState<'a> {
     fn decode_tagged_fields(
         out: &mut Self,
         buf: &mut &'a [u8],
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -345,7 +367,7 @@ impl<'a> TransactionState<'a> {
         Ok(())
     }
 }
-impl Encode for TransactionState<'_> {
+impl<'a> Encode for TransactionState<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         self.encode_field_0(buf, version, flex);
@@ -454,17 +476,25 @@ impl TransactionState<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicData<'a> {
     pub topic: &'a str,
     pub partitions: Vec<i32>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl TopicData<'_> {
+impl<'a> Default for TopicData<'a> {
+    fn default() -> Self {
+        Self {
+            topic: "",
+            partitions: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> TopicData<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_transactions_response::TopicData {
         crate::owned::describe_transactions_response::TopicData {
             topic: (self.topic).to_string(),
@@ -473,7 +503,7 @@ impl TopicData<'_> {
         }
     }
 }
-impl Encode for TopicData<'_> {
+impl<'a> Encode for TopicData<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {

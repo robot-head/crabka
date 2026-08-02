@@ -15,16 +15,23 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribeUserScramCredentialsRequest<'a> {
     pub users: Option<Vec<UserName<'a>>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl DescribeUserScramCredentialsRequest<'_> {
+impl<'a> Default for DescribeUserScramCredentialsRequest<'a> {
+    fn default() -> Self {
+        Self {
+            users: None,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> DescribeUserScramCredentialsRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::describe_user_scram_credentials_request::DescribeUserScramCredentialsRequest
@@ -32,12 +39,12 @@ impl DescribeUserScramCredentialsRequest<'_> {
         crate::owned::describe_user_scram_credentials_request::DescribeUserScramCredentialsRequest {
             users: (self.users)
                 .as_ref()
-                .map(|v| v.iter().map(UserName::to_owned).collect()),
+                .map(|v| v.iter().map(|it| it.to_owned()).collect()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for DescribeUserScramCredentialsRequest<'_> {
+impl<'a> Encode for DescribeUserScramCredentialsRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -70,7 +77,7 @@ impl Encode for DescribeUserScramCredentialsRequest<'_> {
             n += {
                 let opt: Option<&Vec<_>> = (self.users).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
+                    opt.map(|v| v.len()),
                     flex,
                 );
                 let body: usize =
@@ -127,16 +134,23 @@ impl DescribeUserScramCredentialsRequest<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserName<'a> {
     pub name: &'a str,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl UserName<'_> {
+impl<'a> Default for UserName<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> UserName<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_user_scram_credentials_request::UserName {
         crate::owned::describe_user_scram_credentials_request::UserName {
             name: (self.name).to_string(),
@@ -144,7 +158,7 @@ impl UserName<'_> {
         }
     }
 }
-impl Encode for UserName<'_> {
+impl<'a> Encode for UserName<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {

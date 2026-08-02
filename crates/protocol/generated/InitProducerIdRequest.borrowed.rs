@@ -3,11 +3,12 @@ use crate::primitives::fixed::{
     get_bool, get_i16, get_i32, get_i64, put_bool, put_i16, put_i32, put_i64,
 };
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, nullable_string_len, put_compact_nullable_string,
-    put_nullable_string,
+    compact_nullable_string_len, compact_string_len, nullable_string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
 use crate::primitives::string_bytes_borrowed::{
-    get_compact_nullable_string_borrowed, get_nullable_string_borrowed,
+    get_compact_nullable_string_borrowed, get_compact_string_borrowed,
+    get_nullable_string_borrowed, get_string_borrowed,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
@@ -31,7 +32,7 @@ pub struct InitProducerIdRequest<'a> {
     pub keep_prepared_txn: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for InitProducerIdRequest<'_> {
+impl<'a> Default for InitProducerIdRequest<'a> {
     fn default() -> Self {
         Self {
             transactional_id: None,
@@ -44,14 +45,13 @@ impl Default for InitProducerIdRequest<'_> {
         }
     }
 }
-impl InitProducerIdRequest<'_> {
+impl<'a> InitProducerIdRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::init_producer_id_request::InitProducerIdRequest {
         crate::owned::init_producer_id_request::InitProducerIdRequest {
-            transactional_id: (self.transactional_id).map(std::string::ToString::to_string),
+            transactional_id: (self.transactional_id).map(|s| s.to_string()),
             transaction_timeout_ms: (self.transaction_timeout_ms),
             producer_id: (self.producer_id),
             producer_epoch: (self.producer_epoch),
@@ -61,7 +61,7 @@ impl InitProducerIdRequest<'_> {
         }
     }
 }
-impl Encode for InitProducerIdRequest<'_> {
+impl<'a> Encode for InitProducerIdRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -78,19 +78,19 @@ impl Encode for InitProducerIdRequest<'_> {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.transaction_timeout_ms);
+            put_i32(buf, self.transaction_timeout_ms)
         }
         if version >= 3 {
-            put_i64(buf, self.producer_id);
+            put_i64(buf, self.producer_id)
         }
         if version >= 3 {
-            put_i16(buf, self.producer_epoch);
+            put_i16(buf, self.producer_epoch)
         }
         if version >= 6 {
-            put_bool(buf, self.enable2_pc);
+            put_bool(buf, self.enable2_pc)
         }
         if version >= 6 {
-            put_bool(buf, self.keep_prepared_txn);
+            put_bool(buf, self.keep_prepared_txn)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

@@ -7,7 +7,7 @@ use crate::primitives::string_bytes_borrowed::{get_compact_string_borrowed, get_
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 use bytes::BufMut;
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicInfo<'a> {
     pub name: &'a str,
     pub partitions: i32,
@@ -15,11 +15,21 @@ pub struct TopicInfo<'a> {
     pub topic_configs: Vec<super::key_value::KeyValue<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl TopicInfo<'_> {
+impl<'a> Default for TopicInfo<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            partitions: 0i32,
+            replication_factor: 0i16,
+            topic_configs: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> TopicInfo<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::common::streams_group_describe_response::topic_info::TopicInfo {
@@ -29,13 +39,13 @@ impl TopicInfo<'_> {
             replication_factor: (self.replication_factor),
             topic_configs: (self.topic_configs)
                 .iter()
-                .map(super::key_value::KeyValue::to_owned)
+                .map(|it| it.to_owned())
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for TopicInfo<'_> {
+impl<'a> Encode for TopicInfo<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
@@ -46,10 +56,10 @@ impl Encode for TopicInfo<'_> {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.partitions);
+            put_i32(buf, self.partitions)
         }
         if version >= 0 {
-            put_i16(buf, self.replication_factor);
+            put_i16(buf, self.replication_factor)
         }
         if version >= 0 {
             {

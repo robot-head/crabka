@@ -37,7 +37,7 @@ impl Encode for TopicRecord {
             }
         }
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+            crate::primitives::uuid::put_uuid(buf, self.topic_id)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -65,7 +65,7 @@ impl Encode for TopicRecord {
         n
     }
 }
-impl Decode<'_> for TopicRecord {
+impl<'de> Decode<'de> for TopicRecord {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(
@@ -108,7 +108,7 @@ impl TopicRecord {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert(
         "name".to_string(),

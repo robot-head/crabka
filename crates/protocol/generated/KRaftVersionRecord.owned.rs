@@ -27,10 +27,10 @@ impl Encode for KRaftVersionRecord {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i16(buf, self.version);
+            put_i16(buf, self.version)
         }
         if version >= 0 {
-            put_i16(buf, self.k_raft_version);
+            put_i16(buf, self.k_raft_version)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -54,7 +54,7 @@ impl Encode for KRaftVersionRecord {
         n
     }
 }
-impl Decode<'_> for KRaftVersionRecord {
+impl<'de> Decode<'de> for KRaftVersionRecord {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(
@@ -93,7 +93,7 @@ impl KRaftVersionRecord {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("version".to_string(), ::serde_json::json!(0));
     obj.insert("kRaftVersion".to_string(), ::serde_json::json!(0));

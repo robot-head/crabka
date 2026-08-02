@@ -20,26 +20,34 @@ pub const FLEXIBLE_MIN: i16 = 1;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AlterClientQuotasRequest<'a> {
     pub entries: Vec<EntryData<'a>>,
     pub validate_only: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl AlterClientQuotasRequest<'_> {
+impl<'a> Default for AlterClientQuotasRequest<'a> {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            validate_only: false,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> AlterClientQuotasRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::alter_client_quotas_request::AlterClientQuotasRequest {
         crate::owned::alter_client_quotas_request::AlterClientQuotasRequest {
-            entries: (self.entries).iter().map(EntryData::to_owned).collect(),
+            entries: (self.entries).iter().map(|it| it.to_owned()).collect(),
             validate_only: (self.validate_only),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for AlterClientQuotasRequest<'_> {
+impl<'a> Encode for AlterClientQuotasRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -57,7 +65,7 @@ impl Encode for AlterClientQuotasRequest<'_> {
             }
         }
         if version >= 0 {
-            put_bool(buf, self.validate_only);
+            put_bool(buf, self.validate_only)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -132,26 +140,34 @@ impl AlterClientQuotasRequest<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EntryData<'a> {
     pub entity: Vec<EntityData<'a>>,
     pub ops: Vec<OpData<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl EntryData<'_> {
+impl<'a> Default for EntryData<'a> {
+    fn default() -> Self {
+        Self {
+            entity: Vec::new(),
+            ops: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> EntryData<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::alter_client_quotas_request::EntryData {
         crate::owned::alter_client_quotas_request::EntryData {
-            entity: (self.entity).iter().map(EntityData::to_owned).collect(),
-            ops: (self.ops).iter().map(OpData::to_owned).collect(),
+            entity: (self.entity).iter().map(|it| it.to_owned()).collect(),
+            ops: (self.ops).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for EntryData<'_> {
+impl<'a> Encode for EntryData<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
         if version >= 0 {
@@ -245,26 +261,34 @@ impl EntryData<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntityData<'a> {
     pub entity_type: &'a str,
     pub entity_name: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl EntityData<'_> {
+impl<'a> Default for EntityData<'a> {
+    fn default() -> Self {
+        Self {
+            entity_type: "",
+            entity_name: None,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> EntityData<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::alter_client_quotas_request::EntityData {
         crate::owned::alter_client_quotas_request::EntityData {
             entity_type: (self.entity_type).to_string(),
-            entity_name: (self.entity_name).map(std::string::ToString::to_string),
+            entity_name: (self.entity_name).map(|s| s.to_string()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for EntityData<'_> {
+impl<'a> Encode for EntityData<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
         if version >= 0 {
@@ -356,7 +380,7 @@ pub struct OpData<'a> {
     pub remove: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for OpData<'_> {
+impl<'a> Default for OpData<'a> {
     fn default() -> Self {
         Self {
             key: "",
@@ -366,11 +390,10 @@ impl Default for OpData<'_> {
         }
     }
 }
-impl OpData<'_> {
+impl<'a> OpData<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::alter_client_quotas_request::OpData {
         crate::owned::alter_client_quotas_request::OpData {
             key: (self.key).to_string(),
@@ -380,7 +403,7 @@ impl OpData<'_> {
         }
     }
 }
-impl Encode for OpData<'_> {
+impl<'a> Encode for OpData<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
         if version >= 0 {
@@ -391,10 +414,10 @@ impl Encode for OpData<'_> {
             }
         }
         if version >= 0 {
-            put_f64(buf, self.value);
+            put_f64(buf, self.value)
         }
         if version >= 0 {
-            put_bool(buf, self.remove);
+            put_bool(buf, self.remove)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

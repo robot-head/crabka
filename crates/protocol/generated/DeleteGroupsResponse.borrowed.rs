@@ -16,29 +16,34 @@ pub const FLEXIBLE_MIN: i16 = 2;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeleteGroupsResponse<'a> {
     pub throttle_time_ms: i32,
     pub results: Vec<DeletableGroupResult<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl DeleteGroupsResponse<'_> {
+impl<'a> Default for DeleteGroupsResponse<'a> {
+    fn default() -> Self {
+        Self {
+            throttle_time_ms: 0i32,
+            results: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> DeleteGroupsResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::delete_groups_response::DeleteGroupsResponse {
         crate::owned::delete_groups_response::DeleteGroupsResponse {
             throttle_time_ms: (self.throttle_time_ms),
-            results: (self.results)
-                .iter()
-                .map(DeletableGroupResult::to_owned)
-                .collect(),
+            results: (self.results).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for DeleteGroupsResponse<'_> {
+impl<'a> Encode for DeleteGroupsResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -48,7 +53,7 @@ impl Encode for DeleteGroupsResponse<'_> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 0 {
             {
@@ -131,17 +136,25 @@ impl DeleteGroupsResponse<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeletableGroupResult<'a> {
     pub group_id: &'a str,
     pub error_code: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl DeletableGroupResult<'_> {
+impl<'a> Default for DeletableGroupResult<'a> {
+    fn default() -> Self {
+        Self {
+            group_id: "",
+            error_code: 0i16,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> DeletableGroupResult<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::delete_groups_response::DeletableGroupResult {
         crate::owned::delete_groups_response::DeletableGroupResult {
             group_id: (self.group_id).to_string(),
@@ -150,7 +163,7 @@ impl DeletableGroupResult<'_> {
         }
     }
 }
-impl Encode for DeletableGroupResult<'_> {
+impl<'a> Encode for DeletableGroupResult<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
@@ -161,7 +174,7 @@ impl Encode for DeletableGroupResult<'_> {
             }
         }
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

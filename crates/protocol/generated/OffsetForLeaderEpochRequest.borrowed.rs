@@ -22,7 +22,7 @@ pub struct OffsetForLeaderEpochRequest<'a> {
     pub topics: Vec<OffsetForLeaderTopic<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for OffsetForLeaderEpochRequest<'_> {
+impl<'a> Default for OffsetForLeaderEpochRequest<'a> {
     fn default() -> Self {
         Self {
             replica_id: -2i32,
@@ -31,25 +31,21 @@ impl Default for OffsetForLeaderEpochRequest<'_> {
         }
     }
 }
-impl OffsetForLeaderEpochRequest<'_> {
+impl<'a> OffsetForLeaderEpochRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::offset_for_leader_epoch_request::OffsetForLeaderEpochRequest {
         crate::owned::offset_for_leader_epoch_request::OffsetForLeaderEpochRequest {
             replica_id: (self.replica_id),
-            topics: (self.topics)
-                .iter()
-                .map(OffsetForLeaderTopic::to_owned)
-                .collect(),
+            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for OffsetForLeaderEpochRequest<'_> {
+impl<'a> Encode for OffsetForLeaderEpochRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -59,7 +55,7 @@ impl Encode for OffsetForLeaderEpochRequest<'_> {
         }
         let flex = is_flexible(version);
         if version >= 3 {
-            put_i32(buf, self.replica_id);
+            put_i32(buf, self.replica_id)
         }
         if version >= 0 {
             {
@@ -139,29 +135,34 @@ impl OffsetForLeaderEpochRequest<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OffsetForLeaderTopic<'a> {
     pub topic: &'a str,
     pub partitions: Vec<OffsetForLeaderPartition>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl OffsetForLeaderTopic<'_> {
+impl<'a> Default for OffsetForLeaderTopic<'a> {
+    fn default() -> Self {
+        Self {
+            topic: "",
+            partitions: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> OffsetForLeaderTopic<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_for_leader_epoch_request::OffsetForLeaderTopic {
         crate::owned::offset_for_leader_epoch_request::OffsetForLeaderTopic {
             topic: (self.topic).to_string(),
-            partitions: (self.partitions)
-                .iter()
-                .map(OffsetForLeaderPartition::to_owned)
-                .collect(),
+            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for OffsetForLeaderTopic<'_> {
+impl<'a> Encode for OffsetForLeaderTopic<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 4;
         if version >= 0 {
@@ -275,7 +276,6 @@ impl OffsetForLeaderPartition {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::offset_for_leader_epoch_request::OffsetForLeaderPartition {
@@ -291,13 +291,13 @@ impl Encode for OffsetForLeaderPartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 4;
         if version >= 0 {
-            put_i32(buf, self.partition);
+            put_i32(buf, self.partition)
         }
         if version >= 2 {
-            put_i32(buf, self.current_leader_epoch);
+            put_i32(buf, self.current_leader_epoch)
         }
         if version >= 0 {
-            put_i32(buf, self.leader_epoch);
+            put_i32(buf, self.leader_epoch)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

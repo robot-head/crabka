@@ -19,7 +19,7 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteLogSegmentMetadataUpdateRecord<'a> {
     pub remote_log_segment_id: RemoteLogSegmentIdEntry<'a>,
     pub broker_id: i32,
@@ -28,7 +28,19 @@ pub struct RemoteLogSegmentMetadataUpdateRecord<'a> {
     pub remote_log_segment_state: i8,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl RemoteLogSegmentMetadataUpdateRecord<'_> {
+impl<'a> Default for RemoteLogSegmentMetadataUpdateRecord<'a> {
+    fn default() -> Self {
+        Self {
+            remote_log_segment_id: <RemoteLogSegmentIdEntry<'a>>::default(),
+            broker_id: 0i32,
+            event_timestamp_ms: 0i64,
+            custom_metadata: None,
+            remote_log_segment_state: 0i8,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> RemoteLogSegmentMetadataUpdateRecord<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
@@ -46,7 +58,7 @@ impl RemoteLogSegmentMetadataUpdateRecord<'_> {
         }
     }
 }
-impl Encode for RemoteLogSegmentMetadataUpdateRecord<'_> {
+impl<'a> Encode for RemoteLogSegmentMetadataUpdateRecord<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(
@@ -55,13 +67,13 @@ impl Encode for RemoteLogSegmentMetadataUpdateRecord<'_> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            self.remote_log_segment_id.encode(buf, version)?;
+            self.remote_log_segment_id.encode(buf, version)?
         }
         if version >= 0 {
-            put_i32(buf, self.broker_id);
+            put_i32(buf, self.broker_id)
         }
         if version >= 0 {
-            put_i64(buf, self.event_timestamp_ms);
+            put_i64(buf, self.event_timestamp_ms)
         }
         if version >= 0 {
             if flex {
@@ -71,7 +83,7 @@ impl Encode for RemoteLogSegmentMetadataUpdateRecord<'_> {
             }
         }
         if version >= 0 {
-            put_i8(buf, self.remote_log_segment_state);
+            put_i8(buf, self.remote_log_segment_state)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -177,17 +189,25 @@ impl RemoteLogSegmentMetadataUpdateRecord<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteLogSegmentIdEntry<'a> {
     pub topic_id_partition: TopicIdPartitionEntry<'a>,
     pub id: crate::primitives::uuid::Uuid,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl RemoteLogSegmentIdEntry<'_> {
+impl<'a> Default for RemoteLogSegmentIdEntry<'a> {
+    fn default() -> Self {
+        Self {
+            topic_id_partition: <TopicIdPartitionEntry<'a>>::default(),
+            id: crate::primitives::uuid::Uuid::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> RemoteLogSegmentIdEntry<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::remote_log_segment_metadata_update_record::RemoteLogSegmentIdEntry {
@@ -198,14 +218,14 @@ impl RemoteLogSegmentIdEntry<'_> {
         }
     }
 }
-impl Encode for RemoteLogSegmentIdEntry<'_> {
+impl<'a> Encode for RemoteLogSegmentIdEntry<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            self.topic_id_partition.encode(buf, version)?;
+            self.topic_id_partition.encode(buf, version)?
         }
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.id);
+            crate::primitives::uuid::put_uuid(buf, self.id)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -259,18 +279,27 @@ impl RemoteLogSegmentIdEntry<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicIdPartitionEntry<'a> {
     pub name: &'a str,
     pub id: crate::primitives::uuid::Uuid,
     pub partition: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl TopicIdPartitionEntry<'_> {
+impl<'a> Default for TopicIdPartitionEntry<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            id: crate::primitives::uuid::Uuid::default(),
+            partition: 0i32,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> TopicIdPartitionEntry<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::remote_log_segment_metadata_update_record::TopicIdPartitionEntry {
@@ -282,7 +311,7 @@ impl TopicIdPartitionEntry<'_> {
         }
     }
 }
-impl Encode for TopicIdPartitionEntry<'_> {
+impl<'a> Encode for TopicIdPartitionEntry<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
@@ -293,10 +322,10 @@ impl Encode for TopicIdPartitionEntry<'_> {
             }
         }
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.id);
+            crate::primitives::uuid::put_uuid(buf, self.id)
         }
         if version >= 0 {
-            put_i32(buf, self.partition);
+            put_i32(buf, self.partition)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

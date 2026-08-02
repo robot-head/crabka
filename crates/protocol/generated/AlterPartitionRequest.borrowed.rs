@@ -33,12 +33,11 @@ impl AlterPartitionRequest {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::alter_partition_request::AlterPartitionRequest {
         crate::owned::alter_partition_request::AlterPartitionRequest {
             broker_id: (self.broker_id),
             broker_epoch: (self.broker_epoch),
-            topics: (self.topics).iter().map(TopicData::to_owned).collect(),
+            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
@@ -53,10 +52,10 @@ impl Encode for AlterPartitionRequest {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.broker_id);
+            put_i32(buf, self.broker_id)
         }
         if version >= 0 {
-            put_i64(buf, self.broker_epoch);
+            put_i64(buf, self.broker_epoch)
         }
         if version >= 0 {
             {
@@ -145,24 +144,29 @@ impl AlterPartitionRequest {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicData {
     pub topic_id: crate::primitives::uuid::Uuid,
     pub partitions: Vec<PartitionData>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl Default for TopicData {
+    fn default() -> Self {
+        Self {
+            topic_id: crate::primitives::uuid::Uuid::default(),
+            partitions: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl TopicData {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::alter_partition_request::TopicData {
         crate::owned::alter_partition_request::TopicData {
             topic_id: (self.topic_id),
-            partitions: (self.partitions)
-                .iter()
-                .map(PartitionData::to_owned)
-                .collect(),
+            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
@@ -171,7 +175,7 @@ impl Encode for TopicData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 2 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+            crate::primitives::uuid::put_uuid(buf, self.topic_id)
         }
         if version >= 0 {
             {
@@ -248,7 +252,7 @@ impl TopicData {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionData {
     pub partition_index: i32,
     pub leader_epoch: i32,
@@ -258,11 +262,23 @@ pub struct PartitionData {
     pub partition_epoch: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl Default for PartitionData {
+    fn default() -> Self {
+        Self {
+            partition_index: 0i32,
+            leader_epoch: 0i32,
+            new_isr: Vec::new(),
+            new_isr_with_epochs: Vec::new(),
+            leader_recovery_state: 0i8,
+            partition_epoch: 0i32,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl PartitionData {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::alter_partition_request::PartitionData {
         crate::owned::alter_partition_request::PartitionData {
             partition_index: (self.partition_index),
@@ -270,7 +286,7 @@ impl PartitionData {
             new_isr: (self.new_isr).clone(),
             new_isr_with_epochs: (self.new_isr_with_epochs)
                 .iter()
-                .map(BrokerState::to_owned)
+                .map(|it| it.to_owned())
                 .collect(),
             leader_recovery_state: (self.leader_recovery_state),
             partition_epoch: (self.partition_epoch),
@@ -282,10 +298,10 @@ impl Encode for PartitionData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
         if version >= 0 {
-            put_i32(buf, self.leader_epoch);
+            put_i32(buf, self.leader_epoch)
         }
         if (0..=2).contains(&version) {
             {
@@ -308,10 +324,10 @@ impl Encode for PartitionData {
             }
         }
         if version >= 1 {
-            put_i8(buf, self.leader_recovery_state);
+            put_i8(buf, self.leader_recovery_state)
         }
         if version >= 0 {
-            put_i32(buf, self.partition_epoch);
+            put_i32(buf, self.partition_epoch)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -449,7 +465,6 @@ impl BrokerState {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::alter_partition_request::BrokerState {
         crate::owned::alter_partition_request::BrokerState {
             broker_id: (self.broker_id),
@@ -462,10 +477,10 @@ impl Encode for BrokerState {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 3 {
-            put_i32(buf, self.broker_id);
+            put_i32(buf, self.broker_id)
         }
         if version >= 3 {
-            put_i64(buf, self.broker_epoch);
+            put_i64(buf, self.broker_epoch)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

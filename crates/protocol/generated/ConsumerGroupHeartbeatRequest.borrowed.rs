@@ -34,7 +34,7 @@ pub struct ConsumerGroupHeartbeatRequest<'a> {
     pub topic_partitions: Option<Vec<TopicPartitions>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for ConsumerGroupHeartbeatRequest<'_> {
+impl<'a> Default for ConsumerGroupHeartbeatRequest<'a> {
     fn default() -> Self {
         Self {
             group_id: "",
@@ -55,7 +55,6 @@ impl<'a> ConsumerGroupHeartbeatRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::consumer_group_heartbeat_request::ConsumerGroupHeartbeatRequest {
@@ -63,18 +62,17 @@ impl<'a> ConsumerGroupHeartbeatRequest<'a> {
             group_id: (self.group_id).to_string(),
             member_id: (self.member_id).to_string(),
             member_epoch: (self.member_epoch),
-            instance_id: (self.instance_id).map(std::string::ToString::to_string),
-            rack_id: (self.rack_id).map(std::string::ToString::to_string),
+            instance_id: (self.instance_id).map(|s| s.to_string()),
+            rack_id: (self.rack_id).map(|s| s.to_string()),
             rebalance_timeout_ms: (self.rebalance_timeout_ms),
             subscribed_topic_names: (self.subscribed_topic_names)
                 .as_ref()
-                .map(|v| v.iter().map(std::string::ToString::to_string).collect()),
-            subscribed_topic_regex: (self.subscribed_topic_regex)
-                .map(std::string::ToString::to_string),
-            server_assignor: (self.server_assignor).map(std::string::ToString::to_string),
+                .map(|v| v.iter().map(|s| s.to_string()).collect()),
+            subscribed_topic_regex: (self.subscribed_topic_regex).map(|s| s.to_string()),
+            server_assignor: (self.server_assignor).map(|s| s.to_string()),
             topic_partitions: (self.topic_partitions)
                 .as_ref()
-                .map(|v| v.iter().map(TopicPartitions::to_owned).collect()),
+                .map(|v| v.iter().map(|it| it.to_owned()).collect()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
@@ -98,7 +96,7 @@ impl<'a> ConsumerGroupHeartbeatRequest<'a> {
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.member_epoch);
+            put_i32(buf, self.member_epoch)
         }
     }
     fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -121,7 +119,7 @@ impl<'a> ConsumerGroupHeartbeatRequest<'a> {
     }
     fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.rebalance_timeout_ms);
+            put_i32(buf, self.rebalance_timeout_ms)
         }
     }
     fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -132,10 +130,10 @@ impl<'a> ConsumerGroupHeartbeatRequest<'a> {
                 if let Some(v) = &self.subscribed_topic_names {
                     for it in v {
                         if flex {
-                            let () = put_compact_string(buf, it);
+                            let () = put_compact_string(buf, *it);
                         } else {
-                            let () = put_string(buf, it);
-                        }
+                            let () = put_string(buf, *it);
+                        };
                     }
                 }
             }
@@ -349,7 +347,7 @@ impl<'a> ConsumerGroupHeartbeatRequest<'a> {
     fn decode_tagged_fields(
         out: &mut Self,
         buf: &mut &'a [u8],
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -358,7 +356,7 @@ impl<'a> ConsumerGroupHeartbeatRequest<'a> {
         Ok(())
     }
 }
-impl Encode for ConsumerGroupHeartbeatRequest<'_> {
+impl<'a> Encode for ConsumerGroupHeartbeatRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -421,16 +419,16 @@ impl Encode for ConsumerGroupHeartbeatRequest<'_> {
             n += {
                 let opt: Option<&Vec<_>> = (self.subscribed_topic_names).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
+                    opt.map(|v| v.len()),
                     flex,
                 );
                 let body: usize = opt.map_or(0, |v| {
                     v.iter()
                         .map(|it| {
                             if flex {
-                                compact_string_len(it)
+                                compact_string_len(*it)
                             } else {
-                                string_len(it)
+                                string_len(*it)
                             }
                         })
                         .sum()
@@ -456,7 +454,7 @@ impl Encode for ConsumerGroupHeartbeatRequest<'_> {
             n += {
                 let opt: Option<&Vec<_>> = (self.topic_partitions).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
+                    opt.map(|v| v.len()),
                     flex,
                 );
                 let body: usize =
@@ -533,17 +531,25 @@ impl ConsumerGroupHeartbeatRequest<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicPartitions {
     pub topic_id: crate::primitives::uuid::Uuid,
     pub partitions: Vec<i32>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl Default for TopicPartitions {
+    fn default() -> Self {
+        Self {
+            topic_id: crate::primitives::uuid::Uuid::default(),
+            partitions: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl TopicPartitions {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::consumer_group_heartbeat_request::TopicPartitions {
         crate::owned::consumer_group_heartbeat_request::TopicPartitions {
             topic_id: (self.topic_id),
@@ -556,7 +562,7 @@ impl Encode for TopicPartitions {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+            crate::primitives::uuid::put_uuid(buf, self.topic_id)
         }
         if version >= 0 {
             {

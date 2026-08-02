@@ -31,7 +31,7 @@ pub struct MetadataResponse<'a> {
     pub error_code: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for MetadataResponse<'_> {
+impl<'a> Default for MetadataResponse<'a> {
     fn default() -> Self {
         Self {
             throttle_time_ms: 0i32,
@@ -45,31 +45,24 @@ impl Default for MetadataResponse<'_> {
         }
     }
 }
-impl MetadataResponse<'_> {
+impl<'a> MetadataResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::metadata_response::MetadataResponse {
         crate::owned::metadata_response::MetadataResponse {
             throttle_time_ms: (self.throttle_time_ms),
-            brokers: (self.brokers)
-                .iter()
-                .map(MetadataResponseBroker::to_owned)
-                .collect(),
-            cluster_id: (self.cluster_id).map(std::string::ToString::to_string),
+            brokers: (self.brokers).iter().map(|it| it.to_owned()).collect(),
+            cluster_id: (self.cluster_id).map(|s| s.to_string()),
             controller_id: (self.controller_id),
-            topics: (self.topics)
-                .iter()
-                .map(MetadataResponseTopic::to_owned)
-                .collect(),
+            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
             cluster_authorized_operations: (self.cluster_authorized_operations),
             error_code: (self.error_code),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for MetadataResponse<'_> {
+impl<'a> Encode for MetadataResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -79,7 +72,7 @@ impl Encode for MetadataResponse<'_> {
         }
         let flex = is_flexible(version);
         if version >= 3 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 0 {
             {
@@ -97,7 +90,7 @@ impl Encode for MetadataResponse<'_> {
             }
         }
         if version >= 1 {
-            put_i32(buf, self.controller_id);
+            put_i32(buf, self.controller_id)
         }
         if version >= 0 {
             {
@@ -108,10 +101,10 @@ impl Encode for MetadataResponse<'_> {
             }
         }
         if (8..=10).contains(&version) {
-            put_i32(buf, self.cluster_authorized_operations);
+            put_i32(buf, self.cluster_authorized_operations)
         }
         if version >= 13 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -251,7 +244,7 @@ impl MetadataResponse<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataResponseBroker<'a> {
     pub node_id: i32,
     pub host: &'a str,
@@ -259,26 +252,36 @@ pub struct MetadataResponseBroker<'a> {
     pub rack: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl MetadataResponseBroker<'_> {
+impl<'a> Default for MetadataResponseBroker<'a> {
+    fn default() -> Self {
+        Self {
+            node_id: 0i32,
+            host: "",
+            port: 0i32,
+            rack: None,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> MetadataResponseBroker<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::metadata_response::MetadataResponseBroker {
         crate::owned::metadata_response::MetadataResponseBroker {
             node_id: (self.node_id),
             host: (self.host).to_string(),
             port: (self.port),
-            rack: (self.rack).map(std::string::ToString::to_string),
+            rack: (self.rack).map(|s| s.to_string()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for MetadataResponseBroker<'_> {
+impl<'a> Encode for MetadataResponseBroker<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 9;
         if version >= 0 {
-            put_i32(buf, self.node_id);
+            put_i32(buf, self.node_id)
         }
         if version >= 0 {
             if flex {
@@ -288,7 +291,7 @@ impl Encode for MetadataResponseBroker<'_> {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.port);
+            put_i32(buf, self.port)
         }
         if version >= 1 {
             if flex {
@@ -393,7 +396,7 @@ pub struct MetadataResponseTopic<'a> {
     pub topic_authorized_operations: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for MetadataResponseTopic<'_> {
+impl<'a> Default for MetadataResponseTopic<'a> {
     fn default() -> Self {
         Self {
             error_code: 0i16,
@@ -406,31 +409,27 @@ impl Default for MetadataResponseTopic<'_> {
         }
     }
 }
-impl MetadataResponseTopic<'_> {
+impl<'a> MetadataResponseTopic<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::metadata_response::MetadataResponseTopic {
         crate::owned::metadata_response::MetadataResponseTopic {
             error_code: (self.error_code),
-            name: (self.name).map(std::string::ToString::to_string),
+            name: (self.name).map(|s| s.to_string()),
             topic_id: (self.topic_id),
             is_internal: (self.is_internal),
-            partitions: (self.partitions)
-                .iter()
-                .map(MetadataResponsePartition::to_owned)
-                .collect(),
+            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
             topic_authorized_operations: (self.topic_authorized_operations),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for MetadataResponseTopic<'_> {
+impl<'a> Encode for MetadataResponseTopic<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 9;
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
             if version >= 12 {
@@ -448,10 +447,10 @@ impl Encode for MetadataResponseTopic<'_> {
             }
         }
         if version >= 10 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+            crate::primitives::uuid::put_uuid(buf, self.topic_id)
         }
         if version >= 1 {
-            put_bool(buf, self.is_internal);
+            put_bool(buf, self.is_internal)
         }
         if version >= 0 {
             {
@@ -462,7 +461,7 @@ impl Encode for MetadataResponseTopic<'_> {
             }
         }
         if version >= 8 {
-            put_i32(buf, self.topic_authorized_operations);
+            put_i32(buf, self.topic_authorized_operations)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -620,7 +619,6 @@ impl MetadataResponsePartition {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::metadata_response::MetadataResponsePartition {
         crate::owned::metadata_response::MetadataResponsePartition {
             error_code: (self.error_code),
@@ -638,16 +636,16 @@ impl Encode for MetadataResponsePartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 9;
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
         if version >= 0 {
-            put_i32(buf, self.leader_id);
+            put_i32(buf, self.leader_id)
         }
         if version >= 7 {
-            put_i32(buf, self.leader_epoch);
+            put_i32(buf, self.leader_epoch)
         }
         if version >= 0 {
             {

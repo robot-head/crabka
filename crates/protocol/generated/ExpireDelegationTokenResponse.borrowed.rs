@@ -12,18 +12,27 @@ pub const FLEXIBLE_MIN: i16 = 2;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpireDelegationTokenResponse {
     pub error_code: i16,
     pub expiry_timestamp_ms: i64,
     pub throttle_time_ms: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl Default for ExpireDelegationTokenResponse {
+    fn default() -> Self {
+        Self {
+            error_code: 0i16,
+            expiry_timestamp_ms: 0i64,
+            throttle_time_ms: 0i32,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl ExpireDelegationTokenResponse {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::expire_delegation_token_response::ExpireDelegationTokenResponse {
@@ -45,13 +54,13 @@ impl Encode for ExpireDelegationTokenResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
-            put_i64(buf, self.expiry_timestamp_ms);
+            put_i64(buf, self.expiry_timestamp_ms)
         }
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

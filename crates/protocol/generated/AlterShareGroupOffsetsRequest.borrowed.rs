@@ -16,31 +16,36 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterShareGroupOffsetsRequest<'a> {
     pub group_id: &'a str,
     pub topics: Vec<AlterShareGroupOffsetsRequestTopic<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl AlterShareGroupOffsetsRequest<'_> {
+impl<'a> Default for AlterShareGroupOffsetsRequest<'a> {
+    fn default() -> Self {
+        Self {
+            group_id: "",
+            topics: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> AlterShareGroupOffsetsRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::alter_share_group_offsets_request::AlterShareGroupOffsetsRequest {
         crate::owned::alter_share_group_offsets_request::AlterShareGroupOffsetsRequest {
             group_id: (self.group_id).to_string(),
-            topics: (self.topics)
-                .iter()
-                .map(AlterShareGroupOffsetsRequestTopic::to_owned)
-                .collect(),
+            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for AlterShareGroupOffsetsRequest<'_> {
+impl<'a> Encode for AlterShareGroupOffsetsRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -144,31 +149,36 @@ impl AlterShareGroupOffsetsRequest<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterShareGroupOffsetsRequestTopic<'a> {
     pub topic_name: &'a str,
     pub partitions: Vec<AlterShareGroupOffsetsRequestPartition>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl AlterShareGroupOffsetsRequestTopic<'_> {
+impl<'a> Default for AlterShareGroupOffsetsRequestTopic<'a> {
+    fn default() -> Self {
+        Self {
+            topic_name: "",
+            partitions: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> AlterShareGroupOffsetsRequestTopic<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::alter_share_group_offsets_request::AlterShareGroupOffsetsRequestTopic {
         crate::owned::alter_share_group_offsets_request::AlterShareGroupOffsetsRequestTopic {
             topic_name: (self.topic_name).to_string(),
-            partitions: (self.partitions)
-                .iter()
-                .map(AlterShareGroupOffsetsRequestPartition::to_owned)
-                .collect(),
+            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for AlterShareGroupOffsetsRequestTopic<'_> {
+impl<'a> Encode for AlterShareGroupOffsetsRequestTopic<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
@@ -263,17 +273,25 @@ impl AlterShareGroupOffsetsRequestTopic<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterShareGroupOffsetsRequestPartition {
     pub partition_index: i32,
     pub start_offset: i64,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl Default for AlterShareGroupOffsetsRequestPartition {
+    fn default() -> Self {
+        Self {
+            partition_index: 0i32,
+            start_offset: 0i64,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl AlterShareGroupOffsetsRequestPartition {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::alter_share_group_offsets_request::AlterShareGroupOffsetsRequestPartition
@@ -289,10 +307,10 @@ impl Encode for AlterShareGroupOffsetsRequestPartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
         if version >= 0 {
-            put_i64(buf, self.start_offset);
+            put_i64(buf, self.start_offset)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

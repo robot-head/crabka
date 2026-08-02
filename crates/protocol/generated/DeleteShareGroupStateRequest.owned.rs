@@ -78,7 +78,7 @@ impl Encode for DeleteShareGroupStateRequest {
         n
     }
 }
-impl Decode<'_> for DeleteShareGroupStateRequest {
+impl<'de> Decode<'de> for DeleteShareGroupStateRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -135,7 +135,7 @@ impl Encode for DeleteStateData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+            crate::primitives::uuid::put_uuid(buf, self.topic_id)
         }
         if version >= 0 {
             {
@@ -175,7 +175,7 @@ impl Encode for DeleteStateData {
         n
     }
 }
-impl Decode<'_> for DeleteStateData {
+impl<'de> Decode<'de> for DeleteStateData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -221,7 +221,7 @@ impl Encode for PartitionData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition);
+            put_i32(buf, self.partition)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -242,7 +242,7 @@ impl Encode for PartitionData {
         n
     }
 }
-impl Decode<'_> for PartitionData {
+impl<'de> Decode<'de> for PartitionData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -270,7 +270,7 @@ impl PartitionData {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert(
         "groupId".to_string(),

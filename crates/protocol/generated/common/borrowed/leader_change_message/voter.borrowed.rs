@@ -3,17 +3,25 @@ use crate::primitives::fixed::{get_i32, put_i32};
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 use bytes::BufMut;
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Voter {
     pub voter_id: i32,
     pub voter_directory_id: crate::primitives::uuid::Uuid,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl Default for Voter {
+    fn default() -> Self {
+        Self {
+            voter_id: 0i32,
+            voter_directory_id: crate::primitives::uuid::Uuid::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl Voter {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::common::leader_change_message::voter::Voter {
         crate::owned::common::leader_change_message::voter::Voter {
             voter_id: (self.voter_id),
@@ -26,10 +34,10 @@ impl Encode for Voter {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.voter_id);
+            put_i32(buf, self.voter_id)
         }
         if version >= 1 {
-            crate::primitives::uuid::put_uuid(buf, self.voter_directory_id);
+            crate::primitives::uuid::put_uuid(buf, self.voter_directory_id)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

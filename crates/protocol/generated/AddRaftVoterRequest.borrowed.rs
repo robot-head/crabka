@@ -30,7 +30,7 @@ pub struct AddRaftVoterRequest<'a> {
     pub ack_when_committed: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for AddRaftVoterRequest<'_> {
+impl<'a> Default for AddRaftVoterRequest<'a> {
     fn default() -> Self {
         Self {
             cluster_id: None,
@@ -43,24 +43,23 @@ impl Default for AddRaftVoterRequest<'_> {
         }
     }
 }
-impl AddRaftVoterRequest<'_> {
+impl<'a> AddRaftVoterRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::add_raft_voter_request::AddRaftVoterRequest {
         crate::owned::add_raft_voter_request::AddRaftVoterRequest {
-            cluster_id: (self.cluster_id).map(std::string::ToString::to_string),
+            cluster_id: (self.cluster_id).map(|s| s.to_string()),
             timeout_ms: (self.timeout_ms),
             voter_id: (self.voter_id),
             voter_directory_id: (self.voter_directory_id),
-            listeners: (self.listeners).iter().map(Listener::to_owned).collect(),
+            listeners: (self.listeners).iter().map(|it| it.to_owned()).collect(),
             ack_when_committed: (self.ack_when_committed),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for AddRaftVoterRequest<'_> {
+impl<'a> Encode for AddRaftVoterRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -77,13 +76,13 @@ impl Encode for AddRaftVoterRequest<'_> {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.timeout_ms);
+            put_i32(buf, self.timeout_ms)
         }
         if version >= 0 {
-            put_i32(buf, self.voter_id);
+            put_i32(buf, self.voter_id)
         }
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.voter_directory_id);
+            crate::primitives::uuid::put_uuid(buf, self.voter_directory_id)
         }
         if version >= 0 {
             {
@@ -94,7 +93,7 @@ impl Encode for AddRaftVoterRequest<'_> {
             }
         }
         if version >= 1 {
-            put_bool(buf, self.ack_when_committed);
+            put_bool(buf, self.ack_when_committed)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -213,18 +212,27 @@ impl AddRaftVoterRequest<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Listener<'a> {
     pub name: &'a str,
     pub host: &'a str,
     pub port: u16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Listener<'_> {
+impl<'a> Default for Listener<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            host: "",
+            port: 0u16,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> Listener<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::add_raft_voter_request::Listener {
         crate::owned::add_raft_voter_request::Listener {
             name: (self.name).to_string(),
@@ -234,7 +242,7 @@ impl Listener<'_> {
         }
     }
 }
-impl Encode for Listener<'_> {
+impl<'a> Encode for Listener<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
@@ -252,7 +260,7 @@ impl Encode for Listener<'_> {
             }
         }
         if version >= 0 {
-            put_u16(buf, self.port);
+            put_u16(buf, self.port)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

@@ -20,29 +20,34 @@ pub const FLEXIBLE_MIN: i16 = 4;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeleteTopicsResponse<'a> {
     pub throttle_time_ms: i32,
     pub responses: Vec<DeletableTopicResult<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl DeleteTopicsResponse<'_> {
+impl<'a> Default for DeleteTopicsResponse<'a> {
+    fn default() -> Self {
+        Self {
+            throttle_time_ms: 0i32,
+            responses: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> DeleteTopicsResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::delete_topics_response::DeleteTopicsResponse {
         crate::owned::delete_topics_response::DeleteTopicsResponse {
             throttle_time_ms: (self.throttle_time_ms),
-            responses: (self.responses)
-                .iter()
-                .map(DeletableTopicResult::to_owned)
-                .collect(),
+            responses: (self.responses).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for DeleteTopicsResponse<'_> {
+impl<'a> Encode for DeleteTopicsResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -52,7 +57,7 @@ impl Encode for DeleteTopicsResponse<'_> {
         }
         let flex = is_flexible(version);
         if version >= 1 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 0 {
             {
@@ -135,7 +140,7 @@ impl DeleteTopicsResponse<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeletableTopicResult<'a> {
     pub name: Option<&'a str>,
     pub topic_id: crate::primitives::uuid::Uuid,
@@ -143,22 +148,32 @@ pub struct DeletableTopicResult<'a> {
     pub error_message: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl DeletableTopicResult<'_> {
+impl<'a> Default for DeletableTopicResult<'a> {
+    fn default() -> Self {
+        Self {
+            name: None,
+            topic_id: crate::primitives::uuid::Uuid::default(),
+            error_code: 0i16,
+            error_message: None,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> DeletableTopicResult<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::delete_topics_response::DeletableTopicResult {
         crate::owned::delete_topics_response::DeletableTopicResult {
-            name: (self.name).map(std::string::ToString::to_string),
+            name: (self.name).map(|s| s.to_string()),
             topic_id: (self.topic_id),
             error_code: (self.error_code),
-            error_message: (self.error_message).map(std::string::ToString::to_string),
+            error_message: (self.error_message).map(|s| s.to_string()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for DeletableTopicResult<'_> {
+impl<'a> Encode for DeletableTopicResult<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 4;
         if version >= 0 {
@@ -177,10 +192,10 @@ impl Encode for DeletableTopicResult<'_> {
             }
         }
         if version >= 6 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+            crate::primitives::uuid::put_uuid(buf, self.topic_id)
         }
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 5 {
             if flex {

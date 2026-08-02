@@ -42,7 +42,7 @@ impl Encode for ProduceResponse {
             }
         }
         if version >= 1 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -74,7 +74,7 @@ impl Encode for ProduceResponse {
         n
     }
 }
-impl Decode<'_> for ProduceResponse {
+impl<'de> Decode<'de> for ProduceResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -181,7 +181,7 @@ impl Encode for TopicProduceResponse {
         n
     }
 }
-impl Decode<'_> for TopicProduceResponse {
+impl<'de> Decode<'de> for TopicProduceResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 9;
         let mut out = Self::default();
@@ -251,19 +251,19 @@ impl Encode for PartitionProduceResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 9;
         if version >= 0 {
-            put_i32(buf, self.index);
+            put_i32(buf, self.index)
         }
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
-            put_i64(buf, self.base_offset);
+            put_i64(buf, self.base_offset)
         }
         if version >= 2 {
-            put_i64(buf, self.log_append_time_ms);
+            put_i64(buf, self.log_append_time_ms)
         }
         if version >= 5 {
-            put_i64(buf, self.log_start_offset);
+            put_i64(buf, self.log_start_offset)
         }
         if version >= 8 {
             {
@@ -331,7 +331,7 @@ impl Encode for PartitionProduceResponse {
         n
     }
 }
-impl Decode<'_> for PartitionProduceResponse {
+impl<'de> Decode<'de> for PartitionProduceResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 9;
         let mut out = Self::default();
@@ -412,7 +412,7 @@ impl Encode for BatchIndexAndErrorMessage {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 9;
         if version >= 8 {
-            put_i32(buf, self.batch_index);
+            put_i32(buf, self.batch_index)
         }
         if version >= 8 {
             if flex {
@@ -448,7 +448,7 @@ impl Encode for BatchIndexAndErrorMessage {
         n
     }
 }
-impl Decode<'_> for BatchIndexAndErrorMessage {
+impl<'de> Decode<'de> for BatchIndexAndErrorMessage {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 9;
         let mut out = Self::default();

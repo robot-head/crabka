@@ -15,31 +15,36 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeleteShareGroupOffsetsRequest<'a> {
     pub group_id: &'a str,
     pub topics: Vec<DeleteShareGroupOffsetsRequestTopic<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl DeleteShareGroupOffsetsRequest<'_> {
+impl<'a> Default for DeleteShareGroupOffsetsRequest<'a> {
+    fn default() -> Self {
+        Self {
+            group_id: "",
+            topics: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> DeleteShareGroupOffsetsRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::delete_share_group_offsets_request::DeleteShareGroupOffsetsRequest {
         crate::owned::delete_share_group_offsets_request::DeleteShareGroupOffsetsRequest {
             group_id: (self.group_id).to_string(),
-            topics: (self.topics)
-                .iter()
-                .map(DeleteShareGroupOffsetsRequestTopic::to_owned)
-                .collect(),
+            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for DeleteShareGroupOffsetsRequest<'_> {
+impl<'a> Encode for DeleteShareGroupOffsetsRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -143,16 +148,23 @@ impl DeleteShareGroupOffsetsRequest<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeleteShareGroupOffsetsRequestTopic<'a> {
     pub topic_name: &'a str,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl DeleteShareGroupOffsetsRequestTopic<'_> {
+impl<'a> Default for DeleteShareGroupOffsetsRequestTopic<'a> {
+    fn default() -> Self {
+        Self {
+            topic_name: "",
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> DeleteShareGroupOffsetsRequestTopic<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::delete_share_group_offsets_request::DeleteShareGroupOffsetsRequestTopic {
@@ -162,7 +174,7 @@ impl DeleteShareGroupOffsetsRequestTopic<'_> {
         }
     }
 }
-impl Encode for DeleteShareGroupOffsetsRequestTopic<'_> {
+impl<'a> Encode for DeleteShareGroupOffsetsRequestTopic<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {

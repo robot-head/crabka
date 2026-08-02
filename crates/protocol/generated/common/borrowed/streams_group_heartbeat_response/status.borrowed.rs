@@ -7,17 +7,25 @@ use crate::primitives::string_bytes_borrowed::{get_compact_string_borrowed, get_
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 use bytes::BufMut;
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Status<'a> {
     pub status_code: i8,
     pub status_detail: &'a str,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Status<'_> {
+impl<'a> Default for Status<'a> {
+    fn default() -> Self {
+        Self {
+            status_code: 0i8,
+            status_detail: "",
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> Status<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::common::streams_group_heartbeat_response::status::Status {
@@ -28,11 +36,11 @@ impl Status<'_> {
         }
     }
 }
-impl Encode for Status<'_> {
+impl<'a> Encode for Status<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i8(buf, self.status_code);
+            put_i8(buf, self.status_code)
         }
         if version >= 0 {
             if flex {

@@ -27,7 +27,7 @@ pub struct ClientQuotaRecord<'a> {
     pub remove: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for ClientQuotaRecord<'_> {
+impl<'a> Default for ClientQuotaRecord<'a> {
     fn default() -> Self {
         Self {
             entity: Vec::new(),
@@ -38,14 +38,13 @@ impl Default for ClientQuotaRecord<'_> {
         }
     }
 }
-impl ClientQuotaRecord<'_> {
+impl<'a> ClientQuotaRecord<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::client_quota_record::ClientQuotaRecord {
         crate::owned::client_quota_record::ClientQuotaRecord {
-            entity: (self.entity).iter().map(EntityData::to_owned).collect(),
+            entity: (self.entity).iter().map(|it| it.to_owned()).collect(),
             key: (self.key).to_string(),
             value: (self.value),
             remove: (self.remove),
@@ -53,7 +52,7 @@ impl ClientQuotaRecord<'_> {
         }
     }
 }
-impl Encode for ClientQuotaRecord<'_> {
+impl<'a> Encode for ClientQuotaRecord<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(
@@ -77,10 +76,10 @@ impl Encode for ClientQuotaRecord<'_> {
             }
         }
         if version >= 0 {
-            put_f64(buf, self.value);
+            put_f64(buf, self.value)
         }
         if version >= 0 {
-            put_bool(buf, self.remove);
+            put_bool(buf, self.remove)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -177,26 +176,34 @@ impl ClientQuotaRecord<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntityData<'a> {
     pub entity_type: &'a str,
     pub entity_name: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl EntityData<'_> {
+impl<'a> Default for EntityData<'a> {
+    fn default() -> Self {
+        Self {
+            entity_type: "",
+            entity_name: None,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> EntityData<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::client_quota_record::EntityData {
         crate::owned::client_quota_record::EntityData {
             entity_type: (self.entity_type).to_string(),
-            entity_name: (self.entity_name).map(std::string::ToString::to_string),
+            entity_name: (self.entity_name).map(|s| s.to_string()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for EntityData<'_> {
+impl<'a> Encode for EntityData<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {

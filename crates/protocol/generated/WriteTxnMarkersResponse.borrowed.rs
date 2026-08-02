@@ -16,27 +16,31 @@ pub const FLEXIBLE_MIN: i16 = 1;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteTxnMarkersResponse<'a> {
     pub markers: Vec<WritableTxnMarkerResult<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl WriteTxnMarkersResponse<'_> {
+impl<'a> Default for WriteTxnMarkersResponse<'a> {
+    fn default() -> Self {
+        Self {
+            markers: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> WriteTxnMarkersResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::write_txn_markers_response::WriteTxnMarkersResponse {
         crate::owned::write_txn_markers_response::WriteTxnMarkersResponse {
-            markers: (self.markers)
-                .iter()
-                .map(WritableTxnMarkerResult::to_owned)
-                .collect(),
+            markers: (self.markers).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for WriteTxnMarkersResponse<'_> {
+impl<'a> Encode for WriteTxnMarkersResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -117,33 +121,38 @@ impl WriteTxnMarkersResponse<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WritableTxnMarkerResult<'a> {
     pub producer_id: i64,
     pub topics: Vec<WritableTxnMarkerTopicResult<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl WritableTxnMarkerResult<'_> {
+impl<'a> Default for WritableTxnMarkerResult<'a> {
+    fn default() -> Self {
+        Self {
+            producer_id: 0i64,
+            topics: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> WritableTxnMarkerResult<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::write_txn_markers_response::WritableTxnMarkerResult {
         crate::owned::write_txn_markers_response::WritableTxnMarkerResult {
             producer_id: (self.producer_id),
-            topics: (self.topics)
-                .iter()
-                .map(WritableTxnMarkerTopicResult::to_owned)
-                .collect(),
+            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for WritableTxnMarkerResult<'_> {
+impl<'a> Encode for WritableTxnMarkerResult<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
         if version >= 0 {
-            put_i64(buf, self.producer_id);
+            put_i64(buf, self.producer_id)
         }
         if version >= 0 {
             {
@@ -217,31 +226,36 @@ impl WritableTxnMarkerResult<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WritableTxnMarkerTopicResult<'a> {
     pub name: &'a str,
     pub partitions: Vec<WritableTxnMarkerPartitionResult>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl WritableTxnMarkerTopicResult<'_> {
+impl<'a> Default for WritableTxnMarkerTopicResult<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            partitions: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> WritableTxnMarkerTopicResult<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::write_txn_markers_response::WritableTxnMarkerTopicResult {
         crate::owned::write_txn_markers_response::WritableTxnMarkerTopicResult {
             name: (self.name).to_string(),
-            partitions: (self.partitions)
-                .iter()
-                .map(WritableTxnMarkerPartitionResult::to_owned)
-                .collect(),
+            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for WritableTxnMarkerTopicResult<'_> {
+impl<'a> Encode for WritableTxnMarkerTopicResult<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
         if version >= 0 {
@@ -336,17 +350,25 @@ impl WritableTxnMarkerTopicResult<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WritableTxnMarkerPartitionResult {
     pub partition_index: i32,
     pub error_code: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl Default for WritableTxnMarkerPartitionResult {
+    fn default() -> Self {
+        Self {
+            partition_index: 0i32,
+            error_code: 0i16,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl WritableTxnMarkerPartitionResult {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::write_txn_markers_response::WritableTxnMarkerPartitionResult {
@@ -361,10 +383,10 @@ impl Encode for WritableTxnMarkerPartitionResult {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
         if version >= 0 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

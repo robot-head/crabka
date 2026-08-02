@@ -34,7 +34,7 @@ pub struct JoinGroupRequest<'a> {
     pub reason: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for JoinGroupRequest<'_> {
+impl<'a> Default for JoinGroupRequest<'a> {
     fn default() -> Self {
         Self {
             group_id: "",
@@ -53,20 +53,16 @@ impl<'a> JoinGroupRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::join_group_request::JoinGroupRequest {
         crate::owned::join_group_request::JoinGroupRequest {
             group_id: (self.group_id).to_string(),
             session_timeout_ms: (self.session_timeout_ms),
             rebalance_timeout_ms: (self.rebalance_timeout_ms),
             member_id: (self.member_id).to_string(),
-            group_instance_id: (self.group_instance_id).map(std::string::ToString::to_string),
+            group_instance_id: (self.group_instance_id).map(|s| s.to_string()),
             protocol_type: (self.protocol_type).to_string(),
-            protocols: (self.protocols)
-                .iter()
-                .map(JoinGroupRequestProtocol::to_owned)
-                .collect(),
-            reason: (self.reason).map(std::string::ToString::to_string),
+            protocols: (self.protocols).iter().map(|it| it.to_owned()).collect(),
+            reason: (self.reason).map(|s| s.to_string()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
@@ -81,12 +77,12 @@ impl<'a> JoinGroupRequest<'a> {
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.session_timeout_ms);
+            put_i32(buf, self.session_timeout_ms)
         }
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 1 {
-            put_i32(buf, self.rebalance_timeout_ms);
+            put_i32(buf, self.rebalance_timeout_ms)
         }
     }
     fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -265,7 +261,7 @@ impl<'a> JoinGroupRequest<'a> {
     fn decode_tagged_fields(
         out: &mut Self,
         buf: &mut &'a [u8],
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -274,7 +270,7 @@ impl<'a> JoinGroupRequest<'a> {
         Ok(())
     }
 }
-impl Encode for JoinGroupRequest<'_> {
+impl<'a> Encode for JoinGroupRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -410,17 +406,25 @@ impl JoinGroupRequest<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JoinGroupRequestProtocol<'a> {
     pub name: &'a str,
     pub metadata: &'a [u8],
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl JoinGroupRequestProtocol<'_> {
+impl<'a> Default for JoinGroupRequestProtocol<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            metadata: &[],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> JoinGroupRequestProtocol<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::join_group_request::JoinGroupRequestProtocol {
         crate::owned::join_group_request::JoinGroupRequestProtocol {
             name: (self.name).to_string(),
@@ -429,7 +433,7 @@ impl JoinGroupRequestProtocol<'_> {
         }
     }
 }
-impl Encode for JoinGroupRequestProtocol<'_> {
+impl<'a> Encode for JoinGroupRequestProtocol<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 6;
         if version >= 0 {

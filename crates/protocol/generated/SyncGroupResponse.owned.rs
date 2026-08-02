@@ -6,8 +6,9 @@ use crate::primitives::string_bytes::{
     put_compact_bytes,
 };
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, get_compact_nullable_string_owned, get_nullable_string_owned,
-    nullable_string_len, put_compact_nullable_string, put_nullable_string,
+    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
+    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
@@ -40,10 +41,10 @@ impl Encode for SyncGroupResponse {
         }
         let flex = is_flexible(version);
         if version >= 1 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 5 {
             if flex {
@@ -109,7 +110,7 @@ impl Encode for SyncGroupResponse {
         n
     }
 }
-impl Decode<'_> for SyncGroupResponse {
+impl<'de> Decode<'de> for SyncGroupResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {

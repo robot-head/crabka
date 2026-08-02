@@ -35,22 +35,22 @@ pub struct GetTelemetrySubscriptionsResponse {
 impl GetTelemetrySubscriptionsResponse {
     fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.client_instance_id);
+            crate::primitives::uuid::put_uuid(buf, self.client_instance_id)
         }
     }
     fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.subscription_id);
+            put_i32(buf, self.subscription_id)
         }
     }
     fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -69,17 +69,17 @@ impl GetTelemetrySubscriptionsResponse {
     }
     fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.push_interval_ms);
+            put_i32(buf, self.push_interval_ms)
         }
     }
     fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.telemetry_max_bytes);
+            put_i32(buf, self.telemetry_max_bytes)
         }
     }
     fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_bool(buf, self.delta_temporality);
+            put_bool(buf, self.delta_temporality)
         }
     }
     fn encode_field_8<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -88,15 +88,15 @@ impl GetTelemetrySubscriptionsResponse {
                 crate::primitives::array::put_array_len(buf, (self.requested_metrics).len(), flex);
                 for it in &self.requested_metrics {
                     if flex {
-                        let () = put_compact_string(buf, it);
+                        let () = put_compact_string(buf, &*it);
                     } else {
-                        let () = put_string(buf, it);
-                    }
+                        let () = put_string(buf, &*it);
+                    };
                 }
             }
         }
     }
-    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
+    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -222,7 +222,7 @@ impl GetTelemetrySubscriptionsResponse {
     fn decode_tagged_fields<B: Buf>(
         out: &mut Self,
         buf: &mut B,
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -296,9 +296,9 @@ impl Encode for GetTelemetrySubscriptionsResponse {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(it)
+                            compact_string_len(&*it)
                         } else {
-                            string_len(it)
+                            string_len(&*it)
                         }
                     })
                     .sum();
@@ -312,7 +312,7 @@ impl Encode for GetTelemetrySubscriptionsResponse {
         n
     }
 }
-impl Decode<'_> for GetTelemetrySubscriptionsResponse {
+impl<'de> Decode<'de> for GetTelemetrySubscriptionsResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -374,7 +374,7 @@ impl GetTelemetrySubscriptionsResponse {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("throttleTimeMs".to_string(), ::serde_json::json!(0));
     obj.insert("errorCode".to_string(), ::serde_json::json!(0));

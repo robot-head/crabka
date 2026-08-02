@@ -14,7 +14,7 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushTelemetryRequest<'a> {
     pub client_instance_id: crate::primitives::uuid::Uuid,
     pub subscription_id: i32,
@@ -23,11 +23,22 @@ pub struct PushTelemetryRequest<'a> {
     pub metrics: &'a [u8],
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl PushTelemetryRequest<'_> {
+impl<'a> Default for PushTelemetryRequest<'a> {
+    fn default() -> Self {
+        Self {
+            client_instance_id: crate::primitives::uuid::Uuid::default(),
+            subscription_id: 0i32,
+            terminating: false,
+            compression_type: 0i8,
+            metrics: &[],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> PushTelemetryRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::push_telemetry_request::PushTelemetryRequest {
         crate::owned::push_telemetry_request::PushTelemetryRequest {
             client_instance_id: (self.client_instance_id),
@@ -39,7 +50,7 @@ impl PushTelemetryRequest<'_> {
         }
     }
 }
-impl Encode for PushTelemetryRequest<'_> {
+impl<'a> Encode for PushTelemetryRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -49,16 +60,16 @@ impl Encode for PushTelemetryRequest<'_> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.client_instance_id);
+            crate::primitives::uuid::put_uuid(buf, self.client_instance_id)
         }
         if version >= 0 {
-            put_i32(buf, self.subscription_id);
+            put_i32(buf, self.subscription_id)
         }
         if version >= 0 {
-            put_bool(buf, self.terminating);
+            put_bool(buf, self.terminating)
         }
         if version >= 0 {
-            put_i8(buf, self.compression_type);
+            put_i8(buf, self.compression_type)
         }
         if version >= 0 {
             if flex {

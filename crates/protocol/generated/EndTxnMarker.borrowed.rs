@@ -10,16 +10,23 @@ pub const FLEXIBLE_MIN: i16 = 32767;
 pub fn is_flexible(version: i16) -> bool {
     version == FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EndTxnMarker {
     pub coordinator_epoch: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
+}
+impl Default for EndTxnMarker {
+    fn default() -> Self {
+        Self {
+            coordinator_epoch: 0i32,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
 }
 impl EndTxnMarker {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::end_txn_marker::EndTxnMarker {
         crate::owned::end_txn_marker::EndTxnMarker {
             coordinator_epoch: (self.coordinator_epoch),
@@ -35,7 +42,7 @@ impl Encode for EndTxnMarker {
             ));
         }
         if version >= 0 {
-            put_i32(buf, self.coordinator_epoch);
+            put_i32(buf, self.coordinator_epoch)
         }
         Ok(())
     }

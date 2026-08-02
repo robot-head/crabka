@@ -92,7 +92,7 @@ impl Encode for EnvelopeRequest {
         n
     }
 }
-impl Decode<'_> for EnvelopeRequest {
+impl<'de> Decode<'de> for EnvelopeRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -150,7 +150,7 @@ impl EnvelopeRequest {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert(
         "requestData".to_string(),

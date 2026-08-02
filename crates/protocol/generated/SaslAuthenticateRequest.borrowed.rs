@@ -13,16 +13,23 @@ pub const FLEXIBLE_MIN: i16 = 2;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SaslAuthenticateRequest<'a> {
     pub auth_bytes: &'a [u8],
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl SaslAuthenticateRequest<'_> {
+impl<'a> Default for SaslAuthenticateRequest<'a> {
+    fn default() -> Self {
+        Self {
+            auth_bytes: &[],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> SaslAuthenticateRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::sasl_authenticate_request::SaslAuthenticateRequest {
         crate::owned::sasl_authenticate_request::SaslAuthenticateRequest {
             auth_bytes: Bytes::copy_from_slice(self.auth_bytes),
@@ -30,7 +37,7 @@ impl SaslAuthenticateRequest<'_> {
         }
     }
 }
-impl Encode for SaslAuthenticateRequest<'_> {
+impl<'a> Encode for SaslAuthenticateRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {

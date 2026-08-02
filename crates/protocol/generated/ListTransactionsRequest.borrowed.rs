@@ -28,7 +28,7 @@ pub struct ListTransactionsRequest<'a> {
     pub transactional_id_pattern: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for ListTransactionsRequest<'_> {
+impl<'a> Default for ListTransactionsRequest<'a> {
     fn default() -> Self {
         Self {
             state_filters: Vec::new(),
@@ -39,26 +39,21 @@ impl Default for ListTransactionsRequest<'_> {
         }
     }
 }
-impl ListTransactionsRequest<'_> {
+impl<'a> ListTransactionsRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::list_transactions_request::ListTransactionsRequest {
         crate::owned::list_transactions_request::ListTransactionsRequest {
-            state_filters: (self.state_filters)
-                .iter()
-                .map(std::string::ToString::to_string)
-                .collect(),
+            state_filters: (self.state_filters).iter().map(|s| s.to_string()).collect(),
             producer_id_filters: (self.producer_id_filters).clone(),
             duration_filter: (self.duration_filter),
-            transactional_id_pattern: (self.transactional_id_pattern)
-                .map(std::string::ToString::to_string),
+            transactional_id_pattern: (self.transactional_id_pattern).map(|s| s.to_string()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for ListTransactionsRequest<'_> {
+impl<'a> Encode for ListTransactionsRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -72,10 +67,10 @@ impl Encode for ListTransactionsRequest<'_> {
                 crate::primitives::array::put_array_len(buf, (self.state_filters).len(), flex);
                 for it in &self.state_filters {
                     if flex {
-                        let () = put_compact_string(buf, it);
+                        let () = put_compact_string(buf, *it);
                     } else {
-                        let () = put_string(buf, it);
-                    }
+                        let () = put_string(buf, *it);
+                    };
                 }
             }
         }
@@ -92,7 +87,7 @@ impl Encode for ListTransactionsRequest<'_> {
             }
         }
         if version >= 1 {
-            put_i64(buf, self.duration_filter);
+            put_i64(buf, self.duration_filter)
         }
         if version >= 2 {
             if flex {
@@ -120,9 +115,9 @@ impl Encode for ListTransactionsRequest<'_> {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(it)
+                            compact_string_len(*it)
                         } else {
-                            string_len(it)
+                            string_len(*it)
                         }
                     })
                     .sum();

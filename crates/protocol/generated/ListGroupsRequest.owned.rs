@@ -36,10 +36,10 @@ impl Encode for ListGroupsRequest {
                 crate::primitives::array::put_array_len(buf, (self.states_filter).len(), flex);
                 for it in &self.states_filter {
                     if flex {
-                        let () = put_compact_string(buf, it);
+                        let () = put_compact_string(buf, &*it);
                     } else {
-                        let () = put_string(buf, it);
-                    }
+                        let () = put_string(buf, &*it);
+                    };
                 }
             }
         }
@@ -48,10 +48,10 @@ impl Encode for ListGroupsRequest {
                 crate::primitives::array::put_array_len(buf, (self.types_filter).len(), flex);
                 for it in &self.types_filter {
                     if flex {
-                        let () = put_compact_string(buf, it);
+                        let () = put_compact_string(buf, &*it);
                     } else {
-                        let () = put_string(buf, it);
-                    }
+                        let () = put_string(buf, &*it);
+                    };
                 }
             }
         }
@@ -74,9 +74,9 @@ impl Encode for ListGroupsRequest {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(it)
+                            compact_string_len(&*it)
                         } else {
-                            string_len(it)
+                            string_len(&*it)
                         }
                     })
                     .sum();
@@ -91,9 +91,9 @@ impl Encode for ListGroupsRequest {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(it)
+                            compact_string_len(&*it)
                         } else {
-                            string_len(it)
+                            string_len(&*it)
                         }
                     })
                     .sum();
@@ -107,7 +107,7 @@ impl Encode for ListGroupsRequest {
         n
     }
 }
-impl Decode<'_> for ListGroupsRequest {
+impl<'de> Decode<'de> for ListGroupsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {

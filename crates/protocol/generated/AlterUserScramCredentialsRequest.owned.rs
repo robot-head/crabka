@@ -90,7 +90,7 @@ impl Encode for AlterUserScramCredentialsRequest {
         n
     }
 }
-impl Decode<'_> for AlterUserScramCredentialsRequest {
+impl<'de> Decode<'de> for AlterUserScramCredentialsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -157,7 +157,7 @@ impl Encode for ScramCredentialDeletion {
             }
         }
         if version >= 0 {
-            put_i8(buf, self.mechanism);
+            put_i8(buf, self.mechanism)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -185,7 +185,7 @@ impl Encode for ScramCredentialDeletion {
         n
     }
 }
-impl Decode<'_> for ScramCredentialDeletion {
+impl<'de> Decode<'de> for ScramCredentialDeletion {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -239,10 +239,10 @@ impl Encode for ScramCredentialUpsertion {
             }
         }
         if version >= 0 {
-            put_i8(buf, self.mechanism);
+            put_i8(buf, self.mechanism)
         }
         if version >= 0 {
-            put_i32(buf, self.iterations);
+            put_i32(buf, self.iterations)
         }
         if version >= 0 {
             if flex {
@@ -301,7 +301,7 @@ impl Encode for ScramCredentialUpsertion {
         n
     }
 }
-impl Decode<'_> for ScramCredentialUpsertion {
+impl<'de> Decode<'de> for ScramCredentialUpsertion {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -365,7 +365,7 @@ impl ScramCredentialUpsertion {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("deletions".to_string(), ::serde_json::Value::Array(vec![]));
     obj.insert("upsertions".to_string(), ::serde_json::Value::Array(vec![]));

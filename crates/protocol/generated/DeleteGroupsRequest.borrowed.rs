@@ -15,27 +15,31 @@ pub const FLEXIBLE_MIN: i16 = 2;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeleteGroupsRequest<'a> {
     pub groups_names: Vec<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl DeleteGroupsRequest<'_> {
+impl<'a> Default for DeleteGroupsRequest<'a> {
+    fn default() -> Self {
+        Self {
+            groups_names: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> DeleteGroupsRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::delete_groups_request::DeleteGroupsRequest {
         crate::owned::delete_groups_request::DeleteGroupsRequest {
-            groups_names: (self.groups_names)
-                .iter()
-                .map(std::string::ToString::to_string)
-                .collect(),
+            groups_names: (self.groups_names).iter().map(|s| s.to_string()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for DeleteGroupsRequest<'_> {
+impl<'a> Encode for DeleteGroupsRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -49,10 +53,10 @@ impl Encode for DeleteGroupsRequest<'_> {
                 crate::primitives::array::put_array_len(buf, (self.groups_names).len(), flex);
                 for it in &self.groups_names {
                     if flex {
-                        let () = put_compact_string(buf, it);
+                        let () = put_compact_string(buf, *it);
                     } else {
-                        let () = put_string(buf, it);
-                    }
+                        let () = put_string(buf, *it);
+                    };
                 }
             }
         }
@@ -73,9 +77,9 @@ impl Encode for DeleteGroupsRequest<'_> {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(it)
+                            compact_string_len(*it)
                         } else {
-                            string_len(it)
+                            string_len(*it)
                         }
                     })
                     .sum();

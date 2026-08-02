@@ -46,7 +46,7 @@ impl Encode for UpdateFeaturesRequest {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.timeout_ms);
+            put_i32(buf, self.timeout_ms)
         }
         if version >= 0 {
             {
@@ -57,7 +57,7 @@ impl Encode for UpdateFeaturesRequest {
             }
         }
         if version >= 1 {
-            put_bool(buf, self.validate_only);
+            put_bool(buf, self.validate_only)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -94,7 +94,7 @@ impl Encode for UpdateFeaturesRequest {
         n
     }
 }
-impl Decode<'_> for UpdateFeaturesRequest {
+impl<'de> Decode<'de> for UpdateFeaturesRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -173,13 +173,13 @@ impl Encode for FeatureUpdateKey {
             }
         }
         if version >= 0 {
-            put_i16(buf, self.max_version_level);
+            put_i16(buf, self.max_version_level)
         }
         if version == 0 {
-            put_bool(buf, self.allow_downgrade);
+            put_bool(buf, self.allow_downgrade)
         }
         if version >= 1 {
-            put_i8(buf, self.upgrade_type);
+            put_i8(buf, self.upgrade_type)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -213,7 +213,7 @@ impl Encode for FeatureUpdateKey {
         n
     }
 }
-impl Decode<'_> for FeatureUpdateKey {
+impl<'de> Decode<'de> for FeatureUpdateKey {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

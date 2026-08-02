@@ -34,7 +34,7 @@ impl Encode for DescribeProducersResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 0 {
             {
@@ -71,7 +71,7 @@ impl Encode for DescribeProducersResponse {
         n
     }
 }
-impl Decode<'_> for DescribeProducersResponse {
+impl<'de> Decode<'de> for DescribeProducersResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -172,7 +172,7 @@ impl Encode for TopicResponse {
         n
     }
 }
-impl Decode<'_> for TopicResponse {
+impl<'de> Decode<'de> for TopicResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -225,10 +225,10 @@ impl Encode for PartitionResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
             if flex {
@@ -287,7 +287,7 @@ impl Encode for PartitionResponse {
         n
     }
 }
-impl Decode<'_> for PartitionResponse {
+impl<'de> Decode<'de> for PartitionResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -367,22 +367,22 @@ impl Encode for ProducerState {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i64(buf, self.producer_id);
+            put_i64(buf, self.producer_id)
         }
         if version >= 0 {
-            put_i32(buf, self.producer_epoch);
+            put_i32(buf, self.producer_epoch)
         }
         if version >= 0 {
-            put_i32(buf, self.last_sequence);
+            put_i32(buf, self.last_sequence)
         }
         if version >= 0 {
-            put_i64(buf, self.last_timestamp);
+            put_i64(buf, self.last_timestamp)
         }
         if version >= 0 {
-            put_i32(buf, self.coordinator_epoch);
+            put_i32(buf, self.coordinator_epoch)
         }
         if version >= 0 {
-            put_i64(buf, self.current_txn_start_offset);
+            put_i64(buf, self.current_txn_start_offset)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -418,7 +418,7 @@ impl Encode for ProducerState {
         n
     }
 }
-impl Decode<'_> for ProducerState {
+impl<'de> Decode<'de> for ProducerState {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -476,7 +476,7 @@ impl ProducerState {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("throttleTimeMs".to_string(), ::serde_json::json!(0));
     obj.insert("topics".to_string(), ::serde_json::Value::Array(vec![]));

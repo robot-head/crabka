@@ -56,7 +56,7 @@ impl Encode for ApiVersionsResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
             {
@@ -67,7 +67,7 @@ impl Encode for ApiVersionsResponse {
             }
         }
         if version >= 1 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if flex {
             let mut tagged = WriteTaggedFields::new();
@@ -100,7 +100,7 @@ impl Encode for ApiVersionsResponse {
                 );
                 tagged.add(0, payload);
             }
-            if self.finalized_features_epoch != -1i64 {
+            if !(self.finalized_features_epoch == -1i64) {
                 let payload = encode_to_bytes(8, |b| {
                     put_i64(b, self.finalized_features_epoch);
                     Ok(())
@@ -182,7 +182,7 @@ impl Encode for ApiVersionsResponse {
                     prefix + body
                 }));
             }
-            if self.finalized_features_epoch != -1i64 {
+            if !(self.finalized_features_epoch == -1i64) {
                 known_pairs.push((1, 8));
             }
             if !(crate::codegen_helpers::is_default(&self.finalized_features)) {
@@ -206,7 +206,7 @@ impl Encode for ApiVersionsResponse {
         n
     }
 }
-impl Decode<'_> for ApiVersionsResponse {
+impl<'de> Decode<'de> for ApiVersionsResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -338,13 +338,13 @@ impl Encode for ApiVersion {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 3;
         if version >= 0 {
-            put_i16(buf, self.api_key);
+            put_i16(buf, self.api_key)
         }
         if version >= 0 {
-            put_i16(buf, self.min_version);
+            put_i16(buf, self.min_version)
         }
         if version >= 0 {
-            put_i16(buf, self.max_version);
+            put_i16(buf, self.max_version)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -371,7 +371,7 @@ impl Encode for ApiVersion {
         n
     }
 }
-impl Decode<'_> for ApiVersion {
+impl<'de> Decode<'de> for ApiVersion {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 3;
         let mut out = Self::default();
@@ -425,10 +425,10 @@ impl Encode for SupportedFeatureKey {
             }
         }
         if version >= 3 {
-            put_i16(buf, self.min_version);
+            put_i16(buf, self.min_version)
         }
         if version >= 3 {
-            put_i16(buf, self.max_version);
+            put_i16(buf, self.max_version)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -459,7 +459,7 @@ impl Encode for SupportedFeatureKey {
         n
     }
 }
-impl Decode<'_> for SupportedFeatureKey {
+impl<'de> Decode<'de> for SupportedFeatureKey {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 3;
         let mut out = Self::default();
@@ -517,10 +517,10 @@ impl Encode for FinalizedFeatureKey {
             }
         }
         if version >= 3 {
-            put_i16(buf, self.max_version_level);
+            put_i16(buf, self.max_version_level)
         }
         if version >= 3 {
-            put_i16(buf, self.min_version_level);
+            put_i16(buf, self.min_version_level)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -551,7 +551,7 @@ impl Encode for FinalizedFeatureKey {
         n
     }
 }
-impl Decode<'_> for FinalizedFeatureKey {
+impl<'de> Decode<'de> for FinalizedFeatureKey {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 3;
         let mut out = Self::default();

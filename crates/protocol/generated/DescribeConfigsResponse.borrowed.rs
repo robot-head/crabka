@@ -22,29 +22,34 @@ pub const FLEXIBLE_MIN: i16 = 4;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribeConfigsResponse<'a> {
     pub throttle_time_ms: i32,
     pub results: Vec<DescribeConfigsResult<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl DescribeConfigsResponse<'_> {
+impl<'a> Default for DescribeConfigsResponse<'a> {
+    fn default() -> Self {
+        Self {
+            throttle_time_ms: 0i32,
+            results: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> DescribeConfigsResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_configs_response::DescribeConfigsResponse {
         crate::owned::describe_configs_response::DescribeConfigsResponse {
             throttle_time_ms: (self.throttle_time_ms),
-            results: (self.results)
-                .iter()
-                .map(DescribeConfigsResult::to_owned)
-                .collect(),
+            results: (self.results).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for DescribeConfigsResponse<'_> {
+impl<'a> Encode for DescribeConfigsResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -54,7 +59,7 @@ impl Encode for DescribeConfigsResponse<'_> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 0 {
             {
@@ -137,7 +142,7 @@ impl DescribeConfigsResponse<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribeConfigsResult<'a> {
     pub error_code: i16,
     pub error_message: Option<&'a str>,
@@ -146,30 +151,38 @@ pub struct DescribeConfigsResult<'a> {
     pub configs: Vec<DescribeConfigsResourceResult<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl DescribeConfigsResult<'_> {
+impl<'a> Default for DescribeConfigsResult<'a> {
+    fn default() -> Self {
+        Self {
+            error_code: 0i16,
+            error_message: None,
+            resource_type: 0i8,
+            resource_name: "",
+            configs: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> DescribeConfigsResult<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_configs_response::DescribeConfigsResult {
         crate::owned::describe_configs_response::DescribeConfigsResult {
             error_code: (self.error_code),
-            error_message: (self.error_message).map(std::string::ToString::to_string),
+            error_message: (self.error_message).map(|s| s.to_string()),
             resource_type: (self.resource_type),
             resource_name: (self.resource_name).to_string(),
-            configs: (self.configs)
-                .iter()
-                .map(DescribeConfigsResourceResult::to_owned)
-                .collect(),
+            configs: (self.configs).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for DescribeConfigsResult<'_> {
+impl<'a> Encode for DescribeConfigsResult<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 4;
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
             if flex {
@@ -179,7 +192,7 @@ impl Encode for DescribeConfigsResult<'_> {
             }
         }
         if version >= 0 {
-            put_i8(buf, self.resource_type);
+            put_i8(buf, self.resource_type)
         }
         if version >= 0 {
             if flex {
@@ -318,7 +331,7 @@ pub struct DescribeConfigsResourceResult<'a> {
     pub documentation: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for DescribeConfigsResourceResult<'_> {
+impl<'a> Default for DescribeConfigsResourceResult<'a> {
     fn default() -> Self {
         Self {
             name: "",
@@ -337,22 +350,18 @@ impl<'a> DescribeConfigsResourceResult<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::describe_configs_response::DescribeConfigsResourceResult {
         crate::owned::describe_configs_response::DescribeConfigsResourceResult {
             name: (self.name).to_string(),
-            value: (self.value).map(std::string::ToString::to_string),
+            value: (self.value).map(|s| s.to_string()),
             read_only: (self.read_only),
             config_source: (self.config_source),
             is_sensitive: (self.is_sensitive),
-            synonyms: (self.synonyms)
-                .iter()
-                .map(DescribeConfigsSynonym::to_owned)
-                .collect(),
+            synonyms: (self.synonyms).iter().map(|it| it.to_owned()).collect(),
             config_type: (self.config_type),
-            documentation: (self.documentation).map(std::string::ToString::to_string),
+            documentation: (self.documentation).map(|s| s.to_string()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
@@ -376,17 +385,17 @@ impl<'a> DescribeConfigsResourceResult<'a> {
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_bool(buf, self.read_only);
+            put_bool(buf, self.read_only)
         }
     }
     fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 1 {
-            put_i8(buf, self.config_source);
+            put_i8(buf, self.config_source)
         }
     }
     fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_bool(buf, self.is_sensitive);
+            put_bool(buf, self.is_sensitive)
         }
     }
     fn encode_field_5<B: BufMut>(
@@ -407,7 +416,7 @@ impl<'a> DescribeConfigsResourceResult<'a> {
     }
     fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 3 {
-            put_i8(buf, self.config_type);
+            put_i8(buf, self.config_type)
         }
     }
     fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -535,7 +544,7 @@ impl<'a> DescribeConfigsResourceResult<'a> {
     fn decode_tagged_fields(
         out: &mut Self,
         buf: &mut &'a [u8],
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -544,7 +553,7 @@ impl<'a> DescribeConfigsResourceResult<'a> {
         Ok(())
     }
 }
-impl Encode for DescribeConfigsResourceResult<'_> {
+impl<'a> Encode for DescribeConfigsResourceResult<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 4;
         self.encode_field_0(buf, version, flex);
@@ -660,28 +669,37 @@ impl DescribeConfigsResourceResult<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribeConfigsSynonym<'a> {
     pub name: &'a str,
     pub value: Option<&'a str>,
     pub source: i8,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl DescribeConfigsSynonym<'_> {
+impl<'a> Default for DescribeConfigsSynonym<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            value: None,
+            source: 0i8,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> DescribeConfigsSynonym<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_configs_response::DescribeConfigsSynonym {
         crate::owned::describe_configs_response::DescribeConfigsSynonym {
             name: (self.name).to_string(),
-            value: (self.value).map(std::string::ToString::to_string),
+            value: (self.value).map(|s| s.to_string()),
             source: (self.source),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for DescribeConfigsSynonym<'_> {
+impl<'a> Encode for DescribeConfigsSynonym<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 4;
         if version >= 1 {
@@ -699,7 +717,7 @@ impl Encode for DescribeConfigsSynonym<'_> {
             }
         }
         if version >= 1 {
-            put_i8(buf, self.source);
+            put_i8(buf, self.source)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

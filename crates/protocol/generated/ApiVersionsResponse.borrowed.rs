@@ -49,11 +49,10 @@ impl ApiVersionsResponse {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::api_versions_response::ApiVersionsResponse {
         crate::owned::api_versions_response::ApiVersionsResponse {
             error_code: (self.error_code),
-            api_keys: (self.api_keys).iter().map(ApiVersion::to_owned).collect(),
+            api_keys: (self.api_keys).iter().map(|it| it.to_owned()).collect(),
             throttle_time_ms: (self.throttle_time_ms),
             supported_features: self.supported_features.clone(),
             finalized_features_epoch: (self.finalized_features_epoch),
@@ -73,7 +72,7 @@ impl Encode for ApiVersionsResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
             {
@@ -84,7 +83,7 @@ impl Encode for ApiVersionsResponse {
             }
         }
         if version >= 1 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if flex {
             let mut tagged = WriteTaggedFields::new();
@@ -117,7 +116,7 @@ impl Encode for ApiVersionsResponse {
                 );
                 tagged.add(0, payload);
             }
-            if self.finalized_features_epoch != -1i64 {
+            if !(self.finalized_features_epoch == -1i64) {
                 let payload = encode_to_bytes(8, |b| {
                     put_i64(b, self.finalized_features_epoch);
                     Ok(())
@@ -199,7 +198,7 @@ impl Encode for ApiVersionsResponse {
                     prefix + body
                 }));
             }
-            if self.finalized_features_epoch != -1i64 {
+            if !(self.finalized_features_epoch == -1i64) {
                 known_pairs.push((1, 8));
             }
             if !(crate::codegen_helpers::is_default(&self.finalized_features)) {
@@ -346,18 +345,27 @@ impl ApiVersionsResponse {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiVersion {
     pub api_key: i16,
     pub min_version: i16,
     pub max_version: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl Default for ApiVersion {
+    fn default() -> Self {
+        Self {
+            api_key: 0i16,
+            min_version: 0i16,
+            max_version: 0i16,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl ApiVersion {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::api_versions_response::ApiVersion {
         crate::owned::api_versions_response::ApiVersion {
             api_key: (self.api_key),
@@ -371,13 +379,13 @@ impl Encode for ApiVersion {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 3;
         if version >= 0 {
-            put_i16(buf, self.api_key);
+            put_i16(buf, self.api_key)
         }
         if version >= 0 {
-            put_i16(buf, self.min_version);
+            put_i16(buf, self.min_version)
         }
         if version >= 0 {
-            put_i16(buf, self.max_version);
+            put_i16(buf, self.max_version)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -440,18 +448,27 @@ impl ApiVersion {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SupportedFeatureKey<'a> {
     pub name: &'a str,
     pub min_version: i16,
     pub max_version: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl SupportedFeatureKey<'_> {
+impl<'a> Default for SupportedFeatureKey<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            min_version: 0i16,
+            max_version: 0i16,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> SupportedFeatureKey<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::api_versions_response::SupportedFeatureKey {
         crate::owned::api_versions_response::SupportedFeatureKey {
             name: (self.name).to_string(),
@@ -461,7 +478,7 @@ impl SupportedFeatureKey<'_> {
         }
     }
 }
-impl Encode for SupportedFeatureKey<'_> {
+impl<'a> Encode for SupportedFeatureKey<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 3;
         if version >= 3 {
@@ -472,10 +489,10 @@ impl Encode for SupportedFeatureKey<'_> {
             }
         }
         if version >= 3 {
-            put_i16(buf, self.min_version);
+            put_i16(buf, self.min_version)
         }
         if version >= 3 {
-            put_i16(buf, self.max_version);
+            put_i16(buf, self.max_version)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -546,18 +563,27 @@ impl SupportedFeatureKey<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FinalizedFeatureKey<'a> {
     pub name: &'a str,
     pub max_version_level: i16,
     pub min_version_level: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl FinalizedFeatureKey<'_> {
+impl<'a> Default for FinalizedFeatureKey<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            max_version_level: 0i16,
+            min_version_level: 0i16,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> FinalizedFeatureKey<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::api_versions_response::FinalizedFeatureKey {
         crate::owned::api_versions_response::FinalizedFeatureKey {
             name: (self.name).to_string(),
@@ -567,7 +593,7 @@ impl FinalizedFeatureKey<'_> {
         }
     }
 }
-impl Encode for FinalizedFeatureKey<'_> {
+impl<'a> Encode for FinalizedFeatureKey<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 3;
         if version >= 3 {
@@ -578,10 +604,10 @@ impl Encode for FinalizedFeatureKey<'_> {
             }
         }
         if version >= 3 {
-            put_i16(buf, self.max_version_level);
+            put_i16(buf, self.max_version_level)
         }
         if version >= 3 {
-            put_i16(buf, self.min_version_level);
+            put_i16(buf, self.min_version_level)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

@@ -49,10 +49,10 @@ impl Encode for FetchSnapshotRequest {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.replica_id);
+            put_i32(buf, self.replica_id)
         }
         if version >= 0 {
-            put_i32(buf, self.max_bytes);
+            put_i32(buf, self.max_bytes)
         }
         if version >= 0 {
             {
@@ -64,7 +64,7 @@ impl Encode for FetchSnapshotRequest {
         }
         if flex {
             let mut tagged = WriteTaggedFields::new();
-            if self.cluster_id.is_some() {
+            if !(self.cluster_id.is_none()) {
                 let payload = encode_to_bytes(
                     if flex {
                         compact_nullable_string_len(self.cluster_id.as_deref())
@@ -76,7 +76,7 @@ impl Encode for FetchSnapshotRequest {
                             let () = put_compact_nullable_string(b, self.cluster_id.as_deref());
                         } else {
                             let () = put_nullable_string(b, self.cluster_id.as_deref());
-                        }
+                        };
                         Ok(())
                     },
                 );
@@ -105,7 +105,7 @@ impl Encode for FetchSnapshotRequest {
         }
         if flex {
             let mut known_pairs: Vec<(u32, usize)> = Vec::new();
-            if self.cluster_id.is_some() {
+            if !(self.cluster_id.is_none()) {
                 known_pairs.push((
                     0,
                     if flex {
@@ -120,7 +120,7 @@ impl Encode for FetchSnapshotRequest {
         n
     }
 }
-impl Decode<'_> for FetchSnapshotRequest {
+impl<'de> Decode<'de> for FetchSnapshotRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -247,7 +247,7 @@ impl Encode for TopicSnapshot {
         n
     }
 }
-impl Decode<'_> for TopicSnapshot {
+impl<'de> Decode<'de> for TopicSnapshot {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -301,16 +301,16 @@ impl Encode for PartitionSnapshot {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition);
+            put_i32(buf, self.partition)
         }
         if version >= 0 {
-            put_i32(buf, self.current_leader_epoch);
+            put_i32(buf, self.current_leader_epoch)
         }
         if version >= 0 {
-            self.snapshot_id.encode(buf, version)?;
+            self.snapshot_id.encode(buf, version)?
         }
         if version >= 0 {
-            put_i64(buf, self.position);
+            put_i64(buf, self.position)
         }
         if flex {
             let mut tagged = WriteTaggedFields::new();
@@ -350,7 +350,7 @@ impl Encode for PartitionSnapshot {
         n
     }
 }
-impl Decode<'_> for PartitionSnapshot {
+impl<'de> Decode<'de> for PartitionSnapshot {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -418,10 +418,10 @@ impl Encode for SnapshotId {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i64(buf, self.end_offset);
+            put_i64(buf, self.end_offset)
         }
         if version >= 0 {
-            put_i32(buf, self.epoch);
+            put_i32(buf, self.epoch)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -445,7 +445,7 @@ impl Encode for SnapshotId {
         n
     }
 }
-impl Decode<'_> for SnapshotId {
+impl<'de> Decode<'de> for SnapshotId {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -479,7 +479,7 @@ impl SnapshotId {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("clusterId".to_string(), ::serde_json::Value::Null);
     obj.insert("replicaId".to_string(), ::serde_json::json!(-1));

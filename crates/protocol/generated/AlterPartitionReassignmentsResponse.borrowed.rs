@@ -29,7 +29,7 @@ pub struct AlterPartitionReassignmentsResponse<'a> {
     pub responses: Vec<ReassignableTopicResponse<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for AlterPartitionReassignmentsResponse<'_> {
+impl<'a> Default for AlterPartitionReassignmentsResponse<'a> {
     fn default() -> Self {
         Self {
             throttle_time_ms: 0i32,
@@ -41,11 +41,10 @@ impl Default for AlterPartitionReassignmentsResponse<'_> {
         }
     }
 }
-impl AlterPartitionReassignmentsResponse<'_> {
+impl<'a> AlterPartitionReassignmentsResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::alter_partition_reassignments_response::AlterPartitionReassignmentsResponse
@@ -54,16 +53,13 @@ impl AlterPartitionReassignmentsResponse<'_> {
             throttle_time_ms: (self.throttle_time_ms),
             allow_replication_factor_change: (self.allow_replication_factor_change),
             error_code: (self.error_code),
-            error_message: (self.error_message).map(std::string::ToString::to_string),
-            responses: (self.responses)
-                .iter()
-                .map(ReassignableTopicResponse::to_owned)
-                .collect(),
+            error_message: (self.error_message).map(|s| s.to_string()),
+            responses: (self.responses).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for AlterPartitionReassignmentsResponse<'_> {
+impl<'a> Encode for AlterPartitionReassignmentsResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -73,13 +69,13 @@ impl Encode for AlterPartitionReassignmentsResponse<'_> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 1 {
-            put_bool(buf, self.allow_replication_factor_change);
+            put_bool(buf, self.allow_replication_factor_change)
         }
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
             if flex {
@@ -204,31 +200,36 @@ impl AlterPartitionReassignmentsResponse<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReassignableTopicResponse<'a> {
     pub name: &'a str,
     pub partitions: Vec<ReassignablePartitionResponse<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl ReassignableTopicResponse<'_> {
+impl<'a> Default for ReassignableTopicResponse<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            partitions: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> ReassignableTopicResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::alter_partition_reassignments_response::ReassignableTopicResponse {
         crate::owned::alter_partition_reassignments_response::ReassignableTopicResponse {
             name: (self.name).to_string(),
-            partitions: (self.partitions)
-                .iter()
-                .map(ReassignablePartitionResponse::to_owned)
-                .collect(),
+            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for ReassignableTopicResponse<'_> {
+impl<'a> Encode for ReassignableTopicResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
@@ -321,37 +322,46 @@ impl ReassignableTopicResponse<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReassignablePartitionResponse<'a> {
     pub partition_index: i32,
     pub error_code: i16,
     pub error_message: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl ReassignablePartitionResponse<'_> {
+impl<'a> Default for ReassignablePartitionResponse<'a> {
+    fn default() -> Self {
+        Self {
+            partition_index: 0i32,
+            error_code: 0i16,
+            error_message: None,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> ReassignablePartitionResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::alter_partition_reassignments_response::ReassignablePartitionResponse {
         crate::owned::alter_partition_reassignments_response::ReassignablePartitionResponse {
             partition_index: (self.partition_index),
             error_code: (self.error_code),
-            error_message: (self.error_message).map(std::string::ToString::to_string),
+            error_message: (self.error_message).map(|s| s.to_string()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for ReassignablePartitionResponse<'_> {
+impl<'a> Encode for ReassignablePartitionResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
             if flex {

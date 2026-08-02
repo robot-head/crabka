@@ -42,7 +42,7 @@ impl Encode for AlterConfigsRequest {
             }
         }
         if version >= 0 {
-            put_bool(buf, self.validate_only);
+            put_bool(buf, self.validate_only)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -74,7 +74,7 @@ impl Encode for AlterConfigsRequest {
         n
     }
 }
-impl Decode<'_> for AlterConfigsRequest {
+impl<'de> Decode<'de> for AlterConfigsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -128,7 +128,7 @@ impl Encode for AlterConfigsResource {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
-            put_i8(buf, self.resource_type);
+            put_i8(buf, self.resource_type)
         }
         if version >= 0 {
             if flex {
@@ -182,7 +182,7 @@ impl Encode for AlterConfigsResource {
         n
     }
 }
-impl Decode<'_> for AlterConfigsResource {
+impl<'de> Decode<'de> for AlterConfigsResource {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();
@@ -282,7 +282,7 @@ impl Encode for AlterableConfig {
         n
     }
 }
-impl Decode<'_> for AlterableConfig {
+impl<'de> Decode<'de> for AlterableConfig {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();
@@ -324,7 +324,7 @@ impl AlterableConfig {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("resources".to_string(), ::serde_json::Value::Array(vec![]));
     obj.insert("validateOnly".to_string(), ::serde_json::Value::Bool(false));

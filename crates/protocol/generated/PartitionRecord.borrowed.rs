@@ -54,7 +54,6 @@ impl PartitionRecord {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::partition_record::PartitionRecord {
         crate::owned::partition_record::PartitionRecord {
             partition_id: (self.partition_id),
@@ -75,12 +74,12 @@ impl PartitionRecord {
     }
     fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.partition_id);
+            put_i32(buf, self.partition_id)
         }
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+            crate::primitives::uuid::put_uuid(buf, self.topic_id)
         }
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -125,17 +124,17 @@ impl PartitionRecord {
     }
     fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.leader);
+            put_i32(buf, self.leader)
         }
     }
     fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.leader_epoch);
+            put_i32(buf, self.leader_epoch)
         }
     }
     fn encode_field_8<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.partition_epoch);
+            put_i32(buf, self.partition_epoch)
         }
     }
     fn encode_field_9<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -151,19 +150,19 @@ impl PartitionRecord {
     fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
         if flex {
             let mut tagged = WriteTaggedFields::new();
-            if self.leader_recovery_state != 0i8 {
+            if !(self.leader_recovery_state == 0i8) {
                 let payload = encode_to_bytes(1, |b| {
                     put_i8(b, self.leader_recovery_state);
                     Ok(())
                 });
                 tagged.add(0, payload);
             }
-            if self.eligible_leader_replicas.is_some() {
+            if !(self.eligible_leader_replicas.is_none()) {
                 let payload = encode_to_bytes(
                     {
                         let opt: Option<&Vec<_>> = (self.eligible_leader_replicas).as_ref();
                         let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                            opt.map(std::vec::Vec::len),
+                            opt.map(|v| v.len()),
                             flex,
                         );
                         let body: usize = opt.map_or(0, |v| v.iter().map(|_| 4).sum());
@@ -184,12 +183,12 @@ impl PartitionRecord {
                 );
                 tagged.add(1, payload);
             }
-            if self.last_known_elr.is_some() {
+            if !(self.last_known_elr.is_none()) {
                 let payload = encode_to_bytes(
                     {
                         let opt: Option<&Vec<_>> = (self.last_known_elr).as_ref();
                         let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                            opt.map(std::vec::Vec::len),
+                            opt.map(|v| v.len()),
                             flex,
                         );
                         let body: usize = opt.map_or(0, |v| v.iter().map(|_| 4).sum());
@@ -213,9 +212,9 @@ impl PartitionRecord {
             tagged.write(buf, &self.unknown_tagged_fields);
         }
     }
-    fn decode_field_0(
+    fn decode_field_0<'de>(
         out: &mut Self,
-        buf: &mut &[u8],
+        buf: &mut &'de [u8],
         version: i16,
         _flex: bool,
     ) -> Result<(), ProtocolError> {
@@ -224,9 +223,9 @@ impl PartitionRecord {
         }
         Ok(())
     }
-    fn decode_field_1(
+    fn decode_field_1<'de>(
         out: &mut Self,
-        buf: &mut &[u8],
+        buf: &mut &'de [u8],
         version: i16,
         _flex: bool,
     ) -> Result<(), ProtocolError> {
@@ -235,9 +234,9 @@ impl PartitionRecord {
         }
         Ok(())
     }
-    fn decode_field_2(
+    fn decode_field_2<'de>(
         out: &mut Self,
-        buf: &mut &[u8],
+        buf: &mut &'de [u8],
         version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
@@ -253,9 +252,9 @@ impl PartitionRecord {
         }
         Ok(())
     }
-    fn decode_field_3(
+    fn decode_field_3<'de>(
         out: &mut Self,
-        buf: &mut &[u8],
+        buf: &mut &'de [u8],
         version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
@@ -271,9 +270,9 @@ impl PartitionRecord {
         }
         Ok(())
     }
-    fn decode_field_4(
+    fn decode_field_4<'de>(
         out: &mut Self,
-        buf: &mut &[u8],
+        buf: &mut &'de [u8],
         version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
@@ -289,9 +288,9 @@ impl PartitionRecord {
         }
         Ok(())
     }
-    fn decode_field_5(
+    fn decode_field_5<'de>(
         out: &mut Self,
-        buf: &mut &[u8],
+        buf: &mut &'de [u8],
         version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
@@ -307,9 +306,9 @@ impl PartitionRecord {
         }
         Ok(())
     }
-    fn decode_field_6(
+    fn decode_field_6<'de>(
         out: &mut Self,
-        buf: &mut &[u8],
+        buf: &mut &'de [u8],
         version: i16,
         _flex: bool,
     ) -> Result<(), ProtocolError> {
@@ -318,9 +317,9 @@ impl PartitionRecord {
         }
         Ok(())
     }
-    fn decode_field_7(
+    fn decode_field_7<'de>(
         out: &mut Self,
-        buf: &mut &[u8],
+        buf: &mut &'de [u8],
         version: i16,
         _flex: bool,
     ) -> Result<(), ProtocolError> {
@@ -329,9 +328,9 @@ impl PartitionRecord {
         }
         Ok(())
     }
-    fn decode_field_8(
+    fn decode_field_8<'de>(
         out: &mut Self,
-        buf: &mut &[u8],
+        buf: &mut &'de [u8],
         version: i16,
         _flex: bool,
     ) -> Result<(), ProtocolError> {
@@ -340,9 +339,9 @@ impl PartitionRecord {
         }
         Ok(())
     }
-    fn decode_field_9(
+    fn decode_field_9<'de>(
         out: &mut Self,
-        buf: &mut &[u8],
+        buf: &mut &'de [u8],
         version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
@@ -358,10 +357,10 @@ impl PartitionRecord {
         }
         Ok(())
     }
-    fn decode_tagged_fields(
+    fn decode_tagged_fields<'de>(
         out: &mut Self,
-        buf: &mut &[u8],
-        _version: i16,
+        buf: &mut &'de [u8],
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -513,25 +512,25 @@ impl Encode for PartitionRecord {
         }
         if flex {
             let mut known_pairs: Vec<(u32, usize)> = Vec::new();
-            if self.leader_recovery_state != 0i8 {
+            if !(self.leader_recovery_state == 0i8) {
                 known_pairs.push((0, 1));
             }
-            if self.eligible_leader_replicas.is_some() {
+            if !(self.eligible_leader_replicas.is_none()) {
                 known_pairs.push((1, {
                     let opt: Option<&Vec<_>> = (self.eligible_leader_replicas).as_ref();
                     let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                        opt.map(std::vec::Vec::len),
+                        opt.map(|v| v.len()),
                         flex,
                     );
                     let body: usize = opt.map_or(0, |v| v.iter().map(|_| 4).sum());
                     prefix + body
                 }));
             }
-            if self.last_known_elr.is_some() {
+            if !(self.last_known_elr.is_none()) {
                 known_pairs.push((2, {
                     let opt: Option<&Vec<_>> = (self.last_known_elr).as_ref();
                     let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                        opt.map(std::vec::Vec::len),
+                        opt.map(|v| v.len()),
                         flex,
                     );
                     let body: usize = opt.map_or(0, |v| v.iter().map(|_| 4).sum());

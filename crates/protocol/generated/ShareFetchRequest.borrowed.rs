@@ -3,11 +3,12 @@ use crate::primitives::fixed::{
     get_bool, get_i8, get_i32, get_i64, put_bool, put_i8, put_i32, put_i64,
 };
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, nullable_string_len, put_compact_nullable_string,
-    put_nullable_string,
+    compact_nullable_string_len, compact_string_len, nullable_string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
 use crate::primitives::string_bytes_borrowed::{
-    get_compact_nullable_string_borrowed, get_nullable_string_borrowed,
+    get_compact_nullable_string_borrowed, get_compact_string_borrowed,
+    get_nullable_string_borrowed, get_string_borrowed,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
@@ -37,7 +38,7 @@ pub struct ShareFetchRequest<'a> {
     pub forgotten_topics_data: Vec<ForgottenTopic>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for ShareFetchRequest<'_> {
+impl<'a> Default for ShareFetchRequest<'a> {
     fn default() -> Self {
         Self {
             group_id: None,
@@ -60,11 +61,10 @@ impl<'a> ShareFetchRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::share_fetch_request::ShareFetchRequest {
         crate::owned::share_fetch_request::ShareFetchRequest {
-            group_id: (self.group_id).map(std::string::ToString::to_string),
-            member_id: (self.member_id).map(std::string::ToString::to_string),
+            group_id: (self.group_id).map(|s| s.to_string()),
+            member_id: (self.member_id).map(|s| s.to_string()),
             share_session_epoch: (self.share_session_epoch),
             max_wait_ms: (self.max_wait_ms),
             min_bytes: (self.min_bytes),
@@ -73,10 +73,10 @@ impl<'a> ShareFetchRequest<'a> {
             batch_size: (self.batch_size),
             share_acquire_mode: (self.share_acquire_mode),
             is_renew_ack: (self.is_renew_ack),
-            topics: (self.topics).iter().map(FetchTopic::to_owned).collect(),
+            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
             forgotten_topics_data: (self.forgotten_topics_data)
                 .iter()
-                .map(ForgottenTopic::to_owned)
+                .map(|it| it.to_owned())
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
@@ -101,42 +101,42 @@ impl<'a> ShareFetchRequest<'a> {
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.share_session_epoch);
+            put_i32(buf, self.share_session_epoch)
         }
     }
     fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.max_wait_ms);
+            put_i32(buf, self.max_wait_ms)
         }
     }
     fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.min_bytes);
+            put_i32(buf, self.min_bytes)
         }
     }
     fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.max_bytes);
+            put_i32(buf, self.max_bytes)
         }
     }
     fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 1 {
-            put_i32(buf, self.max_records);
+            put_i32(buf, self.max_records)
         }
     }
     fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 1 {
-            put_i32(buf, self.batch_size);
+            put_i32(buf, self.batch_size)
         }
     }
     fn encode_field_8<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 2 {
-            put_i8(buf, self.share_acquire_mode);
+            put_i8(buf, self.share_acquire_mode)
         }
     }
     fn encode_field_9<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 2 {
-            put_bool(buf, self.is_renew_ack);
+            put_bool(buf, self.is_renew_ack)
         }
     }
     fn encode_field_10<B: BufMut>(
@@ -338,7 +338,7 @@ impl<'a> ShareFetchRequest<'a> {
     fn decode_tagged_fields(
         out: &mut Self,
         buf: &mut &'a [u8],
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -347,7 +347,7 @@ impl<'a> ShareFetchRequest<'a> {
         Ok(())
     }
 }
-impl Encode for ShareFetchRequest<'_> {
+impl<'a> Encode for ShareFetchRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -510,24 +510,29 @@ impl ShareFetchRequest<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchTopic {
     pub topic_id: crate::primitives::uuid::Uuid,
     pub partitions: Vec<FetchPartition>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl Default for FetchTopic {
+    fn default() -> Self {
+        Self {
+            topic_id: crate::primitives::uuid::Uuid::default(),
+            partitions: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl FetchTopic {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::share_fetch_request::FetchTopic {
         crate::owned::share_fetch_request::FetchTopic {
             topic_id: (self.topic_id),
-            partitions: (self.partitions)
-                .iter()
-                .map(FetchPartition::to_owned)
-                .collect(),
+            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
@@ -536,7 +541,7 @@ impl Encode for FetchTopic {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+            crate::primitives::uuid::put_uuid(buf, self.topic_id)
         }
         if version >= 0 {
             {
@@ -613,25 +618,34 @@ impl FetchTopic {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchPartition {
     pub partition_index: i32,
     pub partition_max_bytes: i32,
     pub acknowledgement_batches: Vec<AcknowledgementBatch>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl Default for FetchPartition {
+    fn default() -> Self {
+        Self {
+            partition_index: 0i32,
+            partition_max_bytes: 0i32,
+            acknowledgement_batches: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl FetchPartition {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::share_fetch_request::FetchPartition {
         crate::owned::share_fetch_request::FetchPartition {
             partition_index: (self.partition_index),
             partition_max_bytes: (self.partition_max_bytes),
             acknowledgement_batches: (self.acknowledgement_batches)
                 .iter()
-                .map(AcknowledgementBatch::to_owned)
+                .map(|it| it.to_owned())
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
@@ -641,10 +655,10 @@ impl Encode for FetchPartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
         if version == 0 {
-            put_i32(buf, self.partition_max_bytes);
+            put_i32(buf, self.partition_max_bytes)
         }
         if version >= 0 {
             {
@@ -736,18 +750,27 @@ impl FetchPartition {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcknowledgementBatch {
     pub first_offset: i64,
     pub last_offset: i64,
     pub acknowledge_types: Vec<i8>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl Default for AcknowledgementBatch {
+    fn default() -> Self {
+        Self {
+            first_offset: 0i64,
+            last_offset: 0i64,
+            acknowledge_types: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl AcknowledgementBatch {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::share_fetch_request::AcknowledgementBatch {
         crate::owned::share_fetch_request::AcknowledgementBatch {
             first_offset: (self.first_offset),
@@ -761,10 +784,10 @@ impl Encode for AcknowledgementBatch {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i64(buf, self.first_offset);
+            put_i64(buf, self.first_offset)
         }
         if version >= 0 {
-            put_i64(buf, self.last_offset);
+            put_i64(buf, self.last_offset)
         }
         if version >= 0 {
             {
@@ -849,17 +872,25 @@ impl AcknowledgementBatch {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForgottenTopic {
     pub topic_id: crate::primitives::uuid::Uuid,
     pub partitions: Vec<i32>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl Default for ForgottenTopic {
+    fn default() -> Self {
+        Self {
+            topic_id: crate::primitives::uuid::Uuid::default(),
+            partitions: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl ForgottenTopic {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::share_fetch_request::ForgottenTopic {
         crate::owned::share_fetch_request::ForgottenTopic {
             topic_id: (self.topic_id),
@@ -872,7 +903,7 @@ impl Encode for ForgottenTopic {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+            crate::primitives::uuid::put_uuid(buf, self.topic_id)
         }
         if version >= 0 {
             {

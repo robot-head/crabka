@@ -96,7 +96,7 @@ impl Encode for LeaveGroupRequest {
         n
     }
 }
-impl Decode<'_> for LeaveGroupRequest {
+impl<'de> Decode<'de> for LeaveGroupRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -221,7 +221,7 @@ impl Encode for MemberIdentity {
         n
     }
 }
-impl Decode<'_> for MemberIdentity {
+impl<'de> Decode<'de> for MemberIdentity {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 4;
         let mut out = Self::default();

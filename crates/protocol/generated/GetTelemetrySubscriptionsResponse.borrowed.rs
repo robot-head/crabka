@@ -18,7 +18,7 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GetTelemetrySubscriptionsResponse<'a> {
     pub throttle_time_ms: i32,
     pub error_code: i16,
@@ -31,11 +31,26 @@ pub struct GetTelemetrySubscriptionsResponse<'a> {
     pub requested_metrics: Vec<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl<'a> Default for GetTelemetrySubscriptionsResponse<'a> {
+    fn default() -> Self {
+        Self {
+            throttle_time_ms: 0i32,
+            error_code: 0i16,
+            client_instance_id: crate::primitives::uuid::Uuid::default(),
+            subscription_id: 0i32,
+            accepted_compression_types: Vec::new(),
+            push_interval_ms: 0i32,
+            telemetry_max_bytes: 0i32,
+            delta_temporality: false,
+            requested_metrics: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl<'a> GetTelemetrySubscriptionsResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::get_telemetry_subscriptions_response::GetTelemetrySubscriptionsResponse {
@@ -50,29 +65,29 @@ impl<'a> GetTelemetrySubscriptionsResponse<'a> {
             delta_temporality: (self.delta_temporality),
             requested_metrics: (self.requested_metrics)
                 .iter()
-                .map(std::string::ToString::to_string)
+                .map(|s| s.to_string())
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
     fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.client_instance_id);
+            crate::primitives::uuid::put_uuid(buf, self.client_instance_id)
         }
     }
     fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.subscription_id);
+            put_i32(buf, self.subscription_id)
         }
     }
     fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -91,17 +106,17 @@ impl<'a> GetTelemetrySubscriptionsResponse<'a> {
     }
     fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.push_interval_ms);
+            put_i32(buf, self.push_interval_ms)
         }
     }
     fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.telemetry_max_bytes);
+            put_i32(buf, self.telemetry_max_bytes)
         }
     }
     fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_bool(buf, self.delta_temporality);
+            put_bool(buf, self.delta_temporality)
         }
     }
     fn encode_field_8<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -110,10 +125,10 @@ impl<'a> GetTelemetrySubscriptionsResponse<'a> {
                 crate::primitives::array::put_array_len(buf, (self.requested_metrics).len(), flex);
                 for it in &self.requested_metrics {
                     if flex {
-                        let () = put_compact_string(buf, it);
+                        let () = put_compact_string(buf, *it);
                     } else {
-                        let () = put_string(buf, it);
-                    }
+                        let () = put_string(buf, *it);
+                    };
                 }
             }
         }
@@ -244,7 +259,7 @@ impl<'a> GetTelemetrySubscriptionsResponse<'a> {
     fn decode_tagged_fields(
         out: &mut Self,
         buf: &mut &'a [u8],
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -253,7 +268,7 @@ impl<'a> GetTelemetrySubscriptionsResponse<'a> {
         Ok(())
     }
 }
-impl Encode for GetTelemetrySubscriptionsResponse<'_> {
+impl<'a> Encode for GetTelemetrySubscriptionsResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -318,9 +333,9 @@ impl Encode for GetTelemetrySubscriptionsResponse<'_> {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(it)
+                            compact_string_len(*it)
                         } else {
-                            string_len(it)
+                            string_len(*it)
                         }
                     })
                     .sum();

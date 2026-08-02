@@ -18,28 +18,36 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteShareGroupStateRequest<'a> {
     pub group_id: &'a str,
     pub topics: Vec<WriteStateData>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl WriteShareGroupStateRequest<'_> {
+impl<'a> Default for WriteShareGroupStateRequest<'a> {
+    fn default() -> Self {
+        Self {
+            group_id: "",
+            topics: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> WriteShareGroupStateRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::write_share_group_state_request::WriteShareGroupStateRequest {
         crate::owned::write_share_group_state_request::WriteShareGroupStateRequest {
             group_id: (self.group_id).to_string(),
-            topics: (self.topics).iter().map(WriteStateData::to_owned).collect(),
+            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for WriteShareGroupStateRequest<'_> {
+impl<'a> Encode for WriteShareGroupStateRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -141,24 +149,29 @@ impl WriteShareGroupStateRequest<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteStateData {
     pub topic_id: crate::primitives::uuid::Uuid,
     pub partitions: Vec<PartitionData>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl Default for WriteStateData {
+    fn default() -> Self {
+        Self {
+            topic_id: crate::primitives::uuid::Uuid::default(),
+            partitions: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl WriteStateData {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::write_share_group_state_request::WriteStateData {
         crate::owned::write_share_group_state_request::WriteStateData {
             topic_id: (self.topic_id),
-            partitions: (self.partitions)
-                .iter()
-                .map(PartitionData::to_owned)
-                .collect(),
+            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
@@ -167,7 +180,7 @@ impl Encode for WriteStateData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+            crate::primitives::uuid::put_uuid(buf, self.topic_id)
         }
         if version >= 0 {
             {
@@ -271,7 +284,6 @@ impl PartitionData {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::write_share_group_state_request::PartitionData {
         crate::owned::write_share_group_state_request::PartitionData {
             partition: (self.partition),
@@ -281,7 +293,7 @@ impl PartitionData {
             delivery_complete_count: (self.delivery_complete_count),
             state_batches: (self.state_batches)
                 .iter()
-                .map(StateBatch::to_owned)
+                .map(|it| it.to_owned())
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
@@ -291,19 +303,19 @@ impl Encode for PartitionData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition);
+            put_i32(buf, self.partition)
         }
         if version >= 0 {
-            put_i32(buf, self.state_epoch);
+            put_i32(buf, self.state_epoch)
         }
         if version >= 0 {
-            put_i32(buf, self.leader_epoch);
+            put_i32(buf, self.leader_epoch)
         }
         if version >= 0 {
-            put_i64(buf, self.start_offset);
+            put_i64(buf, self.start_offset)
         }
         if version >= 1 {
-            put_i32(buf, self.delivery_complete_count);
+            put_i32(buf, self.delivery_complete_count)
         }
         if version >= 0 {
             {
@@ -418,7 +430,7 @@ impl PartitionData {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateBatch {
     pub first_offset: i64,
     pub last_offset: i64,
@@ -426,11 +438,21 @@ pub struct StateBatch {
     pub delivery_count: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl Default for StateBatch {
+    fn default() -> Self {
+        Self {
+            first_offset: 0i64,
+            last_offset: 0i64,
+            delivery_state: 0i8,
+            delivery_count: 0i16,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl StateBatch {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::write_share_group_state_request::StateBatch {
         crate::owned::write_share_group_state_request::StateBatch {
             first_offset: (self.first_offset),
@@ -445,16 +467,16 @@ impl Encode for StateBatch {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i64(buf, self.first_offset);
+            put_i64(buf, self.first_offset)
         }
         if version >= 0 {
-            put_i64(buf, self.last_offset);
+            put_i64(buf, self.last_offset)
         }
         if version >= 0 {
-            put_i8(buf, self.delivery_state);
+            put_i8(buf, self.delivery_state)
         }
         if version >= 0 {
-            put_i16(buf, self.delivery_count);
+            put_i16(buf, self.delivery_count)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

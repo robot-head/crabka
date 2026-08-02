@@ -34,10 +34,10 @@ impl Encode for ListGroupsResponse {
         }
         let flex = is_flexible(version);
         if version >= 1 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
             {
@@ -77,7 +77,7 @@ impl Encode for ListGroupsResponse {
         n
     }
 }
-impl Decode<'_> for ListGroupsResponse {
+impl<'de> Decode<'de> for ListGroupsResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -209,7 +209,7 @@ impl Encode for ListedGroup {
         n
     }
 }
-impl Decode<'_> for ListedGroup {
+impl<'de> Decode<'de> for ListedGroup {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 3;
         let mut out = Self::default();

@@ -16,7 +16,7 @@ pub const FLEXIBLE_MIN: i16 = 3;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddPartitionsToTxnRequest<'a> {
     pub transactions: Vec<AddPartitionsToTxnTransaction<'a>>,
     pub v3_and_below_transactional_id: &'a str,
@@ -25,25 +25,39 @@ pub struct AddPartitionsToTxnRequest<'a> {
     pub v3_and_below_topics: Vec<super::common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl AddPartitionsToTxnRequest<'_> {
+impl<'a> Default for AddPartitionsToTxnRequest<'a> {
+    fn default() -> Self {
+        Self {
+            transactions: Vec::new(),
+            v3_and_below_transactional_id: "",
+            v3_and_below_producer_id: 0i64,
+            v3_and_below_producer_epoch: 0i16,
+            v3_and_below_topics: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> AddPartitionsToTxnRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::add_partitions_to_txn_request::AddPartitionsToTxnRequest {
         crate::owned::add_partitions_to_txn_request::AddPartitionsToTxnRequest {
-            transactions: (self.transactions).iter().map(AddPartitionsToTxnTransaction::to_owned).collect(),
+            transactions: (self.transactions).iter().map(|it| it.to_owned()).collect(),
             v3_and_below_transactional_id: (self.v3_and_below_transactional_id).to_string(),
             v3_and_below_producer_id: (self.v3_and_below_producer_id),
             v3_and_below_producer_epoch: (self.v3_and_below_producer_epoch),
-            v3_and_below_topics: (self.v3_and_below_topics).iter().map(super::common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic::to_owned).collect(),
+            v3_and_below_topics: (self.v3_and_below_topics)
+                .iter()
+                .map(|it| it.to_owned())
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for AddPartitionsToTxnRequest<'_> {
+impl<'a> Encode for AddPartitionsToTxnRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -68,10 +82,10 @@ impl Encode for AddPartitionsToTxnRequest<'_> {
             }
         }
         if (0..=3).contains(&version) {
-            put_i64(buf, self.v3_and_below_producer_id);
+            put_i64(buf, self.v3_and_below_producer_id)
         }
         if (0..=3).contains(&version) {
-            put_i16(buf, self.v3_and_below_producer_epoch);
+            put_i16(buf, self.v3_and_below_producer_epoch)
         }
         if (0..=3).contains(&version) {
             {
@@ -210,7 +224,7 @@ impl AddPartitionsToTxnRequest<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddPartitionsToTxnTransaction<'a> {
     pub transactional_id: &'a str,
     pub producer_id: i64,
@@ -219,11 +233,22 @@ pub struct AddPartitionsToTxnTransaction<'a> {
     pub topics: Vec<super::common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl AddPartitionsToTxnTransaction<'_> {
+impl<'a> Default for AddPartitionsToTxnTransaction<'a> {
+    fn default() -> Self {
+        Self {
+            transactional_id: "",
+            producer_id: 0i64,
+            producer_epoch: 0i16,
+            verify_only: false,
+            topics: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> AddPartitionsToTxnTransaction<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::add_partitions_to_txn_request::AddPartitionsToTxnTransaction {
@@ -232,12 +257,12 @@ impl AddPartitionsToTxnTransaction<'_> {
             producer_id: (self.producer_id),
             producer_epoch: (self.producer_epoch),
             verify_only: (self.verify_only),
-            topics: (self.topics).iter().map(super::common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic::to_owned).collect(),
+            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for AddPartitionsToTxnTransaction<'_> {
+impl<'a> Encode for AddPartitionsToTxnTransaction<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 3;
         if version >= 4 {
@@ -248,13 +273,13 @@ impl Encode for AddPartitionsToTxnTransaction<'_> {
             }
         }
         if version >= 4 {
-            put_i64(buf, self.producer_id);
+            put_i64(buf, self.producer_id)
         }
         if version >= 4 {
-            put_i16(buf, self.producer_epoch);
+            put_i16(buf, self.producer_epoch)
         }
         if version >= 4 {
-            put_bool(buf, self.verify_only);
+            put_bool(buf, self.verify_only)
         }
         if version >= 4 {
             {

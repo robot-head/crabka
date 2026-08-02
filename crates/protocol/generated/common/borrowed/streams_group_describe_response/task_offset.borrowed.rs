@@ -7,18 +7,27 @@ use crate::primitives::string_bytes_borrowed::{get_compact_string_borrowed, get_
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 use bytes::BufMut;
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskOffset<'a> {
     pub subtopology_id: &'a str,
     pub partition: i32,
     pub offset: i64,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl TaskOffset<'_> {
+impl<'a> Default for TaskOffset<'a> {
+    fn default() -> Self {
+        Self {
+            subtopology_id: "",
+            partition: 0i32,
+            offset: 0i64,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> TaskOffset<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::common::streams_group_describe_response::task_offset::TaskOffset {
@@ -30,7 +39,7 @@ impl TaskOffset<'_> {
         }
     }
 }
-impl Encode for TaskOffset<'_> {
+impl<'a> Encode for TaskOffset<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
@@ -41,10 +50,10 @@ impl Encode for TaskOffset<'_> {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.partition);
+            put_i32(buf, self.partition)
         }
         if version >= 0 {
-            put_i64(buf, self.offset);
+            put_i64(buf, self.offset)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

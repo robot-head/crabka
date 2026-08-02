@@ -2,8 +2,9 @@
 
 use crate::primitives::fixed::{get_i16, get_i32, put_i16, put_i32};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, get_compact_nullable_string_owned, get_nullable_string_owned,
-    nullable_string_len, put_compact_nullable_string, put_nullable_string,
+    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
+    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
@@ -33,13 +34,13 @@ impl Encode for RequestHeader {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i16(buf, self.request_api_key);
+            put_i16(buf, self.request_api_key)
         }
         if version >= 0 {
-            put_i16(buf, self.request_api_version);
+            put_i16(buf, self.request_api_version)
         }
         if version >= 0 {
-            put_i32(buf, self.correlation_id);
+            put_i32(buf, self.correlation_id)
         }
         if version >= 1 {
             {
@@ -86,7 +87,7 @@ impl Encode for RequestHeader {
         n
     }
 }
-impl Decode<'_> for RequestHeader {
+impl<'de> Decode<'de> for RequestHeader {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(

@@ -11,17 +11,25 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnregisterBrokerRecord {
     pub broker_id: i32,
     pub broker_epoch: i64,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl Default for UnregisterBrokerRecord {
+    fn default() -> Self {
+        Self {
+            broker_id: 0i32,
+            broker_epoch: 0i64,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl UnregisterBrokerRecord {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::unregister_broker_record::UnregisterBrokerRecord {
         crate::owned::unregister_broker_record::UnregisterBrokerRecord {
             broker_id: (self.broker_id),
@@ -39,10 +47,10 @@ impl Encode for UnregisterBrokerRecord {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.broker_id);
+            put_i32(buf, self.broker_id)
         }
         if version >= 0 {
-            put_i64(buf, self.broker_epoch);
+            put_i64(buf, self.broker_epoch)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

@@ -40,13 +40,13 @@ impl Encode for DescribeClusterRequest {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_bool(buf, self.include_cluster_authorized_operations);
+            put_bool(buf, self.include_cluster_authorized_operations)
         }
         if version >= 1 {
-            put_i8(buf, self.endpoint_type);
+            put_i8(buf, self.endpoint_type)
         }
         if version >= 2 {
-            put_bool(buf, self.include_fenced_brokers);
+            put_bool(buf, self.include_fenced_brokers)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -73,7 +73,7 @@ impl Encode for DescribeClusterRequest {
         n
     }
 }
-impl Decode<'_> for DescribeClusterRequest {
+impl<'de> Decode<'de> for DescribeClusterRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {

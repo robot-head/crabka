@@ -47,10 +47,10 @@ impl Encode for ProduceRequest {
             }
         }
         if version >= 0 {
-            put_i16(buf, self.acks);
+            put_i16(buf, self.acks)
         }
         if version >= 0 {
-            put_i32(buf, self.timeout_ms);
+            put_i32(buf, self.timeout_ms)
         }
         if version >= 0 {
             {
@@ -100,7 +100,7 @@ impl Encode for ProduceRequest {
         n
     }
 }
-impl Decode<'_> for ProduceRequest {
+impl<'de> Decode<'de> for ProduceRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -219,7 +219,7 @@ impl Encode for TopicProduceData {
         n
     }
 }
-impl Decode<'_> for TopicProduceData {
+impl<'de> Decode<'de> for TopicProduceData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 9;
         let mut out = Self::default();
@@ -270,7 +270,7 @@ impl Encode for PartitionProduceData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 9;
         if version >= 0 {
-            put_i32(buf, self.index);
+            put_i32(buf, self.index)
         }
         if version >= 0 {
             match &self.records {
@@ -336,7 +336,7 @@ impl Encode for PartitionProduceData {
         n
     }
 }
-impl Decode<'_> for PartitionProduceData {
+impl<'de> Decode<'de> for PartitionProduceData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 9;
         let mut out = Self::default();

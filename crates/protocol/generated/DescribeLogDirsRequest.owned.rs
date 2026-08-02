@@ -55,7 +55,7 @@ impl Encode for DescribeLogDirsRequest {
             n += {
                 let opt: Option<&Vec<_>> = (self.topics).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
+                    opt.map(|v| v.len()),
                     flex,
                 );
                 let body: usize =
@@ -70,7 +70,7 @@ impl Encode for DescribeLogDirsRequest {
         n
     }
 }
-impl Decode<'_> for DescribeLogDirsRequest {
+impl<'de> Decode<'de> for DescribeLogDirsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -167,7 +167,7 @@ impl Encode for DescribableLogDirTopic {
         n
     }
 }
-impl Decode<'_> for DescribableLogDirTopic {
+impl<'de> Decode<'de> for DescribableLogDirTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();
@@ -212,7 +212,7 @@ impl DescribableLogDirTopic {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("topics".to_string(), ::serde_json::Value::Null);
     ::serde_json::Value::Object(obj)

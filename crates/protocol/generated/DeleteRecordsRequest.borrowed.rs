@@ -16,29 +16,34 @@ pub const FLEXIBLE_MIN: i16 = 2;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeleteRecordsRequest<'a> {
     pub topics: Vec<DeleteRecordsTopic<'a>>,
     pub timeout_ms: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl DeleteRecordsRequest<'_> {
+impl<'a> Default for DeleteRecordsRequest<'a> {
+    fn default() -> Self {
+        Self {
+            topics: Vec::new(),
+            timeout_ms: 0i32,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> DeleteRecordsRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::delete_records_request::DeleteRecordsRequest {
         crate::owned::delete_records_request::DeleteRecordsRequest {
-            topics: (self.topics)
-                .iter()
-                .map(DeleteRecordsTopic::to_owned)
-                .collect(),
+            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
             timeout_ms: (self.timeout_ms),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for DeleteRecordsRequest<'_> {
+impl<'a> Encode for DeleteRecordsRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -56,7 +61,7 @@ impl Encode for DeleteRecordsRequest<'_> {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.timeout_ms);
+            put_i32(buf, self.timeout_ms)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -128,29 +133,34 @@ impl DeleteRecordsRequest<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeleteRecordsTopic<'a> {
     pub name: &'a str,
     pub partitions: Vec<DeleteRecordsPartition>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl DeleteRecordsTopic<'_> {
+impl<'a> Default for DeleteRecordsTopic<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            partitions: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> DeleteRecordsTopic<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::delete_records_request::DeleteRecordsTopic {
         crate::owned::delete_records_request::DeleteRecordsTopic {
             name: (self.name).to_string(),
-            partitions: (self.partitions)
-                .iter()
-                .map(DeleteRecordsPartition::to_owned)
-                .collect(),
+            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for DeleteRecordsTopic<'_> {
+impl<'a> Encode for DeleteRecordsTopic<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
@@ -243,17 +253,25 @@ impl DeleteRecordsTopic<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeleteRecordsPartition {
     pub partition_index: i32,
     pub offset: i64,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl Default for DeleteRecordsPartition {
+    fn default() -> Self {
+        Self {
+            partition_index: 0i32,
+            offset: 0i64,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl DeleteRecordsPartition {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::delete_records_request::DeleteRecordsPartition {
         crate::owned::delete_records_request::DeleteRecordsPartition {
             partition_index: (self.partition_index),
@@ -266,10 +284,10 @@ impl Encode for DeleteRecordsPartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
         if version >= 0 {
-            put_i64(buf, self.offset);
+            put_i64(buf, self.offset)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

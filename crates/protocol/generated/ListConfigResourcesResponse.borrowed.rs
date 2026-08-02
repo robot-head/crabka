@@ -16,18 +16,27 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListConfigResourcesResponse<'a> {
     pub throttle_time_ms: i32,
     pub error_code: i16,
     pub config_resources: Vec<ConfigResource<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl ListConfigResourcesResponse<'_> {
+impl<'a> Default for ListConfigResourcesResponse<'a> {
+    fn default() -> Self {
+        Self {
+            throttle_time_ms: 0i32,
+            error_code: 0i16,
+            config_resources: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> ListConfigResourcesResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::list_config_resources_response::ListConfigResourcesResponse {
@@ -36,13 +45,13 @@ impl ListConfigResourcesResponse<'_> {
             error_code: (self.error_code),
             config_resources: (self.config_resources)
                 .iter()
-                .map(ConfigResource::to_owned)
+                .map(|it| it.to_owned())
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for ListConfigResourcesResponse<'_> {
+impl<'a> Encode for ListConfigResourcesResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -52,10 +61,10 @@ impl Encode for ListConfigResourcesResponse<'_> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
             {
@@ -155,7 +164,7 @@ pub struct ConfigResource<'a> {
     pub resource_type: i8,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for ConfigResource<'_> {
+impl<'a> Default for ConfigResource<'a> {
     fn default() -> Self {
         Self {
             resource_name: "",
@@ -164,11 +173,10 @@ impl Default for ConfigResource<'_> {
         }
     }
 }
-impl ConfigResource<'_> {
+impl<'a> ConfigResource<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::list_config_resources_response::ConfigResource {
         crate::owned::list_config_resources_response::ConfigResource {
             resource_name: (self.resource_name).to_string(),
@@ -177,7 +185,7 @@ impl ConfigResource<'_> {
         }
     }
 }
-impl Encode for ConfigResource<'_> {
+impl<'a> Encode for ConfigResource<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
@@ -188,7 +196,7 @@ impl Encode for ConfigResource<'_> {
             }
         }
         if version >= 1 {
-            put_i8(buf, self.resource_type);
+            put_i8(buf, self.resource_type)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

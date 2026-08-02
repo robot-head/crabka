@@ -23,7 +23,7 @@ pub struct ElectLeadersRequest<'a> {
     pub timeout_ms: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for ElectLeadersRequest<'_> {
+impl<'a> Default for ElectLeadersRequest<'a> {
     fn default() -> Self {
         Self {
             election_type: 0i8,
@@ -33,23 +33,22 @@ impl Default for ElectLeadersRequest<'_> {
         }
     }
 }
-impl ElectLeadersRequest<'_> {
+impl<'a> ElectLeadersRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::elect_leaders_request::ElectLeadersRequest {
         crate::owned::elect_leaders_request::ElectLeadersRequest {
             election_type: (self.election_type),
             topic_partitions: (self.topic_partitions)
                 .as_ref()
-                .map(|v| v.iter().map(TopicPartitions::to_owned).collect()),
+                .map(|v| v.iter().map(|it| it.to_owned()).collect()),
             timeout_ms: (self.timeout_ms),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for ElectLeadersRequest<'_> {
+impl<'a> Encode for ElectLeadersRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -59,7 +58,7 @@ impl Encode for ElectLeadersRequest<'_> {
         }
         let flex = is_flexible(version);
         if version >= 1 {
-            put_i8(buf, self.election_type);
+            put_i8(buf, self.election_type)
         }
         if version >= 0 {
             {
@@ -73,7 +72,7 @@ impl Encode for ElectLeadersRequest<'_> {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.timeout_ms);
+            put_i32(buf, self.timeout_ms)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -91,7 +90,7 @@ impl Encode for ElectLeadersRequest<'_> {
             n += {
                 let opt: Option<&Vec<_>> = (self.topic_partitions).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
+                    opt.map(|v| v.len()),
                     flex,
                 );
                 let body: usize =
@@ -163,17 +162,25 @@ impl ElectLeadersRequest<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicPartitions<'a> {
     pub topic: &'a str,
     pub partitions: Vec<i32>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl TopicPartitions<'_> {
+impl<'a> Default for TopicPartitions<'a> {
+    fn default() -> Self {
+        Self {
+            topic: "",
+            partitions: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> TopicPartitions<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::elect_leaders_request::TopicPartitions {
         crate::owned::elect_leaders_request::TopicPartitions {
             topic: (self.topic).to_string(),
@@ -182,7 +189,7 @@ impl TopicPartitions<'_> {
         }
     }
 }
-impl Encode for TopicPartitions<'_> {
+impl<'a> Encode for TopicPartitions<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {

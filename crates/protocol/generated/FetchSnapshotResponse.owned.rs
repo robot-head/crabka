@@ -42,10 +42,10 @@ impl Encode for FetchSnapshotResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
             {
@@ -127,7 +127,7 @@ impl Encode for FetchSnapshotResponse {
         n
     }
 }
-impl Decode<'_> for FetchSnapshotResponse {
+impl<'de> Decode<'de> for FetchSnapshotResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -257,7 +257,7 @@ impl Encode for TopicSnapshot {
         n
     }
 }
-impl Decode<'_> for TopicSnapshot {
+impl<'de> Decode<'de> for TopicSnapshot {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -313,19 +313,19 @@ impl Encode for PartitionSnapshot {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.index);
+            put_i32(buf, self.index)
         }
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
-            self.snapshot_id.encode(buf, version)?;
+            self.snapshot_id.encode(buf, version)?
         }
         if version >= 0 {
-            put_i64(buf, self.size);
+            put_i64(buf, self.size)
         }
         if version >= 0 {
-            put_i64(buf, self.position);
+            put_i64(buf, self.position)
         }
         if version >= 0 {
             {
@@ -396,7 +396,7 @@ impl Encode for PartitionSnapshot {
         n
     }
 }
-impl Decode<'_> for PartitionSnapshot {
+impl<'de> Decode<'de> for PartitionSnapshot {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -481,10 +481,10 @@ impl Encode for SnapshotId {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i64(buf, self.end_offset);
+            put_i64(buf, self.end_offset)
         }
         if version >= 0 {
-            put_i32(buf, self.epoch);
+            put_i32(buf, self.epoch)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -508,7 +508,7 @@ impl Encode for SnapshotId {
         n
     }
 }
-impl Decode<'_> for SnapshotId {
+impl<'de> Decode<'de> for SnapshotId {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -548,10 +548,10 @@ impl Encode for LeaderIdAndEpoch {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.leader_id);
+            put_i32(buf, self.leader_id)
         }
         if version >= 0 {
-            put_i32(buf, self.leader_epoch);
+            put_i32(buf, self.leader_epoch)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -575,7 +575,7 @@ impl Encode for LeaderIdAndEpoch {
         n
     }
 }
-impl Decode<'_> for LeaderIdAndEpoch {
+impl<'de> Decode<'de> for LeaderIdAndEpoch {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -616,7 +616,7 @@ impl Encode for NodeEndpoint {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 1 {
-            put_i32(buf, self.node_id);
+            put_i32(buf, self.node_id)
         }
         if version >= 1 {
             if flex {
@@ -626,7 +626,7 @@ impl Encode for NodeEndpoint {
             }
         }
         if version >= 1 {
-            put_u16(buf, self.port);
+            put_u16(buf, self.port)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -657,7 +657,7 @@ impl Encode for NodeEndpoint {
         n
     }
 }
-impl Decode<'_> for NodeEndpoint {
+impl<'de> Decode<'de> for NodeEndpoint {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

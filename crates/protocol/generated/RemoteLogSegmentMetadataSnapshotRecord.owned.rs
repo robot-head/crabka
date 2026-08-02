@@ -38,32 +38,32 @@ pub struct RemoteLogSegmentMetadataSnapshotRecord {
 impl RemoteLogSegmentMetadataSnapshotRecord {
     fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.segment_id);
+            crate::primitives::uuid::put_uuid(buf, self.segment_id)
         }
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i64(buf, self.start_offset);
+            put_i64(buf, self.start_offset)
         }
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i64(buf, self.end_offset);
+            put_i64(buf, self.end_offset)
         }
     }
     fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.broker_id);
+            put_i32(buf, self.broker_id)
         }
     }
     fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i64(buf, self.max_timestamp_ms);
+            put_i64(buf, self.max_timestamp_ms)
         }
     }
     fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i64(buf, self.event_timestamp_ms);
+            put_i64(buf, self.event_timestamp_ms)
         }
     }
     fn encode_field_6<B: BufMut>(
@@ -88,7 +88,7 @@ impl RemoteLogSegmentMetadataSnapshotRecord {
     }
     fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.segment_size_in_bytes);
+            put_i32(buf, self.segment_size_in_bytes)
         }
     }
     fn encode_field_8<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -102,10 +102,10 @@ impl RemoteLogSegmentMetadataSnapshotRecord {
     }
     fn encode_field_9<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i8(buf, self.remote_log_segment_state);
+            put_i8(buf, self.remote_log_segment_state)
         }
     }
-    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
+    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if flex {
             let mut tagged = WriteTaggedFields::new();
             if !(crate::codegen_helpers::is_default(&self.txn_index_empty)) {
@@ -242,7 +242,7 @@ impl RemoteLogSegmentMetadataSnapshotRecord {
     fn decode_tagged_fields<B: Buf>(
         out: &mut Self,
         buf: &mut B,
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -342,7 +342,7 @@ impl Encode for RemoteLogSegmentMetadataSnapshotRecord {
         n
     }
 }
-impl Decode<'_> for RemoteLogSegmentMetadataSnapshotRecord {
+impl<'de> Decode<'de> for RemoteLogSegmentMetadataSnapshotRecord {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(
@@ -416,10 +416,10 @@ impl Encode for SegmentLeaderEpochEntry {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.leader_epoch);
+            put_i32(buf, self.leader_epoch)
         }
         if version >= 0 {
-            put_i64(buf, self.offset);
+            put_i64(buf, self.offset)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -443,7 +443,7 @@ impl Encode for SegmentLeaderEpochEntry {
         n
     }
 }
-impl Decode<'_> for SegmentLeaderEpochEntry {
+impl<'de> Decode<'de> for SegmentLeaderEpochEntry {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -477,7 +477,7 @@ impl SegmentLeaderEpochEntry {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert(
         "segmentId".to_string(),

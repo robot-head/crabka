@@ -15,7 +15,7 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemotePartitionDeleteMetadataRecord<'a> {
     pub topic_id_partition: TopicIdPartitionEntry<'a>,
     pub broker_id: i32,
@@ -23,11 +23,21 @@ pub struct RemotePartitionDeleteMetadataRecord<'a> {
     pub remote_partition_delete_state: i8,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl RemotePartitionDeleteMetadataRecord<'_> {
+impl<'a> Default for RemotePartitionDeleteMetadataRecord<'a> {
+    fn default() -> Self {
+        Self {
+            topic_id_partition: <TopicIdPartitionEntry<'a>>::default(),
+            broker_id: 0i32,
+            event_timestamp_ms: 0i64,
+            remote_partition_delete_state: 0i8,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> RemotePartitionDeleteMetadataRecord<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::remote_partition_delete_metadata_record::RemotePartitionDeleteMetadataRecord
@@ -41,7 +51,7 @@ impl RemotePartitionDeleteMetadataRecord<'_> {
         }
     }
 }
-impl Encode for RemotePartitionDeleteMetadataRecord<'_> {
+impl<'a> Encode for RemotePartitionDeleteMetadataRecord<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(
@@ -50,16 +60,16 @@ impl Encode for RemotePartitionDeleteMetadataRecord<'_> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            self.topic_id_partition.encode(buf, version)?;
+            self.topic_id_partition.encode(buf, version)?
         }
         if version >= 0 {
-            put_i32(buf, self.broker_id);
+            put_i32(buf, self.broker_id)
         }
         if version >= 0 {
-            put_i64(buf, self.event_timestamp_ms);
+            put_i64(buf, self.event_timestamp_ms)
         }
         if version >= 0 {
-            put_i8(buf, self.remote_partition_delete_state);
+            put_i8(buf, self.remote_partition_delete_state)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -136,18 +146,27 @@ impl RemotePartitionDeleteMetadataRecord<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicIdPartitionEntry<'a> {
     pub name: &'a str,
     pub id: crate::primitives::uuid::Uuid,
     pub partition: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl TopicIdPartitionEntry<'_> {
+impl<'a> Default for TopicIdPartitionEntry<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            id: crate::primitives::uuid::Uuid::default(),
+            partition: 0i32,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> TopicIdPartitionEntry<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::remote_partition_delete_metadata_record::TopicIdPartitionEntry {
@@ -159,7 +178,7 @@ impl TopicIdPartitionEntry<'_> {
         }
     }
 }
-impl Encode for TopicIdPartitionEntry<'_> {
+impl<'a> Encode for TopicIdPartitionEntry<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
@@ -170,10 +189,10 @@ impl Encode for TopicIdPartitionEntry<'_> {
             }
         }
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.id);
+            crate::primitives::uuid::put_uuid(buf, self.id)
         }
         if version >= 0 {
-            put_i32(buf, self.partition);
+            put_i32(buf, self.partition)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

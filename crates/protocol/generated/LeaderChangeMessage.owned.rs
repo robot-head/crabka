@@ -29,10 +29,10 @@ impl Encode for LeaderChangeMessage {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i16(buf, self.version);
+            put_i16(buf, self.version)
         }
         if version >= 0 {
-            put_i32(buf, self.leader_id);
+            put_i32(buf, self.leader_id)
         }
         if version >= 0 {
             {
@@ -93,7 +93,7 @@ impl Encode for LeaderChangeMessage {
         n
     }
 }
-impl Decode<'_> for LeaderChangeMessage {
+impl<'de> Decode<'de> for LeaderChangeMessage {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(
@@ -163,7 +163,7 @@ impl LeaderChangeMessage {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("version".to_string(), ::serde_json::json!(0));
     obj.insert("leaderId".to_string(), ::serde_json::json!(0));

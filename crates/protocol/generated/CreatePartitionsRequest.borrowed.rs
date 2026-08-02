@@ -16,31 +16,37 @@ pub const FLEXIBLE_MIN: i16 = 2;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreatePartitionsRequest<'a> {
     pub topics: Vec<CreatePartitionsTopic<'a>>,
     pub timeout_ms: i32,
     pub validate_only: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl CreatePartitionsRequest<'_> {
+impl<'a> Default for CreatePartitionsRequest<'a> {
+    fn default() -> Self {
+        Self {
+            topics: Vec::new(),
+            timeout_ms: 0i32,
+            validate_only: false,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> CreatePartitionsRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::create_partitions_request::CreatePartitionsRequest {
         crate::owned::create_partitions_request::CreatePartitionsRequest {
-            topics: (self.topics)
-                .iter()
-                .map(CreatePartitionsTopic::to_owned)
-                .collect(),
+            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
             timeout_ms: (self.timeout_ms),
             validate_only: (self.validate_only),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for CreatePartitionsRequest<'_> {
+impl<'a> Encode for CreatePartitionsRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -58,10 +64,10 @@ impl Encode for CreatePartitionsRequest<'_> {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.timeout_ms);
+            put_i32(buf, self.timeout_ms)
         }
         if version >= 0 {
-            put_bool(buf, self.validate_only);
+            put_bool(buf, self.validate_only)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -142,30 +148,39 @@ impl CreatePartitionsRequest<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreatePartitionsTopic<'a> {
     pub name: &'a str,
     pub count: i32,
     pub assignments: Option<Vec<CreatePartitionsAssignment>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl CreatePartitionsTopic<'_> {
+impl<'a> Default for CreatePartitionsTopic<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            count: 0i32,
+            assignments: None,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> CreatePartitionsTopic<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::create_partitions_request::CreatePartitionsTopic {
         crate::owned::create_partitions_request::CreatePartitionsTopic {
             name: (self.name).to_string(),
             count: (self.count),
             assignments: (self.assignments)
                 .as_ref()
-                .map(|v| v.iter().map(CreatePartitionsAssignment::to_owned).collect()),
+                .map(|v| v.iter().map(|it| it.to_owned()).collect()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for CreatePartitionsTopic<'_> {
+impl<'a> Encode for CreatePartitionsTopic<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
@@ -176,7 +191,7 @@ impl Encode for CreatePartitionsTopic<'_> {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.count);
+            put_i32(buf, self.count)
         }
         if version >= 0 {
             {
@@ -212,7 +227,7 @@ impl Encode for CreatePartitionsTopic<'_> {
             n += {
                 let opt: Option<&Vec<_>> = (self.assignments).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
+                    opt.map(|v| v.len()),
                     flex,
                 );
                 let body: usize =
@@ -279,16 +294,23 @@ impl CreatePartitionsTopic<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreatePartitionsAssignment {
     pub broker_ids: Vec<i32>,
     pub unknown_tagged_fields: UnknownTaggedFields,
+}
+impl Default for CreatePartitionsAssignment {
+    fn default() -> Self {
+        Self {
+            broker_ids: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
 }
 impl CreatePartitionsAssignment {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::create_partitions_request::CreatePartitionsAssignment {
         crate::owned::create_partitions_request::CreatePartitionsAssignment {
             broker_ids: (self.broker_ids).clone(),

@@ -28,7 +28,7 @@ pub const FLEXIBLE_MIN: i16 = 12;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchResponse<'a> {
     pub throttle_time_ms: i32,
     pub error_code: i16,
@@ -37,26 +37,34 @@ pub struct FetchResponse<'a> {
     pub node_endpoints: Vec<crate::owned::fetch_response::NodeEndpoint>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl FetchResponse<'_> {
+impl<'a> Default for FetchResponse<'a> {
+    fn default() -> Self {
+        Self {
+            throttle_time_ms: 0i32,
+            error_code: 0i16,
+            session_id: 0i32,
+            responses: Vec::new(),
+            node_endpoints: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> FetchResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::fetch_response::FetchResponse {
         crate::owned::fetch_response::FetchResponse {
             throttle_time_ms: (self.throttle_time_ms),
             error_code: (self.error_code),
             session_id: (self.session_id),
-            responses: (self.responses)
-                .iter()
-                .map(FetchableTopicResponse::to_owned)
-                .collect(),
+            responses: (self.responses).iter().map(|it| it.to_owned()).collect(),
             node_endpoints: self.node_endpoints.clone(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for FetchResponse<'_> {
+impl<'a> Encode for FetchResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -66,13 +74,13 @@ impl Encode for FetchResponse<'_> {
         }
         let flex = is_flexible(version);
         if version >= 1 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 7 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 7 {
-            put_i32(buf, self.session_id);
+            put_i32(buf, self.session_id)
         }
         if version >= 0 {
             {
@@ -242,31 +250,37 @@ impl FetchResponse<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchableTopicResponse<'a> {
     pub topic: &'a str,
     pub topic_id: crate::primitives::uuid::Uuid,
     pub partitions: Vec<PartitionData<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl FetchableTopicResponse<'_> {
+impl<'a> Default for FetchableTopicResponse<'a> {
+    fn default() -> Self {
+        Self {
+            topic: "",
+            topic_id: crate::primitives::uuid::Uuid::default(),
+            partitions: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> FetchableTopicResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::fetch_response::FetchableTopicResponse {
         crate::owned::fetch_response::FetchableTopicResponse {
             topic: (self.topic).to_string(),
             topic_id: (self.topic_id),
-            partitions: (self.partitions)
-                .iter()
-                .map(PartitionData::to_owned)
-                .collect(),
+            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for FetchableTopicResponse<'_> {
+impl<'a> Encode for FetchableTopicResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 12;
         if (0..=12).contains(&version) {
@@ -277,7 +291,7 @@ impl Encode for FetchableTopicResponse<'_> {
             }
         }
         if version >= 13 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+            crate::primitives::uuid::put_uuid(buf, self.topic_id)
         }
         if version >= 0 {
             {
@@ -386,7 +400,7 @@ pub struct PartitionData<'a> {
     pub snapshot_id: SnapshotId,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for PartitionData<'_> {
+impl<'a> Default for PartitionData<'a> {
     fn default() -> Self {
         Self {
             partition_index: 0i32,
@@ -408,7 +422,6 @@ impl<'a> PartitionData<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::fetch_response::PartitionData {
         crate::owned::fetch_response::PartitionData {
             partition_index: (self.partition_index),
@@ -418,7 +431,7 @@ impl<'a> PartitionData<'a> {
             log_start_offset: (self.log_start_offset),
             aborted_transactions: (self.aborted_transactions)
                 .as_ref()
-                .map(|v| v.iter().map(AbortedTransaction::to_owned).collect()),
+                .map(|v| v.iter().map(|it| it.to_owned()).collect()),
             preferred_read_replica: (self.preferred_read_replica),
             records: (self.records)
                 .as_ref()
@@ -431,27 +444,27 @@ impl<'a> PartitionData<'a> {
     }
     fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i64(buf, self.high_watermark);
+            put_i64(buf, self.high_watermark)
         }
     }
     fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 4 {
-            put_i64(buf, self.last_stable_offset);
+            put_i64(buf, self.last_stable_offset)
         }
     }
     fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 5 {
-            put_i64(buf, self.log_start_offset);
+            put_i64(buf, self.log_start_offset)
         }
     }
     fn encode_field_5<B: BufMut>(
@@ -475,7 +488,7 @@ impl<'a> PartitionData<'a> {
     }
     fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 11 {
-            put_i32(buf, self.preferred_read_replica);
+            put_i32(buf, self.preferred_read_replica)
         }
     }
     fn encode_field_7<B: BufMut>(
@@ -697,7 +710,7 @@ impl<'a> PartitionData<'a> {
         Ok(())
     }
 }
-impl Encode for PartitionData<'_> {
+impl<'a> Encode for PartitionData<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 12;
         self.encode_field_0(buf, version, flex);
@@ -733,7 +746,7 @@ impl Encode for PartitionData<'_> {
             n += {
                 let opt: Option<&Vec<_>> = (self.aborted_transactions).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
+                    opt.map(|v| v.len()),
                     flex,
                 );
                 let body: usize =
@@ -855,7 +868,6 @@ impl EpochEndOffset {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::fetch_response::EpochEndOffset {
         crate::owned::fetch_response::EpochEndOffset {
             epoch: (self.epoch),
@@ -868,10 +880,10 @@ impl Encode for EpochEndOffset {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 12;
         if version >= 12 {
-            put_i32(buf, self.epoch);
+            put_i32(buf, self.epoch)
         }
         if version >= 12 {
-            put_i64(buf, self.end_offset);
+            put_i64(buf, self.end_offset)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -944,7 +956,6 @@ impl LeaderIdAndEpoch {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::fetch_response::LeaderIdAndEpoch {
         crate::owned::fetch_response::LeaderIdAndEpoch {
             leader_id: (self.leader_id),
@@ -957,10 +968,10 @@ impl Encode for LeaderIdAndEpoch {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 12;
         if version >= 12 {
-            put_i32(buf, self.leader_id);
+            put_i32(buf, self.leader_id)
         }
         if version >= 12 {
-            put_i32(buf, self.leader_epoch);
+            put_i32(buf, self.leader_epoch)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -1033,7 +1044,6 @@ impl SnapshotId {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::fetch_response::SnapshotId {
         crate::owned::fetch_response::SnapshotId {
             end_offset: (self.end_offset),
@@ -1046,10 +1056,10 @@ impl Encode for SnapshotId {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 12;
         if version >= 0 {
-            put_i64(buf, self.end_offset);
+            put_i64(buf, self.end_offset)
         }
         if version >= 0 {
-            put_i32(buf, self.epoch);
+            put_i32(buf, self.epoch)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -1103,17 +1113,25 @@ impl SnapshotId {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AbortedTransaction {
     pub producer_id: i64,
     pub first_offset: i64,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl Default for AbortedTransaction {
+    fn default() -> Self {
+        Self {
+            producer_id: 0i64,
+            first_offset: 0i64,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl AbortedTransaction {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::fetch_response::AbortedTransaction {
         crate::owned::fetch_response::AbortedTransaction {
             producer_id: (self.producer_id),
@@ -1126,10 +1144,10 @@ impl Encode for AbortedTransaction {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 12;
         if version >= 4 {
-            put_i64(buf, self.producer_id);
+            put_i64(buf, self.producer_id)
         }
         if version >= 4 {
-            put_i64(buf, self.first_offset);
+            put_i64(buf, self.first_offset)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -1183,7 +1201,7 @@ impl AbortedTransaction {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeEndpoint<'a> {
     pub node_id: i32,
     pub host: &'a str,
@@ -1191,26 +1209,36 @@ pub struct NodeEndpoint<'a> {
     pub rack: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl NodeEndpoint<'_> {
+impl<'a> Default for NodeEndpoint<'a> {
+    fn default() -> Self {
+        Self {
+            node_id: 0i32,
+            host: "",
+            port: 0i32,
+            rack: None,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> NodeEndpoint<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::fetch_response::NodeEndpoint {
         crate::owned::fetch_response::NodeEndpoint {
             node_id: (self.node_id),
             host: (self.host).to_string(),
             port: (self.port),
-            rack: (self.rack).map(std::string::ToString::to_string),
+            rack: (self.rack).map(|s| s.to_string()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for NodeEndpoint<'_> {
+impl<'a> Encode for NodeEndpoint<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 12;
         if version >= 16 {
-            put_i32(buf, self.node_id);
+            put_i32(buf, self.node_id)
         }
         if version >= 16 {
             if flex {
@@ -1220,7 +1248,7 @@ impl Encode for NodeEndpoint<'_> {
             }
         }
         if version >= 16 {
-            put_i32(buf, self.port);
+            put_i32(buf, self.port)
         }
         if version >= 16 {
             if flex {

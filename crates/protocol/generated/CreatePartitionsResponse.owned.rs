@@ -34,7 +34,7 @@ impl Encode for CreatePartitionsResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 0 {
             {
@@ -74,7 +74,7 @@ impl Encode for CreatePartitionsResponse {
         n
     }
 }
-impl Decode<'_> for CreatePartitionsResponse {
+impl<'de> Decode<'de> for CreatePartitionsResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -135,7 +135,7 @@ impl Encode for CreatePartitionsTopicResult {
             }
         }
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
             if flex {
@@ -177,7 +177,7 @@ impl Encode for CreatePartitionsTopicResult {
         n
     }
 }
-impl Decode<'_> for CreatePartitionsTopicResult {
+impl<'de> Decode<'de> for CreatePartitionsTopicResult {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();
@@ -225,7 +225,7 @@ impl CreatePartitionsTopicResult {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("throttleTimeMs".to_string(), ::serde_json::json!(0));
     obj.insert("results".to_string(), ::serde_json::Value::Array(vec![]));

@@ -20,7 +20,7 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamsGroupHeartbeatResponse<'a> {
     pub throttle_time_ms: i32,
     pub error_code: i16,
@@ -41,40 +41,70 @@ pub struct StreamsGroupHeartbeatResponse<'a> {
     pub partitions_by_user_endpoint: Option<Vec<EndpointToPartitions<'a>>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl<'a> Default for StreamsGroupHeartbeatResponse<'a> {
+    fn default() -> Self {
+        Self {
+            throttle_time_ms: 0i32,
+            error_code: 0i16,
+            error_message: None,
+            member_id: "",
+            member_epoch: 0i32,
+            heartbeat_interval_ms: 0i32,
+            acceptable_recovery_lag: 0i32,
+            task_offset_interval_ms: 0i32,
+            status: None,
+            active_tasks: None,
+            standby_tasks: None,
+            warmup_tasks: None,
+            endpoint_information_epoch: 0i32,
+            partitions_by_user_endpoint: None,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl<'a> StreamsGroupHeartbeatResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::streams_group_heartbeat_response::StreamsGroupHeartbeatResponse {
         crate::owned::streams_group_heartbeat_response::StreamsGroupHeartbeatResponse {
             throttle_time_ms: (self.throttle_time_ms),
             error_code: (self.error_code),
-            error_message: (self.error_message).map(std::string::ToString::to_string),
+            error_message: (self.error_message).map(|s| s.to_string()),
             member_id: (self.member_id).to_string(),
             member_epoch: (self.member_epoch),
             heartbeat_interval_ms: (self.heartbeat_interval_ms),
             acceptable_recovery_lag: (self.acceptable_recovery_lag),
             task_offset_interval_ms: (self.task_offset_interval_ms),
-            status: (self.status).as_ref().map(|v| v.iter().map(super::common::streams_group_heartbeat_response::status::Status::to_owned).collect()),
-            active_tasks: (self.active_tasks).as_ref().map(|v| v.iter().map(super::common::streams_group_heartbeat_response::task_ids::TaskIds::to_owned).collect()),
-            standby_tasks: (self.standby_tasks).as_ref().map(|v| v.iter().map(super::common::streams_group_heartbeat_response::task_ids::TaskIds::to_owned).collect()),
-            warmup_tasks: (self.warmup_tasks).as_ref().map(|v| v.iter().map(super::common::streams_group_heartbeat_response::task_ids::TaskIds::to_owned).collect()),
+            status: (self.status)
+                .as_ref()
+                .map(|v| v.iter().map(|it| it.to_owned()).collect()),
+            active_tasks: (self.active_tasks)
+                .as_ref()
+                .map(|v| v.iter().map(|it| it.to_owned()).collect()),
+            standby_tasks: (self.standby_tasks)
+                .as_ref()
+                .map(|v| v.iter().map(|it| it.to_owned()).collect()),
+            warmup_tasks: (self.warmup_tasks)
+                .as_ref()
+                .map(|v| v.iter().map(|it| it.to_owned()).collect()),
             endpoint_information_epoch: (self.endpoint_information_epoch),
-            partitions_by_user_endpoint: (self.partitions_by_user_endpoint).as_ref().map(|v| v.iter().map(EndpointToPartitions::to_owned).collect()),
+            partitions_by_user_endpoint: (self.partitions_by_user_endpoint)
+                .as_ref()
+                .map(|v| v.iter().map(|it| it.to_owned()).collect()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
     fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -97,22 +127,22 @@ impl<'a> StreamsGroupHeartbeatResponse<'a> {
     }
     fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.member_epoch);
+            put_i32(buf, self.member_epoch)
         }
     }
     fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.heartbeat_interval_ms);
+            put_i32(buf, self.heartbeat_interval_ms)
         }
     }
     fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.acceptable_recovery_lag);
+            put_i32(buf, self.acceptable_recovery_lag)
         }
     }
     fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.task_offset_interval_ms);
+            put_i32(buf, self.task_offset_interval_ms)
         }
     }
     fn encode_field_8<B: BufMut>(
@@ -193,7 +223,7 @@ impl<'a> StreamsGroupHeartbeatResponse<'a> {
     }
     fn encode_field_12<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.endpoint_information_epoch);
+            put_i32(buf, self.endpoint_information_epoch)
         }
     }
     fn encode_field_13<B: BufMut>(
@@ -446,7 +476,7 @@ impl<'a> StreamsGroupHeartbeatResponse<'a> {
     fn decode_tagged_fields(
         out: &mut Self,
         buf: &mut &'a [u8],
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -455,7 +485,7 @@ impl<'a> StreamsGroupHeartbeatResponse<'a> {
         Ok(())
     }
 }
-impl Encode for StreamsGroupHeartbeatResponse<'_> {
+impl<'a> Encode for StreamsGroupHeartbeatResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -520,7 +550,7 @@ impl Encode for StreamsGroupHeartbeatResponse<'_> {
             n += {
                 let opt: Option<&Vec<_>> = (self.status).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
+                    opt.map(|v| v.len()),
                     flex,
                 );
                 let body: usize =
@@ -532,7 +562,7 @@ impl Encode for StreamsGroupHeartbeatResponse<'_> {
             n += {
                 let opt: Option<&Vec<_>> = (self.active_tasks).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
+                    opt.map(|v| v.len()),
                     flex,
                 );
                 let body: usize =
@@ -544,7 +574,7 @@ impl Encode for StreamsGroupHeartbeatResponse<'_> {
             n += {
                 let opt: Option<&Vec<_>> = (self.standby_tasks).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
+                    opt.map(|v| v.len()),
                     flex,
                 );
                 let body: usize =
@@ -556,7 +586,7 @@ impl Encode for StreamsGroupHeartbeatResponse<'_> {
             n += {
                 let opt: Option<&Vec<_>> = (self.warmup_tasks).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
+                    opt.map(|v| v.len()),
                     flex,
                 );
                 let body: usize =
@@ -571,7 +601,7 @@ impl Encode for StreamsGroupHeartbeatResponse<'_> {
             n += {
                 let opt: Option<&Vec<_>> = (self.partitions_by_user_endpoint).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
+                    opt.map(|v| v.len()),
                     flex,
                 );
                 let body: usize =
@@ -678,7 +708,7 @@ impl StreamsGroupHeartbeatResponse<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EndpointToPartitions<'a> {
     pub user_endpoint: super::common::streams_group_heartbeat_response::endpoint::Endpoint<'a>,
     pub active_partitions:
@@ -687,25 +717,41 @@ pub struct EndpointToPartitions<'a> {
         Vec<super::common::streams_group_heartbeat_response::topic_partition::TopicPartition<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl EndpointToPartitions<'_> {
+impl<'a> Default for EndpointToPartitions<'a> {
+    fn default() -> Self {
+        Self {
+            user_endpoint:
+                <super::common::streams_group_heartbeat_response::endpoint::Endpoint<'a>>::default(),
+            active_partitions: Vec::new(),
+            standby_partitions: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> EndpointToPartitions<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::streams_group_heartbeat_response::EndpointToPartitions {
         crate::owned::streams_group_heartbeat_response::EndpointToPartitions {
             user_endpoint: (self.user_endpoint).to_owned(),
-            active_partitions: (self.active_partitions).iter().map(super::common::streams_group_heartbeat_response::topic_partition::TopicPartition::to_owned).collect(),
-            standby_partitions: (self.standby_partitions).iter().map(super::common::streams_group_heartbeat_response::topic_partition::TopicPartition::to_owned).collect(),
+            active_partitions: (self.active_partitions)
+                .iter()
+                .map(|it| it.to_owned())
+                .collect(),
+            standby_partitions: (self.standby_partitions)
+                .iter()
+                .map(|it| it.to_owned())
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for EndpointToPartitions<'_> {
+impl<'a> Encode for EndpointToPartitions<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            self.user_endpoint.encode(buf, version)?;
+            self.user_endpoint.encode(buf, version)?
         }
         if version >= 0 {
             {

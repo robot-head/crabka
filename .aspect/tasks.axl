@@ -1,9 +1,15 @@
 """Crabka's non-Bazel orchestration tasks."""
 
 def _run(ctx, executable, argv = []):
+    if executable == "bazel":
+        executable = "aspect"
+        argv = ["bazel"] + argv
     return ctx.std.process.command(executable).args(argv).spawn().wait().code
 
 def _output(ctx, executable, argv = []):
+    if executable == "bazel":
+        executable = "aspect"
+        argv = ["bazel"] + argv
     result = ctx.std.process.command(executable).args(argv).stdout("piped").spawn().wait_with_output()
     return (result.status.code, result.stdout.strip())
 
@@ -113,6 +119,7 @@ def _affected(ctx: TaskContext) -> int:
         code = _run(ctx, "cargo", ["test", "-p", "crabka-connect-derive", "--test", "derive"])
         if code != 0:
             return code
+    if tests:
         code = _run(ctx, "aspect", ["test"] + tests + [
             "--coverage",
             "--coverage-report=coverage/affected.lcov",

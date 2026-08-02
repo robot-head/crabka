@@ -20,28 +20,37 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VoteResponse<'a> {
     pub error_code: i16,
     pub topics: Vec<TopicData<'a>>,
     pub node_endpoints: Vec<crate::owned::vote_response::NodeEndpoint>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl VoteResponse<'_> {
+impl<'a> Default for VoteResponse<'a> {
+    fn default() -> Self {
+        Self {
+            error_code: 0i16,
+            topics: Vec::new(),
+            node_endpoints: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> VoteResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::vote_response::VoteResponse {
         crate::owned::vote_response::VoteResponse {
             error_code: (self.error_code),
-            topics: (self.topics).iter().map(TopicData::to_owned).collect(),
+            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
             node_endpoints: self.node_endpoints.clone(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for VoteResponse<'_> {
+impl<'a> Encode for VoteResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -51,7 +60,7 @@ impl Encode for VoteResponse<'_> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
             {
@@ -200,29 +209,34 @@ impl VoteResponse<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicData<'a> {
     pub topic_name: &'a str,
     pub partitions: Vec<PartitionData>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl TopicData<'_> {
+impl<'a> Default for TopicData<'a> {
+    fn default() -> Self {
+        Self {
+            topic_name: "",
+            partitions: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> TopicData<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::vote_response::TopicData {
         crate::owned::vote_response::TopicData {
             topic_name: (self.topic_name).to_string(),
-            partitions: (self.partitions)
-                .iter()
-                .map(PartitionData::to_owned)
-                .collect(),
+            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for TopicData<'_> {
+impl<'a> Encode for TopicData<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
@@ -315,7 +329,7 @@ impl TopicData<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionData {
     pub partition_index: i32,
     pub error_code: i16,
@@ -324,11 +338,22 @@ pub struct PartitionData {
     pub vote_granted: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl Default for PartitionData {
+    fn default() -> Self {
+        Self {
+            partition_index: 0i32,
+            error_code: 0i16,
+            leader_id: 0i32,
+            leader_epoch: 0i32,
+            vote_granted: false,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl PartitionData {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::vote_response::PartitionData {
         crate::owned::vote_response::PartitionData {
             partition_index: (self.partition_index),
@@ -344,19 +369,19 @@ impl Encode for PartitionData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
-            put_i32(buf, self.leader_id);
+            put_i32(buf, self.leader_id)
         }
         if version >= 0 {
-            put_i32(buf, self.leader_epoch);
+            put_i32(buf, self.leader_epoch)
         }
         if version >= 0 {
-            put_bool(buf, self.vote_granted);
+            put_bool(buf, self.vote_granted)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -437,18 +462,27 @@ impl PartitionData {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeEndpoint<'a> {
     pub node_id: i32,
     pub host: &'a str,
     pub port: u16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl NodeEndpoint<'_> {
+impl<'a> Default for NodeEndpoint<'a> {
+    fn default() -> Self {
+        Self {
+            node_id: 0i32,
+            host: "",
+            port: 0u16,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> NodeEndpoint<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::vote_response::NodeEndpoint {
         crate::owned::vote_response::NodeEndpoint {
             node_id: (self.node_id),
@@ -458,11 +492,11 @@ impl NodeEndpoint<'_> {
         }
     }
 }
-impl Encode for NodeEndpoint<'_> {
+impl<'a> Encode for NodeEndpoint<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 1 {
-            put_i32(buf, self.node_id);
+            put_i32(buf, self.node_id)
         }
         if version >= 1 {
             if flex {
@@ -472,7 +506,7 @@ impl Encode for NodeEndpoint<'_> {
             }
         }
         if version >= 1 {
-            put_u16(buf, self.port);
+            put_u16(buf, self.port)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

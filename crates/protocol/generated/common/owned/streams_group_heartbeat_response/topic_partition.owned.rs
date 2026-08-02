@@ -62,7 +62,7 @@ impl Encode for TopicPartition {
         n
     }
 }
-impl Decode<'_> for TopicPartition {
+impl<'de> Decode<'de> for TopicPartition {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

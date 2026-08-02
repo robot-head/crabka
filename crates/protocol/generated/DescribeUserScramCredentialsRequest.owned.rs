@@ -54,7 +54,7 @@ impl Encode for DescribeUserScramCredentialsRequest {
             n += {
                 let opt: Option<&Vec<_>> = (self.users).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
+                    opt.map(|v| v.len()),
                     flex,
                 );
                 let body: usize =
@@ -69,7 +69,7 @@ impl Encode for DescribeUserScramCredentialsRequest {
         n
     }
 }
-impl Decode<'_> for DescribeUserScramCredentialsRequest {
+impl<'de> Decode<'de> for DescribeUserScramCredentialsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -149,7 +149,7 @@ impl Encode for UserName {
         n
     }
 }
-impl Decode<'_> for UserName {
+impl<'de> Decode<'de> for UserName {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -181,7 +181,7 @@ impl UserName {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("users".to_string(), ::serde_json::Value::Null);
     ::serde_json::Value::Object(obj)

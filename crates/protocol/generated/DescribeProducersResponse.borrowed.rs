@@ -20,26 +20,34 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribeProducersResponse<'a> {
     pub throttle_time_ms: i32,
     pub topics: Vec<TopicResponse<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl DescribeProducersResponse<'_> {
+impl<'a> Default for DescribeProducersResponse<'a> {
+    fn default() -> Self {
+        Self {
+            throttle_time_ms: 0i32,
+            topics: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> DescribeProducersResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_producers_response::DescribeProducersResponse {
         crate::owned::describe_producers_response::DescribeProducersResponse {
             throttle_time_ms: (self.throttle_time_ms),
-            topics: (self.topics).iter().map(TopicResponse::to_owned).collect(),
+            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for DescribeProducersResponse<'_> {
+impl<'a> Encode for DescribeProducersResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -49,7 +57,7 @@ impl Encode for DescribeProducersResponse<'_> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 0 {
             {
@@ -129,29 +137,34 @@ impl DescribeProducersResponse<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicResponse<'a> {
     pub name: &'a str,
     pub partitions: Vec<PartitionResponse<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl TopicResponse<'_> {
+impl<'a> Default for TopicResponse<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            partitions: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> TopicResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_producers_response::TopicResponse {
         crate::owned::describe_producers_response::TopicResponse {
             name: (self.name).to_string(),
-            partitions: (self.partitions)
-                .iter()
-                .map(PartitionResponse::to_owned)
-                .collect(),
+            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for TopicResponse<'_> {
+impl<'a> Encode for TopicResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
@@ -244,7 +257,7 @@ impl TopicResponse<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionResponse<'a> {
     pub partition_index: i32,
     pub error_code: i16,
@@ -252,32 +265,42 @@ pub struct PartitionResponse<'a> {
     pub active_producers: Vec<ProducerState>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl PartitionResponse<'_> {
+impl<'a> Default for PartitionResponse<'a> {
+    fn default() -> Self {
+        Self {
+            partition_index: 0i32,
+            error_code: 0i16,
+            error_message: None,
+            active_producers: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> PartitionResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_producers_response::PartitionResponse {
         crate::owned::describe_producers_response::PartitionResponse {
             partition_index: (self.partition_index),
             error_code: (self.error_code),
-            error_message: (self.error_message).map(std::string::ToString::to_string),
+            error_message: (self.error_message).map(|s| s.to_string()),
             active_producers: (self.active_producers)
                 .iter()
-                .map(ProducerState::to_owned)
+                .map(|it| it.to_owned())
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for PartitionResponse<'_> {
+impl<'a> Encode for PartitionResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
             if flex {
@@ -416,7 +439,6 @@ impl ProducerState {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_producers_response::ProducerState {
         crate::owned::describe_producers_response::ProducerState {
             producer_id: (self.producer_id),
@@ -433,22 +455,22 @@ impl Encode for ProducerState {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i64(buf, self.producer_id);
+            put_i64(buf, self.producer_id)
         }
         if version >= 0 {
-            put_i32(buf, self.producer_epoch);
+            put_i32(buf, self.producer_epoch)
         }
         if version >= 0 {
-            put_i32(buf, self.last_sequence);
+            put_i32(buf, self.last_sequence)
         }
         if version >= 0 {
-            put_i64(buf, self.last_timestamp);
+            put_i64(buf, self.last_timestamp)
         }
         if version >= 0 {
-            put_i32(buf, self.coordinator_epoch);
+            put_i32(buf, self.coordinator_epoch)
         }
         if version >= 0 {
-            put_i64(buf, self.current_txn_start_offset);
+            put_i64(buf, self.current_txn_start_offset)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

@@ -58,13 +58,13 @@ impl Encode for AddRaftVoterRequest {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.timeout_ms);
+            put_i32(buf, self.timeout_ms)
         }
         if version >= 0 {
-            put_i32(buf, self.voter_id);
+            put_i32(buf, self.voter_id)
         }
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.voter_directory_id);
+            crate::primitives::uuid::put_uuid(buf, self.voter_directory_id)
         }
         if version >= 0 {
             {
@@ -75,7 +75,7 @@ impl Encode for AddRaftVoterRequest {
             }
         }
         if version >= 1 {
-            put_bool(buf, self.ack_when_committed);
+            put_bool(buf, self.ack_when_committed)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -123,7 +123,7 @@ impl Encode for AddRaftVoterRequest {
         n
     }
 }
-impl Decode<'_> for AddRaftVoterRequest {
+impl<'de> Decode<'de> for AddRaftVoterRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -219,7 +219,7 @@ impl Encode for Listener {
             }
         }
         if version >= 0 {
-            put_u16(buf, self.port);
+            put_u16(buf, self.port)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -254,7 +254,7 @@ impl Encode for Listener {
         n
     }
 }
-impl Decode<'_> for Listener {
+impl<'de> Decode<'de> for Listener {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

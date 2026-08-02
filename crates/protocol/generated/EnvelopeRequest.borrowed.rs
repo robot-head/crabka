@@ -18,14 +18,24 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvelopeRequest<'a> {
     pub request_data: &'a [u8],
     pub request_principal: Option<&'a [u8]>,
     pub client_host_address: &'a [u8],
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl EnvelopeRequest<'_> {
+impl<'a> Default for EnvelopeRequest<'a> {
+    fn default() -> Self {
+        Self {
+            request_data: &[],
+            request_principal: None,
+            client_host_address: &[],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> EnvelopeRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
@@ -38,7 +48,7 @@ impl EnvelopeRequest<'_> {
         }
     }
 }
-impl Encode for EnvelopeRequest<'_> {
+impl<'a> Encode for EnvelopeRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {

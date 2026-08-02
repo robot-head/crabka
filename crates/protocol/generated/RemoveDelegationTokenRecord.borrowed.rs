@@ -14,16 +14,23 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoveDelegationTokenRecord<'a> {
     pub token_id: &'a str,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl RemoveDelegationTokenRecord<'_> {
+impl<'a> Default for RemoveDelegationTokenRecord<'a> {
+    fn default() -> Self {
+        Self {
+            token_id: "",
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> RemoveDelegationTokenRecord<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::remove_delegation_token_record::RemoveDelegationTokenRecord {
@@ -33,7 +40,7 @@ impl RemoveDelegationTokenRecord<'_> {
         }
     }
 }
-impl Encode for RemoveDelegationTokenRecord<'_> {
+impl<'a> Encode for RemoveDelegationTokenRecord<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(

@@ -34,7 +34,7 @@ impl Encode for DeleteTopicsResponse {
         }
         let flex = is_flexible(version);
         if version >= 1 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 0 {
             {
@@ -74,7 +74,7 @@ impl Encode for DeleteTopicsResponse {
         n
     }
 }
-impl Decode<'_> for DeleteTopicsResponse {
+impl<'de> Decode<'de> for DeleteTopicsResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -144,10 +144,10 @@ impl Encode for DeletableTopicResult {
             }
         }
         if version >= 6 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+            crate::primitives::uuid::put_uuid(buf, self.topic_id)
         }
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 5 {
             if flex {
@@ -200,7 +200,7 @@ impl Encode for DeletableTopicResult {
         n
     }
 }
-impl Decode<'_> for DeletableTopicResult {
+impl<'de> Decode<'de> for DeletableTopicResult {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 4;
         let mut out = Self::default();

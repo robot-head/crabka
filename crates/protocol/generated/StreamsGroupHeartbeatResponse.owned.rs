@@ -42,12 +42,12 @@ pub struct StreamsGroupHeartbeatResponse {
 impl StreamsGroupHeartbeatResponse {
     fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -70,22 +70,22 @@ impl StreamsGroupHeartbeatResponse {
     }
     fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.member_epoch);
+            put_i32(buf, self.member_epoch)
         }
     }
     fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.heartbeat_interval_ms);
+            put_i32(buf, self.heartbeat_interval_ms)
         }
     }
     fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.acceptable_recovery_lag);
+            put_i32(buf, self.acceptable_recovery_lag)
         }
     }
     fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.task_offset_interval_ms);
+            put_i32(buf, self.task_offset_interval_ms)
         }
     }
     fn encode_field_8<B: BufMut>(
@@ -166,7 +166,7 @@ impl StreamsGroupHeartbeatResponse {
     }
     fn encode_field_12<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.endpoint_information_epoch);
+            put_i32(buf, self.endpoint_information_epoch)
         }
     }
     fn encode_field_13<B: BufMut>(
@@ -188,7 +188,7 @@ impl StreamsGroupHeartbeatResponse {
         }
         Ok(())
     }
-    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
+    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -419,7 +419,7 @@ impl StreamsGroupHeartbeatResponse {
     fn decode_tagged_fields<B: Buf>(
         out: &mut Self,
         buf: &mut B,
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -493,7 +493,7 @@ impl Encode for StreamsGroupHeartbeatResponse {
             n += {
                 let opt: Option<&Vec<_>> = (self.status).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
+                    opt.map(|v| v.len()),
                     flex,
                 );
                 let body: usize =
@@ -505,7 +505,7 @@ impl Encode for StreamsGroupHeartbeatResponse {
             n += {
                 let opt: Option<&Vec<_>> = (self.active_tasks).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
+                    opt.map(|v| v.len()),
                     flex,
                 );
                 let body: usize =
@@ -517,7 +517,7 @@ impl Encode for StreamsGroupHeartbeatResponse {
             n += {
                 let opt: Option<&Vec<_>> = (self.standby_tasks).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
+                    opt.map(|v| v.len()),
                     flex,
                 );
                 let body: usize =
@@ -529,7 +529,7 @@ impl Encode for StreamsGroupHeartbeatResponse {
             n += {
                 let opt: Option<&Vec<_>> = (self.warmup_tasks).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
+                    opt.map(|v| v.len()),
                     flex,
                 );
                 let body: usize =
@@ -544,7 +544,7 @@ impl Encode for StreamsGroupHeartbeatResponse {
             n += {
                 let opt: Option<&Vec<_>> = (self.partitions_by_user_endpoint).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
+                    opt.map(|v| v.len()),
                     flex,
                 );
                 let body: usize =
@@ -559,7 +559,7 @@ impl Encode for StreamsGroupHeartbeatResponse {
         n
     }
 }
-impl Decode<'_> for StreamsGroupHeartbeatResponse {
+impl<'de> Decode<'de> for StreamsGroupHeartbeatResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -664,7 +664,7 @@ impl Encode for EndpointToPartitions {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            self.user_endpoint.encode(buf, version)?;
+            self.user_endpoint.encode(buf, version)?
         }
         if version >= 0 {
             {
@@ -727,7 +727,7 @@ impl Encode for EndpointToPartitions {
         n
     }
 }
-impl Decode<'_> for EndpointToPartitions {
+impl<'de> Decode<'de> for EndpointToPartitions {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -787,7 +787,7 @@ impl EndpointToPartitions {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("throttleTimeMs".to_string(), ::serde_json::json!(0));
     obj.insert("errorCode".to_string(), ::serde_json::json!(0));

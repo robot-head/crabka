@@ -16,31 +16,36 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamsGroupDescribeRequest<'a> {
     pub group_ids: Vec<&'a str>,
     pub include_authorized_operations: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl StreamsGroupDescribeRequest<'_> {
+impl<'a> Default for StreamsGroupDescribeRequest<'a> {
+    fn default() -> Self {
+        Self {
+            group_ids: Vec::new(),
+            include_authorized_operations: false,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> StreamsGroupDescribeRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::streams_group_describe_request::StreamsGroupDescribeRequest {
         crate::owned::streams_group_describe_request::StreamsGroupDescribeRequest {
-            group_ids: (self.group_ids)
-                .iter()
-                .map(std::string::ToString::to_string)
-                .collect(),
+            group_ids: (self.group_ids).iter().map(|s| s.to_string()).collect(),
             include_authorized_operations: (self.include_authorized_operations),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for StreamsGroupDescribeRequest<'_> {
+impl<'a> Encode for StreamsGroupDescribeRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -54,15 +59,15 @@ impl Encode for StreamsGroupDescribeRequest<'_> {
                 crate::primitives::array::put_array_len(buf, (self.group_ids).len(), flex);
                 for it in &self.group_ids {
                     if flex {
-                        let () = put_compact_string(buf, it);
+                        let () = put_compact_string(buf, *it);
                     } else {
-                        let () = put_string(buf, it);
-                    }
+                        let () = put_string(buf, *it);
+                    };
                 }
             }
         }
         if version >= 0 {
-            put_bool(buf, self.include_authorized_operations);
+            put_bool(buf, self.include_authorized_operations)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -81,9 +86,9 @@ impl Encode for StreamsGroupDescribeRequest<'_> {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(it)
+                            compact_string_len(*it)
                         } else {
-                            string_len(it)
+                            string_len(*it)
                         }
                     })
                     .sum();

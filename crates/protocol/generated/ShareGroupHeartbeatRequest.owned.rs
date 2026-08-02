@@ -51,7 +51,7 @@ impl Encode for ShareGroupHeartbeatRequest {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.member_epoch);
+            put_i32(buf, self.member_epoch)
         }
         if version >= 0 {
             if flex {
@@ -67,10 +67,10 @@ impl Encode for ShareGroupHeartbeatRequest {
                 if let Some(v) = &self.subscribed_topic_names {
                     for it in v {
                         if flex {
-                            let () = put_compact_string(buf, it);
+                            let () = put_compact_string(buf, &*it);
                         } else {
-                            let () = put_string(buf, it);
-                        }
+                            let () = put_string(buf, &*it);
+                        };
                     }
                 }
             }
@@ -112,16 +112,16 @@ impl Encode for ShareGroupHeartbeatRequest {
             n += {
                 let opt: Option<&Vec<_>> = (self.subscribed_topic_names).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
+                    opt.map(|v| v.len()),
                     flex,
                 );
                 let body: usize = opt.map_or(0, |v| {
                     v.iter()
                         .map(|it| {
                             if flex {
-                                compact_string_len(it)
+                                compact_string_len(&*it)
                             } else {
-                                string_len(it)
+                                string_len(&*it)
                             }
                         })
                         .sum()
@@ -136,7 +136,7 @@ impl Encode for ShareGroupHeartbeatRequest {
         n
     }
 }
-impl Decode<'_> for ShareGroupHeartbeatRequest {
+impl<'de> Decode<'de> for ShareGroupHeartbeatRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -222,7 +222,7 @@ impl ShareGroupHeartbeatRequest {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert(
         "groupId".to_string(),

@@ -19,7 +19,7 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteLogSegmentMetadataSnapshotRecord<'a> {
     pub segment_id: crate::primitives::uuid::Uuid,
     pub start_offset: i64,
@@ -34,6 +34,24 @@ pub struct RemoteLogSegmentMetadataSnapshotRecord<'a> {
     pub txn_index_empty: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl<'a> Default for RemoteLogSegmentMetadataSnapshotRecord<'a> {
+    fn default() -> Self {
+        Self {
+            segment_id: crate::primitives::uuid::Uuid::default(),
+            start_offset: 0i64,
+            end_offset: 0i64,
+            broker_id: 0i32,
+            max_timestamp_ms: 0i64,
+            event_timestamp_ms: 0i64,
+            segment_leader_epochs: Vec::new(),
+            segment_size_in_bytes: 0i32,
+            custom_metadata: None,
+            remote_log_segment_state: 0i8,
+            txn_index_empty: false,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl<'a> RemoteLogSegmentMetadataSnapshotRecord<'a> {
     /// # Panics
     ///
@@ -46,7 +64,7 @@ impl<'a> RemoteLogSegmentMetadataSnapshotRecord<'a> {
             broker_id: (self.broker_id),
             max_timestamp_ms: (self.max_timestamp_ms),
             event_timestamp_ms: (self.event_timestamp_ms),
-            segment_leader_epochs: (self.segment_leader_epochs).iter().map(SegmentLeaderEpochEntry::to_owned).collect(),
+            segment_leader_epochs: (self.segment_leader_epochs).iter().map(|it| it.to_owned()).collect(),
             segment_size_in_bytes: (self.segment_size_in_bytes),
             custom_metadata: (self.custom_metadata).map(Bytes::copy_from_slice),
             remote_log_segment_state: (self.remote_log_segment_state),
@@ -56,32 +74,32 @@ impl<'a> RemoteLogSegmentMetadataSnapshotRecord<'a> {
     }
     fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.segment_id);
+            crate::primitives::uuid::put_uuid(buf, self.segment_id)
         }
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i64(buf, self.start_offset);
+            put_i64(buf, self.start_offset)
         }
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i64(buf, self.end_offset);
+            put_i64(buf, self.end_offset)
         }
     }
     fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.broker_id);
+            put_i32(buf, self.broker_id)
         }
     }
     fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i64(buf, self.max_timestamp_ms);
+            put_i64(buf, self.max_timestamp_ms)
         }
     }
     fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i64(buf, self.event_timestamp_ms);
+            put_i64(buf, self.event_timestamp_ms)
         }
     }
     fn encode_field_6<B: BufMut>(
@@ -106,7 +124,7 @@ impl<'a> RemoteLogSegmentMetadataSnapshotRecord<'a> {
     }
     fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.segment_size_in_bytes);
+            put_i32(buf, self.segment_size_in_bytes)
         }
     }
     fn encode_field_8<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -120,7 +138,7 @@ impl<'a> RemoteLogSegmentMetadataSnapshotRecord<'a> {
     }
     fn encode_field_9<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i8(buf, self.remote_log_segment_state);
+            put_i8(buf, self.remote_log_segment_state)
         }
     }
     fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
@@ -260,7 +278,7 @@ impl<'a> RemoteLogSegmentMetadataSnapshotRecord<'a> {
     fn decode_tagged_fields(
         out: &mut Self,
         buf: &mut &'a [u8],
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -282,7 +300,7 @@ impl<'a> RemoteLogSegmentMetadataSnapshotRecord<'a> {
         Ok(())
     }
 }
-impl Encode for RemoteLogSegmentMetadataSnapshotRecord<'_> {
+impl<'a> Encode for RemoteLogSegmentMetadataSnapshotRecord<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(
@@ -436,17 +454,25 @@ impl RemoteLogSegmentMetadataSnapshotRecord<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SegmentLeaderEpochEntry {
     pub leader_epoch: i32,
     pub offset: i64,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl Default for SegmentLeaderEpochEntry {
+    fn default() -> Self {
+        Self {
+            leader_epoch: 0i32,
+            offset: 0i64,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl SegmentLeaderEpochEntry {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::remote_log_segment_metadata_snapshot_record::SegmentLeaderEpochEntry {
@@ -461,10 +487,10 @@ impl Encode for SegmentLeaderEpochEntry {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.leader_epoch);
+            put_i32(buf, self.leader_epoch)
         }
         if version >= 0 {
-            put_i64(buf, self.offset);
+            put_i64(buf, self.offset)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

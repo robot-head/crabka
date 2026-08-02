@@ -42,7 +42,7 @@ impl Encode for DescribeClientQuotasRequest {
             }
         }
         if version >= 0 {
-            put_bool(buf, self.strict);
+            put_bool(buf, self.strict)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -74,7 +74,7 @@ impl Encode for DescribeClientQuotasRequest {
         n
     }
 }
-impl Decode<'_> for DescribeClientQuotasRequest {
+impl<'de> Decode<'de> for DescribeClientQuotasRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -135,7 +135,7 @@ impl Encode for ComponentData {
             }
         }
         if version >= 0 {
-            put_i8(buf, self.match_type);
+            put_i8(buf, self.match_type)
         }
         if version >= 0 {
             if flex {
@@ -177,7 +177,7 @@ impl Encode for ComponentData {
         n
     }
 }
-impl Decode<'_> for ComponentData {
+impl<'de> Decode<'de> for ComponentData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 1;
         let mut out = Self::default();
@@ -225,7 +225,7 @@ impl ComponentData {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("components".to_string(), ::serde_json::Value::Array(vec![]));
     obj.insert("strict".to_string(), ::serde_json::Value::Bool(false));

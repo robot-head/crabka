@@ -42,7 +42,7 @@ impl Encode for AlterClientQuotasRequest {
             }
         }
         if version >= 0 {
-            put_bool(buf, self.validate_only);
+            put_bool(buf, self.validate_only)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -74,7 +74,7 @@ impl Encode for AlterClientQuotasRequest {
         n
     }
 }
-impl Decode<'_> for AlterClientQuotasRequest {
+impl<'de> Decode<'de> for AlterClientQuotasRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -173,7 +173,7 @@ impl Encode for EntryData {
         n
     }
 }
-impl Decode<'_> for EntryData {
+impl<'de> Decode<'de> for EntryData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 1;
         let mut out = Self::default();
@@ -270,7 +270,7 @@ impl Encode for EntityData {
         n
     }
 }
-impl Decode<'_> for EntityData {
+impl<'de> Decode<'de> for EntityData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 1;
         let mut out = Self::default();
@@ -326,10 +326,10 @@ impl Encode for OpData {
             }
         }
         if version >= 0 {
-            put_f64(buf, self.value);
+            put_f64(buf, self.value)
         }
         if version >= 0 {
-            put_bool(buf, self.remove);
+            put_bool(buf, self.remove)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -360,7 +360,7 @@ impl Encode for OpData {
         n
     }
 }
-impl Decode<'_> for OpData {
+impl<'de> Decode<'de> for OpData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 1;
         let mut out = Self::default();
@@ -404,7 +404,7 @@ impl OpData {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("entries".to_string(), ::serde_json::Value::Array(vec![]));
     obj.insert("validateOnly".to_string(), ::serde_json::Value::Bool(false));

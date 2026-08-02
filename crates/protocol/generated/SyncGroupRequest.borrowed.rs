@@ -22,7 +22,7 @@ pub const FLEXIBLE_MIN: i16 = 4;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncGroupRequest<'a> {
     pub group_id: &'a str,
     pub generation_id: i32,
@@ -33,28 +33,38 @@ pub struct SyncGroupRequest<'a> {
     pub assignments: Vec<SyncGroupRequestAssignment<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl SyncGroupRequest<'_> {
+impl<'a> Default for SyncGroupRequest<'a> {
+    fn default() -> Self {
+        Self {
+            group_id: "",
+            generation_id: 0i32,
+            member_id: "",
+            group_instance_id: None,
+            protocol_type: None,
+            protocol_name: None,
+            assignments: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> SyncGroupRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::sync_group_request::SyncGroupRequest {
         crate::owned::sync_group_request::SyncGroupRequest {
             group_id: (self.group_id).to_string(),
             generation_id: (self.generation_id),
             member_id: (self.member_id).to_string(),
-            group_instance_id: (self.group_instance_id).map(std::string::ToString::to_string),
-            protocol_type: (self.protocol_type).map(std::string::ToString::to_string),
-            protocol_name: (self.protocol_name).map(std::string::ToString::to_string),
-            assignments: (self.assignments)
-                .iter()
-                .map(SyncGroupRequestAssignment::to_owned)
-                .collect(),
+            group_instance_id: (self.group_instance_id).map(|s| s.to_string()),
+            protocol_type: (self.protocol_type).map(|s| s.to_string()),
+            protocol_name: (self.protocol_name).map(|s| s.to_string()),
+            assignments: (self.assignments).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for SyncGroupRequest<'_> {
+impl<'a> Encode for SyncGroupRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -71,7 +81,7 @@ impl Encode for SyncGroupRequest<'_> {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.generation_id);
+            put_i32(buf, self.generation_id)
         }
         if version >= 0 {
             if flex {
@@ -267,17 +277,25 @@ impl SyncGroupRequest<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncGroupRequestAssignment<'a> {
     pub member_id: &'a str,
     pub assignment: &'a [u8],
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl SyncGroupRequestAssignment<'_> {
+impl<'a> Default for SyncGroupRequestAssignment<'a> {
+    fn default() -> Self {
+        Self {
+            member_id: "",
+            assignment: &[],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> SyncGroupRequestAssignment<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::sync_group_request::SyncGroupRequestAssignment {
         crate::owned::sync_group_request::SyncGroupRequestAssignment {
             member_id: (self.member_id).to_string(),
@@ -286,7 +304,7 @@ impl SyncGroupRequestAssignment<'_> {
         }
     }
 }
-impl Encode for SyncGroupRequestAssignment<'_> {
+impl<'a> Encode for SyncGroupRequestAssignment<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 4;
         if version >= 0 {

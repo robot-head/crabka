@@ -11,16 +11,23 @@ pub const FLEXIBLE_MIN: i16 = 1;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResponseHeader {
     pub correlation_id: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
+}
+impl Default for ResponseHeader {
+    fn default() -> Self {
+        Self {
+            correlation_id: 0i32,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
 }
 impl ResponseHeader {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::response_header::ResponseHeader {
         crate::owned::response_header::ResponseHeader {
             correlation_id: (self.correlation_id),
@@ -37,7 +44,7 @@ impl Encode for ResponseHeader {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.correlation_id);
+            put_i32(buf, self.correlation_id)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

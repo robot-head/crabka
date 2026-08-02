@@ -16,29 +16,34 @@ pub const FLEXIBLE_MIN: i16 = 3;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TxnOffsetCommitResponse<'a> {
     pub throttle_time_ms: i32,
     pub topics: Vec<TxnOffsetCommitResponseTopic<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl TxnOffsetCommitResponse<'_> {
+impl<'a> Default for TxnOffsetCommitResponse<'a> {
+    fn default() -> Self {
+        Self {
+            throttle_time_ms: 0i32,
+            topics: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> TxnOffsetCommitResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::txn_offset_commit_response::TxnOffsetCommitResponse {
         crate::owned::txn_offset_commit_response::TxnOffsetCommitResponse {
             throttle_time_ms: (self.throttle_time_ms),
-            topics: (self.topics)
-                .iter()
-                .map(TxnOffsetCommitResponseTopic::to_owned)
-                .collect(),
+            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for TxnOffsetCommitResponse<'_> {
+impl<'a> Encode for TxnOffsetCommitResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -48,7 +53,7 @@ impl Encode for TxnOffsetCommitResponse<'_> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 0 {
             {
@@ -128,31 +133,36 @@ impl TxnOffsetCommitResponse<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TxnOffsetCommitResponseTopic<'a> {
     pub name: &'a str,
     pub partitions: Vec<TxnOffsetCommitResponsePartition>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl TxnOffsetCommitResponseTopic<'_> {
+impl<'a> Default for TxnOffsetCommitResponseTopic<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            partitions: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> TxnOffsetCommitResponseTopic<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::txn_offset_commit_response::TxnOffsetCommitResponseTopic {
         crate::owned::txn_offset_commit_response::TxnOffsetCommitResponseTopic {
             name: (self.name).to_string(),
-            partitions: (self.partitions)
-                .iter()
-                .map(TxnOffsetCommitResponsePartition::to_owned)
-                .collect(),
+            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for TxnOffsetCommitResponseTopic<'_> {
+impl<'a> Encode for TxnOffsetCommitResponseTopic<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 3;
         if version >= 0 {
@@ -247,17 +257,25 @@ impl TxnOffsetCommitResponseTopic<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TxnOffsetCommitResponsePartition {
     pub partition_index: i32,
     pub error_code: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl Default for TxnOffsetCommitResponsePartition {
+    fn default() -> Self {
+        Self {
+            partition_index: 0i32,
+            error_code: 0i16,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl TxnOffsetCommitResponsePartition {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::txn_offset_commit_response::TxnOffsetCommitResponsePartition {
@@ -272,10 +290,10 @@ impl Encode for TxnOffsetCommitResponsePartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 3;
         if version >= 0 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

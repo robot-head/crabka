@@ -35,10 +35,10 @@ impl Encode for AddPartitionsToTxnResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 4 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 4 {
             {
@@ -112,7 +112,7 @@ impl Encode for AddPartitionsToTxnResponse {
         n
     }
 }
-impl Decode<'_> for AddPartitionsToTxnResponse {
+impl<'de> Decode<'de> for AddPartitionsToTxnResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -234,7 +234,7 @@ impl Encode for AddPartitionsToTxnResult {
         n
     }
 }
-impl Decode<'_> for AddPartitionsToTxnResult {
+impl<'de> Decode<'de> for AddPartitionsToTxnResult {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 3;
         let mut out = Self::default();

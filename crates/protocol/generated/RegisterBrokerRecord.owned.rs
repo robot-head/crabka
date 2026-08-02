@@ -57,22 +57,22 @@ impl Default for RegisterBrokerRecord {
 impl RegisterBrokerRecord {
     fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.broker_id);
+            put_i32(buf, self.broker_id)
         }
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 2 {
-            put_bool(buf, self.is_migrating_zk_broker);
+            put_bool(buf, self.is_migrating_zk_broker)
         }
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.incarnation_id);
+            crate::primitives::uuid::put_uuid(buf, self.incarnation_id)
         }
     }
     fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i64(buf, self.broker_epoch);
+            put_i64(buf, self.broker_epoch)
         }
     }
     fn encode_field_4<B: BufMut>(
@@ -118,15 +118,15 @@ impl RegisterBrokerRecord {
     }
     fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_bool(buf, self.fenced);
+            put_bool(buf, self.fenced)
         }
     }
     fn encode_field_8<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 1 {
-            put_bool(buf, self.in_controlled_shutdown);
+            put_bool(buf, self.in_controlled_shutdown)
         }
     }
-    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
+    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if flex {
             let mut tagged = WriteTaggedFields::new();
             if !(crate::codegen_helpers::is_default(&self.log_dirs)) {
@@ -151,12 +151,12 @@ impl RegisterBrokerRecord {
                 );
                 tagged.add(0, payload);
             }
-            if self.cordoned_log_dirs.is_some() {
+            if !(self.cordoned_log_dirs.is_none()) {
                 let payload = encode_to_bytes(
                     {
                         let opt: Option<&Vec<_>> = (self.cordoned_log_dirs).as_ref();
                         let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                            opt.map(std::vec::Vec::len),
+                            opt.map(|v| v.len()),
                             flex,
                         );
                         let body: usize = opt.map_or(0, |v| v.iter().map(|_| 16).sum());
@@ -300,7 +300,7 @@ impl RegisterBrokerRecord {
     fn decode_tagged_fields<B: Buf>(
         out: &mut Self,
         buf: &mut B,
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -432,11 +432,11 @@ impl Encode for RegisterBrokerRecord {
                     prefix + body
                 }));
             }
-            if self.cordoned_log_dirs.is_some() {
+            if !(self.cordoned_log_dirs.is_none()) {
                 known_pairs.push((1, {
                     let opt: Option<&Vec<_>> = (self.cordoned_log_dirs).as_ref();
                     let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                        opt.map(std::vec::Vec::len),
+                        opt.map(|v| v.len()),
                         flex,
                     );
                     let body: usize = opt.map_or(0, |v| v.iter().map(|_| 16).sum());
@@ -448,7 +448,7 @@ impl Encode for RegisterBrokerRecord {
         n
     }
 }
-impl Decode<'_> for RegisterBrokerRecord {
+impl<'de> Decode<'de> for RegisterBrokerRecord {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(
@@ -537,10 +537,10 @@ impl Encode for BrokerEndpoint {
             }
         }
         if version >= 0 {
-            put_u16(buf, self.port);
+            put_u16(buf, self.port)
         }
         if version >= 0 {
-            put_i16(buf, self.security_protocol);
+            put_i16(buf, self.security_protocol)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -578,7 +578,7 @@ impl Encode for BrokerEndpoint {
         n
     }
 }
-impl Decode<'_> for BrokerEndpoint {
+impl<'de> Decode<'de> for BrokerEndpoint {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -646,10 +646,10 @@ impl Encode for BrokerFeature {
             }
         }
         if version >= 0 {
-            put_i16(buf, self.min_supported_version);
+            put_i16(buf, self.min_supported_version)
         }
         if version >= 0 {
-            put_i16(buf, self.max_supported_version);
+            put_i16(buf, self.max_supported_version)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -680,7 +680,7 @@ impl Encode for BrokerFeature {
         n
     }
 }
-impl Decode<'_> for BrokerFeature {
+impl<'de> Decode<'de> for BrokerFeature {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

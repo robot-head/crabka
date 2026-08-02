@@ -33,17 +33,13 @@ impl AssignReplicasToDirsRequest {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::assign_replicas_to_dirs_request::AssignReplicasToDirsRequest {
         crate::owned::assign_replicas_to_dirs_request::AssignReplicasToDirsRequest {
             broker_id: (self.broker_id),
             broker_epoch: (self.broker_epoch),
-            directories: (self.directories)
-                .iter()
-                .map(DirectoryData::to_owned)
-                .collect(),
+            directories: (self.directories).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
@@ -58,10 +54,10 @@ impl Encode for AssignReplicasToDirsRequest {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.broker_id);
+            put_i32(buf, self.broker_id)
         }
         if version >= 0 {
-            put_i64(buf, self.broker_epoch);
+            put_i64(buf, self.broker_epoch)
         }
         if version >= 0 {
             {
@@ -153,21 +149,29 @@ impl AssignReplicasToDirsRequest {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectoryData {
     pub id: crate::primitives::uuid::Uuid,
     pub topics: Vec<TopicData>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl Default for DirectoryData {
+    fn default() -> Self {
+        Self {
+            id: crate::primitives::uuid::Uuid::default(),
+            topics: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl DirectoryData {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::assign_replicas_to_dirs_request::DirectoryData {
         crate::owned::assign_replicas_to_dirs_request::DirectoryData {
             id: (self.id),
-            topics: (self.topics).iter().map(TopicData::to_owned).collect(),
+            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
@@ -176,7 +180,7 @@ impl Encode for DirectoryData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.id);
+            crate::primitives::uuid::put_uuid(buf, self.id)
         }
         if version >= 0 {
             {
@@ -250,24 +254,29 @@ impl DirectoryData {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicData {
     pub topic_id: crate::primitives::uuid::Uuid,
     pub partitions: Vec<PartitionData>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl Default for TopicData {
+    fn default() -> Self {
+        Self {
+            topic_id: crate::primitives::uuid::Uuid::default(),
+            partitions: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl TopicData {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::assign_replicas_to_dirs_request::TopicData {
         crate::owned::assign_replicas_to_dirs_request::TopicData {
             topic_id: (self.topic_id),
-            partitions: (self.partitions)
-                .iter()
-                .map(PartitionData::to_owned)
-                .collect(),
+            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
@@ -276,7 +285,7 @@ impl Encode for TopicData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+            crate::primitives::uuid::put_uuid(buf, self.topic_id)
         }
         if version >= 0 {
             {
@@ -353,16 +362,23 @@ impl TopicData {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionData {
     pub partition_index: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
+}
+impl Default for PartitionData {
+    fn default() -> Self {
+        Self {
+            partition_index: 0i32,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
 }
 impl PartitionData {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::assign_replicas_to_dirs_request::PartitionData {
         crate::owned::assign_replicas_to_dirs_request::PartitionData {
             partition_index: (self.partition_index),
@@ -374,7 +390,7 @@ impl Encode for PartitionData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

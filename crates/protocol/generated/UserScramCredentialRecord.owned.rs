@@ -46,7 +46,7 @@ impl Encode for UserScramCredentialRecord {
             }
         }
         if version >= 0 {
-            put_i8(buf, self.mechanism);
+            put_i8(buf, self.mechanism)
         }
         if version >= 0 {
             if flex {
@@ -70,7 +70,7 @@ impl Encode for UserScramCredentialRecord {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.iterations);
+            put_i32(buf, self.iterations)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -122,7 +122,7 @@ impl Encode for UserScramCredentialRecord {
         n
     }
 }
-impl Decode<'_> for UserScramCredentialRecord {
+impl<'de> Decode<'de> for UserScramCredentialRecord {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(
@@ -201,7 +201,7 @@ impl UserScramCredentialRecord {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert(
         "name".to_string(),

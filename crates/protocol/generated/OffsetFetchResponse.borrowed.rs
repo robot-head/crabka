@@ -20,7 +20,7 @@ pub const FLEXIBLE_MIN: i16 = 6;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OffsetFetchResponse<'a> {
     pub throttle_time_ms: i32,
     pub topics: Vec<OffsetFetchResponseTopic<'a>>,
@@ -28,28 +28,32 @@ pub struct OffsetFetchResponse<'a> {
     pub groups: Vec<OffsetFetchResponseGroup<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl OffsetFetchResponse<'_> {
+impl<'a> Default for OffsetFetchResponse<'a> {
+    fn default() -> Self {
+        Self {
+            throttle_time_ms: 0i32,
+            topics: Vec::new(),
+            error_code: 0i16,
+            groups: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> OffsetFetchResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_fetch_response::OffsetFetchResponse {
         crate::owned::offset_fetch_response::OffsetFetchResponse {
             throttle_time_ms: (self.throttle_time_ms),
-            topics: (self.topics)
-                .iter()
-                .map(OffsetFetchResponseTopic::to_owned)
-                .collect(),
+            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
             error_code: (self.error_code),
-            groups: (self.groups)
-                .iter()
-                .map(OffsetFetchResponseGroup::to_owned)
-                .collect(),
+            groups: (self.groups).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for OffsetFetchResponse<'_> {
+impl<'a> Encode for OffsetFetchResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -59,7 +63,7 @@ impl Encode for OffsetFetchResponse<'_> {
         }
         let flex = is_flexible(version);
         if version >= 3 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if (0..=7).contains(&version) {
             {
@@ -70,7 +74,7 @@ impl Encode for OffsetFetchResponse<'_> {
             }
         }
         if (2..=7).contains(&version) {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 8 {
             {
@@ -180,29 +184,34 @@ impl OffsetFetchResponse<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OffsetFetchResponseTopic<'a> {
     pub name: &'a str,
     pub partitions: Vec<OffsetFetchResponsePartition<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl OffsetFetchResponseTopic<'_> {
+impl<'a> Default for OffsetFetchResponseTopic<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            partitions: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> OffsetFetchResponseTopic<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_fetch_response::OffsetFetchResponseTopic {
         crate::owned::offset_fetch_response::OffsetFetchResponseTopic {
             name: (self.name).to_string(),
-            partitions: (self.partitions)
-                .iter()
-                .map(OffsetFetchResponsePartition::to_owned)
-                .collect(),
+            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for OffsetFetchResponseTopic<'_> {
+impl<'a> Encode for OffsetFetchResponseTopic<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 6;
         if (0..=7).contains(&version) {
@@ -304,7 +313,7 @@ pub struct OffsetFetchResponsePartition<'a> {
     pub error_code: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for OffsetFetchResponsePartition<'_> {
+impl<'a> Default for OffsetFetchResponsePartition<'a> {
     fn default() -> Self {
         Self {
             partition_index: 0i32,
@@ -316,33 +325,32 @@ impl Default for OffsetFetchResponsePartition<'_> {
         }
     }
 }
-impl OffsetFetchResponsePartition<'_> {
+impl<'a> OffsetFetchResponsePartition<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_fetch_response::OffsetFetchResponsePartition {
         crate::owned::offset_fetch_response::OffsetFetchResponsePartition {
             partition_index: (self.partition_index),
             committed_offset: (self.committed_offset),
             committed_leader_epoch: (self.committed_leader_epoch),
-            metadata: (self.metadata).map(std::string::ToString::to_string),
+            metadata: (self.metadata).map(|s| s.to_string()),
             error_code: (self.error_code),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for OffsetFetchResponsePartition<'_> {
+impl<'a> Encode for OffsetFetchResponsePartition<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 6;
         if (0..=7).contains(&version) {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
         if (0..=7).contains(&version) {
-            put_i64(buf, self.committed_offset);
+            put_i64(buf, self.committed_offset)
         }
         if (5..=7).contains(&version) {
-            put_i32(buf, self.committed_leader_epoch);
+            put_i32(buf, self.committed_leader_epoch)
         }
         if (0..=7).contains(&version) {
             if flex {
@@ -352,7 +360,7 @@ impl Encode for OffsetFetchResponsePartition<'_> {
             }
         }
         if (0..=7).contains(&version) {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -441,31 +449,37 @@ impl OffsetFetchResponsePartition<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OffsetFetchResponseGroup<'a> {
     pub group_id: &'a str,
     pub topics: Vec<OffsetFetchResponseTopics<'a>>,
     pub error_code: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl OffsetFetchResponseGroup<'_> {
+impl<'a> Default for OffsetFetchResponseGroup<'a> {
+    fn default() -> Self {
+        Self {
+            group_id: "",
+            topics: Vec::new(),
+            error_code: 0i16,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> OffsetFetchResponseGroup<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_fetch_response::OffsetFetchResponseGroup {
         crate::owned::offset_fetch_response::OffsetFetchResponseGroup {
             group_id: (self.group_id).to_string(),
-            topics: (self.topics)
-                .iter()
-                .map(OffsetFetchResponseTopics::to_owned)
-                .collect(),
+            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
             error_code: (self.error_code),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for OffsetFetchResponseGroup<'_> {
+impl<'a> Encode for OffsetFetchResponseGroup<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 6;
         if version >= 8 {
@@ -484,7 +498,7 @@ impl Encode for OffsetFetchResponseGroup<'_> {
             }
         }
         if version >= 8 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -567,31 +581,37 @@ impl OffsetFetchResponseGroup<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OffsetFetchResponseTopics<'a> {
     pub name: &'a str,
     pub topic_id: crate::primitives::uuid::Uuid,
     pub partitions: Vec<OffsetFetchResponsePartitions<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl OffsetFetchResponseTopics<'_> {
+impl<'a> Default for OffsetFetchResponseTopics<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            topic_id: crate::primitives::uuid::Uuid::default(),
+            partitions: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> OffsetFetchResponseTopics<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_fetch_response::OffsetFetchResponseTopics {
         crate::owned::offset_fetch_response::OffsetFetchResponseTopics {
             name: (self.name).to_string(),
             topic_id: (self.topic_id),
-            partitions: (self.partitions)
-                .iter()
-                .map(OffsetFetchResponsePartitions::to_owned)
-                .collect(),
+            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for OffsetFetchResponseTopics<'_> {
+impl<'a> Encode for OffsetFetchResponseTopics<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 6;
         if (8..=9).contains(&version) {
@@ -602,7 +622,7 @@ impl Encode for OffsetFetchResponseTopics<'_> {
             }
         }
         if version >= 10 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+            crate::primitives::uuid::put_uuid(buf, self.topic_id)
         }
         if version >= 8 {
             {
@@ -705,7 +725,7 @@ pub struct OffsetFetchResponsePartitions<'a> {
     pub error_code: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for OffsetFetchResponsePartitions<'_> {
+impl<'a> Default for OffsetFetchResponsePartitions<'a> {
     fn default() -> Self {
         Self {
             partition_index: 0i32,
@@ -717,33 +737,32 @@ impl Default for OffsetFetchResponsePartitions<'_> {
         }
     }
 }
-impl OffsetFetchResponsePartitions<'_> {
+impl<'a> OffsetFetchResponsePartitions<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_fetch_response::OffsetFetchResponsePartitions {
         crate::owned::offset_fetch_response::OffsetFetchResponsePartitions {
             partition_index: (self.partition_index),
             committed_offset: (self.committed_offset),
             committed_leader_epoch: (self.committed_leader_epoch),
-            metadata: (self.metadata).map(std::string::ToString::to_string),
+            metadata: (self.metadata).map(|s| s.to_string()),
             error_code: (self.error_code),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for OffsetFetchResponsePartitions<'_> {
+impl<'a> Encode for OffsetFetchResponsePartitions<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 6;
         if version >= 8 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
         if version >= 8 {
-            put_i64(buf, self.committed_offset);
+            put_i64(buf, self.committed_offset)
         }
         if version >= 8 {
-            put_i32(buf, self.committed_leader_epoch);
+            put_i32(buf, self.committed_leader_epoch)
         }
         if version >= 8 {
             if flex {
@@ -753,7 +772,7 @@ impl Encode for OffsetFetchResponsePartitions<'_> {
             }
         }
         if version >= 8 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

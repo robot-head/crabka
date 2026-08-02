@@ -39,7 +39,6 @@ impl InitProducerIdResponse {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::init_producer_id_response::InitProducerIdResponse {
         crate::owned::init_producer_id_response::InitProducerIdResponse {
             throttle_time_ms: (self.throttle_time_ms),
@@ -62,22 +61,22 @@ impl Encode for InitProducerIdResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
-            put_i64(buf, self.producer_id);
+            put_i64(buf, self.producer_id)
         }
         if version >= 0 {
-            put_i16(buf, self.producer_epoch);
+            put_i16(buf, self.producer_epoch)
         }
         if version >= 6 {
-            put_i64(buf, self.ongoing_txn_producer_id);
+            put_i64(buf, self.ongoing_txn_producer_id)
         }
         if version >= 6 {
-            put_i16(buf, self.ongoing_txn_producer_epoch);
+            put_i16(buf, self.ongoing_txn_producer_epoch)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

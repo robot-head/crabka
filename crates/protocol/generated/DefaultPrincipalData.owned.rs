@@ -46,7 +46,7 @@ impl Encode for DefaultPrincipalData {
             }
         }
         if version >= 0 {
-            put_bool(buf, self.token_authenticated);
+            put_bool(buf, self.token_authenticated)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -81,7 +81,7 @@ impl Encode for DefaultPrincipalData {
         n
     }
 }
-impl Decode<'_> for DefaultPrincipalData {
+impl<'de> Decode<'de> for DefaultPrincipalData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(
@@ -134,7 +134,7 @@ impl DefaultPrincipalData {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert(
         "type".to_string(),

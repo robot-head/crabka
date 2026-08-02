@@ -2,39 +2,42 @@
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 use bytes::BufMut;
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Assignment<'a> {
     pub active_tasks: Vec<super::task_ids::TaskIds<'a>>,
     pub standby_tasks: Vec<super::task_ids::TaskIds<'a>>,
     pub warmup_tasks: Vec<super::task_ids::TaskIds<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Assignment<'_> {
+impl<'a> Default for Assignment<'a> {
+    fn default() -> Self {
+        Self {
+            active_tasks: Vec::new(),
+            standby_tasks: Vec::new(),
+            warmup_tasks: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> Assignment<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::common::streams_group_describe_response::assignment::Assignment {
         crate::owned::common::streams_group_describe_response::assignment::Assignment {
-            active_tasks: (self.active_tasks)
-                .iter()
-                .map(super::task_ids::TaskIds::to_owned)
-                .collect(),
+            active_tasks: (self.active_tasks).iter().map(|it| it.to_owned()).collect(),
             standby_tasks: (self.standby_tasks)
                 .iter()
-                .map(super::task_ids::TaskIds::to_owned)
+                .map(|it| it.to_owned())
                 .collect(),
-            warmup_tasks: (self.warmup_tasks)
-                .iter()
-                .map(super::task_ids::TaskIds::to_owned)
-                .collect(),
+            warmup_tasks: (self.warmup_tasks).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for Assignment<'_> {
+impl<'a> Encode for Assignment<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {

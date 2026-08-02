@@ -15,18 +15,27 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DefaultPrincipalData<'a> {
     pub type_: &'a str,
     pub name: &'a str,
     pub token_authenticated: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl DefaultPrincipalData<'_> {
+impl<'a> Default for DefaultPrincipalData<'a> {
+    fn default() -> Self {
+        Self {
+            type_: "",
+            name: "",
+            token_authenticated: false,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> DefaultPrincipalData<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::default_principal_data::DefaultPrincipalData {
         crate::owned::default_principal_data::DefaultPrincipalData {
             type_: (self.type_).to_string(),
@@ -36,7 +45,7 @@ impl DefaultPrincipalData<'_> {
         }
     }
 }
-impl Encode for DefaultPrincipalData<'_> {
+impl<'a> Encode for DefaultPrincipalData<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(
@@ -59,7 +68,7 @@ impl Encode for DefaultPrincipalData<'_> {
             }
         }
         if version >= 0 {
-            put_bool(buf, self.token_authenticated);
+            put_bool(buf, self.token_authenticated)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

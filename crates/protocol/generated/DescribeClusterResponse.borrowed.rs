@@ -34,7 +34,7 @@ pub struct DescribeClusterResponse<'a> {
     pub cluster_authorized_operations: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for DescribeClusterResponse<'_> {
+impl<'a> Default for DescribeClusterResponse<'a> {
     fn default() -> Self {
         Self {
             throttle_time_ms: 0i32,
@@ -53,31 +53,27 @@ impl<'a> DescribeClusterResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_cluster_response::DescribeClusterResponse {
         crate::owned::describe_cluster_response::DescribeClusterResponse {
             throttle_time_ms: (self.throttle_time_ms),
             error_code: (self.error_code),
-            error_message: (self.error_message).map(std::string::ToString::to_string),
+            error_message: (self.error_message).map(|s| s.to_string()),
             endpoint_type: (self.endpoint_type),
             cluster_id: (self.cluster_id).to_string(),
             controller_id: (self.controller_id),
-            brokers: (self.brokers)
-                .iter()
-                .map(DescribeClusterBroker::to_owned)
-                .collect(),
+            brokers: (self.brokers).iter().map(|it| it.to_owned()).collect(),
             cluster_authorized_operations: (self.cluster_authorized_operations),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
     fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -91,7 +87,7 @@ impl<'a> DescribeClusterResponse<'a> {
     }
     fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 1 {
-            put_i8(buf, self.endpoint_type);
+            put_i8(buf, self.endpoint_type)
         }
     }
     fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -105,7 +101,7 @@ impl<'a> DescribeClusterResponse<'a> {
     }
     fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.controller_id);
+            put_i32(buf, self.controller_id)
         }
     }
     fn encode_field_6<B: BufMut>(
@@ -126,7 +122,7 @@ impl<'a> DescribeClusterResponse<'a> {
     }
     fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.cluster_authorized_operations);
+            put_i32(buf, self.cluster_authorized_operations)
         }
     }
     fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
@@ -241,7 +237,7 @@ impl<'a> DescribeClusterResponse<'a> {
     fn decode_tagged_fields(
         out: &mut Self,
         buf: &mut &'a [u8],
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -250,7 +246,7 @@ impl<'a> DescribeClusterResponse<'a> {
         Ok(())
     }
 }
-impl Encode for DescribeClusterResponse<'_> {
+impl<'a> Encode for DescribeClusterResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -374,7 +370,7 @@ impl DescribeClusterResponse<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribeClusterBroker<'a> {
     pub broker_id: i32,
     pub host: &'a str,
@@ -383,27 +379,38 @@ pub struct DescribeClusterBroker<'a> {
     pub is_fenced: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl DescribeClusterBroker<'_> {
+impl<'a> Default for DescribeClusterBroker<'a> {
+    fn default() -> Self {
+        Self {
+            broker_id: 0i32,
+            host: "",
+            port: 0i32,
+            rack: None,
+            is_fenced: false,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> DescribeClusterBroker<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_cluster_response::DescribeClusterBroker {
         crate::owned::describe_cluster_response::DescribeClusterBroker {
             broker_id: (self.broker_id),
             host: (self.host).to_string(),
             port: (self.port),
-            rack: (self.rack).map(std::string::ToString::to_string),
+            rack: (self.rack).map(|s| s.to_string()),
             is_fenced: (self.is_fenced),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for DescribeClusterBroker<'_> {
+impl<'a> Encode for DescribeClusterBroker<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.broker_id);
+            put_i32(buf, self.broker_id)
         }
         if version >= 0 {
             if flex {
@@ -413,7 +420,7 @@ impl Encode for DescribeClusterBroker<'_> {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.port);
+            put_i32(buf, self.port)
         }
         if version >= 0 {
             if flex {
@@ -423,7 +430,7 @@ impl Encode for DescribeClusterBroker<'_> {
             }
         }
         if version >= 2 {
-            put_bool(buf, self.is_fenced);
+            put_bool(buf, self.is_fenced)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

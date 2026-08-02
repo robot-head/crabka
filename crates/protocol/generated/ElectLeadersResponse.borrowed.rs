@@ -20,31 +20,40 @@ pub const FLEXIBLE_MIN: i16 = 2;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ElectLeadersResponse<'a> {
     pub throttle_time_ms: i32,
     pub error_code: i16,
     pub replica_election_results: Vec<ReplicaElectionResult<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl ElectLeadersResponse<'_> {
+impl<'a> Default for ElectLeadersResponse<'a> {
+    fn default() -> Self {
+        Self {
+            throttle_time_ms: 0i32,
+            error_code: 0i16,
+            replica_election_results: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> ElectLeadersResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::elect_leaders_response::ElectLeadersResponse {
         crate::owned::elect_leaders_response::ElectLeadersResponse {
             throttle_time_ms: (self.throttle_time_ms),
             error_code: (self.error_code),
             replica_election_results: (self.replica_election_results)
                 .iter()
-                .map(ReplicaElectionResult::to_owned)
+                .map(|it| it.to_owned())
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for ElectLeadersResponse<'_> {
+impl<'a> Encode for ElectLeadersResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -54,10 +63,10 @@ impl Encode for ElectLeadersResponse<'_> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 1 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
             {
@@ -155,29 +164,37 @@ impl ElectLeadersResponse<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplicaElectionResult<'a> {
     pub topic: &'a str,
     pub partition_result: Vec<PartitionResult<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl ReplicaElectionResult<'_> {
+impl<'a> Default for ReplicaElectionResult<'a> {
+    fn default() -> Self {
+        Self {
+            topic: "",
+            partition_result: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> ReplicaElectionResult<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::elect_leaders_response::ReplicaElectionResult {
         crate::owned::elect_leaders_response::ReplicaElectionResult {
             topic: (self.topic).to_string(),
             partition_result: (self.partition_result)
                 .iter()
-                .map(PartitionResult::to_owned)
+                .map(|it| it.to_owned())
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for ReplicaElectionResult<'_> {
+impl<'a> Encode for ReplicaElectionResult<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
@@ -272,35 +289,44 @@ impl ReplicaElectionResult<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionResult<'a> {
     pub partition_id: i32,
     pub error_code: i16,
     pub error_message: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl PartitionResult<'_> {
+impl<'a> Default for PartitionResult<'a> {
+    fn default() -> Self {
+        Self {
+            partition_id: 0i32,
+            error_code: 0i16,
+            error_message: None,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> PartitionResult<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::elect_leaders_response::PartitionResult {
         crate::owned::elect_leaders_response::PartitionResult {
             partition_id: (self.partition_id),
             error_code: (self.error_code),
-            error_message: (self.error_message).map(std::string::ToString::to_string),
+            error_message: (self.error_message).map(|s| s.to_string()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for PartitionResult<'_> {
+impl<'a> Encode for PartitionResult<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
-            put_i32(buf, self.partition_id);
+            put_i32(buf, self.partition_id)
         }
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
             if flex {

@@ -15,7 +15,7 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DelegationTokenRecord<'a> {
     pub owner: &'a str,
     pub requester: &'a str,
@@ -26,19 +26,29 @@ pub struct DelegationTokenRecord<'a> {
     pub token_id: &'a str,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl DelegationTokenRecord<'_> {
+impl<'a> Default for DelegationTokenRecord<'a> {
+    fn default() -> Self {
+        Self {
+            owner: "",
+            requester: "",
+            renewers: Vec::new(),
+            issue_timestamp: 0i64,
+            max_timestamp: 0i64,
+            expiration_timestamp: 0i64,
+            token_id: "",
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> DelegationTokenRecord<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::delegation_token_record::DelegationTokenRecord {
         crate::owned::delegation_token_record::DelegationTokenRecord {
             owner: (self.owner).to_string(),
             requester: (self.requester).to_string(),
-            renewers: (self.renewers)
-                .iter()
-                .map(std::string::ToString::to_string)
-                .collect(),
+            renewers: (self.renewers).iter().map(|s| s.to_string()).collect(),
             issue_timestamp: (self.issue_timestamp),
             max_timestamp: (self.max_timestamp),
             expiration_timestamp: (self.expiration_timestamp),
@@ -47,7 +57,7 @@ impl DelegationTokenRecord<'_> {
         }
     }
 }
-impl Encode for DelegationTokenRecord<'_> {
+impl<'a> Encode for DelegationTokenRecord<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(
@@ -74,21 +84,21 @@ impl Encode for DelegationTokenRecord<'_> {
                 crate::primitives::array::put_array_len(buf, (self.renewers).len(), flex);
                 for it in &self.renewers {
                     if flex {
-                        let () = put_compact_string(buf, it);
+                        let () = put_compact_string(buf, *it);
                     } else {
-                        let () = put_string(buf, it);
-                    }
+                        let () = put_string(buf, *it);
+                    };
                 }
             }
         }
         if version >= 0 {
-            put_i64(buf, self.issue_timestamp);
+            put_i64(buf, self.issue_timestamp)
         }
         if version >= 0 {
-            put_i64(buf, self.max_timestamp);
+            put_i64(buf, self.max_timestamp)
         }
         if version >= 0 {
-            put_i64(buf, self.expiration_timestamp);
+            put_i64(buf, self.expiration_timestamp)
         }
         if version >= 0 {
             if flex {
@@ -128,9 +138,9 @@ impl Encode for DelegationTokenRecord<'_> {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(it)
+                            compact_string_len(*it)
                         } else {
-                            string_len(it)
+                            string_len(*it)
                         }
                     })
                     .sum();

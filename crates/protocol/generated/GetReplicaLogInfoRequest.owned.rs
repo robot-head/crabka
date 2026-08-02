@@ -29,7 +29,7 @@ impl Encode for GetReplicaLogInfoRequest {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.broker_id);
+            put_i32(buf, self.broker_id)
         }
         if version >= 0 {
             {
@@ -71,7 +71,7 @@ impl Encode for GetReplicaLogInfoRequest {
         n
     }
 }
-impl Decode<'_> for GetReplicaLogInfoRequest {
+impl<'de> Decode<'de> for GetReplicaLogInfoRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -124,7 +124,7 @@ impl Encode for TopicPartitions {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+            crate::primitives::uuid::put_uuid(buf, self.topic_id)
         }
         if version >= 0 {
             {
@@ -161,7 +161,7 @@ impl Encode for TopicPartitions {
         n
     }
 }
-impl Decode<'_> for TopicPartitions {
+impl<'de> Decode<'de> for TopicPartitions {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -202,7 +202,7 @@ impl TopicPartitions {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("brokerId".to_string(), ::serde_json::json!(0));
     obj.insert(

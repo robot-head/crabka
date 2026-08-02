@@ -18,13 +18,22 @@ pub const FLEXIBLE_MIN: i16 = 32767;
 pub fn is_flexible(version: i16) -> bool {
     version == FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsumerProtocolAssignment<'a> {
     pub assigned_partitions: Vec<TopicPartition<'a>>,
     pub user_data: Option<&'a [u8]>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl ConsumerProtocolAssignment<'_> {
+impl<'a> Default for ConsumerProtocolAssignment<'a> {
+    fn default() -> Self {
+        Self {
+            assigned_partitions: Vec::new(),
+            user_data: None,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> ConsumerProtocolAssignment<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
@@ -34,14 +43,14 @@ impl ConsumerProtocolAssignment<'_> {
         crate::owned::consumer_protocol_assignment::ConsumerProtocolAssignment {
             assigned_partitions: (self.assigned_partitions)
                 .iter()
-                .map(TopicPartition::to_owned)
+                .map(|it| it.to_owned())
                 .collect(),
             user_data: (self.user_data).map(Bytes::copy_from_slice),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for ConsumerProtocolAssignment<'_> {
+impl<'a> Encode for ConsumerProtocolAssignment<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(
@@ -151,17 +160,25 @@ impl ConsumerProtocolAssignment<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicPartition<'a> {
     pub topic: &'a str,
     pub partitions: Vec<i32>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl TopicPartition<'_> {
+impl<'a> Default for TopicPartition<'a> {
+    fn default() -> Self {
+        Self {
+            topic: "",
+            partitions: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> TopicPartition<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::consumer_protocol_assignment::TopicPartition {
         crate::owned::consumer_protocol_assignment::TopicPartition {
             topic: (self.topic).to_string(),
@@ -170,7 +187,7 @@ impl TopicPartition<'_> {
         }
     }
 }
-impl Encode for TopicPartition<'_> {
+impl<'a> Encode for TopicPartition<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version == i16::MAX;
         if version >= 0 {

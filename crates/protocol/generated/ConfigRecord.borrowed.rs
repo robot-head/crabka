@@ -19,7 +19,7 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigRecord<'a> {
     pub resource_type: i8,
     pub resource_name: &'a str,
@@ -27,22 +27,32 @@ pub struct ConfigRecord<'a> {
     pub value: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl ConfigRecord<'_> {
+impl<'a> Default for ConfigRecord<'a> {
+    fn default() -> Self {
+        Self {
+            resource_type: 0i8,
+            resource_name: "",
+            name: "",
+            value: None,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> ConfigRecord<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::config_record::ConfigRecord {
         crate::owned::config_record::ConfigRecord {
             resource_type: (self.resource_type),
             resource_name: (self.resource_name).to_string(),
             name: (self.name).to_string(),
-            value: (self.value).map(std::string::ToString::to_string),
+            value: (self.value).map(|s| s.to_string()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for ConfigRecord<'_> {
+impl<'a> Encode for ConfigRecord<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(
@@ -51,7 +61,7 @@ impl Encode for ConfigRecord<'_> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i8(buf, self.resource_type);
+            put_i8(buf, self.resource_type)
         }
         if version >= 0 {
             if flex {

@@ -80,7 +80,7 @@ impl Encode for ConsumerProtocolAssignment {
         n
     }
 }
-impl Decode<'_> for ConsumerProtocolAssignment {
+impl<'de> Decode<'de> for ConsumerProtocolAssignment {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(
@@ -170,7 +170,7 @@ impl Encode for TopicPartition {
         n
     }
 }
-impl Decode<'_> for TopicPartition {
+impl<'de> Decode<'de> for TopicPartition {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version == i16::MAX;
         let mut out = Self::default();
@@ -212,7 +212,7 @@ impl TopicPartition {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert(
         "assignedPartitions".to_string(),

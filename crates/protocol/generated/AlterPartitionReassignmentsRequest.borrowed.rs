@@ -23,7 +23,7 @@ pub struct AlterPartitionReassignmentsRequest<'a> {
     pub topics: Vec<ReassignableTopic<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for AlterPartitionReassignmentsRequest<'_> {
+impl<'a> Default for AlterPartitionReassignmentsRequest<'a> {
     fn default() -> Self {
         Self {
             timeout_ms: 60_000i32,
@@ -33,11 +33,10 @@ impl Default for AlterPartitionReassignmentsRequest<'_> {
         }
     }
 }
-impl AlterPartitionReassignmentsRequest<'_> {
+impl<'a> AlterPartitionReassignmentsRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::alter_partition_reassignments_request::AlterPartitionReassignmentsRequest
@@ -45,15 +44,12 @@ impl AlterPartitionReassignmentsRequest<'_> {
         crate::owned::alter_partition_reassignments_request::AlterPartitionReassignmentsRequest {
             timeout_ms: (self.timeout_ms),
             allow_replication_factor_change: (self.allow_replication_factor_change),
-            topics: (self.topics)
-                .iter()
-                .map(ReassignableTopic::to_owned)
-                .collect(),
+            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for AlterPartitionReassignmentsRequest<'_> {
+impl<'a> Encode for AlterPartitionReassignmentsRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -63,10 +59,10 @@ impl Encode for AlterPartitionReassignmentsRequest<'_> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.timeout_ms);
+            put_i32(buf, self.timeout_ms)
         }
         if version >= 1 {
-            put_bool(buf, self.allow_replication_factor_change);
+            put_bool(buf, self.allow_replication_factor_change)
         }
         if version >= 0 {
             {
@@ -155,31 +151,36 @@ impl AlterPartitionReassignmentsRequest<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReassignableTopic<'a> {
     pub name: &'a str,
     pub partitions: Vec<ReassignablePartition>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl ReassignableTopic<'_> {
+impl<'a> Default for ReassignableTopic<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            partitions: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> ReassignableTopic<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::alter_partition_reassignments_request::ReassignableTopic {
         crate::owned::alter_partition_reassignments_request::ReassignableTopic {
             name: (self.name).to_string(),
-            partitions: (self.partitions)
-                .iter()
-                .map(ReassignablePartition::to_owned)
-                .collect(),
+            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for ReassignableTopic<'_> {
+impl<'a> Encode for ReassignableTopic<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
@@ -272,17 +273,25 @@ impl ReassignableTopic<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReassignablePartition {
     pub partition_index: i32,
     pub replicas: Option<Vec<i32>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl Default for ReassignablePartition {
+    fn default() -> Self {
+        Self {
+            partition_index: 0i32,
+            replicas: None,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl ReassignablePartition {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::alter_partition_reassignments_request::ReassignablePartition {
@@ -297,7 +306,7 @@ impl Encode for ReassignablePartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
         if version >= 0 {
             {
@@ -326,7 +335,7 @@ impl Encode for ReassignablePartition {
             n += {
                 let opt: Option<&Vec<_>> = (self.replicas).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
+                    opt.map(|v| v.len()),
                     flex,
                 );
                 let body: usize = opt.map_or(0, |v| v.iter().map(|_| 4).sum());

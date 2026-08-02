@@ -33,7 +33,7 @@ impl Encode for OffsetCommitResponse {
         }
         let flex = is_flexible(version);
         if version >= 3 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 0 {
             {
@@ -70,7 +70,7 @@ impl Encode for OffsetCommitResponse {
         n
     }
 }
-impl Decode<'_> for OffsetCommitResponse {
+impl<'de> Decode<'de> for OffsetCommitResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -131,7 +131,7 @@ impl Encode for OffsetCommitResponseTopic {
             }
         }
         if version >= 10 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+            crate::primitives::uuid::put_uuid(buf, self.topic_id)
         }
         if version >= 0 {
             {
@@ -178,7 +178,7 @@ impl Encode for OffsetCommitResponseTopic {
         n
     }
 }
-impl Decode<'_> for OffsetCommitResponseTopic {
+impl<'de> Decode<'de> for OffsetCommitResponseTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 8;
         let mut out = Self::default();
@@ -235,10 +235,10 @@ impl Encode for OffsetCommitResponsePartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 8;
         if version >= 0 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -262,7 +262,7 @@ impl Encode for OffsetCommitResponsePartition {
         n
     }
 }
-impl Decode<'_> for OffsetCommitResponsePartition {
+impl<'de> Decode<'de> for OffsetCommitResponsePartition {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 8;
         let mut out = Self::default();

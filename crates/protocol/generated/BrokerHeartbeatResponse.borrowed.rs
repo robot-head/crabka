@@ -37,7 +37,6 @@ impl BrokerHeartbeatResponse {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::broker_heartbeat_response::BrokerHeartbeatResponse {
         crate::owned::broker_heartbeat_response::BrokerHeartbeatResponse {
             throttle_time_ms: (self.throttle_time_ms),
@@ -59,19 +58,19 @@ impl Encode for BrokerHeartbeatResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
-            put_bool(buf, self.is_caught_up);
+            put_bool(buf, self.is_caught_up)
         }
         if version >= 0 {
-            put_bool(buf, self.is_fenced);
+            put_bool(buf, self.is_fenced)
         }
         if version >= 0 {
-            put_bool(buf, self.should_shut_down);
+            put_bool(buf, self.should_shut_down)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

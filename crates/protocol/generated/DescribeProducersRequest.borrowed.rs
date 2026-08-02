@@ -16,24 +16,31 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribeProducersRequest<'a> {
     pub topics: Vec<TopicRequest<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl DescribeProducersRequest<'_> {
+impl<'a> Default for DescribeProducersRequest<'a> {
+    fn default() -> Self {
+        Self {
+            topics: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> DescribeProducersRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_producers_request::DescribeProducersRequest {
         crate::owned::describe_producers_request::DescribeProducersRequest {
-            topics: (self.topics).iter().map(TopicRequest::to_owned).collect(),
+            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for DescribeProducersRequest<'_> {
+impl<'a> Encode for DescribeProducersRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -111,17 +118,25 @@ impl DescribeProducersRequest<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicRequest<'a> {
     pub name: &'a str,
     pub partition_indexes: Vec<i32>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl TopicRequest<'_> {
+impl<'a> Default for TopicRequest<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            partition_indexes: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> TopicRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_producers_request::TopicRequest {
         crate::owned::describe_producers_request::TopicRequest {
             name: (self.name).to_string(),
@@ -130,7 +145,7 @@ impl TopicRequest<'_> {
         }
     }
 }
-impl Encode for TopicRequest<'_> {
+impl<'a> Encode for TopicRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {

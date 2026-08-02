@@ -35,7 +35,7 @@ pub struct JoinGroupResponse<'a> {
     pub members: Vec<JoinGroupResponseMember<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for JoinGroupResponse<'_> {
+impl<'a> Default for JoinGroupResponse<'a> {
     fn default() -> Self {
         Self {
             throttle_time_ms: 0i32,
@@ -55,37 +55,33 @@ impl<'a> JoinGroupResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::join_group_response::JoinGroupResponse {
         crate::owned::join_group_response::JoinGroupResponse {
             throttle_time_ms: (self.throttle_time_ms),
             error_code: (self.error_code),
             generation_id: (self.generation_id),
-            protocol_type: (self.protocol_type).map(std::string::ToString::to_string),
-            protocol_name: (self.protocol_name).map(std::string::ToString::to_string),
+            protocol_type: (self.protocol_type).map(|s| s.to_string()),
+            protocol_name: (self.protocol_name).map(|s| s.to_string()),
             leader: (self.leader).to_string(),
             skip_assignment: (self.skip_assignment),
             member_id: (self.member_id).to_string(),
-            members: (self.members)
-                .iter()
-                .map(JoinGroupResponseMember::to_owned)
-                .collect(),
+            members: (self.members).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
     fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 2 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.generation_id);
+            put_i32(buf, self.generation_id)
         }
     }
     fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -125,7 +121,7 @@ impl<'a> JoinGroupResponse<'a> {
     }
     fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 9 {
-            put_bool(buf, self.skip_assignment);
+            put_bool(buf, self.skip_assignment)
         }
     }
     fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -292,7 +288,7 @@ impl<'a> JoinGroupResponse<'a> {
     fn decode_tagged_fields(
         out: &mut Self,
         buf: &mut &'a [u8],
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -301,7 +297,7 @@ impl<'a> JoinGroupResponse<'a> {
         Ok(())
     }
 }
-impl Encode for JoinGroupResponse<'_> {
+impl<'a> Encode for JoinGroupResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -449,28 +445,37 @@ impl JoinGroupResponse<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JoinGroupResponseMember<'a> {
     pub member_id: &'a str,
     pub group_instance_id: Option<&'a str>,
     pub metadata: &'a [u8],
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl JoinGroupResponseMember<'_> {
+impl<'a> Default for JoinGroupResponseMember<'a> {
+    fn default() -> Self {
+        Self {
+            member_id: "",
+            group_instance_id: None,
+            metadata: &[],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> JoinGroupResponseMember<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::join_group_response::JoinGroupResponseMember {
         crate::owned::join_group_response::JoinGroupResponseMember {
             member_id: (self.member_id).to_string(),
-            group_instance_id: (self.group_instance_id).map(std::string::ToString::to_string),
+            group_instance_id: (self.group_instance_id).map(|s| s.to_string()),
             metadata: Bytes::copy_from_slice(self.metadata),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for JoinGroupResponseMember<'_> {
+impl<'a> Encode for JoinGroupResponseMember<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 6;
         if version >= 0 {

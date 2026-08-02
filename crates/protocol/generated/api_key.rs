@@ -289,7 +289,6 @@ impl ApiKey {
         ApiKey::GetReplicaLogInfo,
     ];
     /// Resolve from numeric key; returns `None` for unknown keys.
-    #[must_use]
     pub fn from_i16(k: i16) -> Option<ApiKey> {
         match k {
             0 => Some(ApiKey::Produce),

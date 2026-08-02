@@ -70,7 +70,7 @@ impl ConsumerGroupHeartbeatRequest {
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.member_epoch);
+            put_i32(buf, self.member_epoch)
         }
     }
     fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -93,7 +93,7 @@ impl ConsumerGroupHeartbeatRequest {
     }
     fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.rebalance_timeout_ms);
+            put_i32(buf, self.rebalance_timeout_ms)
         }
     }
     fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -104,10 +104,10 @@ impl ConsumerGroupHeartbeatRequest {
                 if let Some(v) = &self.subscribed_topic_names {
                     for it in v {
                         if flex {
-                            let () = put_compact_string(buf, it);
+                            let () = put_compact_string(buf, &*it);
                         } else {
-                            let () = put_string(buf, it);
-                        }
+                            let () = put_string(buf, &*it);
+                        };
                     }
                 }
             }
@@ -150,7 +150,7 @@ impl ConsumerGroupHeartbeatRequest {
         }
         Ok(())
     }
-    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
+    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -321,7 +321,7 @@ impl ConsumerGroupHeartbeatRequest {
     fn decode_tagged_fields<B: Buf>(
         out: &mut Self,
         buf: &mut B,
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -393,16 +393,16 @@ impl Encode for ConsumerGroupHeartbeatRequest {
             n += {
                 let opt: Option<&Vec<_>> = (self.subscribed_topic_names).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
+                    opt.map(|v| v.len()),
                     flex,
                 );
                 let body: usize = opt.map_or(0, |v| {
                     v.iter()
                         .map(|it| {
                             if flex {
-                                compact_string_len(it)
+                                compact_string_len(&*it)
                             } else {
-                                string_len(it)
+                                string_len(&*it)
                             }
                         })
                         .sum()
@@ -428,7 +428,7 @@ impl Encode for ConsumerGroupHeartbeatRequest {
             n += {
                 let opt: Option<&Vec<_>> = (self.topic_partitions).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
+                    opt.map(|v| v.len()),
                     flex,
                 );
                 let body: usize =
@@ -443,7 +443,7 @@ impl Encode for ConsumerGroupHeartbeatRequest {
         n
     }
 }
-impl Decode<'_> for ConsumerGroupHeartbeatRequest {
+impl<'de> Decode<'de> for ConsumerGroupHeartbeatRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -515,7 +515,7 @@ impl Encode for TopicPartitions {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+            crate::primitives::uuid::put_uuid(buf, self.topic_id)
         }
         if version >= 0 {
             {
@@ -552,7 +552,7 @@ impl Encode for TopicPartitions {
         n
     }
 }
-impl Decode<'_> for TopicPartitions {
+impl<'de> Decode<'de> for TopicPartitions {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

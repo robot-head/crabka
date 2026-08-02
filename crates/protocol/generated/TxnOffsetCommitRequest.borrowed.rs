@@ -32,7 +32,7 @@ pub struct TxnOffsetCommitRequest<'a> {
     pub topics: Vec<TxnOffsetCommitRequestTopic<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for TxnOffsetCommitRequest<'_> {
+impl<'a> Default for TxnOffsetCommitRequest<'a> {
     fn default() -> Self {
         Self {
             transactional_id: "",
@@ -51,7 +51,6 @@ impl<'a> TxnOffsetCommitRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::txn_offset_commit_request::TxnOffsetCommitRequest {
         crate::owned::txn_offset_commit_request::TxnOffsetCommitRequest {
             transactional_id: (self.transactional_id).to_string(),
@@ -60,11 +59,8 @@ impl<'a> TxnOffsetCommitRequest<'a> {
             producer_epoch: (self.producer_epoch),
             generation_id: (self.generation_id),
             member_id: (self.member_id).to_string(),
-            group_instance_id: (self.group_instance_id).map(std::string::ToString::to_string),
-            topics: (self.topics)
-                .iter()
-                .map(TxnOffsetCommitRequestTopic::to_owned)
-                .collect(),
+            group_instance_id: (self.group_instance_id).map(|s| s.to_string()),
+            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
@@ -88,17 +84,17 @@ impl<'a> TxnOffsetCommitRequest<'a> {
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i64(buf, self.producer_id);
+            put_i64(buf, self.producer_id)
         }
     }
     fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i16(buf, self.producer_epoch);
+            put_i16(buf, self.producer_epoch)
         }
     }
     fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 3 {
-            put_i32(buf, self.generation_id);
+            put_i32(buf, self.generation_id)
         }
     }
     fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -255,7 +251,7 @@ impl<'a> TxnOffsetCommitRequest<'a> {
     fn decode_tagged_fields(
         out: &mut Self,
         buf: &mut &'a [u8],
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -264,7 +260,7 @@ impl<'a> TxnOffsetCommitRequest<'a> {
         Ok(())
     }
 }
-impl Encode for TxnOffsetCommitRequest<'_> {
+impl<'a> Encode for TxnOffsetCommitRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -393,29 +389,34 @@ impl TxnOffsetCommitRequest<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TxnOffsetCommitRequestTopic<'a> {
     pub name: &'a str,
     pub partitions: Vec<TxnOffsetCommitRequestPartition<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl TxnOffsetCommitRequestTopic<'_> {
+impl<'a> Default for TxnOffsetCommitRequestTopic<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            partitions: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> TxnOffsetCommitRequestTopic<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::txn_offset_commit_request::TxnOffsetCommitRequestTopic {
         crate::owned::txn_offset_commit_request::TxnOffsetCommitRequestTopic {
             name: (self.name).to_string(),
-            partitions: (self.partitions)
-                .iter()
-                .map(TxnOffsetCommitRequestPartition::to_owned)
-                .collect(),
+            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for TxnOffsetCommitRequestTopic<'_> {
+impl<'a> Encode for TxnOffsetCommitRequestTopic<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 3;
         if version >= 0 {
@@ -518,7 +519,7 @@ pub struct TxnOffsetCommitRequestPartition<'a> {
     pub committed_metadata: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for TxnOffsetCommitRequestPartition<'_> {
+impl<'a> Default for TxnOffsetCommitRequestPartition<'a> {
     fn default() -> Self {
         Self {
             partition_index: 0i32,
@@ -529,11 +530,10 @@ impl Default for TxnOffsetCommitRequestPartition<'_> {
         }
     }
 }
-impl TxnOffsetCommitRequestPartition<'_> {
+impl<'a> TxnOffsetCommitRequestPartition<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::txn_offset_commit_request::TxnOffsetCommitRequestPartition {
@@ -541,22 +541,22 @@ impl TxnOffsetCommitRequestPartition<'_> {
             partition_index: (self.partition_index),
             committed_offset: (self.committed_offset),
             committed_leader_epoch: (self.committed_leader_epoch),
-            committed_metadata: (self.committed_metadata).map(std::string::ToString::to_string),
+            committed_metadata: (self.committed_metadata).map(|s| s.to_string()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for TxnOffsetCommitRequestPartition<'_> {
+impl<'a> Encode for TxnOffsetCommitRequestPartition<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 3;
         if version >= 0 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
         if version >= 0 {
-            put_i64(buf, self.committed_offset);
+            put_i64(buf, self.committed_offset)
         }
         if version >= 2 {
-            put_i32(buf, self.committed_leader_epoch);
+            put_i32(buf, self.committed_leader_epoch)
         }
         if version >= 0 {
             if flex {

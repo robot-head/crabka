@@ -43,7 +43,7 @@ impl Encode for HeartbeatRequest {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.generation_id);
+            put_i32(buf, self.generation_id)
         }
         if version >= 0 {
             if flex {
@@ -99,7 +99,7 @@ impl Encode for HeartbeatRequest {
         n
     }
 }
-impl Decode<'_> for HeartbeatRequest {
+impl<'de> Decode<'de> for HeartbeatRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {

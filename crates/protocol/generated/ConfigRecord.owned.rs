@@ -34,7 +34,7 @@ impl Encode for ConfigRecord {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i8(buf, self.resource_type);
+            put_i8(buf, self.resource_type)
         }
         if version >= 0 {
             if flex {
@@ -97,7 +97,7 @@ impl Encode for ConfigRecord {
         n
     }
 }
-impl Decode<'_> for ConfigRecord {
+impl<'de> Decode<'de> for ConfigRecord {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(
@@ -160,7 +160,7 @@ impl ConfigRecord {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("resourceType".to_string(), ::serde_json::json!(0));
     obj.insert(

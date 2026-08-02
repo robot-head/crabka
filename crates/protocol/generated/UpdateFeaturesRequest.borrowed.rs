@@ -25,7 +25,7 @@ pub struct UpdateFeaturesRequest<'a> {
     pub validate_only: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for UpdateFeaturesRequest<'_> {
+impl<'a> Default for UpdateFeaturesRequest<'a> {
     fn default() -> Self {
         Self {
             timeout_ms: 60_000i32,
@@ -35,24 +35,23 @@ impl Default for UpdateFeaturesRequest<'_> {
         }
     }
 }
-impl UpdateFeaturesRequest<'_> {
+impl<'a> UpdateFeaturesRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::update_features_request::UpdateFeaturesRequest {
         crate::owned::update_features_request::UpdateFeaturesRequest {
             timeout_ms: (self.timeout_ms),
             feature_updates: (self.feature_updates)
                 .iter()
-                .map(FeatureUpdateKey::to_owned)
+                .map(|it| it.to_owned())
                 .collect(),
             validate_only: (self.validate_only),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for UpdateFeaturesRequest<'_> {
+impl<'a> Encode for UpdateFeaturesRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -62,7 +61,7 @@ impl Encode for UpdateFeaturesRequest<'_> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.timeout_ms);
+            put_i32(buf, self.timeout_ms)
         }
         if version >= 0 {
             {
@@ -73,7 +72,7 @@ impl Encode for UpdateFeaturesRequest<'_> {
             }
         }
         if version >= 1 {
-            put_bool(buf, self.validate_only);
+            put_bool(buf, self.validate_only)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -167,7 +166,7 @@ pub struct FeatureUpdateKey<'a> {
     pub upgrade_type: i8,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for FeatureUpdateKey<'_> {
+impl<'a> Default for FeatureUpdateKey<'a> {
     fn default() -> Self {
         Self {
             feature: "",
@@ -178,11 +177,10 @@ impl Default for FeatureUpdateKey<'_> {
         }
     }
 }
-impl FeatureUpdateKey<'_> {
+impl<'a> FeatureUpdateKey<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::update_features_request::FeatureUpdateKey {
         crate::owned::update_features_request::FeatureUpdateKey {
             feature: (self.feature).to_string(),
@@ -193,7 +191,7 @@ impl FeatureUpdateKey<'_> {
         }
     }
 }
-impl Encode for FeatureUpdateKey<'_> {
+impl<'a> Encode for FeatureUpdateKey<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
@@ -204,13 +202,13 @@ impl Encode for FeatureUpdateKey<'_> {
             }
         }
         if version >= 0 {
-            put_i16(buf, self.max_version_level);
+            put_i16(buf, self.max_version_level)
         }
         if version == 0 {
-            put_bool(buf, self.allow_downgrade);
+            put_bool(buf, self.allow_downgrade)
         }
         if version >= 1 {
-            put_i8(buf, self.upgrade_type);
+            put_i8(buf, self.upgrade_type)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

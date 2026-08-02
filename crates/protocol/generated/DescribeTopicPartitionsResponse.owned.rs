@@ -35,7 +35,7 @@ impl Encode for DescribeTopicPartitionsResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 0 {
             {
@@ -89,7 +89,7 @@ impl Encode for DescribeTopicPartitionsResponse {
         n
     }
 }
-impl Decode<'_> for DescribeTopicPartitionsResponse {
+impl<'de> Decode<'de> for DescribeTopicPartitionsResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -169,7 +169,7 @@ impl Encode for DescribeTopicPartitionsResponseTopic {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
             if flex {
@@ -179,10 +179,10 @@ impl Encode for DescribeTopicPartitionsResponseTopic {
             }
         }
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+            crate::primitives::uuid::put_uuid(buf, self.topic_id)
         }
         if version >= 0 {
-            put_bool(buf, self.is_internal);
+            put_bool(buf, self.is_internal)
         }
         if version >= 0 {
             {
@@ -193,7 +193,7 @@ impl Encode for DescribeTopicPartitionsResponseTopic {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.topic_authorized_operations);
+            put_i32(buf, self.topic_authorized_operations)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -241,7 +241,7 @@ impl Encode for DescribeTopicPartitionsResponseTopic {
         n
     }
 }
-impl Decode<'_> for DescribeTopicPartitionsResponseTopic {
+impl<'de> Decode<'de> for DescribeTopicPartitionsResponseTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -340,22 +340,22 @@ impl Default for DescribeTopicPartitionsResponsePartition {
 impl DescribeTopicPartitionsResponsePartition {
     fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.leader_id);
+            put_i32(buf, self.leader_id)
         }
     }
     fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.leader_epoch);
+            put_i32(buf, self.leader_epoch)
         }
     }
     fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -414,7 +414,7 @@ impl DescribeTopicPartitionsResponsePartition {
             }
         }
     }
-    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
+    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -567,7 +567,7 @@ impl DescribeTopicPartitionsResponsePartition {
     fn decode_tagged_fields<B: Buf>(
         out: &mut Self,
         buf: &mut B,
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -628,7 +628,7 @@ impl Encode for DescribeTopicPartitionsResponsePartition {
             n += {
                 let opt: Option<&Vec<_>> = (self.eligible_leader_replicas).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
+                    opt.map(|v| v.len()),
                     flex,
                 );
                 let body: usize = opt.map_or(0, |v| v.iter().map(|_| 4).sum());
@@ -639,7 +639,7 @@ impl Encode for DescribeTopicPartitionsResponsePartition {
             n += {
                 let opt: Option<&Vec<_>> = (self.last_known_elr).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
+                    opt.map(|v| v.len()),
                     flex,
                 );
                 let body: usize = opt.map_or(0, |v| v.iter().map(|_| 4).sum());
@@ -663,7 +663,7 @@ impl Encode for DescribeTopicPartitionsResponsePartition {
         n
     }
 }
-impl Decode<'_> for DescribeTopicPartitionsResponsePartition {
+impl<'de> Decode<'de> for DescribeTopicPartitionsResponsePartition {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -732,7 +732,7 @@ impl Encode for Cursor {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -760,7 +760,7 @@ impl Encode for Cursor {
         n
     }
 }
-impl Decode<'_> for Cursor {
+impl<'de> Decode<'de> for Cursor {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -798,7 +798,7 @@ impl Cursor {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("throttleTimeMs".to_string(), ::serde_json::json!(0));
     obj.insert("topics".to_string(), ::serde_json::Value::Array(vec![]));

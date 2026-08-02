@@ -20,31 +20,40 @@ pub const FLEXIBLE_MIN: i16 = 1;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EndQuorumEpochRequest<'a> {
     pub cluster_id: Option<&'a str>,
     pub topics: Vec<TopicData<'a>>,
     pub leader_endpoints: Vec<LeaderEndpoint<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl EndQuorumEpochRequest<'_> {
+impl<'a> Default for EndQuorumEpochRequest<'a> {
+    fn default() -> Self {
+        Self {
+            cluster_id: None,
+            topics: Vec::new(),
+            leader_endpoints: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> EndQuorumEpochRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::end_quorum_epoch_request::EndQuorumEpochRequest {
         crate::owned::end_quorum_epoch_request::EndQuorumEpochRequest {
-            cluster_id: (self.cluster_id).map(std::string::ToString::to_string),
-            topics: (self.topics).iter().map(TopicData::to_owned).collect(),
+            cluster_id: (self.cluster_id).map(|s| s.to_string()),
+            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
             leader_endpoints: (self.leader_endpoints)
                 .iter()
-                .map(LeaderEndpoint::to_owned)
+                .map(|it| it.to_owned())
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for EndQuorumEpochRequest<'_> {
+impl<'a> Encode for EndQuorumEpochRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -180,29 +189,34 @@ impl EndQuorumEpochRequest<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicData<'a> {
     pub topic_name: &'a str,
     pub partitions: Vec<PartitionData>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl TopicData<'_> {
+impl<'a> Default for TopicData<'a> {
+    fn default() -> Self {
+        Self {
+            topic_name: "",
+            partitions: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> TopicData<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::end_quorum_epoch_request::TopicData {
         crate::owned::end_quorum_epoch_request::TopicData {
             topic_name: (self.topic_name).to_string(),
-            partitions: (self.partitions)
-                .iter()
-                .map(PartitionData::to_owned)
-                .collect(),
+            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for TopicData<'_> {
+impl<'a> Encode for TopicData<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
         if version >= 0 {
@@ -295,7 +309,7 @@ impl TopicData<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionData {
     pub partition_index: i32,
     pub leader_id: i32,
@@ -304,11 +318,22 @@ pub struct PartitionData {
     pub preferred_candidates: Vec<ReplicaInfo>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl Default for PartitionData {
+    fn default() -> Self {
+        Self {
+            partition_index: 0i32,
+            leader_id: 0i32,
+            leader_epoch: 0i32,
+            preferred_successors: Vec::new(),
+            preferred_candidates: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl PartitionData {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::end_quorum_epoch_request::PartitionData {
         crate::owned::end_quorum_epoch_request::PartitionData {
             partition_index: (self.partition_index),
@@ -317,7 +342,7 @@ impl PartitionData {
             preferred_successors: (self.preferred_successors).clone(),
             preferred_candidates: (self.preferred_candidates)
                 .iter()
-                .map(ReplicaInfo::to_owned)
+                .map(|it| it.to_owned())
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
@@ -327,13 +352,13 @@ impl Encode for PartitionData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
         if version >= 0 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
         if version >= 0 {
-            put_i32(buf, self.leader_id);
+            put_i32(buf, self.leader_id)
         }
         if version >= 0 {
-            put_i32(buf, self.leader_epoch);
+            put_i32(buf, self.leader_epoch)
         }
         if version == 0 {
             {
@@ -469,17 +494,25 @@ impl PartitionData {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplicaInfo {
     pub candidate_id: i32,
     pub candidate_directory_id: crate::primitives::uuid::Uuid,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
+impl Default for ReplicaInfo {
+    fn default() -> Self {
+        Self {
+            candidate_id: 0i32,
+            candidate_directory_id: crate::primitives::uuid::Uuid::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
 impl ReplicaInfo {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::end_quorum_epoch_request::ReplicaInfo {
         crate::owned::end_quorum_epoch_request::ReplicaInfo {
             candidate_id: (self.candidate_id),
@@ -492,10 +525,10 @@ impl Encode for ReplicaInfo {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
         if version >= 1 {
-            put_i32(buf, self.candidate_id);
+            put_i32(buf, self.candidate_id)
         }
         if version >= 1 {
-            crate::primitives::uuid::put_uuid(buf, self.candidate_directory_id);
+            crate::primitives::uuid::put_uuid(buf, self.candidate_directory_id)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -549,18 +582,27 @@ impl ReplicaInfo {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeaderEndpoint<'a> {
     pub name: &'a str,
     pub host: &'a str,
     pub port: u16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl LeaderEndpoint<'_> {
+impl<'a> Default for LeaderEndpoint<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            host: "",
+            port: 0u16,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> LeaderEndpoint<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::end_quorum_epoch_request::LeaderEndpoint {
         crate::owned::end_quorum_epoch_request::LeaderEndpoint {
             name: (self.name).to_string(),
@@ -570,7 +612,7 @@ impl LeaderEndpoint<'_> {
         }
     }
 }
-impl Encode for LeaderEndpoint<'_> {
+impl<'a> Encode for LeaderEndpoint<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
         if version >= 1 {
@@ -588,7 +630,7 @@ impl Encode for LeaderEndpoint<'_> {
             }
         }
         if version >= 1 {
-            put_u16(buf, self.port);
+            put_u16(buf, self.port)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

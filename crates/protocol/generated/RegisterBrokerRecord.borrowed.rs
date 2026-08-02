@@ -38,7 +38,7 @@ pub struct RegisterBrokerRecord<'a> {
     pub cordoned_log_dirs: Option<Vec<crate::primitives::uuid::Uuid>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for RegisterBrokerRecord<'_> {
+impl<'a> Default for RegisterBrokerRecord<'a> {
     fn default() -> Self {
         Self {
             broker_id: 0i32,
@@ -60,22 +60,15 @@ impl<'a> RegisterBrokerRecord<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::register_broker_record::RegisterBrokerRecord {
         crate::owned::register_broker_record::RegisterBrokerRecord {
             broker_id: (self.broker_id),
             is_migrating_zk_broker: (self.is_migrating_zk_broker),
             incarnation_id: (self.incarnation_id),
             broker_epoch: (self.broker_epoch),
-            end_points: (self.end_points)
-                .iter()
-                .map(BrokerEndpoint::to_owned)
-                .collect(),
-            features: (self.features)
-                .iter()
-                .map(BrokerFeature::to_owned)
-                .collect(),
-            rack: (self.rack).map(std::string::ToString::to_string),
+            end_points: (self.end_points).iter().map(|it| it.to_owned()).collect(),
+            features: (self.features).iter().map(|it| it.to_owned()).collect(),
+            rack: (self.rack).map(|s| s.to_string()),
             fenced: (self.fenced),
             in_controlled_shutdown: (self.in_controlled_shutdown),
             log_dirs: (self.log_dirs).clone(),
@@ -85,22 +78,22 @@ impl<'a> RegisterBrokerRecord<'a> {
     }
     fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.broker_id);
+            put_i32(buf, self.broker_id)
         }
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 2 {
-            put_bool(buf, self.is_migrating_zk_broker);
+            put_bool(buf, self.is_migrating_zk_broker)
         }
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.incarnation_id);
+            crate::primitives::uuid::put_uuid(buf, self.incarnation_id)
         }
     }
     fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i64(buf, self.broker_epoch);
+            put_i64(buf, self.broker_epoch)
         }
     }
     fn encode_field_4<B: BufMut>(
@@ -146,12 +139,12 @@ impl<'a> RegisterBrokerRecord<'a> {
     }
     fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_bool(buf, self.fenced);
+            put_bool(buf, self.fenced)
         }
     }
     fn encode_field_8<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 1 {
-            put_bool(buf, self.in_controlled_shutdown);
+            put_bool(buf, self.in_controlled_shutdown)
         }
     }
     fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
@@ -179,12 +172,12 @@ impl<'a> RegisterBrokerRecord<'a> {
                 );
                 tagged.add(0, payload);
             }
-            if self.cordoned_log_dirs.is_some() {
+            if !(self.cordoned_log_dirs.is_none()) {
                 let payload = encode_to_bytes(
                     {
                         let opt: Option<&Vec<_>> = (self.cordoned_log_dirs).as_ref();
                         let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                            opt.map(std::vec::Vec::len),
+                            opt.map(|v| v.len()),
                             flex,
                         );
                         let body: usize = opt.map_or(0, |v| v.iter().map(|_| 16).sum());
@@ -328,7 +321,7 @@ impl<'a> RegisterBrokerRecord<'a> {
     fn decode_tagged_fields(
         out: &mut Self,
         buf: &mut &'a [u8],
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -380,7 +373,7 @@ impl<'a> RegisterBrokerRecord<'a> {
         Ok(())
     }
 }
-impl Encode for RegisterBrokerRecord<'_> {
+impl<'a> Encode for RegisterBrokerRecord<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(
@@ -460,11 +453,11 @@ impl Encode for RegisterBrokerRecord<'_> {
                     prefix + body
                 }));
             }
-            if self.cordoned_log_dirs.is_some() {
+            if !(self.cordoned_log_dirs.is_none()) {
                 known_pairs.push((1, {
                     let opt: Option<&Vec<_>> = (self.cordoned_log_dirs).as_ref();
                     let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                        opt.map(std::vec::Vec::len),
+                        opt.map(|v| v.len()),
                         flex,
                     );
                     let body: usize = opt.map_or(0, |v| v.iter().map(|_| 16).sum());
@@ -539,7 +532,7 @@ impl RegisterBrokerRecord<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrokerEndpoint<'a> {
     pub name: &'a str,
     pub host: &'a str,
@@ -547,11 +540,21 @@ pub struct BrokerEndpoint<'a> {
     pub security_protocol: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl BrokerEndpoint<'_> {
+impl<'a> Default for BrokerEndpoint<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            host: "",
+            port: 0u16,
+            security_protocol: 0i16,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> BrokerEndpoint<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::register_broker_record::BrokerEndpoint {
         crate::owned::register_broker_record::BrokerEndpoint {
             name: (self.name).to_string(),
@@ -562,7 +565,7 @@ impl BrokerEndpoint<'_> {
         }
     }
 }
-impl Encode for BrokerEndpoint<'_> {
+impl<'a> Encode for BrokerEndpoint<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
@@ -580,10 +583,10 @@ impl Encode for BrokerEndpoint<'_> {
             }
         }
         if version >= 0 {
-            put_u16(buf, self.port);
+            put_u16(buf, self.port)
         }
         if version >= 0 {
-            put_i16(buf, self.security_protocol);
+            put_i16(buf, self.security_protocol)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -671,18 +674,27 @@ impl BrokerEndpoint<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrokerFeature<'a> {
     pub name: &'a str,
     pub min_supported_version: i16,
     pub max_supported_version: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl BrokerFeature<'_> {
+impl<'a> Default for BrokerFeature<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            min_supported_version: 0i16,
+            max_supported_version: 0i16,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> BrokerFeature<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::register_broker_record::BrokerFeature {
         crate::owned::register_broker_record::BrokerFeature {
             name: (self.name).to_string(),
@@ -692,7 +704,7 @@ impl BrokerFeature<'_> {
         }
     }
 }
-impl Encode for BrokerFeature<'_> {
+impl<'a> Encode for BrokerFeature<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
@@ -703,10 +715,10 @@ impl Encode for BrokerFeature<'_> {
             }
         }
         if version >= 0 {
-            put_i16(buf, self.min_supported_version);
+            put_i16(buf, self.min_supported_version)
         }
         if version >= 0 {
-            put_i16(buf, self.max_supported_version);
+            put_i16(buf, self.max_supported_version)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

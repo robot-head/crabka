@@ -14,17 +14,25 @@ pub const FLEXIBLE_MIN: i16 = 2;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenewDelegationTokenRequest<'a> {
     pub hmac: &'a [u8],
     pub renew_period_ms: i64,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl RenewDelegationTokenRequest<'_> {
+impl<'a> Default for RenewDelegationTokenRequest<'a> {
+    fn default() -> Self {
+        Self {
+            hmac: &[],
+            renew_period_ms: 0i64,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> RenewDelegationTokenRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::renew_delegation_token_request::RenewDelegationTokenRequest {
@@ -35,7 +43,7 @@ impl RenewDelegationTokenRequest<'_> {
         }
     }
 }
-impl Encode for RenewDelegationTokenRequest<'_> {
+impl<'a> Encode for RenewDelegationTokenRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -52,7 +60,7 @@ impl Encode for RenewDelegationTokenRequest<'_> {
             }
         }
         if version >= 0 {
-            put_i64(buf, self.renew_period_ms);
+            put_i64(buf, self.renew_period_ms)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

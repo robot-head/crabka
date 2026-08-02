@@ -41,17 +41,17 @@ impl Encode for FindCoordinatorRequest {
             }
         }
         if version >= 1 {
-            put_i8(buf, self.key_type);
+            put_i8(buf, self.key_type)
         }
         if version >= 4 {
             {
                 crate::primitives::array::put_array_len(buf, (self.coordinator_keys).len(), flex);
                 for it in &self.coordinator_keys {
                     if flex {
-                        let () = put_compact_string(buf, it);
+                        let () = put_compact_string(buf, &*it);
                     } else {
-                        let () = put_string(buf, it);
-                    }
+                        let () = put_string(buf, &*it);
+                    };
                 }
             }
         }
@@ -84,9 +84,9 @@ impl Encode for FindCoordinatorRequest {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(it)
+                            compact_string_len(&*it)
                         } else {
-                            string_len(it)
+                            string_len(&*it)
                         }
                     })
                     .sum();
@@ -100,7 +100,7 @@ impl Encode for FindCoordinatorRequest {
         n
     }
 }
-impl Decode<'_> for FindCoordinatorRequest {
+impl<'de> Decode<'de> for FindCoordinatorRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {

@@ -2,29 +2,36 @@
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 use bytes::BufMut;
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Assignment<'a> {
     pub topic_partitions: Vec<super::topic_partitions::TopicPartitions<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Assignment<'_> {
+impl<'a> Default for Assignment<'a> {
+    fn default() -> Self {
+        Self {
+            topic_partitions: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> Assignment<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::common::consumer_group_describe_response::assignment::Assignment {
         crate::owned::common::consumer_group_describe_response::assignment::Assignment {
             topic_partitions: (self.topic_partitions)
                 .iter()
-                .map(super::topic_partitions::TopicPartitions::to_owned)
+                .map(|it| it.to_owned())
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for Assignment<'_> {
+impl<'a> Encode for Assignment<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {

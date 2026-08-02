@@ -15,30 +15,35 @@ pub const FLEXIBLE_MIN: i16 = 2;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribeDelegationTokenRequest<'a> {
     pub owners: Option<Vec<DescribeDelegationTokenOwner<'a>>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl DescribeDelegationTokenRequest<'_> {
+impl<'a> Default for DescribeDelegationTokenRequest<'a> {
+    fn default() -> Self {
+        Self {
+            owners: None,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> DescribeDelegationTokenRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::describe_delegation_token_request::DescribeDelegationTokenRequest {
         crate::owned::describe_delegation_token_request::DescribeDelegationTokenRequest {
-            owners: (self.owners).as_ref().map(|v| {
-                v.iter()
-                    .map(DescribeDelegationTokenOwner::to_owned)
-                    .collect()
-            }),
+            owners: (self.owners)
+                .as_ref()
+                .map(|v| v.iter().map(|it| it.to_owned()).collect()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for DescribeDelegationTokenRequest<'_> {
+impl<'a> Encode for DescribeDelegationTokenRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -71,7 +76,7 @@ impl Encode for DescribeDelegationTokenRequest<'_> {
             n += {
                 let opt: Option<&Vec<_>> = (self.owners).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
+                    opt.map(|v| v.len()),
                     flex,
                 );
                 let body: usize =
@@ -128,17 +133,25 @@ impl DescribeDelegationTokenRequest<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribeDelegationTokenOwner<'a> {
     pub principal_type: &'a str,
     pub principal_name: &'a str,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl DescribeDelegationTokenOwner<'_> {
+impl<'a> Default for DescribeDelegationTokenOwner<'a> {
+    fn default() -> Self {
+        Self {
+            principal_type: "",
+            principal_name: "",
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> DescribeDelegationTokenOwner<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::describe_delegation_token_request::DescribeDelegationTokenOwner {
@@ -149,7 +162,7 @@ impl DescribeDelegationTokenOwner<'_> {
         }
     }
 }
-impl Encode for DescribeDelegationTokenOwner<'_> {
+impl<'a> Encode for DescribeDelegationTokenOwner<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {

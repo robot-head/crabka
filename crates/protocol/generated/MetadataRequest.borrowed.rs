@@ -28,7 +28,7 @@ pub struct MetadataRequest<'a> {
     pub include_topic_authorized_operations: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for MetadataRequest<'_> {
+impl<'a> Default for MetadataRequest<'a> {
     fn default() -> Self {
         Self {
             topics: None,
@@ -39,16 +39,15 @@ impl Default for MetadataRequest<'_> {
         }
     }
 }
-impl MetadataRequest<'_> {
+impl<'a> MetadataRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::metadata_request::MetadataRequest {
         crate::owned::metadata_request::MetadataRequest {
             topics: (self.topics)
                 .as_ref()
-                .map(|v| v.iter().map(MetadataRequestTopic::to_owned).collect()),
+                .map(|v| v.iter().map(|it| it.to_owned()).collect()),
             allow_auto_topic_creation: (self.allow_auto_topic_creation),
             include_cluster_authorized_operations: (self.include_cluster_authorized_operations),
             include_topic_authorized_operations: (self.include_topic_authorized_operations),
@@ -56,7 +55,7 @@ impl MetadataRequest<'_> {
         }
     }
 }
-impl Encode for MetadataRequest<'_> {
+impl<'a> Encode for MetadataRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -78,7 +77,7 @@ impl Encode for MetadataRequest<'_> {
                 }
             } else {
                 {
-                    let v = (self.topics).as_deref().unwrap_or(&[]);
+                    let v = (self.topics).as_ref().map(Vec::as_slice).unwrap_or(&[]);
                     crate::primitives::array::put_array_len(buf, v.len(), flex);
                     for it in v {
                         it.encode(buf, version)?;
@@ -87,13 +86,13 @@ impl Encode for MetadataRequest<'_> {
             }
         }
         if version >= 4 {
-            put_bool(buf, self.allow_auto_topic_creation);
+            put_bool(buf, self.allow_auto_topic_creation)
         }
         if (8..=10).contains(&version) {
-            put_bool(buf, self.include_cluster_authorized_operations);
+            put_bool(buf, self.include_cluster_authorized_operations)
         }
         if version >= 8 {
-            put_bool(buf, self.include_topic_authorized_operations);
+            put_bool(buf, self.include_topic_authorized_operations)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -109,7 +108,7 @@ impl Encode for MetadataRequest<'_> {
                 {
                     let opt: Option<&Vec<_>> = (self.topics).as_ref();
                     let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                        opt.map(std::vec::Vec::len),
+                        opt.map(|v| v.len()),
                         flex,
                     );
                     let body: usize =
@@ -118,7 +117,7 @@ impl Encode for MetadataRequest<'_> {
                 }
             } else {
                 {
-                    let v = (self.topics).as_deref().unwrap_or(&[]);
+                    let v = (self.topics).as_ref().map(Vec::as_slice).unwrap_or(&[]);
                     let prefix = crate::primitives::array::array_len_prefix_len(v.len(), flex);
                     let body: usize = v.iter().map(|it| it.encoded_len(version)).sum();
                     prefix + body
@@ -212,30 +211,38 @@ impl MetadataRequest<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataRequestTopic<'a> {
     pub topic_id: crate::primitives::uuid::Uuid,
     pub name: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl MetadataRequestTopic<'_> {
+impl<'a> Default for MetadataRequestTopic<'a> {
+    fn default() -> Self {
+        Self {
+            topic_id: crate::primitives::uuid::Uuid::default(),
+            name: None,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> MetadataRequestTopic<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::metadata_request::MetadataRequestTopic {
         crate::owned::metadata_request::MetadataRequestTopic {
             topic_id: (self.topic_id),
-            name: (self.name).map(std::string::ToString::to_string),
+            name: (self.name).map(|s| s.to_string()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for MetadataRequestTopic<'_> {
+impl<'a> Encode for MetadataRequestTopic<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 9;
         if version >= 10 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+            crate::primitives::uuid::put_uuid(buf, self.topic_id)
         }
         if version >= 0 {
             if version >= 10 {

@@ -35,7 +35,7 @@ pub struct BrokerRegistrationRequest<'a> {
     pub previous_broker_epoch: i64,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for BrokerRegistrationRequest<'_> {
+impl<'a> Default for BrokerRegistrationRequest<'a> {
     fn default() -> Self {
         Self {
             broker_id: 0i32,
@@ -55,15 +55,14 @@ impl<'a> BrokerRegistrationRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::broker_registration_request::BrokerRegistrationRequest {
         crate::owned::broker_registration_request::BrokerRegistrationRequest {
             broker_id: (self.broker_id),
             cluster_id: (self.cluster_id).to_string(),
             incarnation_id: (self.incarnation_id),
-            listeners: (self.listeners).iter().map(Listener::to_owned).collect(),
-            features: (self.features).iter().map(Feature::to_owned).collect(),
-            rack: (self.rack).map(std::string::ToString::to_string),
+            listeners: (self.listeners).iter().map(|it| it.to_owned()).collect(),
+            features: (self.features).iter().map(|it| it.to_owned()).collect(),
+            rack: (self.rack).map(|s| s.to_string()),
             is_migrating_zk_broker: (self.is_migrating_zk_broker),
             log_dirs: (self.log_dirs).clone(),
             previous_broker_epoch: (self.previous_broker_epoch),
@@ -72,7 +71,7 @@ impl<'a> BrokerRegistrationRequest<'a> {
     }
     fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.broker_id);
+            put_i32(buf, self.broker_id)
         }
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -86,7 +85,7 @@ impl<'a> BrokerRegistrationRequest<'a> {
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.incarnation_id);
+            crate::primitives::uuid::put_uuid(buf, self.incarnation_id)
         }
     }
     fn encode_field_3<B: BufMut>(
@@ -132,7 +131,7 @@ impl<'a> BrokerRegistrationRequest<'a> {
     }
     fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 1 {
-            put_bool(buf, self.is_migrating_zk_broker);
+            put_bool(buf, self.is_migrating_zk_broker)
         }
     }
     fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -147,7 +146,7 @@ impl<'a> BrokerRegistrationRequest<'a> {
     }
     fn encode_field_8<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 3 {
-            put_i64(buf, self.previous_broker_epoch);
+            put_i64(buf, self.previous_broker_epoch)
         }
     }
     fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
@@ -287,7 +286,7 @@ impl<'a> BrokerRegistrationRequest<'a> {
     fn decode_tagged_fields(
         out: &mut Self,
         buf: &mut &'a [u8],
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -296,7 +295,7 @@ impl<'a> BrokerRegistrationRequest<'a> {
         Ok(())
     }
 }
-impl Encode for BrokerRegistrationRequest<'_> {
+impl<'a> Encode for BrokerRegistrationRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -441,7 +440,7 @@ impl BrokerRegistrationRequest<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Listener<'a> {
     pub name: &'a str,
     pub host: &'a str,
@@ -449,11 +448,21 @@ pub struct Listener<'a> {
     pub security_protocol: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Listener<'_> {
+impl<'a> Default for Listener<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            host: "",
+            port: 0u16,
+            security_protocol: 0i16,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> Listener<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::broker_registration_request::Listener {
         crate::owned::broker_registration_request::Listener {
             name: (self.name).to_string(),
@@ -464,7 +473,7 @@ impl Listener<'_> {
         }
     }
 }
-impl Encode for Listener<'_> {
+impl<'a> Encode for Listener<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
@@ -482,10 +491,10 @@ impl Encode for Listener<'_> {
             }
         }
         if version >= 0 {
-            put_u16(buf, self.port);
+            put_u16(buf, self.port)
         }
         if version >= 0 {
-            put_i16(buf, self.security_protocol);
+            put_i16(buf, self.security_protocol)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -573,18 +582,27 @@ impl Listener<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Feature<'a> {
     pub name: &'a str,
     pub min_supported_version: i16,
     pub max_supported_version: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Feature<'_> {
+impl<'a> Default for Feature<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            min_supported_version: 0i16,
+            max_supported_version: 0i16,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> Feature<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::broker_registration_request::Feature {
         crate::owned::broker_registration_request::Feature {
             name: (self.name).to_string(),
@@ -594,7 +612,7 @@ impl Feature<'_> {
         }
     }
 }
-impl Encode for Feature<'_> {
+impl<'a> Encode for Feature<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
@@ -605,10 +623,10 @@ impl Encode for Feature<'_> {
             }
         }
         if version >= 0 {
-            put_i16(buf, self.min_supported_version);
+            put_i16(buf, self.min_supported_version)
         }
         if version >= 0 {
-            put_i16(buf, self.max_supported_version);
+            put_i16(buf, self.max_supported_version)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

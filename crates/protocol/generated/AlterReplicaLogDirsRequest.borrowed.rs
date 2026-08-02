@@ -16,29 +16,33 @@ pub const FLEXIBLE_MIN: i16 = 2;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterReplicaLogDirsRequest<'a> {
     pub dirs: Vec<AlterReplicaLogDir<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl AlterReplicaLogDirsRequest<'_> {
+impl<'a> Default for AlterReplicaLogDirsRequest<'a> {
+    fn default() -> Self {
+        Self {
+            dirs: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> AlterReplicaLogDirsRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::alter_replica_log_dirs_request::AlterReplicaLogDirsRequest {
         crate::owned::alter_replica_log_dirs_request::AlterReplicaLogDirsRequest {
-            dirs: (self.dirs)
-                .iter()
-                .map(AlterReplicaLogDir::to_owned)
-                .collect(),
+            dirs: (self.dirs).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for AlterReplicaLogDirsRequest<'_> {
+impl<'a> Encode for AlterReplicaLogDirsRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -116,29 +120,34 @@ impl AlterReplicaLogDirsRequest<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterReplicaLogDir<'a> {
     pub path: &'a str,
     pub topics: Vec<AlterReplicaLogDirTopic<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl AlterReplicaLogDir<'_> {
+impl<'a> Default for AlterReplicaLogDir<'a> {
+    fn default() -> Self {
+        Self {
+            path: "",
+            topics: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> AlterReplicaLogDir<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::alter_replica_log_dirs_request::AlterReplicaLogDir {
         crate::owned::alter_replica_log_dirs_request::AlterReplicaLogDir {
             path: (self.path).to_string(),
-            topics: (self.topics)
-                .iter()
-                .map(AlterReplicaLogDirTopic::to_owned)
-                .collect(),
+            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for AlterReplicaLogDir<'_> {
+impl<'a> Encode for AlterReplicaLogDir<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
@@ -228,17 +237,25 @@ impl AlterReplicaLogDir<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterReplicaLogDirTopic<'a> {
     pub name: &'a str,
     pub partitions: Vec<i32>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl AlterReplicaLogDirTopic<'_> {
+impl<'a> Default for AlterReplicaLogDirTopic<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            partitions: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> AlterReplicaLogDirTopic<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::alter_replica_log_dirs_request::AlterReplicaLogDirTopic {
@@ -249,7 +266,7 @@ impl AlterReplicaLogDirTopic<'_> {
         }
     }
 }
-impl Encode for AlterReplicaLogDirTopic<'_> {
+impl<'a> Encode for AlterReplicaLogDirTopic<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {

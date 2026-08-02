@@ -16,31 +16,36 @@ pub const FLEXIBLE_MIN: i16 = 4;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OffsetForLeaderEpochResponse<'a> {
     pub throttle_time_ms: i32,
     pub topics: Vec<OffsetForLeaderTopicResult<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl OffsetForLeaderEpochResponse<'_> {
+impl<'a> Default for OffsetForLeaderEpochResponse<'a> {
+    fn default() -> Self {
+        Self {
+            throttle_time_ms: 0i32,
+            topics: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> OffsetForLeaderEpochResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::offset_for_leader_epoch_response::OffsetForLeaderEpochResponse {
         crate::owned::offset_for_leader_epoch_response::OffsetForLeaderEpochResponse {
             throttle_time_ms: (self.throttle_time_ms),
-            topics: (self.topics)
-                .iter()
-                .map(OffsetForLeaderTopicResult::to_owned)
-                .collect(),
+            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for OffsetForLeaderEpochResponse<'_> {
+impl<'a> Encode for OffsetForLeaderEpochResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -50,7 +55,7 @@ impl Encode for OffsetForLeaderEpochResponse<'_> {
         }
         let flex = is_flexible(version);
         if version >= 2 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 0 {
             {
@@ -130,31 +135,36 @@ impl OffsetForLeaderEpochResponse<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OffsetForLeaderTopicResult<'a> {
     pub topic: &'a str,
     pub partitions: Vec<EpochEndOffset>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl OffsetForLeaderTopicResult<'_> {
+impl<'a> Default for OffsetForLeaderTopicResult<'a> {
+    fn default() -> Self {
+        Self {
+            topic: "",
+            partitions: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> OffsetForLeaderTopicResult<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::offset_for_leader_epoch_response::OffsetForLeaderTopicResult {
         crate::owned::offset_for_leader_epoch_response::OffsetForLeaderTopicResult {
             topic: (self.topic).to_string(),
-            partitions: (self.partitions)
-                .iter()
-                .map(EpochEndOffset::to_owned)
-                .collect(),
+            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for OffsetForLeaderTopicResult<'_> {
+impl<'a> Encode for OffsetForLeaderTopicResult<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 4;
         if version >= 0 {
@@ -270,7 +280,6 @@ impl EpochEndOffset {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_for_leader_epoch_response::EpochEndOffset {
         crate::owned::offset_for_leader_epoch_response::EpochEndOffset {
             error_code: (self.error_code),
@@ -285,16 +294,16 @@ impl Encode for EpochEndOffset {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 4;
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
-            put_i32(buf, self.partition);
+            put_i32(buf, self.partition)
         }
         if version >= 1 {
-            put_i32(buf, self.leader_epoch);
+            put_i32(buf, self.leader_epoch)
         }
         if version >= 0 {
-            put_i64(buf, self.end_offset);
+            put_i64(buf, self.end_offset)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

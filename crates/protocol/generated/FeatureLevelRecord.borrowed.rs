@@ -15,17 +15,25 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FeatureLevelRecord<'a> {
     pub name: &'a str,
     pub feature_level: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl FeatureLevelRecord<'_> {
+impl<'a> Default for FeatureLevelRecord<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            feature_level: 0i16,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> FeatureLevelRecord<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::feature_level_record::FeatureLevelRecord {
         crate::owned::feature_level_record::FeatureLevelRecord {
             name: (self.name).to_string(),
@@ -34,7 +42,7 @@ impl FeatureLevelRecord<'_> {
         }
     }
 }
-impl Encode for FeatureLevelRecord<'_> {
+impl<'a> Encode for FeatureLevelRecord<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(
@@ -50,7 +58,7 @@ impl Encode for FeatureLevelRecord<'_> {
             }
         }
         if version >= 0 {
-            put_i16(buf, self.feature_level);
+            put_i16(buf, self.feature_level)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

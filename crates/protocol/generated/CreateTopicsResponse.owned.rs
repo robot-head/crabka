@@ -38,7 +38,7 @@ impl Encode for CreateTopicsResponse {
         }
         let flex = is_flexible(version);
         if version >= 2 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 0 {
             {
@@ -75,7 +75,7 @@ impl Encode for CreateTopicsResponse {
         n
     }
 }
-impl Decode<'_> for CreateTopicsResponse {
+impl<'de> Decode<'de> for CreateTopicsResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -157,12 +157,12 @@ impl CreatableTopicResult {
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 7 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+            crate::primitives::uuid::put_uuid(buf, self.topic_id)
         }
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
     }
     fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -176,12 +176,12 @@ impl CreatableTopicResult {
     }
     fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 5 {
-            put_i32(buf, self.num_partitions);
+            put_i32(buf, self.num_partitions)
         }
     }
     fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 5 {
-            put_i16(buf, self.replication_factor);
+            put_i16(buf, self.replication_factor)
         }
     }
     fn encode_field_6<B: BufMut>(
@@ -203,7 +203,7 @@ impl CreatableTopicResult {
         }
         Ok(())
     }
-    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
+    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if flex {
             let mut tagged = WriteTaggedFields::new();
             if !(crate::codegen_helpers::is_default(&self.topic_config_error_code)) {
@@ -316,7 +316,7 @@ impl CreatableTopicResult {
     fn decode_tagged_fields<B: Buf>(
         out: &mut Self,
         buf: &mut B,
-        _version: i16,
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -384,7 +384,7 @@ impl Encode for CreatableTopicResult {
             n += {
                 let opt: Option<&Vec<_>> = (self.configs).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
+                    opt.map(|v| v.len()),
                     flex,
                 );
                 let body: usize =
@@ -402,7 +402,7 @@ impl Encode for CreatableTopicResult {
         n
     }
 }
-impl Decode<'_> for CreatableTopicResult {
+impl<'de> Decode<'de> for CreatableTopicResult {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 5;
         let mut out = Self::default();
@@ -488,13 +488,13 @@ impl Encode for CreatableTopicConfigs {
             }
         }
         if version >= 5 {
-            put_bool(buf, self.read_only);
+            put_bool(buf, self.read_only)
         }
         if version >= 5 {
-            put_i8(buf, self.config_source);
+            put_i8(buf, self.config_source)
         }
         if version >= 5 {
-            put_bool(buf, self.is_sensitive);
+            put_bool(buf, self.is_sensitive)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -535,7 +535,7 @@ impl Encode for CreatableTopicConfigs {
         n
     }
 }
-impl Decode<'_> for CreatableTopicConfigs {
+impl<'de> Decode<'de> for CreatableTopicConfigs {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 5;
         let mut out = Self::default();

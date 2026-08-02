@@ -1,5 +1,5 @@
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_image_index", "oci_load", "oci_push")
-load("@rules_pkg//pkg:mappings.bzl", "pkg_files")
+load("@rules_pkg//pkg:mappings.bzl", "pkg_attributes", "pkg_files")
 load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
 
 def _linux_transition_impl(_settings, attr):
@@ -33,6 +33,7 @@ def runtime_image(name, binaries, entrypoint, repository, cmd = []):
 
     pkg_files(
         name = files,
+        attributes = pkg_attributes(mode = "0755"),
         srcs = binaries.keys(),
         prefix = "/usr/bin",
         renames = binaries,

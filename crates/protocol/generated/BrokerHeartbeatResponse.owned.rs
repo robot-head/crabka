@@ -44,19 +44,19 @@ impl Encode for BrokerHeartbeatResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
-            put_bool(buf, self.is_caught_up);
+            put_bool(buf, self.is_caught_up)
         }
         if version >= 0 {
-            put_bool(buf, self.is_fenced);
+            put_bool(buf, self.is_fenced)
         }
         if version >= 0 {
-            put_bool(buf, self.should_shut_down);
+            put_bool(buf, self.should_shut_down)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -89,7 +89,7 @@ impl Encode for BrokerHeartbeatResponse {
         n
     }
 }
-impl Decode<'_> for BrokerHeartbeatResponse {
+impl<'de> Decode<'de> for BrokerHeartbeatResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -147,7 +147,7 @@ impl BrokerHeartbeatResponse {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("throttleTimeMs".to_string(), ::serde_json::json!(0));
     obj.insert("errorCode".to_string(), ::serde_json::json!(0));

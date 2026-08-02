@@ -38,7 +38,7 @@ impl Encode for FeatureLevelRecord {
             }
         }
         if version >= 0 {
-            put_i16(buf, self.feature_level);
+            put_i16(buf, self.feature_level)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -66,7 +66,7 @@ impl Encode for FeatureLevelRecord {
         n
     }
 }
-impl Decode<'_> for FeatureLevelRecord {
+impl<'de> Decode<'de> for FeatureLevelRecord {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(
@@ -109,7 +109,7 @@ impl FeatureLevelRecord {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(_version: i16) -> ::serde_json::Value {
+pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert(
         "name".to_string(),

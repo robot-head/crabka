@@ -25,10 +25,10 @@ impl Encode for TaskOffset {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.partition);
+            put_i32(buf, self.partition)
         }
         if version >= 0 {
-            put_i64(buf, self.offset);
+            put_i64(buf, self.offset)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -59,7 +59,7 @@ impl Encode for TaskOffset {
         n
     }
 }
-impl Decode<'_> for TaskOffset {
+impl<'de> Decode<'de> for TaskOffset {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

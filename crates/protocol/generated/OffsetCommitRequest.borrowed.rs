@@ -30,7 +30,7 @@ pub struct OffsetCommitRequest<'a> {
     pub topics: Vec<OffsetCommitRequestTopic<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for OffsetCommitRequest<'_> {
+impl<'a> Default for OffsetCommitRequest<'a> {
     fn default() -> Self {
         Self {
             group_id: "",
@@ -43,27 +43,23 @@ impl Default for OffsetCommitRequest<'_> {
         }
     }
 }
-impl OffsetCommitRequest<'_> {
+impl<'a> OffsetCommitRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_commit_request::OffsetCommitRequest {
         crate::owned::offset_commit_request::OffsetCommitRequest {
             group_id: (self.group_id).to_string(),
             generation_id_or_member_epoch: (self.generation_id_or_member_epoch),
             member_id: (self.member_id).to_string(),
-            group_instance_id: (self.group_instance_id).map(std::string::ToString::to_string),
+            group_instance_id: (self.group_instance_id).map(|s| s.to_string()),
             retention_time_ms: (self.retention_time_ms),
-            topics: (self.topics)
-                .iter()
-                .map(OffsetCommitRequestTopic::to_owned)
-                .collect(),
+            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for OffsetCommitRequest<'_> {
+impl<'a> Encode for OffsetCommitRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -80,7 +76,7 @@ impl Encode for OffsetCommitRequest<'_> {
             }
         }
         if version >= 1 {
-            put_i32(buf, self.generation_id_or_member_epoch);
+            put_i32(buf, self.generation_id_or_member_epoch)
         }
         if version >= 1 {
             if flex {
@@ -97,7 +93,7 @@ impl Encode for OffsetCommitRequest<'_> {
             }
         }
         if (2..=4).contains(&version) {
-            put_i64(buf, self.retention_time_ms);
+            put_i64(buf, self.retention_time_ms)
         }
         if version >= 0 {
             {
@@ -237,31 +233,37 @@ impl OffsetCommitRequest<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OffsetCommitRequestTopic<'a> {
     pub name: &'a str,
     pub topic_id: crate::primitives::uuid::Uuid,
     pub partitions: Vec<OffsetCommitRequestPartition<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl OffsetCommitRequestTopic<'_> {
+impl<'a> Default for OffsetCommitRequestTopic<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            topic_id: crate::primitives::uuid::Uuid::default(),
+            partitions: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> OffsetCommitRequestTopic<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_commit_request::OffsetCommitRequestTopic {
         crate::owned::offset_commit_request::OffsetCommitRequestTopic {
             name: (self.name).to_string(),
             topic_id: (self.topic_id),
-            partitions: (self.partitions)
-                .iter()
-                .map(OffsetCommitRequestPartition::to_owned)
-                .collect(),
+            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for OffsetCommitRequestTopic<'_> {
+impl<'a> Encode for OffsetCommitRequestTopic<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 8;
         if (0..=9).contains(&version) {
@@ -272,7 +274,7 @@ impl Encode for OffsetCommitRequestTopic<'_> {
             }
         }
         if version >= 10 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+            crate::primitives::uuid::put_uuid(buf, self.topic_id)
         }
         if version >= 0 {
             {
@@ -374,7 +376,7 @@ pub struct OffsetCommitRequestPartition<'a> {
     pub committed_metadata: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for OffsetCommitRequestPartition<'_> {
+impl<'a> Default for OffsetCommitRequestPartition<'a> {
     fn default() -> Self {
         Self {
             partition_index: 0i32,
@@ -385,32 +387,31 @@ impl Default for OffsetCommitRequestPartition<'_> {
         }
     }
 }
-impl OffsetCommitRequestPartition<'_> {
+impl<'a> OffsetCommitRequestPartition<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_commit_request::OffsetCommitRequestPartition {
         crate::owned::offset_commit_request::OffsetCommitRequestPartition {
             partition_index: (self.partition_index),
             committed_offset: (self.committed_offset),
             committed_leader_epoch: (self.committed_leader_epoch),
-            committed_metadata: (self.committed_metadata).map(std::string::ToString::to_string),
+            committed_metadata: (self.committed_metadata).map(|s| s.to_string()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for OffsetCommitRequestPartition<'_> {
+impl<'a> Encode for OffsetCommitRequestPartition<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 8;
         if version >= 0 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
         if version >= 0 {
-            put_i64(buf, self.committed_offset);
+            put_i64(buf, self.committed_offset)
         }
         if version >= 6 {
-            put_i32(buf, self.committed_leader_epoch);
+            put_i32(buf, self.committed_leader_epoch)
         }
         if version >= 0 {
             if flex {

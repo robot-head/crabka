@@ -10,16 +10,23 @@ pub const FLEXIBLE_MIN: i16 = 32767;
 pub fn is_flexible(version: i16) -> bool {
     version == FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlRecordTypeSchema {
     pub type_: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
+}
+impl Default for ControlRecordTypeSchema {
+    fn default() -> Self {
+        Self {
+            type_: 0i16,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
 }
 impl ControlRecordTypeSchema {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::control_record_type_schema::ControlRecordTypeSchema {
         crate::owned::control_record_type_schema::ControlRecordTypeSchema {
             type_: (self.type_),
@@ -35,7 +42,7 @@ impl Encode for ControlRecordTypeSchema {
             ));
         }
         if version >= 0 {
-            put_i16(buf, self.type_);
+            put_i16(buf, self.type_)
         }
         Ok(())
     }

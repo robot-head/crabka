@@ -20,7 +20,7 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShareGroupHeartbeatRequest<'a> {
     pub group_id: &'a str,
     pub member_id: &'a str,
@@ -29,11 +29,22 @@ pub struct ShareGroupHeartbeatRequest<'a> {
     pub subscribed_topic_names: Option<Vec<&'a str>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl ShareGroupHeartbeatRequest<'_> {
+impl<'a> Default for ShareGroupHeartbeatRequest<'a> {
+    fn default() -> Self {
+        Self {
+            group_id: "",
+            member_id: "",
+            member_epoch: 0i32,
+            rack_id: None,
+            subscribed_topic_names: None,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> ShareGroupHeartbeatRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::share_group_heartbeat_request::ShareGroupHeartbeatRequest {
@@ -41,15 +52,15 @@ impl ShareGroupHeartbeatRequest<'_> {
             group_id: (self.group_id).to_string(),
             member_id: (self.member_id).to_string(),
             member_epoch: (self.member_epoch),
-            rack_id: (self.rack_id).map(std::string::ToString::to_string),
+            rack_id: (self.rack_id).map(|s| s.to_string()),
             subscribed_topic_names: (self.subscribed_topic_names)
                 .as_ref()
-                .map(|v| v.iter().map(std::string::ToString::to_string).collect()),
+                .map(|v| v.iter().map(|s| s.to_string()).collect()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for ShareGroupHeartbeatRequest<'_> {
+impl<'a> Encode for ShareGroupHeartbeatRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -73,7 +84,7 @@ impl Encode for ShareGroupHeartbeatRequest<'_> {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.member_epoch);
+            put_i32(buf, self.member_epoch)
         }
         if version >= 0 {
             if flex {
@@ -89,10 +100,10 @@ impl Encode for ShareGroupHeartbeatRequest<'_> {
                 if let Some(v) = &self.subscribed_topic_names {
                     for it in v {
                         if flex {
-                            let () = put_compact_string(buf, it);
+                            let () = put_compact_string(buf, *it);
                         } else {
-                            let () = put_string(buf, it);
-                        }
+                            let () = put_string(buf, *it);
+                        };
                     }
                 }
             }
@@ -134,16 +145,16 @@ impl Encode for ShareGroupHeartbeatRequest<'_> {
             n += {
                 let opt: Option<&Vec<_>> = (self.subscribed_topic_names).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
+                    opt.map(|v| v.len()),
                     flex,
                 );
                 let body: usize = opt.map_or(0, |v| {
                     v.iter()
                         .map(|it| {
                             if flex {
-                                compact_string_len(it)
+                                compact_string_len(*it)
                             } else {
-                                string_len(it)
+                                string_len(*it)
                             }
                         })
                         .sum()

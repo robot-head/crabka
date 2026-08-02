@@ -16,13 +16,22 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvelopeResponse<'a> {
     pub response_data: Option<&'a [u8]>,
     pub error_code: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl EnvelopeResponse<'_> {
+impl<'a> Default for EnvelopeResponse<'a> {
+    fn default() -> Self {
+        Self {
+            response_data: None,
+            error_code: 0i16,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> EnvelopeResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
@@ -34,7 +43,7 @@ impl EnvelopeResponse<'_> {
         }
     }
 }
-impl Encode for EnvelopeResponse<'_> {
+impl<'a> Encode for EnvelopeResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -51,7 +60,7 @@ impl Encode for EnvelopeResponse<'_> {
             }
         }
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

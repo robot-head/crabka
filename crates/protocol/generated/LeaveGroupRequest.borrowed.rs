@@ -19,31 +19,37 @@ pub const FLEXIBLE_MIN: i16 = 4;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeaveGroupRequest<'a> {
     pub group_id: &'a str,
     pub member_id: &'a str,
     pub members: Vec<MemberIdentity<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl LeaveGroupRequest<'_> {
+impl<'a> Default for LeaveGroupRequest<'a> {
+    fn default() -> Self {
+        Self {
+            group_id: "",
+            member_id: "",
+            members: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> LeaveGroupRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::leave_group_request::LeaveGroupRequest {
         crate::owned::leave_group_request::LeaveGroupRequest {
             group_id: (self.group_id).to_string(),
             member_id: (self.member_id).to_string(),
-            members: (self.members)
-                .iter()
-                .map(MemberIdentity::to_owned)
-                .collect(),
+            members: (self.members).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for LeaveGroupRequest<'_> {
+impl<'a> Encode for LeaveGroupRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -172,28 +178,37 @@ impl LeaveGroupRequest<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemberIdentity<'a> {
     pub member_id: &'a str,
     pub group_instance_id: Option<&'a str>,
     pub reason: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl MemberIdentity<'_> {
+impl<'a> Default for MemberIdentity<'a> {
+    fn default() -> Self {
+        Self {
+            member_id: "",
+            group_instance_id: None,
+            reason: None,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> MemberIdentity<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::leave_group_request::MemberIdentity {
         crate::owned::leave_group_request::MemberIdentity {
             member_id: (self.member_id).to_string(),
-            group_instance_id: (self.group_instance_id).map(std::string::ToString::to_string),
-            reason: (self.reason).map(std::string::ToString::to_string),
+            group_instance_id: (self.group_instance_id).map(|s| s.to_string()),
+            reason: (self.reason).map(|s| s.to_string()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for MemberIdentity<'_> {
+impl<'a> Encode for MemberIdentity<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 4;
         if version >= 3 {

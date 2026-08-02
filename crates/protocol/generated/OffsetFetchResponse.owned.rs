@@ -36,7 +36,7 @@ impl Encode for OffsetFetchResponse {
         }
         let flex = is_flexible(version);
         if version >= 3 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if (0..=7).contains(&version) {
             {
@@ -47,7 +47,7 @@ impl Encode for OffsetFetchResponse {
             }
         }
         if (2..=7).contains(&version) {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 8 {
             {
@@ -95,7 +95,7 @@ impl Encode for OffsetFetchResponse {
         n
     }
 }
-impl Decode<'_> for OffsetFetchResponse {
+impl<'de> Decode<'de> for OffsetFetchResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -215,7 +215,7 @@ impl Encode for OffsetFetchResponseTopic {
         n
     }
 }
-impl Decode<'_> for OffsetFetchResponseTopic {
+impl<'de> Decode<'de> for OffsetFetchResponseTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 6;
         let mut out = Self::default();
@@ -281,13 +281,13 @@ impl Encode for OffsetFetchResponsePartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 6;
         if (0..=7).contains(&version) {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
         if (0..=7).contains(&version) {
-            put_i64(buf, self.committed_offset);
+            put_i64(buf, self.committed_offset)
         }
         if (5..=7).contains(&version) {
-            put_i32(buf, self.committed_leader_epoch);
+            put_i32(buf, self.committed_leader_epoch)
         }
         if (0..=7).contains(&version) {
             if flex {
@@ -297,7 +297,7 @@ impl Encode for OffsetFetchResponsePartition {
             }
         }
         if (0..=7).contains(&version) {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -334,7 +334,7 @@ impl Encode for OffsetFetchResponsePartition {
         n
     }
 }
-impl Decode<'_> for OffsetFetchResponsePartition {
+impl<'de> Decode<'de> for OffsetFetchResponsePartition {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 6;
         let mut out = Self::default();
@@ -412,7 +412,7 @@ impl Encode for OffsetFetchResponseGroup {
             }
         }
         if version >= 8 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -448,7 +448,7 @@ impl Encode for OffsetFetchResponseGroup {
         n
     }
 }
-impl Decode<'_> for OffsetFetchResponseGroup {
+impl<'de> Decode<'de> for OffsetFetchResponseGroup {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 6;
         let mut out = Self::default();
@@ -513,7 +513,7 @@ impl Encode for OffsetFetchResponseTopics {
             }
         }
         if version >= 10 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+            crate::primitives::uuid::put_uuid(buf, self.topic_id)
         }
         if version >= 8 {
             {
@@ -560,7 +560,7 @@ impl Encode for OffsetFetchResponseTopics {
         n
     }
 }
-impl Decode<'_> for OffsetFetchResponseTopics {
+impl<'de> Decode<'de> for OffsetFetchResponseTopics {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 6;
         let mut out = Self::default();
@@ -632,13 +632,13 @@ impl Encode for OffsetFetchResponsePartitions {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 6;
         if version >= 8 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
         if version >= 8 {
-            put_i64(buf, self.committed_offset);
+            put_i64(buf, self.committed_offset)
         }
         if version >= 8 {
-            put_i32(buf, self.committed_leader_epoch);
+            put_i32(buf, self.committed_leader_epoch)
         }
         if version >= 8 {
             if flex {
@@ -648,7 +648,7 @@ impl Encode for OffsetFetchResponsePartitions {
             }
         }
         if version >= 8 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -685,7 +685,7 @@ impl Encode for OffsetFetchResponsePartitions {
         n
     }
 }
-impl Decode<'_> for OffsetFetchResponsePartitions {
+impl<'de> Decode<'de> for OffsetFetchResponsePartitions {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 6;
         let mut out = Self::default();
@@ -749,7 +749,7 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     if version <= 7 {
         obj.insert("topics".to_string(), ::serde_json::Value::Array(vec![]));
     }
-    if (2..=7).contains(&version) {
+    if version >= 2 && version <= 7 {
         obj.insert("errorCode".to_string(), ::serde_json::json!(0));
     }
     if version >= 8 {

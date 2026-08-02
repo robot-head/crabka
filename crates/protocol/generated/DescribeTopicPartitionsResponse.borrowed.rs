@@ -20,33 +20,39 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribeTopicPartitionsResponse<'a> {
     pub throttle_time_ms: i32,
     pub topics: Vec<DescribeTopicPartitionsResponseTopic<'a>>,
     pub next_cursor: Option<Cursor<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl DescribeTopicPartitionsResponse<'_> {
+impl<'a> Default for DescribeTopicPartitionsResponse<'a> {
+    fn default() -> Self {
+        Self {
+            throttle_time_ms: 0i32,
+            topics: Vec::new(),
+            next_cursor: None,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> DescribeTopicPartitionsResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::describe_topic_partitions_response::DescribeTopicPartitionsResponse {
         crate::owned::describe_topic_partitions_response::DescribeTopicPartitionsResponse {
             throttle_time_ms: (self.throttle_time_ms),
-            topics: (self.topics)
-                .iter()
-                .map(DescribeTopicPartitionsResponseTopic::to_owned)
-                .collect(),
-            next_cursor: (self.next_cursor).as_ref().map(Cursor::to_owned),
+            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
+            next_cursor: (self.next_cursor).as_ref().map(|v| v.to_owned()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for DescribeTopicPartitionsResponse<'_> {
+impl<'a> Encode for DescribeTopicPartitionsResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -56,7 +62,7 @@ impl Encode for DescribeTopicPartitionsResponse<'_> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms);
+            put_i32(buf, self.throttle_time_ms)
         }
         if version >= 0 {
             {
@@ -175,7 +181,7 @@ pub struct DescribeTopicPartitionsResponseTopic<'a> {
     pub topic_authorized_operations: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for DescribeTopicPartitionsResponseTopic<'_> {
+impl<'a> Default for DescribeTopicPartitionsResponseTopic<'a> {
     fn default() -> Self {
         Self {
             error_code: 0i16,
@@ -188,34 +194,30 @@ impl Default for DescribeTopicPartitionsResponseTopic<'_> {
         }
     }
 }
-impl DescribeTopicPartitionsResponseTopic<'_> {
+impl<'a> DescribeTopicPartitionsResponseTopic<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::describe_topic_partitions_response::DescribeTopicPartitionsResponseTopic
     {
         crate::owned::describe_topic_partitions_response::DescribeTopicPartitionsResponseTopic {
             error_code: (self.error_code),
-            name: (self.name).map(std::string::ToString::to_string),
+            name: (self.name).map(|s| s.to_string()),
             topic_id: (self.topic_id),
             is_internal: (self.is_internal),
-            partitions: (self.partitions)
-                .iter()
-                .map(DescribeTopicPartitionsResponsePartition::to_owned)
-                .collect(),
+            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
             topic_authorized_operations: (self.topic_authorized_operations),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for DescribeTopicPartitionsResponseTopic<'_> {
+impl<'a> Encode for DescribeTopicPartitionsResponseTopic<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
         if version >= 0 {
             if flex {
@@ -225,10 +227,10 @@ impl Encode for DescribeTopicPartitionsResponseTopic<'_> {
             }
         }
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+            crate::primitives::uuid::put_uuid(buf, self.topic_id)
         }
         if version >= 0 {
-            put_bool(buf, self.is_internal);
+            put_bool(buf, self.is_internal)
         }
         if version >= 0 {
             {
@@ -239,7 +241,7 @@ impl Encode for DescribeTopicPartitionsResponseTopic<'_> {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.topic_authorized_operations);
+            put_i32(buf, self.topic_authorized_operations)
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -387,7 +389,6 @@ impl DescribeTopicPartitionsResponsePartition {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::describe_topic_partitions_response::DescribeTopicPartitionsResponsePartition
@@ -407,22 +408,22 @@ impl DescribeTopicPartitionsResponsePartition {
     }
     fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i16(buf, self.error_code);
+            put_i16(buf, self.error_code)
         }
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.leader_id);
+            put_i32(buf, self.leader_id)
         }
     }
     fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.leader_epoch);
+            put_i32(buf, self.leader_epoch)
         }
     }
     fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -487,9 +488,9 @@ impl DescribeTopicPartitionsResponsePartition {
             tagged.write(buf, &self.unknown_tagged_fields);
         }
     }
-    fn decode_field_0(
+    fn decode_field_0<'de>(
         out: &mut Self,
-        buf: &mut &[u8],
+        buf: &mut &'de [u8],
         version: i16,
         _flex: bool,
     ) -> Result<(), ProtocolError> {
@@ -498,9 +499,9 @@ impl DescribeTopicPartitionsResponsePartition {
         }
         Ok(())
     }
-    fn decode_field_1(
+    fn decode_field_1<'de>(
         out: &mut Self,
-        buf: &mut &[u8],
+        buf: &mut &'de [u8],
         version: i16,
         _flex: bool,
     ) -> Result<(), ProtocolError> {
@@ -509,9 +510,9 @@ impl DescribeTopicPartitionsResponsePartition {
         }
         Ok(())
     }
-    fn decode_field_2(
+    fn decode_field_2<'de>(
         out: &mut Self,
-        buf: &mut &[u8],
+        buf: &mut &'de [u8],
         version: i16,
         _flex: bool,
     ) -> Result<(), ProtocolError> {
@@ -520,9 +521,9 @@ impl DescribeTopicPartitionsResponsePartition {
         }
         Ok(())
     }
-    fn decode_field_3(
+    fn decode_field_3<'de>(
         out: &mut Self,
-        buf: &mut &[u8],
+        buf: &mut &'de [u8],
         version: i16,
         _flex: bool,
     ) -> Result<(), ProtocolError> {
@@ -531,9 +532,9 @@ impl DescribeTopicPartitionsResponsePartition {
         }
         Ok(())
     }
-    fn decode_field_4(
+    fn decode_field_4<'de>(
         out: &mut Self,
-        buf: &mut &[u8],
+        buf: &mut &'de [u8],
         version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
@@ -549,9 +550,9 @@ impl DescribeTopicPartitionsResponsePartition {
         }
         Ok(())
     }
-    fn decode_field_5(
+    fn decode_field_5<'de>(
         out: &mut Self,
-        buf: &mut &[u8],
+        buf: &mut &'de [u8],
         version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
@@ -567,9 +568,9 @@ impl DescribeTopicPartitionsResponsePartition {
         }
         Ok(())
     }
-    fn decode_field_6(
+    fn decode_field_6<'de>(
         out: &mut Self,
-        buf: &mut &[u8],
+        buf: &mut &'de [u8],
         version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
@@ -590,9 +591,9 @@ impl DescribeTopicPartitionsResponsePartition {
         }
         Ok(())
     }
-    fn decode_field_7(
+    fn decode_field_7<'de>(
         out: &mut Self,
-        buf: &mut &[u8],
+        buf: &mut &'de [u8],
         version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
@@ -613,9 +614,9 @@ impl DescribeTopicPartitionsResponsePartition {
         }
         Ok(())
     }
-    fn decode_field_8(
+    fn decode_field_8<'de>(
         out: &mut Self,
-        buf: &mut &[u8],
+        buf: &mut &'de [u8],
         version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
@@ -631,10 +632,10 @@ impl DescribeTopicPartitionsResponsePartition {
         }
         Ok(())
     }
-    fn decode_tagged_fields(
+    fn decode_tagged_fields<'de>(
         out: &mut Self,
-        buf: &mut &[u8],
-        _version: i16,
+        buf: &mut &'de [u8],
+        version: i16,
         flex: bool,
     ) -> Result<(), ProtocolError> {
         if flex {
@@ -695,7 +696,7 @@ impl Encode for DescribeTopicPartitionsResponsePartition {
             n += {
                 let opt: Option<&Vec<_>> = (self.eligible_leader_replicas).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
+                    opt.map(|v| v.len()),
                     flex,
                 );
                 let body: usize = opt.map_or(0, |v| v.iter().map(|_| 4).sum());
@@ -706,7 +707,7 @@ impl Encode for DescribeTopicPartitionsResponsePartition {
             n += {
                 let opt: Option<&Vec<_>> = (self.last_known_elr).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
+                    opt.map(|v| v.len()),
                     flex,
                 );
                 let body: usize = opt.map_or(0, |v| v.iter().map(|_| 4).sum());
@@ -782,17 +783,25 @@ impl DescribeTopicPartitionsResponsePartition {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cursor<'a> {
     pub topic_name: &'a str,
     pub partition_index: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Cursor<'_> {
+impl<'a> Default for Cursor<'a> {
+    fn default() -> Self {
+        Self {
+            topic_name: "",
+            partition_index: 0i32,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> Cursor<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_topic_partitions_response::Cursor {
         crate::owned::describe_topic_partitions_response::Cursor {
             topic_name: (self.topic_name).to_string(),
@@ -801,7 +810,7 @@ impl Cursor<'_> {
         }
     }
 }
-impl Encode for Cursor<'_> {
+impl<'a> Encode for Cursor<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
@@ -812,7 +821,7 @@ impl Encode for Cursor<'_> {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.partition_index);
+            put_i32(buf, self.partition_index)
         }
         if flex {
             let tagged = WriteTaggedFields::new();

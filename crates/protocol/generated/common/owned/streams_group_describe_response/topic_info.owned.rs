@@ -26,10 +26,10 @@ impl Encode for TopicInfo {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.partitions);
+            put_i32(buf, self.partitions)
         }
         if version >= 0 {
-            put_i16(buf, self.replication_factor);
+            put_i16(buf, self.replication_factor)
         }
         if version >= 0 {
             {
@@ -81,7 +81,7 @@ impl Encode for TopicInfo {
         n
     }
 }
-impl Decode<'_> for TopicInfo {
+impl<'de> Decode<'de> for TopicInfo {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

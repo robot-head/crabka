@@ -31,7 +31,7 @@ pub struct ConsumerProtocolSubscription<'a> {
     pub rack_id: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for ConsumerProtocolSubscription<'_> {
+impl<'a> Default for ConsumerProtocolSubscription<'a> {
     fn default() -> Self {
         Self {
             topics: Vec::new(),
@@ -43,7 +43,7 @@ impl Default for ConsumerProtocolSubscription<'_> {
         }
     }
 }
-impl ConsumerProtocolSubscription<'_> {
+impl<'a> ConsumerProtocolSubscription<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
@@ -51,22 +51,19 @@ impl ConsumerProtocolSubscription<'_> {
         &self,
     ) -> crate::owned::consumer_protocol_subscription::ConsumerProtocolSubscription {
         crate::owned::consumer_protocol_subscription::ConsumerProtocolSubscription {
-            topics: (self.topics)
-                .iter()
-                .map(std::string::ToString::to_string)
-                .collect(),
+            topics: (self.topics).iter().map(|s| s.to_string()).collect(),
             user_data: (self.user_data).map(Bytes::copy_from_slice),
             owned_partitions: (self.owned_partitions)
                 .iter()
-                .map(TopicPartition::to_owned)
+                .map(|it| it.to_owned())
                 .collect(),
             generation_id: (self.generation_id),
-            rack_id: (self.rack_id).map(std::string::ToString::to_string),
+            rack_id: (self.rack_id).map(|s| s.to_string()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl Encode for ConsumerProtocolSubscription<'_> {
+impl<'a> Encode for ConsumerProtocolSubscription<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(
@@ -79,10 +76,10 @@ impl Encode for ConsumerProtocolSubscription<'_> {
                 crate::primitives::array::put_array_len(buf, (self.topics).len(), flex);
                 for it in &self.topics {
                     if flex {
-                        let () = put_compact_string(buf, it);
+                        let () = put_compact_string(buf, *it);
                     } else {
-                        let () = put_string(buf, it);
-                    }
+                        let () = put_string(buf, *it);
+                    };
                 }
             }
         }
@@ -102,7 +99,7 @@ impl Encode for ConsumerProtocolSubscription<'_> {
             }
         }
         if version >= 2 {
-            put_i32(buf, self.generation_id);
+            put_i32(buf, self.generation_id)
         }
         if version >= 3 {
             if flex {
@@ -124,9 +121,9 @@ impl Encode for ConsumerProtocolSubscription<'_> {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(it)
+                            compact_string_len(*it)
                         } else {
-                            string_len(it)
+                            string_len(*it)
                         }
                     })
                     .sum();
@@ -254,17 +251,25 @@ impl ConsumerProtocolSubscription<'_> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicPartition<'a> {
     pub topic: &'a str,
     pub partitions: Vec<i32>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl TopicPartition<'_> {
+impl<'a> Default for TopicPartition<'a> {
+    fn default() -> Self {
+        Self {
+            topic: "",
+            partitions: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> TopicPartition<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::consumer_protocol_subscription::TopicPartition {
         crate::owned::consumer_protocol_subscription::TopicPartition {
             topic: (self.topic).to_string(),
@@ -273,7 +278,7 @@ impl TopicPartition<'_> {
         }
     }
 }
-impl Encode for TopicPartition<'_> {
+impl<'a> Encode for TopicPartition<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version == i16::MAX;
         if version >= 1 {

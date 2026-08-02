@@ -15,17 +15,25 @@ pub const FLEXIBLE_MIN: i16 = 3;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiVersionsRequest<'a> {
     pub client_software_name: &'a str,
     pub client_software_version: &'a str,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl ApiVersionsRequest<'_> {
+impl<'a> Default for ApiVersionsRequest<'a> {
+    fn default() -> Self {
+        Self {
+            client_software_name: "",
+            client_software_version: "",
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+}
+impl<'a> ApiVersionsRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
-    #[must_use]
     pub fn to_owned(&self) -> crate::owned::api_versions_request::ApiVersionsRequest {
         crate::owned::api_versions_request::ApiVersionsRequest {
             client_software_name: (self.client_software_name).to_string(),
@@ -34,7 +42,7 @@ impl ApiVersionsRequest<'_> {
         }
     }
 }
-impl Encode for ApiVersionsRequest<'_> {
+impl<'a> Encode for ApiVersionsRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
