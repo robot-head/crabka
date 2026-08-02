@@ -1,9 +1,8 @@
 //! Generates Connect-RPC server stubs + prost message types from the `.proto`.
 //!
-//! Drives codegen through a vendored `protoc` binary (`protoc-bin-vendored`) so
-//! the build is hermetic — no system `protoc` and no network fetch. The Connect
-//! generator (connectrpc-axum-build) always invokes a `protoc` binary, so the
-//! vendored one is supplied via `prost-build`'s `protoc_executable`.
+//! The Connect generator requires a protoc-compatible executable. Bazel
+//! supplies the pure-Rust `protox` CLI; Cargo-only builds fall back to
+//! `protoc-bin-vendored`.
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proto = "proto/crabka/gateway/v1/gateway.proto";

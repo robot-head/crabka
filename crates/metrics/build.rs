@@ -1,8 +1,7 @@
 //! Generates prost message types from the vendored `remote_write` v1/v2 protos.
 //!
-//! Drives codegen through a vendored `protoc` binary (`protoc-bin-vendored`) so
-//! the build is hermetic: no system `protoc`, no network fetch, and no
-//! platform-specific protobuf release archive naming.
+//! Bazel supplies the pure-Rust `protox` CLI via `PROTOC`; Cargo-only builds
+//! fall back to `protoc-bin-vendored`.
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let protos = [

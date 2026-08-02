@@ -94,6 +94,10 @@ crate.annotation(
     gen_binaries = ["wasm-bindgen"],
 )
 crate.annotation(
+    crate = "protox",
+    gen_binaries = ["protox"],
+)
+crate.annotation(
     crate = "sqlx-postgres",
     crate_features = ["offline"],
 )

@@ -135,7 +135,7 @@ def rust_package(
         cargo_build_script(
             name = "_build_script",
             aliases = _aliases("build_deps"),
-            build_script_env = {"PROTOC": "$(execpath @protobuf//:protoc)"} if protoc else {},
+            build_script_env = {"PROTOC": "$(execpath @crates//:protox__protox)"} if protoc else {},
             crate_root = "build.rs",
             compile_data = native.glob(["**"], exclude = ["BUILD.bazel"]),
             data = native.glob(["**"], exclude = ["BUILD.bazel"]),
@@ -144,7 +144,7 @@ def rust_package(
             link_deps = deps,
             pkg_name = cargo_name or name,
             srcs = srcs + ["build.rs"],
-            tools = ["@protobuf//:protoc"] if protoc else [],
+            tools = ["@crates//:protox__protox"] if protoc else [],
         )
         deps = deps + [":_build_script"]
 
