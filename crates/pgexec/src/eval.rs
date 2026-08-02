@@ -1040,7 +1040,15 @@ fn coerce_untyped_literal_operands(
         }
         if let Datum::Range(range) = other {
             return match op {
-                BinaryOp::Eq
+                BinaryOp::Add
+                | BinaryOp::Sub
+                | BinaryOp::Mul
+                | BinaryOp::Shl
+                | BinaryOp::Shr
+                | BinaryOp::DoesNotExtendRight
+                | BinaryOp::DoesNotExtendLeft
+                | BinaryOp::Adjacent
+                | BinaryOp::Eq
                 | BinaryOp::Ne
                 | BinaryOp::Lt
                 | BinaryOp::Le
@@ -1110,6 +1118,12 @@ pub(crate) fn apply_binary(
         return Ok(result);
     }
     match op {
+        BinaryOp::Add if matches!((l, r), (Datum::Range(_), Datum::Range(_))) => {
+            let (Datum::Range(a), Datum::Range(b)) = (l, r) else {
+                unreachable!()
+            };
+            Ok(Datum::Range(crabka_pgtypes::range::union(a, b)?))
+        }
         BinaryOp::Add => Ok(ops::add(l, r)?),
         // jsonb `-` (delete a key, an index, or a set of keys) overloads the
         // arithmetic `-`; a jsonb LEFT operand is what selects it, so every
@@ -1117,7 +1131,19 @@ pub(crate) fn apply_binary(
         BinaryOp::Sub if matches!(l, Datum::Jsonb(_)) => {
             json_fn::eval_json_operator(JsonOp::Delete, l, r)
         }
+        BinaryOp::Sub if matches!((l, r), (Datum::Range(_), Datum::Range(_))) => {
+            let (Datum::Range(a), Datum::Range(b)) = (l, r) else {
+                unreachable!()
+            };
+            Ok(Datum::Range(crabka_pgtypes::range::difference(a, b)?))
+        }
         BinaryOp::Sub => Ok(ops::sub(l, r)?),
+        BinaryOp::Mul if matches!((l, r), (Datum::Range(_), Datum::Range(_))) => {
+            let (Datum::Range(a), Datum::Range(b)) = (l, r) else {
+                unreachable!()
+            };
+            Ok(Datum::Range(crabka_pgtypes::range::intersection(a, b)?))
+        }
         BinaryOp::Mul => Ok(ops::mul(l, r)?),
         BinaryOp::Div => Ok(ops::div(l, r)?),
         BinaryOp::And => Ok(ops::and(l, r)?),
@@ -1169,6 +1195,32 @@ pub(crate) fn apply_binary(
         }
         // Array overlap; NULL handling lives in the array function.
         BinaryOp::Overlaps => array_fn::array_overlap(l, r),
+        BinaryOp::DoesNotExtendRight
+        | BinaryOp::DoesNotExtendLeft
+        | BinaryOp::Adjacent
+        | BinaryOp::Shl
+        | BinaryOp::Shr
+            if matches!((l, r), (Datum::Range(_), Datum::Range(_))) =>
+        {
+            let (Datum::Range(a), Datum::Range(b)) = (l, r) else {
+                unreachable!()
+            };
+            Ok(Datum::Bool(match op {
+                BinaryOp::DoesNotExtendRight => crabka_pgtypes::range::does_not_extend_right(a, b)?,
+                BinaryOp::DoesNotExtendLeft => crabka_pgtypes::range::does_not_extend_left(a, b)?,
+                BinaryOp::Adjacent => crabka_pgtypes::range::adjacent(a, b)?,
+                BinaryOp::Shl => crabka_pgtypes::range::strictly_left(a, b)?,
+                BinaryOp::Shr => crabka_pgtypes::range::strictly_right(a, b)?,
+                _ => unreachable!(),
+            }))
+        }
+        BinaryOp::DoesNotExtendRight | BinaryOp::DoesNotExtendLeft | BinaryOp::Adjacent => {
+            if l.is_null() || r.is_null() {
+                Ok(Datum::Null)
+            } else {
+                Err(undefined_operator_for(op, l, r))
+            }
+        }
         BinaryOp::Phrase => match (l, r) {
             (Datum::TsQuery(left), Datum::TsQuery(right)) => Ok(Datum::TsQuery(
                 crabka_pgtypes::TsQuery::Phrase(Box::new(left.clone()), Box::new(right.clone()), 1),
@@ -1723,6 +1775,9 @@ fn op_spelling(op: BinaryOp) -> &'static str {
         BinaryOp::JsonPathExists => "@?",
         BinaryOp::JsonPathMatch => "@@",
         BinaryOp::Overlaps => "&&",
+        BinaryOp::DoesNotExtendRight => "&<",
+        BinaryOp::DoesNotExtendLeft => "&>",
+        BinaryOp::Adjacent => "-|-",
         BinaryOp::Phrase => "<->",
         BinaryOp::Match => "~",
         BinaryOp::MatchCi => "~*",
@@ -2169,6 +2224,14 @@ fn infer_binary_type(
     match op {
         BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div => {
             let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
+            if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul) {
+                match (lt, rt) {
+                    (ColumnType::Range(a), ColumnType::Range(b)) if a == b => return Ok(lt),
+                    (ColumnType::Range(_), _) if is_unknown_literal(right) => return Ok(lt),
+                    (_, ColumnType::Range(_)) if is_unknown_literal(left) => return Ok(rt),
+                    _ => {}
+                }
+            }
             // jsonb `-` (delete) overloads the arithmetic `-`. Only a jsonb LEFT
             // operand selects it, so every numeric/date pair below is unchanged;
             // a jsonb left operand with an unsupported right operand is 42883
@@ -2260,8 +2323,26 @@ fn infer_binary_type(
         // The bitwise operators are integer-only. `&`/`|`/`#` widen to the wider
         // operand; a shift keeps the LEFT operand's width (its count is an
         // ordinary integer, not part of the result type).
+        BinaryOp::DoesNotExtendRight | BinaryOp::DoesNotExtendLeft | BinaryOp::Adjacent => {
+            let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
+            if matches!((lt, rt), (ColumnType::Range(a), ColumnType::Range(b)) if a == b)
+                || matches!(lt, ColumnType::Range(_)) && is_unknown_literal(right)
+                || matches!(rt, ColumnType::Range(_)) && is_unknown_literal(left)
+            {
+                Ok(ColumnType::Bool)
+            } else {
+                Err(undefined_operator(op_spelling(op), lt, rt))
+            }
+        }
         BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor | BinaryOp::Shl | BinaryOp::Shr => {
             let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
+            if matches!(op, BinaryOp::Shl | BinaryOp::Shr)
+                && (matches!((lt, rt), (ColumnType::Range(a), ColumnType::Range(b)) if a == b)
+                    || matches!(lt, ColumnType::Range(_)) && is_unknown_literal(right)
+                    || matches!(rt, ColumnType::Range(_)) && is_unknown_literal(left))
+            {
+                return Ok(ColumnType::Bool);
+            }
             let is_int =
                 |t: ColumnType| matches!(t, ColumnType::Int2 | ColumnType::Int4 | ColumnType::Int8);
             if !is_int(lt) || !is_int(rt) {

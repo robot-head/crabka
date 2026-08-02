@@ -3080,7 +3080,13 @@ pub enum BinaryOp {
     JsonPathMatch,
     /// array `&&`: the two arrays have at least one element in common.
     Overlaps,
-    /// `tsquery <-> tsquery`: adjacent phrase composition.
+    /// Range does not extend right of the other range (`&<`).
+    DoesNotExtendRight,
+    /// Range does not extend left of the other range (`&>`).
+    DoesNotExtendLeft,
+    /// Ranges are adjacent (`-|-`).
+    Adjacent,
+    /// `tsquery <-> tsquery` — adjacent phrase composition.
     Phrase,
     /// `~`: the left string matches the POSIX regular expression on the right.
     Match,

@@ -52,7 +52,11 @@ pub enum Token {
     KeyExistsAll,
     /// The array `&&` overlap operator.
     Overlaps,
-    /// `<->`: adjacent-lexeme phrase query composition.
+    /// Range does not extend right/left and adjacency operators.
+    DoesNotExtendRight,
+    DoesNotExtendLeft,
+    Adjacent,
+    /// `<->` — adjacent-lexeme phrase query composition.
     Phrase,
     /// `!!`: prefix tsquery negation.
     TsNot,

@@ -59,6 +59,7 @@ enum AggFunc {
     BitAnd,
     BitOr,
     BitXor,
+    RangeIntersect,
     /// The single-variable statistical family. `variance` is `var_samp` and
     /// `stddev` is `stddev_samp`, exactly as PostgreSQL aliases them.
     VarPop,
@@ -159,6 +160,7 @@ fn aggregate_func(name: &str) -> Option<AggFunc> {
         "bit_and" => Some(AggFunc::BitAnd),
         "bit_or" => Some(AggFunc::BitOr),
         "bit_xor" => Some(AggFunc::BitXor),
+        "range_intersect_agg" => Some(AggFunc::RangeIntersect),
         "var_pop" => Some(AggFunc::VarPop),
         "var_samp" | "variance" => Some(AggFunc::VarSamp),
         "stddev_pop" => Some(AggFunc::StddevPop),
@@ -345,6 +347,13 @@ pub(crate) fn func_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnTyp
             let arg = single_value_arg(fc)?;
             match crate::eval::infer_type(arg, scope)? {
                 t @ (ColumnType::Int2 | ColumnType::Int4 | ColumnType::Int8) => Ok(t),
+                other => Err(undefined_for_arg(&fc.name, other)),
+            }
+        }
+        AggFunc::RangeIntersect => {
+            let arg = single_value_arg(fc)?;
+            match crate::eval::infer_type(arg, scope)? {
+                ty @ ColumnType::Range(_) => Ok(ty),
                 other => Err(undefined_for_arg(&fc.name, other)),
             }
         }
@@ -1415,10 +1424,12 @@ enum AccState {
     BitAgg {
         acc: Option<Datum>,
     },
-    /// The `float8` single-variable statistical state.
-    ///
-    /// It is PostgreSQL's Youngs–Cramer `(N, Sx, Sxx)`, where `Sxx` is the
-    /// running sum of squared deviations and not the sum of squares.
+    RangeIntersect {
+        acc: Option<crabka_pgtypes::RangeValue>,
+    },
+    /// The `float8` single-variable statistical state: PostgreSQL's
+    /// Youngs–Cramer `(N, Sx, Sxx)`, where `Sxx` is the running sum of squared
+    /// deviations rather than the sum of squares.
     VarFloat {
         n: f64,
         sx: f64,
@@ -1612,6 +1623,7 @@ impl AccState {
                 seen: false,
             },
             AggFunc::BitAnd | AggFunc::BitOr | AggFunc::BitXor => AccState::BitAgg { acc: None },
+            AggFunc::RangeIntersect => AccState::RangeIntersect { acc: None },
             AggFunc::VarPop | AggFunc::VarSamp | AggFunc::StddevPop | AggFunc::StddevSamp => {
                 if matches!(spec.arg_type, Some(ColumnType::Float4 | ColumnType::Float8)) {
                     AccState::VarFloat {
@@ -1770,6 +1782,18 @@ impl AccState {
                 *acc = Some(match acc.take() {
                     None => v,
                     Some(cur) => bit_fold(spec.func, &cur, &v)?,
+                });
+            }
+            AccState::RangeIntersect { acc } => {
+                let Datum::Range(range) = v else {
+                    return Err(undefined_for_arg(
+                        "range_intersect_agg",
+                        v.column_type().unwrap_or(ColumnType::Text),
+                    ));
+                };
+                *acc = Some(match acc.take() {
+                    None => range,
+                    Some(cur) => crabka_pgtypes::range::intersection(&cur, &range)?,
                 });
             }
             // Youngs–Cramer: `Sxx` accumulates squared deviations, which is why
@@ -1965,6 +1989,9 @@ impl AccState {
                 }
             }
             AccState::BitAgg { acc } => acc.clone().unwrap_or(Datum::Null),
+            AccState::RangeIntersect { acc } => {
+                acc.clone().map(Datum::Range).unwrap_or(Datum::Null)
+            }
             AccState::VarFloat { n, sxx, .. } => {
                 let (sample, sqrt) = spec
                     .func
@@ -2563,6 +2590,36 @@ mod tests {
 
     fn int(n: i64) -> Datum {
         Datum::Int8(n)
+    }
+
+    #[test]
+    fn range_intersection_aggregate_folds_and_is_null_on_no_rows() {
+        let ty = ColumnType::builtin_range(crabka_pgtypes::oids::INT4RANGE).expect("int4range");
+        let ColumnType::Range(range_ty) = ty else {
+            unreachable!()
+        };
+        let mut t = table();
+        t.columns = vec![Column::new("v", ty)];
+        let range = |text| {
+            Datum::Range(
+                crabka_pgtypes::range::parse(text, range_ty.clone(), &jiff::tz::TimeZone::UTC)
+                    .expect("range"),
+            )
+        };
+        assert_eq!(
+            agg_text(
+                "SELECT range_intersect_agg(v) FROM t",
+                Some(&t),
+                vec![vec![range("[1,5)")], vec![range("[3,7)")]]
+            )
+            .expect("aggregate"),
+            vec![vec![Some("[3,5)".into())]]
+        );
+        assert_eq!(
+            agg_text("SELECT range_intersect_agg(v) FROM t", Some(&t), vec![])
+                .expect("empty aggregate"),
+            vec![vec![None]]
+        );
     }
 
     /// `sum`/`avg`/`min`/`max` over the two new scalar types, in both the type

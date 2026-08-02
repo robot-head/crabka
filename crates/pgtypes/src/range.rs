@@ -100,6 +100,148 @@ pub fn overlaps(a: &RangeValue, b: &RangeValue) -> Result<bool, TypeError> {
     Ok(!strictly_left(a, b)? && !strictly_left(b, a)?)
 }
 
+pub fn strictly_left(a: &RangeValue, b: &RangeValue) -> Result<bool, TypeError> {
+    same_type(a, b)?;
+    if a.empty || b.empty {
+        return Ok(false);
+    }
+    left_of(a, b)
+}
+
+pub fn strictly_right(a: &RangeValue, b: &RangeValue) -> Result<bool, TypeError> {
+    strictly_left(b, a)
+}
+
+pub fn does_not_extend_right(a: &RangeValue, b: &RangeValue) -> Result<bool, TypeError> {
+    same_type(a, b)?;
+    if a.empty || b.empty {
+        return Ok(false);
+    }
+    Ok(compare_upper_bound(a, b)? != Ordering::Greater)
+}
+
+pub fn does_not_extend_left(a: &RangeValue, b: &RangeValue) -> Result<bool, TypeError> {
+    same_type(a, b)?;
+    if a.empty || b.empty {
+        return Ok(false);
+    }
+    Ok(compare_lower_bound(a, b)? != Ordering::Less)
+}
+
+pub fn adjacent(a: &RangeValue, b: &RangeValue) -> Result<bool, TypeError> {
+    same_type(a, b)?;
+    if a.empty || b.empty {
+        return Ok(false);
+    }
+    Ok(adjacent_on(a, b)? || adjacent_on(b, a)?)
+}
+
+pub fn merge(a: &RangeValue, b: &RangeValue) -> Result<RangeValue, TypeError> {
+    same_type(a, b)?;
+    if a.empty {
+        return Ok(b.clone());
+    }
+    if b.empty {
+        return Ok(a.clone());
+    }
+    let lower_order = compare_lower(a, b)?;
+    let upper_order = compare_upper(a, b)?;
+    Ok(RangeValue {
+        ty: a.ty.clone(),
+        lower: if lower_order == Ordering::Greater {
+            b.lower.clone()
+        } else {
+            a.lower.clone()
+        },
+        upper: if upper_order == Ordering::Less {
+            b.upper.clone()
+        } else {
+            a.upper.clone()
+        },
+        lower_inclusive: match lower_order {
+            Ordering::Less => a.lower_inclusive,
+            Ordering::Greater => b.lower_inclusive,
+            Ordering::Equal => a.lower_inclusive || b.lower_inclusive,
+        },
+        upper_inclusive: match upper_order {
+            Ordering::Greater => a.upper_inclusive,
+            Ordering::Less => b.upper_inclusive,
+            Ordering::Equal => a.upper_inclusive || b.upper_inclusive,
+        },
+        empty: false,
+    })
+}
+
+pub fn union(a: &RangeValue, b: &RangeValue) -> Result<RangeValue, TypeError> {
+    if !a.empty && !b.empty && !overlaps(a, b)? && !adjacent(a, b)? {
+        return Err(TypeError::Coded {
+            sqlstate: "22000",
+            message: "result of range union would not be contiguous".into(),
+        });
+    }
+    merge(a, b)
+}
+
+pub fn intersection(a: &RangeValue, b: &RangeValue) -> Result<RangeValue, TypeError> {
+    same_type(a, b)?;
+    if a.empty || b.empty || !overlaps(a, b)? {
+        return Ok(empty(a));
+    }
+    let lower_order = compare_lower(a, b)?;
+    let upper_order = compare_upper(a, b)?;
+    Ok(RangeValue {
+        ty: a.ty.clone(),
+        lower: if lower_order == Ordering::Less {
+            b.lower.clone()
+        } else {
+            a.lower.clone()
+        },
+        upper: if upper_order == Ordering::Greater {
+            b.upper.clone()
+        } else {
+            a.upper.clone()
+        },
+        lower_inclusive: match lower_order {
+            Ordering::Less => b.lower_inclusive,
+            Ordering::Greater => a.lower_inclusive,
+            Ordering::Equal => a.lower_inclusive && b.lower_inclusive,
+        },
+        upper_inclusive: match upper_order {
+            Ordering::Greater => b.upper_inclusive,
+            Ordering::Less => a.upper_inclusive,
+            Ordering::Equal => a.upper_inclusive && b.upper_inclusive,
+        },
+        empty: false,
+    })
+}
+
+pub fn difference(a: &RangeValue, b: &RangeValue) -> Result<RangeValue, TypeError> {
+    same_type(a, b)?;
+    if a.empty || b.empty || !overlaps(a, b)? {
+        return Ok(a.clone());
+    }
+    if contains_range(b, a)? {
+        return Ok(empty(a));
+    }
+    let cuts_left = compare_lower_bound(b, a)? != Ordering::Greater;
+    let cuts_right = compare_upper_bound(b, a)? != Ordering::Less;
+    if !cuts_left && !cuts_right {
+        return Err(TypeError::Coded {
+            sqlstate: "22000",
+            message: "result of range difference would not be contiguous".into(),
+        });
+    }
+    let mut result = a.clone();
+    if cuts_left {
+        result.lower = b.upper.clone();
+        result.lower_inclusive = !b.upper_inclusive;
+    } else {
+        result.upper = b.lower.clone();
+        result.upper_inclusive = !b.lower_inclusive;
+    }
+    Ok(result)
+}
+
 fn lower_contains(outer: &RangeValue, inner: &RangeValue) -> Result<bool, TypeError> {
     match (outer.lower.as_deref(), inner.lower.as_deref()) {
         (None, _) => Ok(true),
@@ -128,7 +270,7 @@ fn upper_contains(outer: &RangeValue, inner: &RangeValue) -> Result<bool, TypeEr
     }
 }
 
-fn strictly_left(a: &RangeValue, b: &RangeValue) -> Result<bool, TypeError> {
+fn left_of(a: &RangeValue, b: &RangeValue) -> Result<bool, TypeError> {
     let (Some(upper), Some(lower)) = (a.upper.as_deref(), b.lower.as_deref()) else {
         return Ok(false);
     };
@@ -139,6 +281,77 @@ fn strictly_left(a: &RangeValue, b: &RangeValue) -> Result<bool, TypeError> {
             Ordering::Equal => !(a.upper_inclusive && b.lower_inclusive),
         },
     )
+}
+
+fn same_type(a: &RangeValue, b: &RangeValue) -> Result<(), TypeError> {
+    if a.ty == b.ty {
+        Ok(())
+    } else {
+        Err(TypeError::TypeMismatch {
+            message: "range types do not match".into(),
+        })
+    }
+}
+
+fn adjacent_on(a: &RangeValue, b: &RangeValue) -> Result<bool, TypeError> {
+    let (Some(upper), Some(lower)) = (a.upper.as_deref(), b.lower.as_deref()) else {
+        return Ok(false);
+    };
+    Ok(crate::ops::compare(upper, lower)? == Some(Ordering::Equal)
+        && a.upper_inclusive != b.lower_inclusive)
+}
+
+fn compare_lower(a: &RangeValue, b: &RangeValue) -> Result<Ordering, TypeError> {
+    match (a.lower.as_deref(), b.lower.as_deref()) {
+        (None, None) => Ok(Ordering::Equal),
+        (None, Some(_)) => Ok(Ordering::Less),
+        (Some(_), None) => Ok(Ordering::Greater),
+        (Some(a), Some(b)) => Ok(crate::ops::compare(a, b)?.expect("bounds are non-null")),
+    }
+}
+
+fn compare_upper(a: &RangeValue, b: &RangeValue) -> Result<Ordering, TypeError> {
+    match (a.upper.as_deref(), b.upper.as_deref()) {
+        (None, None) => Ok(Ordering::Equal),
+        (None, Some(_)) => Ok(Ordering::Greater),
+        (Some(_), None) => Ok(Ordering::Less),
+        (Some(a), Some(b)) => Ok(crate::ops::compare(a, b)?.expect("bounds are non-null")),
+    }
+}
+
+fn compare_lower_bound(a: &RangeValue, b: &RangeValue) -> Result<Ordering, TypeError> {
+    let order = compare_lower(a, b)?;
+    if order != Ordering::Equal || a.lower.is_none() {
+        return Ok(order);
+    }
+    Ok(match (a.lower_inclusive, b.lower_inclusive) {
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        _ => Ordering::Equal,
+    })
+}
+
+fn compare_upper_bound(a: &RangeValue, b: &RangeValue) -> Result<Ordering, TypeError> {
+    let order = compare_upper(a, b)?;
+    if order != Ordering::Equal || a.upper.is_none() {
+        return Ok(order);
+    }
+    Ok(match (a.upper_inclusive, b.upper_inclusive) {
+        (false, true) => Ordering::Less,
+        (true, false) => Ordering::Greater,
+        _ => Ordering::Equal,
+    })
+}
+
+fn empty(range: &RangeValue) -> RangeValue {
+    RangeValue {
+        ty: range.ty.clone(),
+        lower: None,
+        upper: None,
+        lower_inclusive: false,
+        upper_inclusive: false,
+        empty: true,
+    }
 }
 
 fn quote_bound(text: &str) -> String {

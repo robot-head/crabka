@@ -22,7 +22,7 @@
 use std::cmp::Ordering;
 
 use crabka_pgparser::ast::{Expr, FuncArgs, FuncCall};
-use crabka_pgtypes::{ColumnType, Datum, ops};
+use crabka_pgtypes::{ColumnType, Datum, ops, usertype::RangeRef};
 
 use crate::{clock::EvalCtx, error::ExecError, scope::Scope};
 
@@ -100,7 +100,7 @@ enum ScalarFunc {
     /// `pg_input_is_valid(text, text)`: would the type's input function accept
     /// this string?
     PgInputIsValid,
-    RangeConstructor(u32),
+    RangeConstructor(RangeRef),
     IsEmpty,
     LowerInc,
     LowerInf,
@@ -109,6 +109,9 @@ enum ScalarFunc {
     RangeContains,
     RangeContainedBy,
     RangeOverlaps,
+    RangeAdjacent,
+    RangeMinus,
+    RangeMerge,
     PgTableIsVisible,
     NextVal,
     CurrVal,
@@ -212,12 +215,6 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "format_type" => ScalarFunc::FormatType,
         "pg_typeof" => ScalarFunc::PgTypeof,
         "pg_input_is_valid" => ScalarFunc::PgInputIsValid,
-        "int4range" => ScalarFunc::RangeConstructor(crabka_pgtypes::oids::INT4RANGE),
-        "numrange" => ScalarFunc::RangeConstructor(crabka_pgtypes::oids::NUMRANGE),
-        "tsrange" => ScalarFunc::RangeConstructor(crabka_pgtypes::oids::TSRANGE),
-        "tstzrange" => ScalarFunc::RangeConstructor(crabka_pgtypes::oids::TSTZRANGE),
-        "daterange" => ScalarFunc::RangeConstructor(crabka_pgtypes::oids::DATERANGE),
-        "int8range" => ScalarFunc::RangeConstructor(crabka_pgtypes::oids::INT8RANGE),
         "isempty" => ScalarFunc::IsEmpty,
         "lower_inc" => ScalarFunc::LowerInc,
         "lower_inf" => ScalarFunc::LowerInf,
@@ -226,12 +223,18 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "range_contains" => ScalarFunc::RangeContains,
         "range_contained_by" => ScalarFunc::RangeContainedBy,
         "range_overlaps" => ScalarFunc::RangeOverlaps,
+        "range_adjacent" => ScalarFunc::RangeAdjacent,
+        "range_minus" => ScalarFunc::RangeMinus,
+        "range_merge" => ScalarFunc::RangeMerge,
         "pg_table_is_visible" => ScalarFunc::PgTableIsVisible,
         "nextval" => ScalarFunc::NextVal,
         "currval" => ScalarFunc::CurrVal,
         "setval" => ScalarFunc::SetVal,
         "pg_notify" => ScalarFunc::PgNotify,
-        _ => return None,
+        _ => match ColumnType::from_sql_name(name) {
+            Some(ColumnType::Range(range)) => ScalarFunc::RangeConstructor(range),
+            _ => return None,
+        },
     })
 }
 
@@ -609,9 +612,9 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
             require_text(&args[1], scope)?;
             Ok(ColumnType::Bool)
         }
-        ScalarFunc::RangeConstructor(oid) => {
+        ScalarFunc::RangeConstructor(range) => {
             require_arity(fc, n == 2 || n == 3)?;
-            Ok(ColumnType::builtin_range(oid).expect("known range constructor"))
+            Ok(ColumnType::Range(range))
         }
         ScalarFunc::IsEmpty
         | ScalarFunc::LowerInc
@@ -627,9 +630,22 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
             }
             Ok(ColumnType::Bool)
         }
-        ScalarFunc::RangeContains | ScalarFunc::RangeContainedBy | ScalarFunc::RangeOverlaps => {
+        ScalarFunc::RangeContains
+        | ScalarFunc::RangeContainedBy
+        | ScalarFunc::RangeOverlaps
+        | ScalarFunc::RangeAdjacent => {
             require_arity(fc, n == 2)?;
             Ok(ColumnType::Bool)
+        }
+        ScalarFunc::RangeMinus | ScalarFunc::RangeMerge => {
+            require_arity(fc, n == 2)?;
+            let left = crate::eval::infer_type(&args[0], scope)?;
+            let right = crate::eval::infer_type(&args[1], scope)?;
+            if matches!((left, right), (ColumnType::Range(a), ColumnType::Range(b)) if a == b) {
+                Ok(left)
+            } else {
+                Err(no_matching_function())
+            }
         }
         ScalarFunc::PgTableIsVisible => {
             require_arity(fc, n == 1)?;
@@ -857,8 +873,8 @@ fn eval_eager(
         }
         return Ok(Datum::Text(s));
     }
-    if let ScalarFunc::RangeConstructor(oid) = f {
-        return eval_range_constructor(oid, fc, vals, ctx);
+    if let ScalarFunc::RangeConstructor(range) = f {
+        return eval_range_constructor(range, fc, vals, ctx);
     }
     // Strict: a NULL argument short-circuits to NULL.
     if vals.iter().any(Datum::is_null) {
@@ -917,17 +933,35 @@ fn eval_eager(
                 _ => unreachable!(),
             }))
         }
-        ScalarFunc::RangeContains | ScalarFunc::RangeContainedBy | ScalarFunc::RangeOverlaps => {
+        ScalarFunc::RangeContains
+        | ScalarFunc::RangeContainedBy
+        | ScalarFunc::RangeOverlaps
+        | ScalarFunc::RangeAdjacent
+        | ScalarFunc::RangeMinus
+        | ScalarFunc::RangeMerge => {
             require_arity(fc, vals.len() == 2)?;
             let (Datum::Range(left), Datum::Range(right)) = (&vals[0], &vals[1]) else {
                 return Err(type_error(&fc.name, &vals[0]));
             };
-            Ok(Datum::Bool(match f {
-                ScalarFunc::RangeContains => crabka_pgtypes::range::contains_range(left, right)?,
-                ScalarFunc::RangeContainedBy => crabka_pgtypes::range::contains_range(right, left)?,
-                ScalarFunc::RangeOverlaps => crabka_pgtypes::range::overlaps(left, right)?,
+            Ok(match f {
+                ScalarFunc::RangeContains => {
+                    Datum::Bool(crabka_pgtypes::range::contains_range(left, right)?)
+                }
+                ScalarFunc::RangeContainedBy => {
+                    Datum::Bool(crabka_pgtypes::range::contains_range(right, left)?)
+                }
+                ScalarFunc::RangeOverlaps => {
+                    Datum::Bool(crabka_pgtypes::range::overlaps(left, right)?)
+                }
+                ScalarFunc::RangeAdjacent => {
+                    Datum::Bool(crabka_pgtypes::range::adjacent(left, right)?)
+                }
+                ScalarFunc::RangeMinus => {
+                    Datum::Range(crabka_pgtypes::range::difference(left, right)?)
+                }
+                ScalarFunc::RangeMerge => Datum::Range(crabka_pgtypes::range::merge(left, right)?),
                 _ => unreachable!(),
-            }))
+            })
         }
         ScalarFunc::Btrim | ScalarFunc::Ltrim | ScalarFunc::Rtrim => {
             require_arity(fc, vals.len() == 1 || vals.len() == 2)?;
@@ -1950,7 +1984,7 @@ fn float_sign(x: f64) -> f64 {
 }
 
 fn eval_range_constructor(
-    oid: u32,
+    ty: RangeRef,
     fc: &FuncCall,
     vals: &[Datum],
     ctx: &EvalCtx,
@@ -1959,10 +1993,6 @@ fn eval_range_constructor(
     if vals.get(2).is_some_and(Datum::is_null) {
         return Ok(Datum::Null);
     }
-    let ColumnType::Range(ty) = ColumnType::builtin_range(oid).expect("known range constructor")
-    else {
-        unreachable!()
-    };
     let bounds = vals.get(2).map_or(Ok("[)"), text_arg)?;
     let [left, right] = bounds.as_bytes() else {
         return Err(ExecError::Type(crabka_pgtypes::TypeError::Coded {
@@ -2379,6 +2409,43 @@ mod tests {
             ev("numrange(1.0, 3.0) && numrange(2.0, 4.0)"),
             Datum::Bool(true)
         );
+        assert_eq!(
+            ev("numrange(1.0, 2.0) -|- numrange(2.0, 3.0)"),
+            Datum::Bool(true)
+        );
+        assert_eq!(
+            ev("numrange(1.0, 2.0) << numrange(3.0, 4.0)"),
+            Datum::Bool(true)
+        );
+        assert_eq!(
+            ev("numrange(1.0, 2.0) &< numrange(1.5, 3.0)"),
+            Datum::Bool(true)
+        );
+        assert_eq!(text("numrange(1.0, 2.0) + numrange(2.0, 3.0)"), "[1.0,3.0)");
+        assert_eq!(text("numrange(1.0, 2.0) + '[2.0,3.0)'"), "[1.0,3.0)");
+        assert_eq!(text("numrange(1.0, 2.0) * numrange(1.5, 3.0)"), "[1.5,2.0)");
+        assert_eq!(text("numrange(1.0, 2.0) - numrange(1.5, 3.0)"), "[1.0,1.5)");
+        assert_eq!(
+            text("numrange(1.0, 3.0) - numrange(1.0, 3.0, '()')"),
+            "[1.0,1.0]"
+        );
+        assert_eq!(
+            ev("numrange(1.0, 2.0, '[]') &< numrange(1.0, 2.0)"),
+            Datum::Bool(false)
+        );
+        assert_eq!(
+            text("range_merge(numrange(1.0, 2.0), numrange(2.5, 3.0))"),
+            "[1.0,3.0)"
+        );
+        let _ = crabka_pgtypes::usertype::register(
+            "range_constructor_test",
+            crabka_pgtypes::usertype::UserTypeBody::Range(crabka_pgtypes::usertype::RangeBody {
+                subtype: ColumnType::Text,
+                collation: None,
+            }),
+        );
+        assert_eq!(text("range_constructor_test('a', 'z')"), "[a,z)");
+        crabka_pgtypes::usertype::unregister("range_constructor_test");
     }
 
     #[test]
