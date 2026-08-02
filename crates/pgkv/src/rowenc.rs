@@ -45,6 +45,8 @@ mod tag {
     /// Full-text values, stored as their canonical text representations.
     pub const TSVECTOR: u8 = 20;
     pub const TSQUERY: u8 = 21;
+    /// Geometric point (`[22][f64 x][f64 y]`). Append-only.
+    pub const POINT: u8 = 22;
 }
 
 /// Encodes one row in the current storage format.
@@ -94,6 +96,11 @@ fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
             Datum::Float8(f) => {
                 out.push(tag::FLOAT8);
                 out.extend_from_slice(&f.to_be_bytes());
+            }
+            Datum::Point(point) => {
+                out.push(tag::POINT);
+                out.extend_from_slice(&point.x.to_be_bytes());
+                out.extend_from_slice(&point.y.to_be_bytes());
             }
             Datum::Numeric(d) => {
                 out.push(tag::NUMERIC);
@@ -304,6 +311,19 @@ fn decode_field(cur: &mut &[u8]) -> Result<Datum, KvError> {
                 crabka_pgtypes::datetime::interval_from_binary(raw)
                     .map_err(|e| KvError::CorruptRow(format!("corrupt interval: {e}")))?,
             )
+        }
+        tag::POINT => {
+            let x = f64::from_be_bytes(
+                take_n(cur, 8)?
+                    .try_into()
+                    .expect("8 bytes fit a point coordinate"),
+            );
+            let y = f64::from_be_bytes(
+                take_n(cur, 8)?
+                    .try_into()
+                    .expect("8 bytes fit a point coordinate"),
+            );
+            Datum::Point(crabka_pgtypes::Point { x, y })
         }
         tag::BYTEA => {
             let len = take_u32_len(cur)?;

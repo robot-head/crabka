@@ -1645,6 +1645,7 @@ fn to_jsonb(d: &Datum, ctx: &EvalCtx) -> Result<JsonbValue, ExecError> {
         // `regclass` joins the stringly group, not the numbers: PostgreSQL's
         // `to_jsonb('pp'::regclass)` is `"pp"`, its output function's text.
         Datum::Text(_)
+        | Datum::Point(_)
         | Datum::Date(_)
         | Datum::Time(_)
         | Datum::Timetz(_)

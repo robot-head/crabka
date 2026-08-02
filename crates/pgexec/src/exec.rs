@@ -11874,6 +11874,7 @@ fn format_default_value(value: &Datum, ty: ColumnType) -> String {
             }
         }
         Datum::Date(_)
+        | Datum::Point(_)
         | Datum::Time(_)
         | Datum::Timetz(_)
         | Datum::Timestamp(_)
@@ -12576,6 +12577,14 @@ fn scalar_type_rows() -> &'static [BuiltinTypeRow] {
             category: "N",
             elem: 0,
             array: crabka_pgtypes::oids::FLOAT8ARRAY as i32,
+        },
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::POINT as i32,
+            name: "point",
+            len: 16,
+            category: "G",
+            elem: 0,
+            array: 0,
         },
         BuiltinTypeRow {
             oid: crabka_pgtypes::oids::NUMERIC as i32,
@@ -13868,6 +13877,7 @@ pub(crate) fn column_type_from_oid(oid: u32) -> Result<ColumnType, ExecError> {
         crabka_pgtypes::oids::BPCHAR => ColumnType::Char(None),
         crabka_pgtypes::oids::FLOAT4 => ColumnType::Float4,
         crabka_pgtypes::oids::FLOAT8 => ColumnType::Float8,
+        crabka_pgtypes::oids::POINT => ColumnType::Point,
         crabka_pgtypes::oids::NUMERIC => ColumnType::Numeric(None),
         crabka_pgtypes::oids::DATE => ColumnType::Date,
         crabka_pgtypes::oids::TIME => ColumnType::Time,

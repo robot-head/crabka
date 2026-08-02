@@ -9648,6 +9648,7 @@ fn param_column_type(param: &BoundParam) -> Result<Option<ColumnType>, PgError> 
         Some(crabka_pgtypes::oids::BOOL) => Ok(Some(ColumnType::Bool)),
         Some(crabka_pgtypes::oids::FLOAT4) => Ok(Some(ColumnType::Float4)),
         Some(crabka_pgtypes::oids::FLOAT8) => Ok(Some(ColumnType::Float8)),
+        Some(crabka_pgtypes::oids::POINT) => Ok(Some(ColumnType::Point)),
         Some(crabka_pgtypes::oids::NUMERIC) => Ok(Some(ColumnType::Numeric(None))),
         Some(crabka_pgtypes::oids::BYTEA) => Ok(Some(ColumnType::Bytea)),
         Some(crabka_pgtypes::oids::UUID) => Ok(Some(ColumnType::Uuid)),
@@ -9728,6 +9729,13 @@ fn decode_binary_value(
         }
         ColumnType::Float4 => Ok(Datum::Float4(f32::from_be_bytes(binary_array(value)?))),
         ColumnType::Float8 => Ok(Datum::Float8(f64::from_be_bytes(binary_array(value)?))),
+        ColumnType::Point => {
+            let bytes: [u8; 16] = binary_array(value)?;
+            Ok(Datum::Point(crabka_pgtypes::Point {
+                x: f64::from_be_bytes(bytes[..8].try_into().expect("8 bytes")),
+                y: f64::from_be_bytes(bytes[8..].try_into().expect("8 bytes")),
+            }))
+        }
         ColumnType::Numeric(_) => crabka_pgtypes::numeric::from_binary(value)
             .map(Datum::Numeric)
             .ok_or_else(malformed_binary_parameter),

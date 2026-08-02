@@ -58,6 +58,12 @@ pub fn encode_text_in(d: &Datum, style: OutputStyle<'_>) -> Vec<u8> {
         Datum::Text(s) => s.clone().into_bytes(),
         Datum::Float4(f) => encode_float4_text(*f).into_bytes(),
         Datum::Float8(f) => encode_float8_text(*f).into_bytes(),
+        Datum::Point(point) => format!(
+            "({},{})",
+            encode_float8_text(point.x),
+            encode_float8_text(point.y)
+        )
+        .into_bytes(),
         // SP32: PostgreSQL `numeric_out` (plain decimal, dscale fractional digits).
         Datum::Numeric(d) => crate::numeric::to_text(d).into_bytes(),
         // SP37: text encodings. `Timestamptz` renders in the supplied session zone.
@@ -200,6 +206,12 @@ pub fn encode_binary(d: &Datum) -> Vec<u8> {
         // IEEE-754 big-endian, matching PostgreSQL's float4send / float8send.
         Datum::Float4(f) => f.to_be_bytes().to_vec(),
         Datum::Float8(f) => f.to_be_bytes().to_vec(),
+        Datum::Point(point) => {
+            let mut out = Vec::with_capacity(16);
+            out.extend_from_slice(&point.x.to_be_bytes());
+            out.extend_from_slice(&point.y.to_be_bytes());
+            out
+        }
         // SP32: PostgreSQL `numeric_send` (base-10000 NBASE wire format).
         Datum::Numeric(d) => crate::numeric::binary(d),
         // SP37: binary encodings (Task 4). PG 2000-01-01 epoch for date/timestamp.
