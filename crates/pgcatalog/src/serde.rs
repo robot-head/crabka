@@ -146,6 +146,8 @@ mod type_tag {
     pub const USER: u8 = 21;
     pub const TSVECTOR: u8 = 22;
     pub const TSQUERY: u8 = 23;
+    /// `point`. Append-only — no version bump.
+    pub const POINT: u8 = 24;
 }
 
 /// Append a column's type (tag byte, plus the numeric typmod payload).
@@ -160,6 +162,7 @@ pub(crate) fn write_type(out: &mut Vec<u8>, ty: ColumnType) {
         ColumnType::Char(limit) => write_optional_u16_type(out, type_tag::BPCHAR, limit),
         ColumnType::Float4 => out.push(type_tag::FLOAT4),
         ColumnType::Float8 => out.push(type_tag::FLOAT8),
+        ColumnType::Point => out.push(type_tag::POINT),
         ColumnType::Numeric(tm) => {
             out.push(type_tag::NUMERIC);
             match tm {
@@ -240,6 +243,7 @@ pub(crate) fn read_type(cur: &mut &[u8]) -> Result<ColumnType, KvError> {
         type_tag::BPCHAR => ColumnType::Char(read_optional_u16_type(cur)?),
         type_tag::FLOAT4 => ColumnType::Float4,
         type_tag::FLOAT8 => ColumnType::Float8,
+        type_tag::POINT => ColumnType::Point,
         type_tag::NUMERIC => {
             if take_u8(cur)? == 1 {
                 let precision = u16::from_be_bytes(take_n(cur, 2)?.try_into().expect("2"));
@@ -411,6 +415,7 @@ fn write_default_value(out: &mut Vec<u8>, default: &Datum) {
             write_str(out, &value.to_string());
         }
         Datum::Date(_)
+        | Datum::Point(_)
         | Datum::Time(_)
         | Datum::Timetz(_)
         | Datum::Timestamp(_)

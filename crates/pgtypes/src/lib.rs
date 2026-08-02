@@ -10,6 +10,7 @@ pub mod datetime;
 pub mod datum;
 pub mod encoding;
 pub mod error;
+pub mod geometry;
 pub mod jsonb;
 pub mod numeric;
 pub mod ops;
@@ -23,5 +24,6 @@ pub use datum::{
     RegclassValue, canonicalize_for_key, canonicalize_row_for_key, oids,
 };
 pub use error::TypeError;
+pub use geometry::Point;
 pub use jsonb::JsonbValue;
 pub use text_search::{Lexeme, Position, QueryTerm, TsQuery, TsVector, Weight};

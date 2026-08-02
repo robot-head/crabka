@@ -39,6 +39,8 @@ pub mod oids {
     pub const FLOAT4: u32 = 700;
     /// SP30: `double precision` (IEEE-754 f64).
     pub const FLOAT8: u32 = 701;
+    /// PostgreSQL geometric point.
+    pub const POINT: u32 = 600;
     /// SP32: arbitrary-precision `numeric`/`decimal`.
     pub const NUMERIC: u32 = 1700;
     /// SP37: `date` — days since 2000-01-01, stored as i32.
@@ -217,7 +219,8 @@ impl ElemType {
             // Composite, enum and domain element types are not supported: an
             // array of them would need an element oid the array encoder cannot
             // name, so callers report 0A000 rather than mis-encoding.
-            ColumnType::Regclass
+            ColumnType::Point
+            | ColumnType::Regclass
             | ColumnType::TsVector
             | ColumnType::TsQuery
             | ColumnType::Array(_)
@@ -394,6 +397,8 @@ pub enum ColumnType {
     Float4,
     /// SP30: PostgreSQL `double precision` (an IEEE-754 `f64`).
     Float8,
+    /// PostgreSQL `point` (OID 600): two double-precision coordinates.
+    Point,
     /// SP32: PostgreSQL `numeric`/`decimal`. The `Typmod` (precision, scale) is
     /// significant only when storing/casting; OID/name/typlen ignore it.
     Numeric(Option<Typmod>),
@@ -470,6 +475,7 @@ impl ColumnType {
             // two-word `double precision` is normalized to this single string by the
             // parser before it reaches here.
             "float8" | "float" | "double precision" => Some(ColumnType::Float8),
+            "point" => Some(ColumnType::Point),
             "float4" | "real" => Some(ColumnType::Float4),
             // SP32: `numeric`/`decimal` (unconstrained here; typmod added by parser).
             "numeric" | "decimal" => Some(ColumnType::Numeric(None)),
@@ -548,6 +554,7 @@ impl ColumnType {
             ColumnType::Char(_) => oids::BPCHAR,
             ColumnType::Float4 => oids::FLOAT4,
             ColumnType::Float8 => oids::FLOAT8,
+            ColumnType::Point => oids::POINT,
             ColumnType::Numeric(_) => oids::NUMERIC,
             ColumnType::Date => oids::DATE,
             ColumnType::Time => oids::TIME,
@@ -580,6 +587,7 @@ impl ColumnType {
             ColumnType::Char(_) => "character",
             ColumnType::Float4 => "real",
             ColumnType::Float8 => "double precision",
+            ColumnType::Point => "point",
             ColumnType::Numeric(_) => "numeric",
             ColumnType::Date => "date",
             ColumnType::Time => "time without time zone",
@@ -610,6 +618,7 @@ impl ColumnType {
             ColumnType::Text | ColumnType::Varchar(_) | ColumnType::Char(_) => -1,
             ColumnType::Float4 => 4,
             ColumnType::Float8 => 8,
+            ColumnType::Point => 16,
             ColumnType::Numeric(_) => -1,
             ColumnType::Date => 4,
             ColumnType::Time => 8,
@@ -684,6 +693,8 @@ pub enum Datum {
     Float4(f32),
     /// SP30: PostgreSQL `double precision`.
     Float8(f64),
+    /// PostgreSQL geometric point.
+    Point(crate::geometry::Point),
     /// SP32: PostgreSQL `numeric` — an arbitrary-precision exact decimal, or one
     /// of the `NaN` / `±Infinity` specials.
     Numeric(NumericValue),
@@ -1034,6 +1045,7 @@ impl PartialEq for Datum {
             // explicit NaN arm) and `-0.0 == +0.0` (Rust's `==` already says true).
             (Datum::Float4(a), Datum::Float4(b)) => a == b || (a.is_nan() && b.is_nan()),
             (Datum::Float8(a), Datum::Float8(b)) => a == b || (a.is_nan() && b.is_nan()),
+            (Datum::Point(a), Datum::Point(b)) => a == b,
             // SP32: numeric grouping equality is by VALUE, ignoring scale, so
             // `1.0` and `1.00` group together (`bigdecimal`'s `==` already does
             // this), and — as in PostgreSQL's `numeric_eq` — `NaN` equals `NaN`.
@@ -1104,6 +1116,7 @@ impl std::hash::Hash for Datum {
                 };
                 bits.hash(state);
             }
+            Datum::Point(point) => point.hash(state),
             // SP32: `NumericValue` hashes the scale-normalized form so values
             // that compare equal (`1.0` and `1.00`) hash equally.
             Datum::Numeric(d) => d.hash(state),
@@ -1143,6 +1156,7 @@ impl Datum {
             Datum::Text(_) => Some(ColumnType::Text),
             Datum::Float4(_) => Some(ColumnType::Float4),
             Datum::Float8(_) => Some(ColumnType::Float8),
+            Datum::Point(_) => Some(ColumnType::Point),
             // The runtime value carries no typmod — it is unconstrained `numeric`.
             Datum::Numeric(_) => Some(ColumnType::Numeric(None)),
             Datum::Date(_) => Some(ColumnType::Date),

@@ -3104,6 +3104,27 @@ mod cursor_terminal_tests {
     }
 }
 
+#[cfg(test)]
+mod point_type_tests {
+    use crabka_pgwire::engine::{Engine, Session};
+
+    use super::SqlEngine;
+
+    #[tokio::test]
+    async fn point_columns_store_copy_and_render_postgres_values() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE TABLE point_values (p point); \
+                 INSERT INTO point_values VALUES ('(0,0)'), (' ( NaN , Infinity ) '); \
+                 SELECT p FROM point_values",
+            )
+            .await
+            .expect("point values round trip through a table");
+    }
+}
+
 pub(crate) fn checkpoint_garbage_horizon(
     procarray: &ProcArray,
     kv: &dyn Kv,

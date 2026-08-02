@@ -6818,6 +6818,7 @@ fn datum_hash_bytes(value: &Datum) -> Option<Vec<u8>> {
         | Datum::Int2(_)
         | Datum::Float4(_)
         | Datum::Float8(_)
+        | Datum::Point(_)
         | Datum::Numeric(_)
         | Datum::Date(_)
         | Datum::Time(_)
