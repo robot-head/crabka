@@ -356,8 +356,8 @@ release = false
 
 [[package]]
 name = "crabka-units"
-publish = false
-release = false
+publish = true
+release = true
 
 [[package]]
 name = "crabka-verified"

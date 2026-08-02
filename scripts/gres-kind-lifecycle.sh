@@ -266,6 +266,11 @@ spec:
   pgdog:
     replicas: 1
     listenPort: 6432
+    # Keep the activator route stable for the complete cold-start request on a
+    # loaded CI runner.  The four-second product default is intentionally
+    # aggressive, but can expire while the release compute pod is starting and
+    # roll the PgDog pod underneath the request this gate is timing.
+    directBootstrapGrace: 30s
     tlsSecretRef: {name: pgdog-tls}
     adminSecretRef: {name: pgdog-admin, key: password}
   defaults:

@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 # Keep the Rust-skills documentation example harness independent so tooling can
 # update its lockfile via its own manifest.
-exclude = [".agents/skills/rust-skills/checks", ".agents/skills/rust-skills/checks"]
+exclude = [".agents/skills/rust-skills/checks"]
 
 [workspace.package]
 version = "0.3.9"
