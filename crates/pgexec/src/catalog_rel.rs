@@ -1730,7 +1730,22 @@ fn pg_sequence_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
 /// for a column comment (0 otherwise) — `obj_description`/`col_description`
 /// both read exactly these two.
 fn pg_description_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
-    let mut rows = Vec::new();
+    let corrupt = || ExecError::Unsupported("built-in pg_description fixture is corrupt".into());
+    let descriptions = zstd::decode_all(crate::builtin_proc_descriptions::BUILTIN_PROC_DESCRIPTIONS)
+        .map_err(|_| corrupt())?;
+    let descriptions = std::str::from_utf8(&descriptions).map_err(|_| corrupt())?;
+    let mut rows = descriptions
+        .lines()
+        .map(|line| {
+            let (oid, description) = line.split_once('\t').ok_or_else(&corrupt)?;
+            Ok(vec![
+                int(oid.parse::<i32>().map_err(|_| corrupt())?),
+                int(relation_oid("pg_proc")),
+                int(0),
+                text(description),
+            ])
+        })
+        .collect::<Result<Vec<_>, ExecError>>()?;
     for table in crabka_pgcatalog::list_tables(kv)? {
         let relid = i32::try_from(table.id)
             .map_err(|_| ExecError::Unsupported("oid exceeds int4 range".into()))?;
