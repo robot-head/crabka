@@ -1010,6 +1010,14 @@ pub(crate) fn execute_ddl(
             )?;
             Ok((command("GRANT"), ops))
         }
+        Statement::GrantSchemaPrivileges {
+            schemas, grantees, ..
+        } => {
+            validate_schema_privilege_targets(kv, schemas, grantees)?;
+            // ponytail: trust-auth grants every schema privilege; persist ACLs
+            // when role-based schema authorization is enforced.
+            Ok((command("GRANT"), Vec::new()))
+        }
         Statement::RevokeTablePrivileges {
             privileges,
             table,
@@ -1022,6 +1030,14 @@ pub(crate) fn execute_ddl(
                 privileges,
             )?;
             Ok((command("REVOKE"), ops))
+        }
+        Statement::RevokeSchemaPrivileges {
+            schemas, grantees, ..
+        } => {
+            validate_schema_privilege_targets(kv, schemas, grantees)?;
+            // See the matching GRANT arm: validation is observable today,
+            // authorization state is not.
+            Ok((command("REVOKE"), Vec::new()))
         }
         Statement::CreateFdw { name, options } => {
             let ops = crabka_pgcatalog::create_fdw_ops(kv, name, options.clone())?;
@@ -1675,6 +1691,22 @@ fn ensure_default_can_be_persisted(value: &Datum) -> Result<(), ExecError> {
         "defaults for date/time, interval, bytea, composite and enum columns are not persisted yet"
             .into(),
     ))
+}
+
+fn validate_schema_privilege_targets(
+    kv: &dyn Kv,
+    schemas: &[String],
+    grantees: &[String],
+) -> Result<(), ExecError> {
+    for schema in schemas {
+        if !crabka_pgcatalog::schema_exists(kv, schema)? {
+            return Err(crabka_pgcatalog::CatalogError::UndefinedSchema(schema.clone()).into());
+        }
+    }
+    for grantee in grantees {
+        crabka_pgcatalog::get_role(kv, grantee)?;
+    }
+    Ok(())
 }
 
 /// Normalize the `user` spec from `CREATE / DROP USER MAPPING FOR <user>` to

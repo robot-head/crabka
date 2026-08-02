@@ -460,9 +460,19 @@ pub enum Statement {
         table: RelationRef,
         grantees: Vec<String>,
     },
+    /* SQL parity matrix row: GRANT. */ GrantSchemaPrivileges {
+        privileges: Vec<String>,
+        schemas: Vec<String>,
+        grantees: Vec<String>,
+    },
     /* SQL parity matrix row: REVOKE. */ RevokeTablePrivileges {
         privileges: Vec<String>,
         table: RelationRef,
+        grantees: Vec<String>,
+    },
+    /* SQL parity matrix row: REVOKE. */ RevokeSchemaPrivileges {
+        privileges: Vec<String>,
+        schemas: Vec<String>,
         grantees: Vec<String>,
     },
     /* SQL parity matrix row: SET ROLE. */ SetRole {

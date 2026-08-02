@@ -3474,6 +3474,16 @@ impl Parser {
         self.expect_ident_eq("grant")?;
         let privileges = self.privilege_list_until_on()?;
         self.expect(&Token::Keyword(Keyword::On))?;
+        if self.eat_keyword(Keyword::Schema) {
+            let schemas = self.object_name_list()?;
+            self.expect(&Token::Keyword(Keyword::To))?;
+            let grantees = self.object_name_list()?;
+            return Ok(crate::ast::Statement::GrantSchemaPrivileges {
+                privileges,
+                schemas,
+                grantees,
+            });
+        }
         self.expect(&Token::Keyword(Keyword::Table))?;
         let table = self.relation_ref()?;
         self.expect(&Token::Keyword(Keyword::To))?;
@@ -3489,6 +3499,16 @@ impl Parser {
         self.expect_ident_eq("revoke")?;
         let privileges = self.privilege_list_until_on()?;
         self.expect(&Token::Keyword(Keyword::On))?;
+        if self.eat_keyword(Keyword::Schema) {
+            let schemas = self.object_name_list()?;
+            self.expect(&Token::Keyword(Keyword::From))?;
+            let grantees = self.object_name_list()?;
+            return Ok(crate::ast::Statement::RevokeSchemaPrivileges {
+                privileges,
+                schemas,
+                grantees,
+            });
+        }
         self.expect(&Token::Keyword(Keyword::Table))?;
         let table = self.relation_ref()?;
         self.expect(&Token::Keyword(Keyword::From))?;
@@ -3616,6 +3636,7 @@ impl Parser {
             Token::Keyword(Keyword::Insert) => Ok("INSERT".into()),
             Token::Keyword(Keyword::Update) => Ok("UPDATE".into()),
             Token::Keyword(Keyword::Delete) => Ok("DELETE".into()),
+            Token::Keyword(Keyword::Create) => Ok("CREATE".into()),
             Token::Keyword(Keyword::All) => Ok("ALL".into()),
             other => Err(ParseError::new(
                 format!("expected privilege name, found {other:?}"),

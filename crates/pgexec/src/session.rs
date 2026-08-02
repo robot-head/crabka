@@ -1073,6 +1073,7 @@ static GUC_DEFINITIONS: &[GucDefinition] = &[
     guc("enable_sort", "bool", "on", parse_bool),
     guc("enable_tidscan", "bool", "on", parse_bool),
     guc("allow_alter_system", "bool", "on", parse_bool).context(GucContext::Sighup),
+    guc("allow_in_place_tablespaces", "bool", "off", parse_bool).context(GucContext::Superuser),
     guc("array_nulls", "bool", "on", parse_bool),
     guc("check_function_bodies", "bool", "on", parse_bool),
     guc("default_transaction_deferrable", "bool", "off", parse_bool),
@@ -2141,7 +2142,9 @@ fn establishes_transaction_activity(stmt: &Statement) -> bool {
         | Statement::CreateRole { .. }
         | Statement::DropRole { .. }
         | Statement::GrantTablePrivileges { .. }
+        | Statement::GrantSchemaPrivileges { .. }
         | Statement::RevokeTablePrivileges { .. }
+        | Statement::RevokeSchemaPrivileges { .. }
         | Statement::ImportForeignSchema { .. }
         | Statement::CreateTrigger(_)
         | Statement::AlterTrigger { .. }
@@ -5057,7 +5060,9 @@ impl SqlSession {
             | Statement::CreateRole { .. }
             | Statement::DropRole { .. }
             | Statement::GrantTablePrivileges { .. }
+            | Statement::GrantSchemaPrivileges { .. }
             | Statement::RevokeTablePrivileges { .. }
+            | Statement::RevokeSchemaPrivileges { .. }
             | Statement::ImportForeignSchema { .. }
             | Statement::CreateTrigger(_)
             | Statement::AlterTrigger { .. }
@@ -10919,6 +10924,31 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn schema_grants_validate_targets_under_trust_auth() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE SCHEMA app; CREATE ROLE reader; \
+                 GRANT CREATE, USAGE ON SCHEMA public, app TO public, reader; \
+                 REVOKE USAGE ON SCHEMA app FROM reader",
+            )
+            .await
+            .expect("schema privilege syntax and targets");
+
+        let missing_schema = session
+            .simple_query("GRANT USAGE ON SCHEMA missing TO reader")
+            .await
+            .expect_err("missing schema");
+        assert_eq!(missing_schema.code, "3F000");
+        let missing_role = session
+            .simple_query("GRANT USAGE ON SCHEMA app TO missing")
+            .await
+            .expect_err("missing role");
+        assert_eq!(missing_role.code, "42704");
+    }
+
     struct FailFirstCommitOracle {
         next_start_ts: AtomicU64,
         should_fail_commit: AtomicBool,
@@ -11593,6 +11623,7 @@ mod tests {
             ("seq_page_cost", "1.5", "1.5"),
             ("bytea_output", "'escape'", "escape"),
             ("max_parallel_workers_per_gather", "0", "0"),
+            ("allow_in_place_tablespaces", "true", "on"),
             ("crabka_test.option", "'value'", "value"),
         ];
         for (name, value, shown) in cases {
