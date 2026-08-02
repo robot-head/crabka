@@ -52,6 +52,12 @@ jobs:
           filters: |
             rust:
               - 'crates/**'
+              - '**/BUILD.bazel'
+              - '**/*.bzl'
+              - '.aspect/**'
+              - '.bazelrc'
+              - 'MODULE.bazel'
+              - 'MODULE.bazel.lock'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'release-plz.toml'
@@ -296,17 +302,27 @@ jobs:
               - 'scripts/gres-sharded-conformance.sh'
               - 'scripts/tests/gres_sharded_conformance_ci.py'
 
-  rust:
+  affected:
     needs: changes
     if: ${{ needs.changes.outputs.rust == 'true' }}
     timeout-minutes: 60
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: ./.github/actions/free-disk-space
       - uses: ./.github/actions/setup-bazel
-      - name: Build complete workspace
-        run: aspect build --task:name=rust-linux --bazel-flag=--config=ci //...
+      - name: Build and test affected targets
+        run: aspect affected --base "${{ github.event.pull_request.base.sha || github.event.before }}"
+      - uses: codecov/codecov-action@v7
+        if: ${{ hashFiles('coverage/affected.lcov') != '' }}
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage/affected.lcov
+          disable_search: true
+          flags: affected
+          fail_ci_if_error: false
 
   jvm-differential:
     needs: changes
@@ -1052,43 +1068,6 @@ jobs:
           flags: gres-integration
           fail_ci_if_error: false
 
-  # Non-ignored integration targets across the remainder of the workspace.
-  # The JVM differential lane used to sweep these accidentally via
-  # `--include-ignored`; keep broad coverage here without coupling ordinary
-  # Rust tests to the Java oracle. Packages with external-service or especially
-  # heavy suites are excluded because their dedicated coverage jobs above own
-  # those targets.
-  workspace-integration-coverage:
-    needs: changes
-    if: ${{ needs.changes.outputs.rust == 'true' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/free-disk-space
-      - uses: ./.github/actions/setup-bazel
-      - name: Workspace integration coverage
-        run: |
-          mkdir -p coverage
-          mapfile -t targets < <(bazel query '
-            kind(rust_test, //...)
-            except //crates/broker/...
-            except //crates/client-core/...
-            except //crates/log/...
-            except //crates/grpc-gateway/...
-            except //crates/admin-ui/...
-          ')
-          aspect test "${targets[@]}" \
-            --coverage --coverage-report=coverage/workspace-integration.lcov \
-            --bazel-flag=--config=ci
-      - uses: codecov/codecov-action@v7
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: coverage/workspace-integration.lcov
-          disable_search: true
-          flags: workspace-integration
-          fail_ci_if_error: false
-
   # Admin UI's Dioxus dependency graph pushes the already-large workspace
   # LLVM build past the hosted runner's disk limit. Keep its non-ignored
   # integration suite on a dedicated runner; the Playwright E2E remains
@@ -1326,7 +1305,7 @@ jobs:
   gatekeeper-ci:
     needs:
       - changes
-      - rust
+      - affected
       - jvm-differential
       - cargo-deny
       - creusot-verify
@@ -1341,7 +1320,6 @@ jobs:
       - traces-conformance
       - gres-conformance
       - gres-integration
-      - workspace-integration-coverage
       - admin-ui-integration
       - broker-jvm-acceptance
       - broker-integration

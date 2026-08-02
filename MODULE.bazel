@@ -6,6 +6,7 @@ module(
 )
 
 bazel_dep(name = "llvm", version = "0.8.9")
+bazel_dep(name = "bazel-diff", version = "27.0.0")
 bazel_dep(name = "openssl", version = "3.5.5.bcr.0")
 bazel_dep(name = "platforms", version = "1.1.0")
 bazel_dep(name = "protobuf", version = "34.0.bcr.1")

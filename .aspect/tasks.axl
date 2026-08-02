@@ -3,6 +3,128 @@
 def _run(ctx, executable, argv = []):
     return ctx.std.process.command(executable).args(argv).spawn().wait().code
 
+def _output(ctx, executable, argv = []):
+    result = ctx.std.process.command(executable).args(argv).stdout("piped").spawn().wait_with_output()
+    return (result.status.code, result.stdout.strip())
+
+def _affected(ctx: TaskContext) -> int:
+    (code, temp) = _output(ctx, "mktemp", ["-d", ctx.std.env.temp_dir() + "/crabka-affected.XXXXXX"])
+    if code != 0:
+        return code
+    base_workspace = temp + "/base"
+    starting_hashes = temp + "/starting-hashes.json"
+    final_hashes = temp + "/final-hashes.json"
+    impacted_path = temp + "/impacted.txt"
+
+    code = _run(ctx, "bazel", ["build", "@bazel-diff//:bazel-diff", "--config=ci"])
+    if code != 0:
+        return code
+    (code, outputs) = _output(ctx, "bazel", ["cquery", "@bazel-diff//:bazel-diff", "--config=ci", "--output=files"])
+    if code != 0:
+        return code
+    executables = [path for path in outputs.split("\n") if path and not path.endswith(".jar")]
+    if len(executables) != 1:
+        print("expected one bazel-diff executable, got: %s" % outputs)
+        return 1
+    bazel_diff = executables[0]
+
+    code = _run(ctx, "git", ["worktree", "add", "--detach", base_workspace, ctx.args.base])
+    if code != 0:
+        return code
+
+    code = _run(ctx, bazel_diff, [
+        "generate-hashes",
+        "--includeTargetType",
+        "-w",
+        base_workspace,
+        starting_hashes,
+    ])
+    if code == 0:
+        code = _run(ctx, bazel_diff, [
+            "generate-hashes",
+            "--includeTargetType",
+            "-w",
+            ctx.std.env.current_dir(),
+            final_hashes,
+        ])
+    if code == 0:
+        code = _run(ctx, bazel_diff, [
+            "get-impacted-targets",
+            "-w",
+            ctx.std.env.current_dir(),
+            "-sh",
+            starting_hashes,
+            "-fh",
+            final_hashes,
+            "-tt",
+            "Rule",
+            "-o",
+            impacted_path,
+        ])
+
+    cleanup = _run(ctx, "git", ["worktree", "remove", "--force", base_workspace])
+    if code != 0:
+        return code
+    if cleanup != 0:
+        return cleanup
+
+    impacted = [target for target in ctx.std.fs.read_to_string(impacted_path).split("\n") if target]
+    if not impacted:
+        print("No Bazel targets are affected.")
+        return 0
+
+    target_set = "set(%s)" % " ".join(impacted)
+    (code, tests_output) = _output(ctx, "bazel", ["query", "kind(rust_test, %s)" % target_set])
+    if code != 0:
+        return code
+    (code, builds_output) = _output(ctx, "bazel", ["query", "%s except kind('.*_test rule', %s)" % (target_set, target_set)])
+    if code != 0:
+        return code
+
+    builds = [target for target in builds_output.split("\n") if target]
+    tests = [target for target in tests_output.split("\n") if target and not any([
+        target.startswith("//crates/admin-ui:"),
+        target.startswith("//crates/broker:"),
+        target.startswith("//crates/client-consumer:"),
+        target.startswith("//crates/client-core:"),
+        target.startswith("//crates/client-streams:"),
+        target.startswith("//crates/gres"),
+        target.startswith("//crates/grpc-gateway:"),
+        target.startswith("//crates/log:"),
+        target.startswith("//crates/metrics-service:"),
+        target.startswith("//crates/operator:"),
+        target.startswith("//crates/promql:"),
+        target.startswith("//crates/schema-registry:"),
+        target.startswith("//crates/schema-serde:"),
+        target.startswith("//crates/traceql:"),
+        target.startswith("//crates/traces:"),
+    ])]
+    if builds:
+        code = _run(ctx, "bazel", ["build", "--config=ci"] + builds)
+        if code != 0:
+            return code
+    if tests:
+        code = _run(ctx, "mkdir", ["-p", "coverage"])
+        if code != 0:
+            return code
+        code = _run(ctx, "aspect", ["test"] + tests + [
+            "--coverage",
+            "--coverage-report=coverage/affected.lcov",
+            "--bazel-flag=--config=ci",
+        ])
+        if code != 0:
+            return code
+    print("Built %d and tested %d affected targets." % (len(builds), len(tests)))
+    return 0
+
+affected = task(
+    implementation = _affected,
+    summary = "Build and test targets affected since a base revision.",
+    args = {
+        "base": args.string(required = True, description = "Base Git revision."),
+    },
+)
+
 def _codegen(ctx: TaskContext) -> int:
     code = _run(ctx, "bazel", [
         "build",
