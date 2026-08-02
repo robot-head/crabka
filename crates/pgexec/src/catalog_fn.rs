@@ -1122,6 +1122,7 @@ fn constraint_def(kv: &dyn Kv, object: &Datum) -> Result<Datum, ExecError> {
         let keyword = match kind {
             crabka_pgcatalog::IndexConstraint::PrimaryKey => "PRIMARY KEY",
             crabka_pgcatalog::IndexConstraint::Unique => "UNIQUE",
+            crabka_pgcatalog::IndexConstraint::Exclusion(_) => "EXCLUDE",
         };
         return Ok(Datum::Text(format!(
             "{keyword} ({})",

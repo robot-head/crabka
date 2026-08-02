@@ -5911,6 +5911,7 @@ impl Parser {
                 *self.peek2() == Token::LParen
                     || matches!(self.peek2(), Token::Ident(k) if k.eq_ignore_ascii_case("nulls"))
             }
+            Token::Ident(s) if s.eq_ignore_ascii_case("exclude") => true,
             _ => false,
         }
     }
@@ -5943,6 +5944,34 @@ impl Parser {
                 columns,
                 references: self.foreign_key_reference()?,
             }
+        } else if self.eat_ident_eq("exclude") {
+            let method = if self.eat_keyword(Keyword::Using) {
+                self.expect_ident()?
+            } else {
+                "gist".into()
+            };
+            self.expect(&Token::LParen)?;
+            let mut elements = Vec::new();
+            loop {
+                let column = self.expect_ident()?;
+                self.expect_keyword_or_ident(Keyword::With, "with")?;
+                let operator = match self.bump() {
+                    Token::Eq => crate::ast::BinaryOp::Eq,
+                    Token::Overlaps => crate::ast::BinaryOp::Overlaps,
+                    token => {
+                        return Err(ParseError::new(
+                            format!("unsupported exclusion operator {token:?}"),
+                            self.peek_pos(),
+                        ));
+                    }
+                };
+                elements.push(crate::ast::ExclusionElement { column, operator });
+                if !self.eat_comma() {
+                    break;
+                }
+            }
+            self.expect(&Token::RParen)?;
+            TableConstraintKind::Exclude { method, elements }
         } else {
             return Err(ParseError::new(
                 format!("expected a table constraint, found {:?}", self.peek()),
@@ -11928,6 +11957,24 @@ mod tests {
             panic!("expected a VALUES source");
         };
         assert!(matches!(rows[0][1], Expr::Default));
+    }
+
+    #[test]
+    fn parses_exclusion_constraints() {
+        let Statement::CreateTable { constraints, .. } = one(
+            "CREATE TABLE t (room int4range, during tstzrange, \
+             EXCLUDE USING gist (room WITH =, during WITH &&))",
+        ) else {
+            panic!("expected create table");
+        };
+        let TableConstraintKind::Exclude { method, elements } = &constraints[0].kind else {
+            panic!("expected exclusion constraint");
+        };
+        assert_eq!(method, "gist");
+        assert_eq!(elements[0].column, "room");
+        assert_eq!(elements[0].operator, BinaryOp::Eq);
+        assert_eq!(elements[1].column, "during");
+        assert_eq!(elements[1].operator, BinaryOp::Overlaps);
     }
 
     #[test]

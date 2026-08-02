@@ -2123,6 +2123,10 @@ struct StatementWrites {
     /// Unique-index keys claimed by rows this statement staged. They live only
     /// in the pending op batch, which a KV probe cannot see.
     pending_unique_keys: HashSet<PendingUniqueKey>,
+    /// Exclusion keys staged by this statement, which are not visible in KV
+    /// until the statement's batch commits.
+    pending_exclusion_keys:
+        HashMap<crabka_pgcatalog::IndexId, Vec<(u64, Vec<Datum>)>>,
     /// `(index, rowid)` pairs whose key this statement freed — a deleted row, or
     /// an updated row whose indexed values changed. A row holds exactly one key
     /// per index, so the rowid identifies the freed key. The superseded version
@@ -5834,6 +5838,19 @@ async fn enforce_unique_local_index_updates(
         }
         enforce_unique_local_index(write_ctx, table, index, rowid, new_values, writes).await?;
     }
+    for index in indexes.iter().filter(|index| {
+        matches!(
+            index.constraint,
+            Some(crabka_pgcatalog::IndexConstraint::Exclusion(_))
+        )
+    }) {
+        let old_values = indexed_values(table, index, old_row)?;
+        let new_values = indexed_values(table, index, new_row)?;
+        if old_values != new_values {
+            enforce_exclusion_constraint(write_ctx, table, index, rowid, new_values, writes)
+                .await?;
+        }
+    }
     Ok(())
 }
 
@@ -5849,7 +5866,155 @@ async fn enforce_unique_local_indexes(
         let values = indexed_values(table, index, row)?;
         enforce_unique_local_index(write_ctx, table, index, rowid, values, writes).await?;
     }
+    for index in indexes.iter().filter(|index| {
+        matches!(
+            index.constraint,
+            Some(crabka_pgcatalog::IndexConstraint::Exclusion(_))
+        )
+    }) {
+        let values = indexed_values(table, index, row)?;
+        enforce_exclusion_constraint(write_ctx, table, index, rowid, values, writes).await?;
+    }
     Ok(())
+}
+
+async fn enforce_exclusion_constraint(
+    write_ctx: &WriteContext<'_>,
+    table: &Table,
+    index: &crabka_pgcatalog::Index,
+    rowid: u64,
+    values: Vec<Datum>,
+    writes: &mut StatementWrites,
+) -> Result<(), ExecError> {
+    let Some(crabka_pgcatalog::IndexConstraint::Exclusion(operators)) = &index.constraint else {
+        return Ok(());
+    };
+    if values.iter().any(Datum::is_null) {
+        return Ok(());
+    }
+    // ponytail: This deliberately serializes per constraint. A spatial lock
+    // structure can replace it when GiST indexes become physical rather than
+    // catalog-only; correctness needs only this one coarse key today.
+    write_ctx
+        .lockmgr
+        .acquire_key(
+            crate::lockmgr::LockKey::UniqueKey(
+                crabka_pgkv::key::secondary_index_entry_prefix(table.id, index.id, &[]),
+            ),
+            crate::lockmgr::LockMode::Exclusive,
+            write_ctx.xid,
+            write_ctx.lock_wait_cap,
+        )
+        .await
+        .map_err(lock_acquire_error)?;
+
+    let current_visibility = all_committed_snapshot();
+    let rows = scan_live(
+        write_ctx.kv,
+        write_ctx.global,
+        &current_visibility,
+        &current_visibility,
+        Some(write_ctx.xid),
+        table,
+    )?;
+    for (holder_rowid, _xmin, holder_row) in rows {
+        if holder_rowid == rowid || !writes.holder_still_holds(index.id, holder_rowid) {
+            continue;
+        }
+        let holder = indexed_values(table, index, &holder_row)?;
+        if exclusion_keys_conflict(operators, &values, &holder)? {
+            return Err(exclusion_violation(write_ctx, table, index, &values, &holder));
+        }
+    }
+    if let Some(pending) = writes.pending_exclusion_keys.get(&index.id) {
+        for (holder_rowid, holder) in pending {
+            if *holder_rowid != rowid && exclusion_keys_conflict(operators, &values, holder)? {
+                return Err(exclusion_violation(write_ctx, table, index, &values, holder));
+            }
+        }
+    }
+    writes
+        .pending_exclusion_keys
+        .entry(index.id)
+        .or_default()
+        .push((rowid, values));
+    Ok(())
+}
+
+fn exclusion_keys_conflict(
+    operators: &[crabka_pgcatalog::ExclusionOperator],
+    left: &[Datum],
+    right: &[Datum],
+) -> Result<bool, ExecError> {
+    for ((operator, left), right) in operators.iter().zip(left).zip(right) {
+        if left.is_null() || right.is_null() {
+            return Ok(false);
+        }
+        let conflicts = match operator {
+            crabka_pgcatalog::ExclusionOperator::Equal => {
+                crabka_pgtypes::ops::compare(left, right)? == Some(std::cmp::Ordering::Equal)
+            }
+            crabka_pgcatalog::ExclusionOperator::Overlaps => match (left, right) {
+                (Datum::Range(left), Datum::Range(right)) => {
+                    crabka_pgtypes::range::overlaps(left, right)?
+                }
+                (Datum::Multirange(left), Datum::Multirange(right)) => {
+                    crabka_pgtypes::multirange::overlaps(left, right)?
+                }
+                (Datum::Multirange(left), Datum::Range(right)) => {
+                    crabka_pgtypes::multirange::overlaps_range(left, right)?
+                }
+                (Datum::Range(left), Datum::Multirange(right)) => {
+                    crabka_pgtypes::multirange::overlaps_range(right, left)?
+                }
+                _ => return Err(ExecError::UndefinedFunction("operator &&".into())),
+            },
+        };
+        if !conflicts {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn exclusion_violation(
+    write_ctx: &WriteContext<'_>,
+    table: &Table,
+    index: &crabka_pgcatalog::Index,
+    proposed: &[Datum],
+    existing: &[Datum],
+) -> ExecError {
+    let columns = index.columns.join(", ");
+    let render = |values: &[Datum]| {
+        values
+            .iter()
+            .map(|value| {
+                String::from_utf8_lossy(&crabka_pgtypes::encoding::encode_text_in(
+                    value,
+                    write_ctx.eval_ctx.output_style(),
+                ))
+                .into_owned()
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    ExecError::Remote(
+        crabka_pgwire::error::PgError::error(
+            "23P01",
+            format!(
+                "conflicting key value violates exclusion constraint \"{}\"",
+                index.name
+            ),
+        )
+        .with_detail(format!(
+            "Key ({columns})=({}) conflicts with existing key ({columns})=({}).",
+            render(proposed),
+            render(existing)
+        ))
+        .with_schema(table.name.schema.clone())
+        .with_table(table.name.name.clone())
+        .with_constraint(index.name.clone()),
+    )
 }
 
 async fn enforce_unique_local_index(
@@ -14644,6 +14809,15 @@ fn create_table_definition(
                     },
                 )?;
             }
+            crabka_pgparser::ast::TableConstraintKind::Exclude { method, elements } => {
+                indexes.push(exclusion_constraint_index(
+                    constraint.name.as_deref(),
+                    name,
+                    &cols,
+                    method,
+                    elements,
+                )?);
+            }
         }
     }
     // Resolve every CHECK against the finished column list up front, so an
@@ -14999,6 +15173,52 @@ fn named_constraint_index(
         index.name = name.to_string();
     }
     index
+}
+
+fn exclusion_constraint_index(
+    explicit: Option<&str>,
+    table_name: &crabka_pgcatalog::RelationName,
+    table_columns: &[Column],
+    method: &str,
+    elements: &[crabka_pgparser::ast::ExclusionElement],
+) -> Result<crabka_pgcatalog::NewIndex, ExecError> {
+    if !method.eq_ignore_ascii_case("gist") {
+        return Err(ExecError::Unsupported(format!(
+            "exclusion constraints using access method \"{method}\" are not supported"
+        )));
+    }
+    let mut columns = Vec::with_capacity(elements.len());
+    let mut operators = Vec::with_capacity(elements.len());
+    for element in elements {
+        if !table_columns
+            .iter()
+            .any(|column| column.name == element.column)
+        {
+            return Err(ExecError::UndefinedColumn(element.column.clone()));
+        }
+        columns.push(element.column.clone());
+        operators.push(match element.operator {
+            crabka_pgparser::ast::BinaryOp::Eq => {
+                crabka_pgcatalog::ExclusionOperator::Equal
+            }
+            crabka_pgparser::ast::BinaryOp::Overlaps => {
+                crabka_pgcatalog::ExclusionOperator::Overlaps
+            }
+            _ => unreachable!("parser accepts only exclusion operators the executor supports"),
+        });
+    }
+    let name = explicit.map_or_else(
+        || format!("{}_{}_excl", table_name.name, columns.join("_")),
+        str::to_string,
+    );
+    Ok(crabka_pgcatalog::NewIndex {
+        name,
+        columns,
+        unique: false,
+        placement: crabka_pgcatalog::IndexPlacement::Local,
+        method: crabka_pgcatalog::IndexMethod::Gist,
+        constraint: Some(crabka_pgcatalog::IndexConstraint::Exclusion(operators)),
+    })
 }
 
 /// `PostgreSQL`'s default index name for a `PRIMARY KEY`/`UNIQUE` constraint.
@@ -15900,6 +16120,17 @@ fn alter_table_action_ops(
                 own_xid,
                 &ddl_ctx,
             ),
+            crabka_pgparser::ast::TableConstraintKind::Exclude { method, elements } => {
+                reject_not_valid(constraint.attributes.not_valid, "EXCLUDE")?;
+                let new_index = exclusion_constraint_index(
+                    constraint.name.as_deref(),
+                    &state.table.name,
+                    &state.table.columns,
+                    method,
+                    elements,
+                )?;
+                add_exclusion_constraint(kv, state, new_index)
+            }
         },
         Action::DropConstraint {
             name,
@@ -16585,6 +16816,42 @@ fn add_constraint_index(
     }
     state.ops.extend(index_ops);
     state.ops.extend(backfill);
+    state.created_indexes.push(index);
+    Ok(())
+}
+
+fn add_exclusion_constraint(
+    kv: &dyn Kv,
+    state: &mut AlterTableState,
+    new_index: crabka_pgcatalog::NewIndex,
+) -> Result<(), ExecError> {
+    if state.table.sharded {
+        return Err(ExecError::Unsupported(
+            "exclusion constraints on sharded tables are not supported".into(),
+        ));
+    }
+    let rows = state.live_rows(kv)?;
+    let (index, index_ops) =
+        crabka_pgcatalog::create_constraint_index_ops(kv, &state.table, &new_index)?;
+    let Some(crabka_pgcatalog::IndexConstraint::Exclusion(operators)) = &index.constraint else {
+        unreachable!("exclusion helper creates an exclusion index")
+    };
+    for (offset, (_rowid, _xmin, row)) in rows.iter().enumerate() {
+        let left = indexed_values(&state.table, &index, row)?;
+        for (_rowid, _xmin, other) in &rows[..offset] {
+            let right = indexed_values(&state.table, &index, other)?;
+            if exclusion_keys_conflict(operators, &left, &right)? {
+                return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+                    "23P01",
+                    format!(
+                        "could not create exclusion constraint \"{}\"",
+                        index.name
+                    ),
+                )));
+            }
+        }
+    }
+    state.ops.extend(index_ops);
     state.created_indexes.push(index);
     Ok(())
 }
