@@ -1515,7 +1515,7 @@ The G-1 gate: prove the vendored engine reproduces the donor's conformance resul
 - [ ] **Step 1: Run the DONOR harness against a fresh postgres:18 oracle**
 
 ```bash
-docker run -d --name gres-oracle -e POSTGRES_HOST_AUTH_METHOD=trust -p 54320:5432 postgres:18
+docker run -d --name gres-oracle -e POSTGRES_HOST_AUTH_METHOD=trust -p 127.0.0.1:54320:5432 postgres:18
 until docker exec gres-oracle pg_isready -U postgres >/dev/null 2>&1; do sleep 0.5; done
 
 cd $DONOR
@@ -1537,7 +1537,7 @@ Expected: `parity: NN.N% (M / T) -> …` on stdout. (The donor build resolves pu
 - [ ] **Step 2: Run OUR harness against a fresh identical oracle** (fresh container — the corpus creates tables, so an oracle cannot be reused across runs)
 
 ```bash
-docker run -d --name gres-oracle -e POSTGRES_HOST_AUTH_METHOD=trust -p 54320:5432 postgres:18
+docker run -d --name gres-oracle -e POSTGRES_HOST_AUTH_METHOD=trust -p 127.0.0.1:54320:5432 postgres:18
 until docker exec gres-oracle pg_isready -U postgres >/dev/null 2>&1; do sleep 0.5; done
 
 cd <repo root>
@@ -1623,7 +1623,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
         env:
           POSTGRES_HOST_AUTH_METHOD: trust
         ports:
-          - 54320:5432
+          - 127.0.0.1:54320:5432
         options: >-
           --health-cmd "pg_isready -U postgres"
           --health-interval 5s --health-timeout 5s --health-retries 10
