@@ -528,6 +528,10 @@ pub(crate) fn execute_ddl(
             }
             if let Some((parent, bound)) = &attachment {
                 ops.extend(crate::partition::attach_ops(parent, name, bound));
+                let parent = crabka_pgcatalog::get_table(kv, parent)?;
+                ops.extend(crate::trigger::clone_new_partition_triggers(
+                    kv, &parent, &table,
+                )?);
             }
             if temporary {
                 ops.splice(..0, ensure_schema_ops(kv, &name.schema)?);
@@ -791,7 +795,7 @@ pub(crate) fn execute_ddl(
                 }
                 Err(error) => return Err(error),
             };
-            let ops = match crabka_pgcatalog::drop_view_ops(kv, name) {
+            let ops = match drop_view_with_triggers_ops(kv, name) {
                 Ok(mut ops) => {
                     // A view may itself be read by other views. PostgreSQL
                     // refuses the drop unless CASCADE is written, and then drops
@@ -804,13 +808,17 @@ pub(crate) fn execute_ddl(
                             )));
                         }
                         for view in &dependents {
-                            ops.extend(crabka_pgcatalog::drop_view_ops(kv, view)?);
+                            ops.extend(drop_view_with_triggers_ops(kv, view)?);
                         }
                     }
                     ops
                 }
-                Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) if *if_exists => Vec::new(),
-                Err(error) => return Err(error.into()),
+                Err(ExecError::Catalog(crabka_pgcatalog::CatalogError::UndefinedTable(_)))
+                    if *if_exists =>
+                {
+                    Vec::new()
+                }
+                Err(error) => return Err(error),
             };
             Ok((command("DROP VIEW"), ops))
         }
@@ -2588,7 +2596,15 @@ async fn execute_write_with_ctes(
     stmt: &Statement,
     writes: &mut StatementWrites,
 ) -> Result<(WriteOutcome, Vec<crabka_pgkv::WriteOp>), ExecError> {
-    let statement_triggers = statement_trigger_targets(write_ctx, stmt)?;
+    let mut statement_triggers = Vec::new();
+    if let Some(with) = statement_with_clause(stmt) {
+        for cte in &with.ctes {
+            if let crabka_pgparser::ast::CteBody::Dml(dml) = &cte.body {
+                statement_triggers.extend(statement_trigger_targets(write_ctx, dml)?);
+            }
+        }
+    }
+    statement_triggers.extend(statement_trigger_targets(write_ctx, stmt)?);
     for (table, event, updated) in &statement_triggers {
         crate::trigger::fire_statement(
             write_ctx.catalog_kv,
@@ -5430,7 +5446,7 @@ pub(crate) fn drop_schema_contents_ops(
             }
             handled.insert(relation.clone());
             if crabka_pgcatalog::get_view(kv, relation).is_ok() {
-                ops.extend(crabka_pgcatalog::drop_view_ops(kv, relation)?);
+                ops.extend(drop_view_with_triggers_ops(kv, relation)?);
             } else if let Ok(table) = crabka_pgcatalog::get_table(kv, relation) {
                 handled.extend(crate::partition::descendants(kv, relation)?);
                 ops.extend(drop_table_and_dependents_ops(kv, &table, &dropping, true)?);
@@ -5482,7 +5498,7 @@ fn drop_table_and_dependents_ops(
             )));
         }
         for view in &dependents {
-            ops.extend(crabka_pgcatalog::drop_view_ops(kv, view)?);
+            ops.extend(drop_view_with_triggers_ops(kv, view)?);
         }
     }
     ops.extend(drop_blocking_foreign_keys(kv, table, dropping, cascade)?);
@@ -5501,6 +5517,23 @@ fn drop_table_and_dependents_ops(
         kv, table.id,
     )?);
     ops.extend(table_ops);
+    Ok(ops)
+}
+
+fn drop_view_with_triggers_ops(
+    kv: &dyn Kv,
+    name: &crabka_pgcatalog::RelationName,
+) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
+    let view_id = crate::catalog_rel::view_oids(kv)?
+        .get(name)
+        .copied()
+        .and_then(|oid| u32::try_from(oid).ok());
+    let mut ops = crabka_pgcatalog::drop_view_ops(kv, name)?;
+    if let Some(view_id) = view_id {
+        ops.extend(crabka_pgcatalog::trigger::drop_triggers_for_table_ops(
+            kv, view_id,
+        )?);
+    }
     Ok(ops)
 }
 
@@ -7528,7 +7561,7 @@ fn find_visible_one_keyed(
 
 /// Coerce an evaluated value into a target column type (assignment context). `ctx`
 /// supplies the session zone for any temporal numeric conversion.
-fn coerce(
+pub(crate) fn coerce(
     value: crabka_pgtypes::Datum,
     target: crabka_pgtypes::ColumnType,
     ctx: &crate::clock::EvalCtx,
@@ -8847,7 +8880,7 @@ fn partitioned_scan(
 /// `source` — the permutation that rewrites a `source`-shaped row into a
 /// `target`-shaped one. A partition and its parent always declare the same
 /// column names, but `ATTACH PARTITION` maps them by name, not by position.
-fn column_mapping(target: &Table, source: &Table) -> Result<Vec<usize>, ExecError> {
+pub(crate) fn column_mapping(target: &Table, source: &Table) -> Result<Vec<usize>, ExecError> {
     target
         .columns
         .iter()
@@ -11384,6 +11417,11 @@ fn information_schema_trigger_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>
     let triggers = crabka_pgcatalog::trigger::list_triggers(catalog_kv)?;
     let mut rows = Vec::new();
     for trigger in triggers.iter().filter(|trigger| !trigger.is_internal) {
+        let function = crate::routine::routine_by_oid(
+            catalog_kv,
+            i32::try_from(trigger.function_oid).unwrap_or(0),
+        )?
+        .map_or_else(|| trigger.function.clone(), |routine| routine.name);
         let events = [
             (trigger.events.insert, "INSERT"),
             (trigger.events.update, "UPDATE"),
@@ -11425,10 +11463,7 @@ fn information_schema_trigger_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>
                     .when
                     .as_ref()
                     .map_or(Datum::Null, |value| text(value)),
-                text(&format!(
-                    "EXECUTE FUNCTION {}({arguments})",
-                    trigger.function
-                )),
+                text(&format!("EXECUTE FUNCTION {function}({arguments})")),
                 text(match trigger.level {
                     TriggerLevel::Row => "ROW",
                     TriggerLevel::Statement => "STATEMENT",
@@ -15161,7 +15196,7 @@ fn alter_table_action_ops(
                     )));
                 }
                 for view in &dependents {
-                    state.ops.extend(crabka_pgcatalog::drop_view_ops(kv, view)?);
+                    state.ops.extend(drop_view_with_triggers_ops(kv, view)?);
                 }
                 // CASCADE takes the dependent generated columns with it. They
                 // are removed first, so `index` still addresses the target.
@@ -16639,7 +16674,7 @@ fn drop_blocking_foreign_keys(
     Ok(ops)
 }
 
-fn dependent_view_names(
+pub(crate) fn dependent_view_names(
     kv: &dyn Kv,
     table: &crabka_pgcatalog::RelationName,
     column: Option<&str>,

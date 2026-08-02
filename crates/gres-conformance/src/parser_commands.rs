@@ -133,6 +133,42 @@ const COMMAND_PROBES: &[CommandProbe] = &[
         refusal: None,
     },
     CommandProbe {
+        command: "CREATE TRIGGER",
+        sql: "CREATE TRIGGER parser_commands_trigger BEFORE INSERT ON parser_commands_probe FOR EACH ROW EXECUTE FUNCTION parser_commands_trigger_fn()",
+        expected_statement: "CreateTrigger",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "ALTER TRIGGER",
+        sql: "ALTER TRIGGER parser_commands_trigger ON parser_commands_probe RENAME TO parser_commands_trigger_renamed",
+        expected_statement: "AlterTrigger",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "DROP TRIGGER",
+        sql: "DROP TRIGGER parser_commands_trigger ON parser_commands_probe",
+        expected_statement: "DropTrigger",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "CREATE EVENT TRIGGER",
+        sql: "CREATE EVENT TRIGGER parser_commands_event_trigger ON ddl_command_start EXECUTE FUNCTION parser_commands_event_trigger_fn()",
+        expected_statement: "CreateEventTrigger",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "ALTER EVENT TRIGGER",
+        sql: "ALTER EVENT TRIGGER parser_commands_event_trigger ENABLE",
+        expected_statement: "AlterEventTrigger",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "DROP EVENT TRIGGER",
+        sql: "DROP EVENT TRIGGER parser_commands_event_trigger",
+        expected_statement: "DropEventTrigger",
+        refusal: None,
+    },
+    CommandProbe {
         command: "CREATE INDEX",
         sql: "CREATE INDEX parser_commands_probe_index ON parser_commands_probe (id)",
         expected_statement: "CreateIndex",
@@ -844,6 +880,12 @@ fn statement_shape(statement: &Statement) -> &'static str {
         Statement::CompatibilityRefusal(_) => "CompatibilityRefusal",
         Statement::CreateTable { .. } => "CreateTable",
         Statement::CreateView { .. } => "CreateView",
+        Statement::CreateTrigger(_) => "CreateTrigger",
+        Statement::AlterTrigger { .. } => "AlterTrigger",
+        Statement::DropTrigger { .. } => "DropTrigger",
+        Statement::CreateEventTrigger(_) => "CreateEventTrigger",
+        Statement::AlterEventTrigger { .. } => "AlterEventTrigger",
+        Statement::DropEventTrigger { .. } => "DropEventTrigger",
         Statement::CreateRoutine(_) => "CreateRoutine",
         Statement::DropRoutine { .. } => "DropRoutine",
         Statement::AlterRoutine { .. } => "AlterRoutine",
@@ -981,7 +1023,7 @@ mod tests {
 
         assert!(report.format_version == PARSER_COMMAND_REPORT_FORMAT_VERSION);
         assert!(
-            report.commands.len() == 149,
+            report.commands.len() == 155,
             "all resolved command rows need probes"
         );
         assert!(report.commands.windows(2).all(|pair| pair[0] < pair[1]));
@@ -1019,7 +1061,7 @@ mod tests {
 
         assert!(json["format_version"] == PARSER_COMMAND_REPORT_FORMAT_VERSION);
         assert!(json["commands"][0] == "ABORT");
-        assert!(json["probes"].as_array().map(Vec::len) == Some(149));
+        assert!(json["probes"].as_array().map(Vec::len) == Some(155));
         let refusal = json["probes"]
             .as_array()
             .expect("probe array")

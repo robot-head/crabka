@@ -316,6 +316,204 @@ async fn event_trigger_helper_srfs_expose_command_and_drop_objects() {
 }
 
 #[tokio::test]
+async fn sql_drop_reports_cascaded_views_triggers_and_constraints() {
+    let engine = SqlEngine::new();
+    exec(
+        &engine,
+        "CREATE TABLE cascade_drop_audit (kind text, name text)",
+    )
+    .await;
+    exec(
+        &engine,
+        "CREATE FUNCTION audit_cascade_drop() RETURNS event_trigger LANGUAGE plpgsql AS $$
+         BEGIN
+           INSERT INTO cascade_drop_audit
+           SELECT object_type, object_name FROM pg_event_trigger_dropped_objects();
+           RETURN NULL;
+         END $$",
+    )
+    .await;
+    exec(
+        &engine,
+        "CREATE EVENT TRIGGER audit_cascade_drop ON sql_drop
+         WHEN TAG IN ('DROP TABLE') EXECUTE FUNCTION audit_cascade_drop()",
+    )
+    .await;
+    exec(&engine, "CREATE TABLE cascade_base (id int PRIMARY KEY)").await;
+    exec(
+        &engine,
+        "CREATE TABLE cascade_ref (id int REFERENCES cascade_base(id))",
+    )
+    .await;
+    exec(
+        &engine,
+        "CREATE VIEW cascade_view AS SELECT id FROM cascade_base",
+    )
+    .await;
+    exec(
+        &engine,
+        "CREATE FUNCTION cascade_view_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN RETURN NEW; END $$",
+    )
+    .await;
+    exec(
+        &engine,
+        "CREATE TRIGGER cascade_view_trigger INSTEAD OF INSERT ON cascade_view
+         FOR EACH ROW EXECUTE FUNCTION cascade_view_insert()",
+    )
+    .await;
+    exec(&engine, "DROP TABLE cascade_base CASCADE").await;
+    for (kind, name) in [
+        ("table", "cascade_base"),
+        ("view", "cascade_view"),
+        ("trigger", "cascade_view_trigger"),
+    ] {
+        assert_eq!(
+            scalar(
+                &engine,
+                &format!(
+                    "SELECT count(*) FROM cascade_drop_audit WHERE kind = '{kind}' AND name = '{name}'"
+                ),
+            )
+            .await,
+            "1"
+        );
+    }
+    assert_eq!(
+        scalar(
+            &engine,
+            "SELECT count(*) FROM cascade_drop_audit WHERE kind = 'table constraint'",
+        )
+        .await,
+        "1"
+    );
+}
+
+#[tokio::test]
+async fn event_trigger_catalog_reports_transferred_owner() {
+    let engine = SqlEngine::new();
+    exec(&engine, "CREATE ROLE event_trigger_owner").await;
+    exec(
+        &engine,
+        "CREATE FUNCTION owned_event_trigger_fn() RETURNS event_trigger LANGUAGE plpgsql AS $$
+         BEGIN RETURN NULL; END $$",
+    )
+    .await;
+    exec(
+        &engine,
+        "CREATE EVENT TRIGGER owned_event_trigger ON ddl_command_end
+         EXECUTE FUNCTION owned_event_trigger_fn()",
+    )
+    .await;
+    exec(
+        &engine,
+        "ALTER EVENT TRIGGER owned_event_trigger OWNER TO event_trigger_owner",
+    )
+    .await;
+    assert_eq!(
+        scalar(
+            &engine,
+            "SELECT rolname FROM pg_event_trigger JOIN pg_roles ON pg_roles.oid = evtowner
+             WHERE evtname = 'owned_event_trigger'",
+        )
+        .await,
+        "event_trigger_owner"
+    );
+}
+
+#[tokio::test]
+async fn trigger_arguments_rows_and_event_tags_are_validated() {
+    let engine = SqlEngine::new();
+    exec(&engine, "CREATE TABLE validated_trigger_rows (id int)").await;
+    exec(
+        &engine,
+        "CREATE FUNCTION use_trigger_argument() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN NEW.id := TG_ARGV[0]::int; RETURN NEW; END $$",
+    )
+    .await;
+    exec(
+        &engine,
+        "CREATE TRIGGER use_arg BEFORE INSERT ON validated_trigger_rows
+         FOR EACH ROW EXECUTE FUNCTION use_trigger_argument('7')",
+    )
+    .await;
+    exec(&engine, "INSERT INTO validated_trigger_rows VALUES (1)").await;
+    assert_eq!(
+        scalar(&engine, "SELECT id FROM validated_trigger_rows").await,
+        "7"
+    );
+
+    exec(
+        &engine,
+        "CREATE FUNCTION bad_trigger_row() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN RETURN ROW('not-an-int'); END $$",
+    )
+    .await;
+    exec(
+        &engine,
+        "CREATE TRIGGER bad_row BEFORE UPDATE ON validated_trigger_rows
+         FOR EACH ROW EXECUTE FUNCTION bad_trigger_row()",
+    )
+    .await;
+    let error = engine
+        .connect()
+        .simple_query("UPDATE validated_trigger_rows SET id = 8")
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "42804");
+    assert_eq!(
+        scalar(&engine, "SELECT id FROM validated_trigger_rows").await,
+        "7"
+    );
+
+    let error = engine
+        .connect()
+        .simple_query(
+            "CREATE TRIGGER duplicate_alias AFTER UPDATE ON validated_trigger_rows
+             REFERENCING OLD TABLE AS changed NEW TABLE AS changed
+             FOR EACH STATEMENT EXECUTE FUNCTION use_trigger_argument()",
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "42601");
+
+    exec(&engine, "CREATE TABLE sequence_tag_audit (tag text)").await;
+    exec(
+        &engine,
+        "CREATE FUNCTION audit_sequence_tag() RETURNS event_trigger LANGUAGE plpgsql AS $$
+         BEGIN INSERT INTO sequence_tag_audit VALUES (TG_TAG); RETURN NULL; END $$",
+    )
+    .await;
+    for sql in [
+        "CREATE EVENT TRIGGER audit_create_sequence ON ddl_command_end
+         WHEN TAG IN ('CREATE SEQUENCE') EXECUTE FUNCTION audit_sequence_tag()",
+        "CREATE EVENT TRIGGER audit_drop_sequence ON ddl_command_end
+         WHEN TAG IN ('DROP SEQUENCE') EXECUTE FUNCTION audit_sequence_tag()",
+    ] {
+        exec(&engine, sql).await;
+    }
+    let error = engine
+        .connect()
+        .simple_query(
+            "CREATE EVENT TRIGGER bad_tag ON ddl_command_end
+             WHEN TAG IN ('CREATE TABEL') EXECUTE FUNCTION audit_sequence_tag()",
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "22023");
+    exec(&engine, "CREATE SEQUENCE trigger_sequence").await;
+    exec(&engine, "DROP SEQUENCE trigger_sequence").await;
+    assert_eq!(
+        scalar(
+            &engine,
+            "SELECT string_agg(tag, ',') FROM sequence_tag_audit"
+        )
+        .await,
+        "CREATE SEQUENCE,DROP SEQUENCE"
+    );
+}
+
+#[tokio::test]
 async fn trigger_catalog_and_definition_are_visible() {
     let engine = SqlEngine::new();
     exec(&engine, "CREATE TABLE documented (id int, value text)").await;
@@ -339,6 +537,28 @@ async fn trigger_catalog_and_definition_are_visible() {
     assert!(definition.contains("CREATE TRIGGER documented_trigger BEFORE UPDATE OF value"));
     assert!(definition.contains("WHEN (NEW.id > 0)"));
     assert!(definition.contains("EXECUTE FUNCTION documented_fn('argument')"));
+    exec(
+        &engine,
+        "ALTER FUNCTION documented_fn() RENAME TO documented_fn_renamed",
+    )
+    .await;
+    assert!(
+        scalar(
+            &engine,
+            "SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname = 'documented_trigger'",
+        )
+        .await
+        .contains("EXECUTE FUNCTION documented_fn_renamed('argument')")
+    );
+    assert_eq!(
+        scalar(
+            &engine,
+            "SELECT action_statement FROM information_schema.triggers
+             WHERE trigger_name = 'documented_trigger'",
+        )
+        .await,
+        "EXECUTE FUNCTION documented_fn_renamed('argument')"
+    );
     assert_eq!(
         scalar(
             &engine,
@@ -489,6 +709,25 @@ async fn login_event_and_information_schema_are_exposed() {
 }
 
 #[tokio::test]
+async fn login_event_can_reject_connection_startup() {
+    let engine = SqlEngine::new();
+    exec(
+        &engine,
+        "CREATE FUNCTION reject_login() RETURNS event_trigger LANGUAGE plpgsql AS $$
+         BEGIN RAISE EXCEPTION 'login rejected'; END $$",
+    )
+    .await;
+    exec(
+        &engine,
+        "CREATE EVENT TRIGGER reject_login_event ON login EXECUTE FUNCTION reject_login()",
+    )
+    .await;
+    let mut session = engine.connect();
+    let error = session.startup().await.unwrap_err();
+    assert!(error.message.contains("login rejected"));
+}
+
+#[tokio::test]
 async fn merge_actions_fire_their_row_trigger_classes() {
     let engine = SqlEngine::new();
     exec(
@@ -541,6 +780,71 @@ async fn merge_actions_fire_their_row_trigger_classes() {
 }
 
 #[tokio::test]
+async fn autocommit_trigger_side_effects_are_atomic() {
+    let engine = SqlEngine::new();
+    exec(&engine, "CREATE TABLE atomic_rows (id int PRIMARY KEY)").await;
+    exec(&engine, "CREATE TABLE atomic_audit (message text)").await;
+    exec(
+        &engine,
+        "CREATE FUNCTION atomic_before() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN INSERT INTO atomic_audit VALUES ('before:' || NEW.id::text); RETURN NEW; END $$",
+    )
+    .await;
+    exec(
+        &engine,
+        "CREATE TRIGGER atomic_before BEFORE INSERT ON atomic_rows
+         FOR EACH ROW EXECUTE FUNCTION atomic_before()",
+    )
+    .await;
+    assert!(
+        engine
+            .connect()
+            .simple_query("INSERT INTO atomic_rows VALUES (1), (1)")
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        scalar(&engine, "SELECT count(*) FROM atomic_rows").await,
+        "0"
+    );
+    assert_eq!(
+        scalar(&engine, "SELECT count(*) FROM atomic_audit").await,
+        "0"
+    );
+
+    exec(
+        &engine,
+        "CREATE FUNCTION atomic_after() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+           INSERT INTO atomic_audit VALUES ('after:' || NEW.id::text);
+           RAISE EXCEPTION 'reject after trigger';
+         END $$",
+    )
+    .await;
+    exec(
+        &engine,
+        "CREATE TRIGGER atomic_after AFTER INSERT ON atomic_rows
+         FOR EACH ROW EXECUTE FUNCTION atomic_after()",
+    )
+    .await;
+    assert!(
+        engine
+            .connect()
+            .simple_query("INSERT INTO atomic_rows VALUES (2)")
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        scalar(&engine, "SELECT count(*) FROM atomic_rows").await,
+        "0"
+    );
+    assert_eq!(
+        scalar(&engine, "SELECT count(*) FROM atomic_audit").await,
+        "0"
+    );
+}
+
+#[tokio::test]
 async fn constraint_trigger_deferral_obeys_set_constraints() {
     let engine = SqlEngine::new();
     exec(&engine, "CREATE TABLE deferred_target (id int)").await;
@@ -571,6 +875,11 @@ async fn constraint_trigger_deferral_obeys_set_constraints() {
         "7"
     );
     exec_session(&mut session, "COMMIT").await;
+    exec(&engine, "INSERT INTO deferred_target VALUES (8)").await;
+    assert_eq!(
+        scalar(&engine, "SELECT count(*) FROM deferred_audit").await,
+        "2"
+    );
 }
 
 #[tokio::test]
@@ -616,6 +925,72 @@ async fn transition_tables_contain_the_whole_statement() {
         )
         .await,
         "2:2"
+    );
+}
+
+#[tokio::test]
+async fn cte_and_partition_parent_statement_triggers_fire() {
+    let engine = SqlEngine::new();
+    exec(&engine, "CREATE TABLE cte_trigger_source (id int)").await;
+    exec(&engine, "CREATE TABLE cte_trigger_sink (id int)").await;
+    exec(
+        &engine,
+        "CREATE TABLE statement_trigger_audit (message text)",
+    )
+    .await;
+    exec(
+        &engine,
+        "CREATE FUNCTION audit_statement_target() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN INSERT INTO statement_trigger_audit VALUES (TG_TABLE_NAME || ':' || TG_OP); RETURN NULL; END $$",
+    )
+    .await;
+    exec(
+        &engine,
+        "CREATE TRIGGER cte_update AFTER UPDATE ON cte_trigger_source
+         FOR EACH STATEMENT EXECUTE FUNCTION audit_statement_target()",
+    )
+    .await;
+    exec(&engine, "INSERT INTO cte_trigger_source VALUES (1)").await;
+    exec(
+        &engine,
+        "WITH changed AS (UPDATE cte_trigger_source SET id = 2 RETURNING id)
+         INSERT INTO cte_trigger_sink SELECT id FROM changed",
+    )
+    .await;
+    assert_eq!(
+        scalar(&engine, "SELECT message FROM statement_trigger_audit").await,
+        "cte_trigger_source:UPDATE"
+    );
+
+    exec(
+        &engine,
+        "CREATE TABLE transition_parent (id int, value text) PARTITION BY RANGE (id)",
+    )
+    .await;
+    exec(
+        &engine,
+        "CREATE TABLE transition_leaf PARTITION OF transition_parent FOR VALUES FROM (0) TO (10)",
+    )
+    .await;
+    exec(&engine, "CREATE TABLE parent_transition_audit (rows int)").await;
+    exec(
+        &engine,
+        "CREATE FUNCTION audit_parent_transition() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN INSERT INTO parent_transition_audit SELECT count(*) FROM changed; RETURN NULL; END $$",
+    )
+    .await;
+    exec(
+        &engine,
+        "CREATE TRIGGER parent_transition AFTER UPDATE ON transition_parent
+         REFERENCING NEW TABLE AS changed FOR EACH STATEMENT
+         EXECUTE FUNCTION audit_parent_transition()",
+    )
+    .await;
+    exec(&engine, "INSERT INTO transition_parent VALUES (1, 'old')").await;
+    exec(&engine, "UPDATE transition_parent SET value = 'new'").await;
+    assert_eq!(
+        scalar(&engine, "SELECT rows FROM parent_transition_audit").await,
+        "1"
     );
 }
 
@@ -693,6 +1068,7 @@ async fn instead_of_view_triggers_route_row_changes() {
         &engine,
         "CREATE FUNCTION view_delete() RETURNS trigger LANGUAGE plpgsql AS $$
          BEGIN
+           IF NEW IS NOT NULL THEN RAISE EXCEPTION 'NEW must be null'; END IF;
            DELETE FROM view_base WHERE id = OLD.id;
            RETURN OLD;
          END $$",
@@ -736,6 +1112,15 @@ async fn instead_of_view_triggers_route_row_changes() {
         "changed"
     );
     assert_eq!(scalar(&engine, "SELECT count(*) FROM view_base").await, "0");
+    exec(&engine, "DROP VIEW trigger_view").await;
+    assert_eq!(
+        scalar(
+            &engine,
+            "SELECT count(*) FROM pg_trigger WHERE tgname LIKE 'view_%'",
+        )
+        .await,
+        "0"
+    );
 }
 
 #[tokio::test]
@@ -782,6 +1167,65 @@ async fn partition_trigger_clones_are_row_level_only() {
     assert_eq!(
         scalar(&engine, "SELECT string_agg(name, ',') FROM partition_audit").await,
         "parent_row,parent_statement"
+    );
+
+    exec(
+        &engine,
+        "CREATE TABLE nested_parent (id int) PARTITION BY RANGE (id)",
+    )
+    .await;
+    exec(
+        &engine,
+        "CREATE TABLE nested_middle PARTITION OF nested_parent
+         FOR VALUES FROM (0) TO (100) PARTITION BY RANGE (id)",
+    )
+    .await;
+    exec(
+        &engine,
+        "CREATE TRIGGER nested_row AFTER INSERT ON nested_parent
+         FOR EACH ROW EXECUTE FUNCTION audit_partition_trigger()",
+    )
+    .await;
+    exec(
+        &engine,
+        "CREATE TABLE nested_leaf PARTITION OF nested_middle FOR VALUES FROM (0) TO (10)",
+    )
+    .await;
+    exec(
+        &engine,
+        "ALTER TRIGGER nested_row ON nested_parent RENAME TO nested_renamed",
+    )
+    .await;
+    assert_eq!(
+        scalar(
+            &engine,
+            "SELECT count(*) FROM pg_trigger WHERE tgname = 'nested_renamed'",
+        )
+        .await,
+        "3"
+    );
+    exec(
+        &engine,
+        "ALTER TABLE nested_parent DISABLE TRIGGER nested_renamed",
+    )
+    .await;
+    exec(&engine, "INSERT INTO nested_parent VALUES (1)").await;
+    assert_eq!(
+        scalar(
+            &engine,
+            "SELECT count(*) FROM partition_audit WHERE name = 'nested_renamed'",
+        )
+        .await,
+        "0"
+    );
+    exec(&engine, "DROP TRIGGER nested_renamed ON nested_parent").await;
+    assert_eq!(
+        scalar(
+            &engine,
+            "SELECT count(*) FROM pg_trigger WHERE tgname = 'nested_renamed'",
+        )
+        .await,
+        "0"
     );
 }
 
@@ -837,6 +1281,34 @@ async fn foreign_key_actions_fire_child_statement_triggers() {
         )
         .await,
         "BEFORE:DELETE,AFTER:DELETE"
+    );
+}
+
+#[tokio::test]
+async fn disable_trigger_all_rejects_tables_with_foreign_keys() {
+    let engine = SqlEngine::new();
+    exec(
+        &engine,
+        "CREATE TABLE disable_fk_parent (id int PRIMARY KEY)",
+    )
+    .await;
+    exec(
+        &engine,
+        "CREATE TABLE disable_fk_child (parent_id int REFERENCES disable_fk_parent(id))",
+    )
+    .await;
+    let error = engine
+        .connect()
+        .simple_query("ALTER TABLE disable_fk_child DISABLE TRIGGER ALL")
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "0A000");
+    assert!(
+        engine
+            .connect()
+            .simple_query("INSERT INTO disable_fk_child VALUES (1)")
+            .await
+            .is_err()
     );
 }
 

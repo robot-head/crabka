@@ -651,6 +651,7 @@ fn pg_depend_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
 
 fn pg_event_trigger_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     use crabka_pgcatalog::trigger::EventTriggerEvent;
+    let role_oids = role_oids(kv)?;
     Ok(crabka_pgcatalog::trigger::list_event_triggers(kv)?
         .into_iter()
         .map(|trigger| {
@@ -672,7 +673,7 @@ fn pg_event_trigger_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 int(i32::try_from(trigger.oid).unwrap_or(0)),
                 text(&trigger.name),
                 text(event),
-                int(crate::catalog_fn::BOOTSTRAP_ROLE_OID),
+                int(role_oids.get(&trigger.owner).copied().unwrap_or(0)),
                 int(i32::try_from(trigger.function_oid).unwrap_or(0)),
                 text(&trigger.enabled.catalog_code().to_string()),
                 if tags.is_empty() {

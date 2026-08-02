@@ -336,17 +336,15 @@ pub(crate) async fn execute_trigger_function(
         ColumnType::Int4,
         true,
     );
-    insert(
-        "tg_nargs",
-        Datum::Int4(i32::try_from(invocation.arguments.len()).unwrap_or(i32::MAX)),
-        ColumnType::Int4,
-        true,
-    );
+    let nargs = i32::try_from(invocation.arguments.len()).unwrap_or(i32::MAX);
+    let arguments = invocation.arguments.into_iter().map(Datum::Text).collect();
+    insert("tg_nargs", Datum::Int4(nargs), ColumnType::Int4, true);
     insert(
         "tg_argv",
-        Datum::Array(ArrayValue::new(
+        Datum::Array(ArrayValue::with_dims(
             ElemType::Text,
-            invocation.arguments.into_iter().map(Datum::Text).collect(),
+            arguments,
+            vec![crabka_pgtypes::ArrayDim::new(0, nargs)],
         )),
         ColumnType::Array(ElemType::Text),
         true,

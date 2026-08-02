@@ -37,7 +37,7 @@ Full-text search includes first-class `tsvector`/`tsquery` values (OIDs 3614/361
 | ALTER DATABASE | Error-with-notice(0A000) | Bounded rename syntax reaches a typed `0A000` session refusal; tenant provisioning owns lifecycle. |
 | ALTER DEFAULT PRIVILEGES | Wave-assigned(D8) | Roles and privileges wave. |
 | ALTER DOMAIN | Implemented | `SET DEFAULT` and `DROP DEFAULT`. Adding, dropping and validating a domain constraint, and `SET`/`DROP NOT NULL`, are not implemented. |
-| ALTER EVENT TRIGGER | Wave-assigned(P4) | Stretch trigger surface; stock-shaped refusal until then. |
+| ALTER EVENT TRIGGER | Implemented | Supports enable modes, owner changes, and rename. |
 | ALTER EXTENSION | Error-with-notice(0A000) | Bounded update syntax reaches a typed `0A000` session refusal; shims are explicit. |
 | ALTER FOREIGN DATA WRAPPER | Wave-assigned(P5) | FDW lifecycle completeness bucket. |
 | ALTER FOREIGN TABLE | Wave-assigned(P5) | FDW lifecycle completeness bucket. |
@@ -71,7 +71,7 @@ Full-text search includes first-class `tsvector`/`tsquery` values (OIDs 3614/361
 | ALTER TEXT SEARCH DICTIONARY | Implemented | SQL-managed dictionaries are durable and support `RENAME TO`; option alterations preserve the object while the built-in Rust lexizer remains fixed. |
 | ALTER TEXT SEARCH PARSER | Non-goal(C-bound text search parser) | C-bound object kind excluded. |
 | ALTER TEXT SEARCH TEMPLATE | Non-goal(C-bound text search template) | C-bound object kind excluded. |
-| ALTER TRIGGER | Wave-assigned(P4) | Trigger lifecycle. |
+| ALTER TRIGGER | Implemented | Supports rename and dependency marking. |
 | ALTER TYPE | Implemented | `ALTER TYPE … ADD VALUE [BEFORE\|AFTER]` and `ALTER TYPE … RENAME VALUE … TO …` on an enum. Composite-type alteration (`ADD`/`DROP`/`ALTER ATTRIBUTE`) and `SET SCHEMA` are not implemented. |
 | ALTER USER | Wave-assigned(D8) | Role synonym surface. |
 | ALTER USER MAPPING | Error-with-notice(0A000) | Parser accepts FDW user mapping options, but the executor currently rejects `ALTER USER MAPPING` as unsupported rather than mutating catalog metadata. |
@@ -93,7 +93,7 @@ Full-text search includes first-class `tsvector`/`tsquery` values (OIDs 3614/361
 | CREATE CONVERSION | Non-goal(UTF-8-only server) | C-bound conversion objects are excluded. |
 | CREATE DATABASE | Error-with-notice(0A000) | Typed session refusal with exact `0A000`; tenant provisioning owns lifecycle. |
 | CREATE DOMAIN | Implemented | `CREATE DOMAIN name AS base [DEFAULT expr] [[NOT] NULL] [CHECK (VALUE …)]`. The constraint is enforced on assignment and cast: writing a violating value gives PostgreSQL's exact `value for domain <name> violates check constraint "<name>_check"`. |
-| CREATE EVENT TRIGGER | Wave-assigned(P4) | Stretch trigger surface. |
+| CREATE EVENT TRIGGER | Implemented | Creates event triggers with event and tag filtering. |
 | CREATE EXTENSION | Wave-assigned(P5) | Statement supported only for built-in shim whitelist. |
 | CREATE FOREIGN DATA WRAPPER | Implemented | FDW DDL is parsed in the current baseline. |
 | CREATE FOREIGN TABLE | Implemented | FDW foreign table DDL is parsed in the current baseline. |
@@ -127,7 +127,7 @@ Full-text search includes first-class `tsvector`/`tsquery` values (OIDs 3614/361
 | CREATE TEXT SEARCH PARSER | Non-goal(C-bound text search parser) | C-bound object kind excluded. |
 | CREATE TEXT SEARCH TEMPLATE | Non-goal(C-bound text search template) | C-bound object kind excluded. |
 | CREATE TRANSFORM | Non-goal(C-bound transform objects) | C-bound object kind excluded. |
-| CREATE TRIGGER | Wave-assigned(P4) | Trigger support. |
+| CREATE TRIGGER | Implemented | Row and statement triggers support BEFORE, AFTER, and INSTEAD OF timing, transition tables, conditions, and constraint options. |
 | CREATE TYPE | Implemented | `CREATE TYPE name AS ENUM (…)` and `CREATE TYPE name AS (field type, …)` are real types: an enum column rejects an out-of-set value with PostgreSQL's exact `invalid input value for enum <name>: "…"` message, a composite supports `ROW(…)::name` and `(x).field` selection, and both appear in `pg_type`. Deferred: `CREATE TYPE … AS RANGE` reaches a typed 0A000 (range and multirange types are not implemented, so `int4range`/`numrange`/… and their operators are absent), and the enum introspection functions `enum_first`/`enum_last`/`enum_range` are 42883. |
 | CREATE USER | Implemented | Starter subset: `CREATE USER name` persists role metadata with `rolcanlogin = true`; passwords/options and authentication remain deferred. |
 | CREATE USER MAPPING | Implemented | FDW user mapping DDL is parsed in the current baseline. |
@@ -144,7 +144,7 @@ Full-text search includes first-class `tsvector`/`tsquery` values (OIDs 3614/361
 | DROP CONVERSION | Non-goal(UTF-8-only server) | C-bound conversion objects are excluded. |
 | DROP DATABASE | Error-with-notice(0A000) | Typed session refusal with exact `0A000`; tenant provisioning owns lifecycle. |
 | DROP DOMAIN | Implemented | Drops a domain, refusing with 2BP01 `cannot drop type <name> because other objects depend on it` while a column still uses it. `CASCADE` is accepted but drops nothing extra. |
-| DROP EVENT TRIGGER | Wave-assigned(P4) | Stretch trigger surface. |
+| DROP EVENT TRIGGER | Implemented | Drops event triggers with `IF EXISTS` and dependency behavior. |
 | DROP EXTENSION | Error-with-notice(0A000) | Bounded syntax reaches a typed `0A000` session refusal. |
 | DROP FOREIGN DATA WRAPPER | Implemented | FDW DDL is parsed in the current baseline. |
 | DROP FOREIGN TABLE | Implemented | FDW DDL is parsed in the current baseline. |
@@ -174,7 +174,7 @@ Full-text search includes first-class `tsvector`/`tsquery` values (OIDs 3614/361
 | DROP TEXT SEARCH PARSER | Non-goal(C-bound text search parser) | C-bound object kind excluded. |
 | DROP TEXT SEARCH TEMPLATE | Non-goal(C-bound text search template) | C-bound object kind excluded. |
 | DROP TRANSFORM | Non-goal(C-bound transform objects) | C-bound object kind excluded. |
-| DROP TRIGGER | Wave-assigned(P4) | Trigger support. |
+| DROP TRIGGER | Implemented | Drops relation triggers with `IF EXISTS` and dependency behavior. |
 | DROP TYPE | Implemented | Drops an enum or composite type, refusing with 2BP01 `cannot drop type <name> because other objects depend on it` while a column still uses it — the dependency check runs before the drop, as in PostgreSQL. `CASCADE` is accepted but drops nothing extra. |
 | DROP USER | Implemented | Starter synonym for the `DROP ROLE` metadata path. |
 | DROP USER MAPPING | Implemented | FDW user mapping DDL is parsed in the current baseline. |

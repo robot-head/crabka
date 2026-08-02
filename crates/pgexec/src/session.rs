@@ -4967,12 +4967,17 @@ impl SqlSession {
     pub(crate) async fn run_one(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
         if !self.login_event_fired {
             self.login_event_fired = true;
-            self.fire_event_triggers(
-                crabka_pgcatalog::trigger::EventTriggerEvent::Login,
-                "LOGIN",
-                None,
-            )
-            .await?;
+            if let Err(error) = self
+                .fire_event_triggers(
+                    crabka_pgcatalog::trigger::EventTriggerEvent::Login,
+                    "LOGIN",
+                    None,
+                )
+                .await
+            {
+                self.login_event_fired = false;
+                return Err(error);
+            }
         }
         // Pin the garbage horizon for this autocommit statement's duration.
         // The pin (the ProcArray xmin now) is <= the xmin of any snapshot the
@@ -10034,6 +10039,24 @@ fn invalid_parameter_encoding(_: std::str::Utf8Error) -> PgError {
 }
 
 impl Session for SqlSession {
+    async fn startup(&mut self) -> Result<(), PgError> {
+        if !self.login_event_fired {
+            self.login_event_fired = true;
+            if let Err(error) = self
+                .fire_event_triggers(
+                    crabka_pgcatalog::trigger::EventTriggerEvent::Login,
+                    "LOGIN",
+                    None,
+                )
+                .await
+            {
+                self.login_event_fired = false;
+                return Err(error.into_pg());
+            }
+        }
+        Ok(())
+    }
+
     /// A session's temporary relations die with it.
     ///
     /// A failure here is not the client's to hear — the connection is already

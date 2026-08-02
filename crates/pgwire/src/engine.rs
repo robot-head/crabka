@@ -275,6 +275,12 @@ pub trait Engine: Send + Sync + 'static {
 /// (`tokio::select!`), then awaits [`Session::cancel_current_query`] before it
 /// reports `ReadyForQuery`. Implementations must make that pair drop-safe.
 pub trait Session: Send {
+    /// Complete engine-side connection startup before the wire layer reports
+    /// `ReadyForQuery`. Returning an error rejects the connection.
+    fn startup(&mut self) -> impl Future<Output = Result<(), PgError>> + Send {
+        async { Ok(()) }
+    }
+
     /// Release whatever the session owns that outlives the connection but not
     /// the session, called once when the message loop ends however it ends.
     ///

@@ -30,6 +30,8 @@ use crate::{
 
 /// `pg_class`'s own oid — the `classoid` every relation comment carries.
 pub(crate) const PG_CLASS_OID: i32 = 1259;
+pub(crate) const PG_CONSTRAINT_OID: i32 = 2606;
+pub(crate) const PG_TRIGGER_OID: i32 = 2620;
 /// First oid of the band reserved for roles.
 pub(crate) const ROLE_OID_BASE: i32 = 100_000;
 /// The oid of the bootstrap superuser, which owns every object — PostgreSQL's
@@ -194,7 +196,11 @@ pub(crate) fn catalog_func_result_type(
     Ok(match f {
         IsVisible | HasPrivilege | HasRole | IsPublishable | InRecovery => ColumnType::Bool,
         RelationSize | ClusterSize => ColumnType::Int8,
-        BackendPid | CharToEncoding | CatalogFunc::TriggerDepth => ColumnType::Int4,
+        BackendPid
+        | CharToEncoding
+        | CatalogFunc::TriggerDepth
+        | CatalogFunc::EventRewriteOid
+        | CatalogFunc::EventRewriteReason => ColumnType::Int4,
         StartTime => ColumnType::Timestamptz,
         CurrentSchemas => ColumnType::Array(ElemType::Text),
         _ => ColumnType::Text,
@@ -431,7 +437,10 @@ fn trigger_def(kv: &dyn Kv, reference: &Datum) -> Result<Datum, ExecError> {
         .map(|arg| format!("'{}'", arg.replace(char::from(39), "''")))
         .collect::<Vec<_>>()
         .join(", ");
-    let _ = write!(sql, " EXECUTE FUNCTION {}({args})", trigger.function);
+    let function =
+        crate::routine::routine_by_oid(kv, i32::try_from(trigger.function_oid).unwrap_or(0))?
+            .map_or(trigger.function, |routine| routine.name);
+    let _ = write!(sql, " EXECUTE FUNCTION {function}({args})");
     Ok(Datum::Text(sql))
 }
 

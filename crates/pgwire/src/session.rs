@@ -639,6 +639,12 @@ where
     // built with is the one just announced in `BackendKeyData`, so a
     // self-notify reaches the client stamped with its own pid.
     let mut session = engine.connect_with_pid(cancel.pid);
+    if let Err(error) = session.startup().await {
+        backend::error_response(&mut out, &error);
+        stream.write_all(&out).await?;
+        session.terminate().await;
+        return Ok(());
+    }
     // The loop, not the session, owns the asynchronous streams: taking them
     // once here avoids a second borrow of `session` during protocol handling.
     let mut notifications = session.take_notifications();
