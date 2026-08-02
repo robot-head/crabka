@@ -8739,11 +8739,23 @@ fn append_from_item(
         {
             push_local_where(&mut acc, &mut next, filter, read_ctx.eval_ctx)?;
         }
+        let pushed_constraint = filter
+            .filter(|filter| {
+                matches!(kind, crabka_pgparser::ast::JoinKind::Cross)
+                    && matches!(constraint, crabka_pgparser::ast::JoinConstraint::None)
+                    && immutable_row_predicate(filter)
+                    && {
+                        let mut scope = acc.scope.clone();
+                        scope.columns.extend(next.scope.columns.iter().cloned());
+                        crate::eval::check_predicate_resolves(filter, &scope).is_ok()
+                    }
+            })
+            .map(|filter| crabka_pgparser::ast::JoinConstraint::On(filter.clone()));
         return join_relations(
             acc,
             next,
             kind,
-            constraint,
+            pushed_constraint.as_ref().unwrap_or(constraint),
             read_ctx.eval_ctx,
             read_ctx.blocking_query_memory,
         );
@@ -19226,6 +19238,18 @@ mod tests {
         let r = &run(&engine, "SELECT a.id FROM a, b WHERE a.id = b.id").await[0];
         assert_eq!(rows_of(r).len(), 1);
         assert_eq!(text(&rows_of(r)[0][0]), Some("2".into()));
+    }
+
+    #[tokio::test]
+    async fn comma_equality_uses_the_bounded_indexed_join() {
+        let engine = SqlEngine::new();
+        let r = &run(
+            &engine,
+            "SELECT count(*) FROM generate_series(1, 2000) a(i), \
+             generate_series(1, 2000) b(i) WHERE a.i = b.i",
+        )
+        .await[0];
+        assert_eq!(text(&rows_of(r)[0][0]), Some("2000".into()));
     }
 
     #[tokio::test]
