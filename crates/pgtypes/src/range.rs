@@ -509,9 +509,57 @@ fn render(value: &Datum, tz: &jiff::tz::TimeZone) -> String {
 }
 
 fn malformed(value: &str) -> TypeError {
-    TypeError::Coded {
-        sqlstate: "22P02",
-        message: format!("malformed range literal: \"{value}\""),
+    TypeError::RangeMalformed {
+        value: value.into(),
+        detail: malformed_detail(value),
+    }
+}
+
+fn malformed_detail(value: &str) -> &'static str {
+    let value = value.trim();
+    let Some(first) = value.as_bytes().first() else {
+        return "Missing left parenthesis or bracket.";
+    };
+    if !matches!(first, b'[' | b'(') {
+        return "Missing left parenthesis or bracket.";
+    }
+    let Some(last) = value.as_bytes().last() else {
+        return "Unexpected end of input.";
+    };
+    if !matches!(last, b']' | b')') {
+        return if value.bytes().any(|byte| matches!(byte, b']' | b')')) {
+            "Junk after right parenthesis or bracket."
+        } else {
+            "Unexpected end of input."
+        };
+    }
+
+    let mut quoted = false;
+    let mut escaped = false;
+    let mut commas = 0;
+    for byte in value[1..value.len() - 1].bytes() {
+        if escaped {
+            escaped = false;
+        } else if byte == b'\\' {
+            escaped = true;
+        } else if byte == b'"' {
+            quoted = !quoted;
+        } else if !quoted && byte == b',' {
+            commas += 1;
+        } else if !quoted && matches!(byte, b']' | b')') {
+            return if commas == 0 {
+                "Missing comma after lower bound."
+            } else {
+                "Junk after right parenthesis or bracket."
+            };
+        }
+    }
+    if quoted || escaped {
+        "Unexpected end of input."
+    } else if commas > 1 {
+        "Too many commas."
+    } else {
+        "Missing comma after lower bound."
     }
 }
 
@@ -550,6 +598,25 @@ mod tests {
             canonicalize("((,z)", ColumnType::Text, &tz),
             Ok("(\"(\",z)".into())
         );
+    }
+
+    #[test]
+    fn malformed_ranges_report_postgres_details() {
+        for (input, detail) in [
+            ("", "Missing left parenthesis or bracket."),
+            ("-[a,z)", "Missing left parenthesis or bracket."),
+            ("[a,z) - ", "Junk after right parenthesis or bracket."),
+            ("(\",a)", "Unexpected end of input."),
+            ("(,,a)", "Too many commas."),
+            ("(),a)", "Missing comma after lower bound."),
+            ("(a,))", "Junk after right parenthesis or bracket."),
+            ("(],a)", "Missing comma after lower bound."),
+            ("(a,])", "Junk after right parenthesis or bracket."),
+        ] {
+            let error = canonicalize(input, ColumnType::Text, &jiff::tz::TimeZone::UTC)
+                .expect_err("malformed range");
+            assert_eq!(error.detail(), Some(detail), "{input}");
+        }
     }
 
     #[test]
