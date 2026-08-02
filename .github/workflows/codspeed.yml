@@ -54,8 +54,8 @@ jobs:
           //crates/compression:bench_codec
           //crates/security:bench_scram
           //crates/metadata:bench_image
-          --config=ci
-          --config=codspeed
+          --bazel-flag=--config=ci
+          --bazel-flag=--config=codspeed
       - name: Run the benchmarks
         uses: CodSpeedHQ/action@v5
         with:
