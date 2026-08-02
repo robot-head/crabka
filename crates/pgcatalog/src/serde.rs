@@ -423,7 +423,7 @@ fn write_default_value(out: &mut Vec<u8>, default: &Datum) {
         }
         Datum::Array(array) => {
             out.push(datum_tag::ARRAY);
-            out.push(array.elem.code());
+            array.elem.write_code(out);
             write_bytes(out, &crabka_pgkv::rowenc::encode_row(&array.elems));
         }
         // Only the oid: the relation name is re-derived on read.
@@ -515,10 +515,8 @@ fn read_default_value(cur: &mut &[u8]) -> Result<Datum, KvError> {
             )
         }
         datum_tag::ARRAY => {
-            let code = take_u8(cur)?;
-            let elem = crabka_pgtypes::ElemType::from_code(code).ok_or_else(|| {
-                KvError::CorruptRow(format!("unknown array element type code {code}"))
-            })?;
+            let elem = crabka_pgtypes::ElemType::read_code(cur)
+                .ok_or_else(|| KvError::CorruptRow("unknown array element type code".into()))?;
             let elems = crabka_pgkv::rowenc::decode_row(read_str(cur)?)?;
             Datum::Array(crabka_pgtypes::ArrayValue::new(elem, elems))
         }
@@ -1833,6 +1831,15 @@ mod tests {
                 ColumnType::Array(elem),
             ));
         }
+        let range =
+            match ColumnType::builtin_range(crabka_pgtypes::oids::INT8RANGE).expect("int8range") {
+                ColumnType::Range(range) => range,
+                _ => unreachable!(),
+            };
+        columns.push(Column::new(
+            "ranges",
+            ColumnType::Array(ElemType::Range(range)),
+        ));
         let bytes = serialize_schema(table_id, &columns, TableOptions::default(), None, &[]);
         let (id, cols, _options, _foreign, _) = deserialize_schema(&bytes).expect("decode");
         assert!(id == table_id);
