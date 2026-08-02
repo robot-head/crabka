@@ -1178,15 +1178,16 @@ jobs:
         run: |
           docker pull mirror.gcr.io/confluentinc/cp-kafka:7.4.0
           docker pull mirror.gcr.io/apache/kafka:4.0.0
-      # The nextest `broker-jvm-acceptance` test group serializes these tests:
-      # they bind the Rust broker to a fixed host port so the Dockerized Kafka
-      # tools have a known bootstrap target. Parallel execution would hit `AddrInUse`.
+      # These tests bind the Rust broker to a fixed host port so the Dockerized
+      # Kafka tools have a known bootstrap target. Serialize both Bazel targets
+      # and their libtest cases to avoid `AddrInUse`.
       - name: Broker JVM acceptance coverage
         run: |
           mkdir -p coverage
           aspect test //crates/broker:jvm_acceptance //crates/broker:jvm_consumer_group_next_gen \
             --coverage --coverage-report=coverage/broker-jvm-acceptance.lcov \
-            --bazel-flag=--config=ci --bazel-flag=--test_arg=--ignored
+            --bazel-flag=--config=ci --bazel-flag=--local_test_jobs=1 \
+            --bazel-flag=--test_arg=--ignored --bazel-flag=--test_arg=--test-threads=1
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
