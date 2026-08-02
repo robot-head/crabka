@@ -3341,6 +3341,7 @@ fn rewrite_statement_with_ctes(
             let source_table = match source {
                 crabka_pgparser::ast::MergeSource::Table { name, alias } => TableExpr::Table {
                     name: name.clone(),
+                    only: false,
                     alias: alias.clone(),
                     columns: None,
                     sample: None,

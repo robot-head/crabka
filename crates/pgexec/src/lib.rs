@@ -60,6 +60,7 @@ mod grouping;
 mod gtm;
 pub mod hlc;
 pub mod hlc_source;
+mod inheritance;
 mod join;
 mod json_fn;
 mod jsonpath;
@@ -3141,7 +3142,7 @@ mod cursor_terminal_tests {
 
 #[cfg(test)]
 mod point_type_tests {
-    use crabka_pgwire::engine::{Engine, Session};
+    use crabka_pgwire::engine::{Engine, QueryResult, Session};
 
     use super::SqlEngine;
 
@@ -3159,6 +3160,47 @@ mod point_type_tests {
             )
             .await
             .expect("point values round trip through a table");
+    }
+
+    #[tokio::test]
+    async fn inherited_tables_merge_columns_and_only_excludes_children() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        let mut notices = session.take_notices().expect("notice receiver");
+        session
+            .simple_query(
+                "CREATE TABLE parent_values (id int4, location point); \
+                 CREATE TABLE child_values (note text) INHERITS (parent_values); \
+                 CREATE TABLE sibling_values (extra text) INHERITS (parent_values); \
+                 CREATE TABLE grandchild_values () INHERITS (child_values, sibling_values); \
+                 INSERT INTO parent_values VALUES (1, '(0,0)'); \
+                 INSERT INTO child_values VALUES (2, '(1,1)', 'child')",
+            )
+            .await
+            .expect("create and populate inherited tables");
+        assert_eq!(
+            notices.try_recv().expect("id merge notice").message,
+            "merging multiple inherited definitions of column \"id\""
+        );
+        assert_eq!(
+            notices.try_recv().expect("location merge notice").message,
+            "merging multiple inherited definitions of column \"location\""
+        );
+
+        let all = session
+            .simple_query("SELECT id FROM parent_values ORDER BY id")
+            .await
+            .expect("scan inheritance tree");
+        let only = session
+            .simple_query("SELECT id FROM ONLY parent_values ORDER BY id")
+            .await
+            .expect("scan only parent");
+        let row_count = |results: &[QueryResult]| match results.last() {
+            Some(QueryResult::Rows { rows, .. }) => rows.len(),
+            other => panic!("expected rows, got {other:?}"),
+        };
+        assert_eq!(row_count(&all), 2);
+        assert_eq!(row_count(&only), 1);
     }
 }
 

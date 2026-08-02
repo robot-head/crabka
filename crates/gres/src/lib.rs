@@ -2927,6 +2927,15 @@ impl Session for RuntimeSession {
         }
     }
 
+    fn take_notices(
+        &mut self,
+    ) -> Option<tokio::sync::mpsc::Receiver<crabka_pgwire::error::PgError>> {
+        match self {
+            Self::Single(session) => session.take_notices(),
+            Self::Multi(session) => session.take_notices(),
+        }
+    }
+
     fn mark_statement_failed(&mut self) {
         match self {
             Self::Single(session) => session.mark_statement_failed(),

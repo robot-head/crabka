@@ -7000,6 +7000,8 @@ impl SqlSession {
                 _ => None,
             },
         };
+        let inheritance_notices =
+            crate::exec::inheritance_merge_notices(&*self.catalog_kv, &resolution, stmt)?;
         let (result, ops) = crate::exec::execute_ddl(&*self.catalog_kv, stmt, fctx)?;
         let catalog_before = if self.savepoints.is_empty() && !fires_event_triggers {
             BTreeMap::new()
@@ -7114,6 +7116,11 @@ impl SqlSession {
             return Err(error);
         }
         self.record_on_commit(stmt)?;
+        for column in inheritance_notices {
+            self.plpgsql_notice(PgError::notice(format!(
+                "merging multiple inherited definitions of column \"{column}\""
+            )))?;
+        }
         Ok(result)
     }
 
@@ -10204,6 +10211,7 @@ impl SqlSession {
                 alias,
                 columns: None,
                 sample: None,
+                ..
             },
         ] = select.from.as_slice()
         else {

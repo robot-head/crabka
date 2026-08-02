@@ -2307,6 +2307,8 @@ pub enum SelectItem {
 pub enum TableExpr {
     Table {
         name: RelationRef,
+        /// `ONLY relation` excludes inheritance descendants.
+        only: bool,
         alias: Option<String>,
         /// The alias's column list (`t AS q(x, y)`), which renames the leading
         /// columns. Shorter than the relation is allowed; longer is `42P10`.
