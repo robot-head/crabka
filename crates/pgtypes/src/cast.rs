@@ -568,19 +568,17 @@ fn cast_user_type(
     to: ColumnType,
     style: crate::encoding::OutputStyle<'_>,
 ) -> Result<Option<Datum>, TypeError> {
+    if let ColumnType::Range(range) = to {
+        let Datum::Text(text) = value else {
+            return Err(cannot_cast(value, to));
+        };
+        return crate::range::canonicalize(text, *range.subtype, style.time_zone)
+            .map(Datum::Text)
+            .map(Some);
+    }
     // Casting *to* a domain is casting to its base: the constraint check is the
     // executor's, and it needs the base value to test.
     if let ColumnType::Domain(domain) = to {
-        if let Some(range) =
-            crate::usertype::lookup_oid(domain.oid).and_then(|ty| ty.range().cloned())
-        {
-            let Datum::Text(text) = value else {
-                return Err(cannot_cast(value, to));
-            };
-            return crate::range::canonicalize(text, range.subtype, style.time_zone)
-                .map(Datum::Text)
-                .map(Some);
-        }
         return cast_in(value, *domain.base, style).map(Some);
     }
     match (value, to) {

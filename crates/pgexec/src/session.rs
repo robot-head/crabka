@@ -9838,11 +9838,13 @@ fn decode_binary_value(
         // parameter carries per-field type oids crabka would have to resolve
         // against its own type catalog, and mis-decoding one would be a silent
         // wrong answer. Text-format parameters of both types work.
-        ColumnType::Record(_) | ColumnType::Enum(_) => Err(ExecError::Unsupported(format!(
-            "binary-format parameters of type {} are not supported; send it in text format",
-            ty.name()
-        ))
-        .into_pg()),
+        ColumnType::Record(_) | ColumnType::Enum(_) | ColumnType::Range(_) => {
+            Err(ExecError::Unsupported(format!(
+                "binary-format parameters of type {} are not supported; send it in text format",
+                ty.name()
+            ))
+            .into_pg())
+        }
     }
 }
 

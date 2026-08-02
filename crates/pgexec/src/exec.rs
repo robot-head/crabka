@@ -12096,7 +12096,7 @@ fn pg_type_rows() -> Vec<Vec<Datum>> {
                 // ('b') with no domain base type, matching PostgreSQL 18's
                 // pg_type for these OIDs. Only `box` uses a typdelim other
                 // than ',', and crabka has no geometric types.
-                text("b"),
+                text(if ty.category == "R" { "r" } else { "b" }),
                 text(","),
                 int(ty.elem),
                 int(ty.array),
@@ -12779,6 +12779,54 @@ fn scalar_type_rows() -> &'static [BuiltinTypeRow] {
             elem: 0,
             array: crabka_pgtypes::oids::TSQUERYARRAY as i32,
         },
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::INT4RANGE as i32,
+            name: "int4range",
+            len: -1,
+            category: "R",
+            elem: 0,
+            array: crabka_pgtypes::oids::INT4RANGEARRAY as i32,
+        },
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::NUMRANGE as i32,
+            name: "numrange",
+            len: -1,
+            category: "R",
+            elem: 0,
+            array: crabka_pgtypes::oids::NUMRANGEARRAY as i32,
+        },
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::TSRANGE as i32,
+            name: "tsrange",
+            len: -1,
+            category: "R",
+            elem: 0,
+            array: crabka_pgtypes::oids::TSRANGEARRAY as i32,
+        },
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::TSTZRANGE as i32,
+            name: "tstzrange",
+            len: -1,
+            category: "R",
+            elem: 0,
+            array: crabka_pgtypes::oids::TSTZRANGEARRAY as i32,
+        },
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::DATERANGE as i32,
+            name: "daterange",
+            len: -1,
+            category: "R",
+            elem: 0,
+            array: crabka_pgtypes::oids::DATERANGEARRAY as i32,
+        },
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::INT8RANGE as i32,
+            name: "int8range",
+            len: -1,
+            category: "R",
+            elem: 0,
+            array: crabka_pgtypes::oids::INT8RANGEARRAY as i32,
+        },
     ]
 }
 
@@ -12839,6 +12887,47 @@ fn builtin_type_rows() -> &'static [BuiltinTypeRow] {
             elem: crabka_pgtypes::oids::TSQUERY as i32,
             array: 0,
         });
+        for (oid, name, elem) in [
+            (
+                crabka_pgtypes::oids::INT4RANGEARRAY,
+                "_int4range",
+                crabka_pgtypes::oids::INT4RANGE,
+            ),
+            (
+                crabka_pgtypes::oids::NUMRANGEARRAY,
+                "_numrange",
+                crabka_pgtypes::oids::NUMRANGE,
+            ),
+            (
+                crabka_pgtypes::oids::TSRANGEARRAY,
+                "_tsrange",
+                crabka_pgtypes::oids::TSRANGE,
+            ),
+            (
+                crabka_pgtypes::oids::TSTZRANGEARRAY,
+                "_tstzrange",
+                crabka_pgtypes::oids::TSTZRANGE,
+            ),
+            (
+                crabka_pgtypes::oids::DATERANGEARRAY,
+                "_daterange",
+                crabka_pgtypes::oids::DATERANGE,
+            ),
+            (
+                crabka_pgtypes::oids::INT8RANGEARRAY,
+                "_int8range",
+                crabka_pgtypes::oids::INT8RANGE,
+            ),
+        ] {
+            rows.push(BuiltinTypeRow {
+                oid: oid as i32,
+                name,
+                len: -1,
+                category: "A",
+                elem: elem as i32,
+                array: 0,
+            });
+        }
         rows.extend(crabka_pgtypes::ElemType::ALL.map(|elem| BuiltinTypeRow {
             oid: i32::try_from(elem.array_oid()).expect("array oid fits in int4"),
             name: array_typname(elem),
