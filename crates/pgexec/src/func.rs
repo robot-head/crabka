@@ -2424,6 +2424,7 @@ mod tests {
         assert_eq!(text("int4range(1, 4, '(]')"), "[2,5)");
         assert_eq!(text("int4range(int4range(1, 4))"), "[1,4)");
         assert_eq!(text("int4multirange()"), "{}");
+        assert_eq!(text("int4range(1, 4)::int4multirange"), "{[1,4)}");
         assert_eq!(
             text("int4multirange(int4range(5, 8), int4range(1, 5))"),
             "{[1,8)}"
@@ -2434,6 +2435,20 @@ mod tests {
         );
         assert_eq!(
             ev("int4range(1, 3) && int4multirange(int4range(2, 4), int4range(6, 8))"),
+            Datum::Bool(true)
+        );
+        assert_eq!(
+            ev("int4multirange(int4range(2, 4), int4range(6, 8)) @> '3'"),
+            Datum::Bool(true)
+        );
+        assert_eq!(
+            ev("int4multirange(int4range(2, 4), int4range(6, 8)) << int4range(9, 10)"),
+            Datum::Bool(true)
+        );
+        assert_eq!(
+            ev(
+                "int4multirange(int4range(2, 4), int4range(6, 8)) &< int4multirange(int4range(7, 10))"
+            ),
             Datum::Bool(true)
         );
         assert_eq!(ev("lower(int4range(1, 4))"), Datum::Int4(1));

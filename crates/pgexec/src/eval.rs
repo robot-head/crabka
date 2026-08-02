@@ -958,7 +958,7 @@ fn coerce_untyped_literal_operands(
     // Only a jsonb counterpart resolves a bare literal; an array must not, so
     // that `ARRAY['a'] || 'b'` still appends an element (PostgreSQL's
     // `anyarray || anyelement`).
-    let target = |other: &Datum| -> Option<ColumnType> {
+    let target = |other: &Datum, unknown_is_left: bool| -> Option<ColumnType> {
         // A comparison against a date/time value resolves the literal to that
         // type, which is how `f1 < '05:06:07'` works on a `time` column.
         if matches!(
@@ -1017,6 +1017,12 @@ fn coerce_untyped_literal_operands(
             };
         }
         if let Datum::Multirange(multirange) = other {
+            if matches!(
+                (op, unknown_is_left),
+                (BinaryOp::Contains, false) | (BinaryOp::ContainedBy, true)
+            ) {
+                return Some(*multirange.ty.range.subtype);
+            }
             return match op {
                 BinaryOp::Contains
                 | BinaryOp::ContainedBy
@@ -1064,16 +1070,20 @@ fn coerce_untyped_literal_operands(
             _ => None,
         }
     };
-    let convert = |e: &Expr, v: &Datum, other: &Datum| -> Result<Option<Datum>, ExecError> {
+    let convert = |e: &Expr,
+                   v: &Datum,
+                   other: &Datum,
+                   unknown_is_left: bool|
+     -> Result<Option<Datum>, ExecError> {
         if !matches!(e, Expr::StringLiteral(_)) || !matches!(v, Datum::Text(_)) {
             return Ok(None);
         }
-        match target(other) {
+        match target(other, unknown_is_left) {
             Some(ty) => Ok(Some(crabka_pgtypes::cast::cast(v, ty, &ctx.time_zone)?)),
             None => Ok(None),
         }
     };
-    Ok((convert(left, l, r)?, convert(right, r, l)?))
+    Ok((convert(left, l, r, true)?, convert(right, r, l, false)?))
 }
 
 /// Apply a binary operator to two already-evaluated operands. Shared by scalar
@@ -1185,49 +1195,10 @@ pub(crate) fn apply_binary(
         | BinaryOp::Adjacent
         | BinaryOp::Shl
         | BinaryOp::Shr
-            if matches!((l, r), (Datum::Range(_), Datum::Range(_))) =>
+            if matches!(l, Datum::Range(_) | Datum::Multirange(_))
+                && matches!(r, Datum::Range(_) | Datum::Multirange(_)) =>
         {
-            let (Datum::Range(a), Datum::Range(b)) = (l, r) else {
-                unreachable!()
-            };
-            Ok(Datum::Bool(match op {
-                BinaryOp::DoesNotExtendRight => crabka_pgtypes::range::does_not_extend_right(a, b)?,
-                BinaryOp::DoesNotExtendLeft => crabka_pgtypes::range::does_not_extend_left(a, b)?,
-                BinaryOp::Adjacent => crabka_pgtypes::range::adjacent(a, b)?,
-                BinaryOp::Shl => crabka_pgtypes::range::strictly_left(a, b)?,
-                BinaryOp::Shr => crabka_pgtypes::range::strictly_right(a, b)?,
-                _ => unreachable!(),
-            }))
-        }
-        BinaryOp::DoesNotExtendRight
-        | BinaryOp::DoesNotExtendLeft
-        | BinaryOp::Adjacent
-        | BinaryOp::Shl
-        | BinaryOp::Shr
-            if matches!((l, r), (Datum::Range(_), Datum::Multirange(_))) =>
-        {
-            let (Datum::Range(range), Datum::Multirange(multirange)) = (l, r) else {
-                unreachable!()
-            };
-            let (relation, use_last) = match op {
-                BinaryOp::DoesNotExtendRight => {
-                    (crabka_pgtypes::range::does_not_extend_right as _, true)
-                }
-                BinaryOp::DoesNotExtendLeft => {
-                    (crabka_pgtypes::range::does_not_extend_left as _, false)
-                }
-                BinaryOp::Shl => (crabka_pgtypes::range::strictly_left as _, false),
-                BinaryOp::Shr => (crabka_pgtypes::range::strictly_right as _, true),
-                BinaryOp::Adjacent => {
-                    return Ok(Datum::Bool(crabka_pgtypes::multirange::adjacent_range(
-                        multirange, range,
-                    )?));
-                }
-                _ => unreachable!(),
-            };
-            Ok(Datum::Bool(crabka_pgtypes::multirange::range_relation(
-                range, multirange, relation, use_last,
-            )?))
+            Ok(Datum::Bool(apply_range_directional(op, l, r)?))
         }
         BinaryOp::DoesNotExtendRight | BinaryOp::DoesNotExtendLeft | BinaryOp::Adjacent => {
             if l.is_null() || r.is_null() {
@@ -1349,6 +1320,61 @@ fn apply_containment(op: BinaryOp, l: &Datum, r: &Datum) -> Result<Datum, ExecEr
     Err(undefined_operator_for(op, l, r))
 }
 
+fn apply_range_directional(op: BinaryOp, l: &Datum, r: &Datum) -> Result<bool, ExecError> {
+    let (left_last, right_last, relation): (
+        bool,
+        bool,
+        fn(
+            &crabka_pgtypes::RangeValue,
+            &crabka_pgtypes::RangeValue,
+        ) -> Result<bool, crabka_pgtypes::TypeError>,
+    ) = match op {
+        BinaryOp::DoesNotExtendRight => (
+            true,
+            true,
+            crabka_pgtypes::range::does_not_extend_right as _,
+        ),
+        BinaryOp::DoesNotExtendLeft => (
+            false,
+            false,
+            crabka_pgtypes::range::does_not_extend_left as _,
+        ),
+        BinaryOp::Shl => (true, false, crabka_pgtypes::range::strictly_left as _),
+        BinaryOp::Shr => (false, true, crabka_pgtypes::range::strictly_right as _),
+        BinaryOp::Adjacent => {
+            let Some(left_first) = range_boundary(l, false) else {
+                return Ok(false);
+            };
+            let Some(left_last) = range_boundary(l, true) else {
+                return Ok(false);
+            };
+            let Some(right_first) = range_boundary(r, false) else {
+                return Ok(false);
+            };
+            let Some(right_last) = range_boundary(r, true) else {
+                return Ok(false);
+            };
+            return Ok(crabka_pgtypes::range::adjacent(left_last, right_first)?
+                || crabka_pgtypes::range::adjacent(left_first, right_last)?);
+        }
+        _ => unreachable!(),
+    };
+    let (Some(left), Some(right)) = (range_boundary(l, left_last), range_boundary(r, right_last))
+    else {
+        return Ok(false);
+    };
+    Ok(relation(left, right)?)
+}
+
+fn range_boundary(value: &Datum, last: bool) -> Option<&crabka_pgtypes::RangeValue> {
+    match value {
+        Datum::Range(range) if !range.empty => Some(range),
+        Datum::Multirange(multirange) if last => multirange.ranges.last(),
+        Datum::Multirange(multirange) => multirange.ranges.first(),
+        _ => None,
+    }
+}
+
 /// Which of PostgreSQL's concatenation operators a `||` resolves to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConcatKind {
@@ -1463,6 +1489,24 @@ fn adopt_json_operand_types(
         }
         if matches!(left, Expr::StringLiteral(_)) && matches!(rt, ColumnType::Range(_)) {
             return (rt, rt);
+        }
+        if let ColumnType::Multirange(multirange) = lt
+            && matches!(right, Expr::StringLiteral(_))
+        {
+            return if op == BinaryOp::Contains {
+                (lt, *multirange.range.subtype)
+            } else {
+                (lt, lt)
+            };
+        }
+        if let ColumnType::Multirange(multirange) = rt
+            && matches!(left, Expr::StringLiteral(_))
+        {
+            return if op == BinaryOp::ContainedBy {
+                (*multirange.range.subtype, rt)
+            } else {
+                (rt, rt)
+            };
         }
     }
     if !matches!(right, Expr::StringLiteral(_)) || lt != ColumnType::Jsonb {
@@ -2342,8 +2386,10 @@ fn infer_binary_type(
         BinaryOp::DoesNotExtendRight | BinaryOp::DoesNotExtendLeft | BinaryOp::Adjacent => {
             let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
             if range_family_compatible(lt, rt)
-                || matches!(lt, ColumnType::Range(_)) && is_unknown_literal(right)
-                || matches!(rt, ColumnType::Range(_)) && is_unknown_literal(left)
+                || matches!(lt, ColumnType::Range(_) | ColumnType::Multirange(_))
+                    && is_unknown_literal(right)
+                || matches!(rt, ColumnType::Range(_) | ColumnType::Multirange(_))
+                    && is_unknown_literal(left)
             {
                 Ok(ColumnType::Bool)
             } else {
@@ -2354,8 +2400,10 @@ fn infer_binary_type(
             let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
             if matches!(op, BinaryOp::Shl | BinaryOp::Shr)
                 && (range_family_compatible(lt, rt)
-                    || matches!(lt, ColumnType::Range(_)) && is_unknown_literal(right)
-                    || matches!(rt, ColumnType::Range(_)) && is_unknown_literal(left))
+                    || matches!(lt, ColumnType::Range(_) | ColumnType::Multirange(_))
+                        && is_unknown_literal(right)
+                    || matches!(rt, ColumnType::Range(_) | ColumnType::Multirange(_))
+                        && is_unknown_literal(left))
             {
                 return Ok(ColumnType::Bool);
             }
