@@ -4694,6 +4694,12 @@ impl SqlSession {
             UtilityStatement::Checkpoint => Ok(QueryResult::Command {
                 tag: "CHECKPOINT".into(),
             }),
+            UtilityStatement::CreateTablespace => Ok(QueryResult::Command {
+                tag: "CREATE TABLESPACE".into(),
+            }),
+            UtilityStatement::CreateOperatorClass => Ok(QueryResult::Command {
+                tag: "CREATE OPERATOR CLASS".into(),
+            }),
             UtilityStatement::AlterSystem { name } => {
                 // `ALTER SYSTEM` never changes the running session in PostgreSQL
                 // either, but it does validate the parameter name.

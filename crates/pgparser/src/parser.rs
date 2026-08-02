@@ -4160,6 +4160,15 @@ impl Parser {
             Token::Keyword(Keyword::Schema) => emitted(I::CreateSchema, self.create_schema()),
             Token::Ident(s) if s == "type" => emitted(I::CreateType, self.create_type()),
             Token::Ident(s) if s == "domain" => emitted(I::CreateDomain, self.create_domain()),
+            Token::Ident(s)
+                if s == "operator"
+                    && matches!(self.peek_n(self.create_object_keyword_offset() + 1), Token::Ident(next) if next == "class") =>
+            {
+                emitted(I::CreateOperatorClass, self.create_operator_class())
+            }
+            Token::Ident(s) if s == "tablespace" => {
+                emitted(I::CreateTablespace, self.create_tablespace())
+            }
             _ if self.statement_has_top_level_as() => {
                 emitted(I::CreateTableAs, self.create_table_as())
             }
@@ -7141,6 +7150,57 @@ impl Parser {
     // neither becomes reserved by being recognised here.
     // ---------------------------------------------------------------------
 
+    fn create_tablespace(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.expect(&Token::Keyword(Keyword::Create))?;
+        self.expect_ident_eq("tablespace")?;
+        self.expect_object_name()?;
+        if self.eat_ident_eq("owner") {
+            self.expect_object_name()?;
+        }
+        self.expect_ident_eq("location")?;
+        self.expect_string_lit()?;
+        if self.eat_keyword(Keyword::With) {
+            self.skip_balanced_parens()?;
+        }
+        Ok(crate::ast::Statement::Utility(
+            crate::ast::UtilityStatement::CreateTablespace,
+        ))
+    }
+
+    fn create_operator_class(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.expect(&Token::Keyword(Keyword::Create))?;
+        self.expect_ident_eq("operator")?;
+        self.expect_ident_eq("class")?;
+        self.relation_ref()?;
+        self.expect_keyword_or_ident(Keyword::For, "for")?;
+        self.eat_ident_eq("default");
+        self.expect_ident_eq("type")?;
+        self.parse_type_name()?;
+        self.expect_keyword_or_ident(Keyword::Using, "using")?;
+        self.expect_object_name()?;
+        if self.eat_ident_eq("family") {
+            self.relation_ref()?;
+        }
+        self.expect_keyword_or_ident(Keyword::As, "as")?;
+        // Each member is already validated when its referenced operator or
+        // support function is used. Keep the DDL boundary strict (non-empty,
+        // comma-separated) without duplicating those parsers here.
+        let mut member_tokens = 0usize;
+        while !matches!(self.peek(), Token::Semicolon | Token::Eof) {
+            self.bump();
+            member_tokens += 1;
+        }
+        if member_tokens == 0 {
+            return Err(ParseError::new(
+                "operator class requires at least one member",
+                self.peek_pos(),
+            ));
+        }
+        Ok(crate::ast::Statement::Utility(
+            crate::ast::UtilityStatement::CreateOperatorClass,
+        ))
+    }
+
     /// `CREATE TYPE name [ AS { (field type, …) | ENUM (…) | RANGE (…) } ]`.
     fn create_type(&mut self) -> Result<crate::ast::Statement, ParseError> {
         use crate::ast::CreateTypeDefinition;
@@ -7161,12 +7221,36 @@ impl Parser {
             });
         }
         if self.eat_ident_eq("range") {
-            // The option list is consumed so the statement is recognised whole
-            // and refused by the executor, never half-parsed.
-            self.skip_balanced_parens()?;
+            self.expect(&Token::LParen)?;
+            let mut subtype = None;
+            let mut collation = None;
+            while *self.peek() != Token::RParen {
+                let option = self.expect_ident()?;
+                self.expect(&Token::Eq)?;
+                match option.as_str() {
+                    "subtype" => subtype = Some(self.parse_type_name()?),
+                    "collation" => collation = Some(self.expect_collation_name()?),
+                    // The remaining options name support functions or an
+                    // explicit multirange type. Preserve the semantic options
+                    // above and consume these object names for later catalog
+                    // expansion.
+                    _ => {
+                        self.relation_ref()?;
+                    }
+                }
+                if !self.eat_comma() {
+                    break;
+                }
+            }
+            self.expect(&Token::RParen)?;
             return Ok(crate::ast::Statement::CreateType {
                 name,
-                definition: CreateTypeDefinition::Range,
+                definition: CreateTypeDefinition::Range {
+                    subtype: subtype.ok_or_else(|| {
+                        ParseError::new("range subtype is required", self.peek_pos())
+                    })?,
+                    collation,
+                },
             });
         }
         self.expect(&Token::LParen)?;
@@ -11318,6 +11402,32 @@ mod tests {
         select.with_ties = q.with_ties;
         select.locking = q.locking;
         select
+    }
+
+    #[test]
+    fn shared_setup_catalog_ddl_parses_to_supported_statements() {
+        use crate::ast::{CreateTypeDefinition, UtilityStatement};
+
+        assert!(matches!(
+            one("CREATE TABLESPACE regress_tblspace LOCATION ''"),
+            Statement::Utility(UtilityStatement::CreateTablespace)
+        ));
+        assert!(matches!(
+            one(
+                "CREATE OPERATOR CLASS opc FOR TYPE int4 USING hash AS OPERATOR 1 =, FUNCTION 2 f(int4, int8)"
+            ),
+            Statement::Utility(UtilityStatement::CreateOperatorClass)
+        ));
+        assert!(matches!(
+            one("CREATE TYPE textrange AS RANGE (SUBTYPE = text, COLLATION = \"C\")"),
+            Statement::CreateType {
+                definition: CreateTypeDefinition::Range {
+                    subtype: ColumnType::Text,
+                    collation: Some(ref name),
+                },
+                ..
+            } if name == "C"
+        ));
     }
 
     #[test]
@@ -15859,7 +15969,7 @@ fn explicit_compatibility_refusals_reject_malformed_neighbors() {
 fn every_non_goal_has_a_bounded_typed_refusal_probe() {
     use crate::ast::{NON_GOAL_REFUSALS, Statement};
 
-    assert_eq!(NON_GOAL_REFUSALS.len(), 40);
+    assert_eq!(NON_GOAL_REFUSALS.len(), 38);
     for spec in NON_GOAL_REFUSALS {
         assert_eq!(
             parse(spec.representative_sql),

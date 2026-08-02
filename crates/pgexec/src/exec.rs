@@ -12017,6 +12017,7 @@ fn user_type_rows() -> Vec<Vec<Datum>> {
                     "C",
                 ),
                 usertype::UserTypeBody::Enum(_) => (0, 0, "E"),
+                usertype::UserTypeBody::Range(_) => (0, 0, "R"),
                 usertype::UserTypeBody::Domain(domain) => (
                     0,
                     i32::try_from(domain.base.oid()).unwrap_or(0),
