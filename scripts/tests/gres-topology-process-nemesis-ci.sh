@@ -2,8 +2,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-cargo build --locked -p crabka-cli -p crabka-gres
-cargo test --locked -p crabka-gres --test topology_process_nemesis --no-run
+if [[ "${CRABKA_GRES_SKIP_BUILD:-0}" != "1" ]]; then
+  cargo build --locked -p crabka-cli -p crabka-gres
+  cargo test --locked -p crabka-gres --test topology_process_nemesis --no-run
+fi
 mkdir -p target/g8-topology-process-nemesis
 evidence_path="$PWD/target/g8-topology-process-nemesis/move-foundation.json"
 CRABKA_G8_PROCESS_NEMESIS=1 \

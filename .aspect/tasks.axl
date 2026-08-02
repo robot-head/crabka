@@ -247,22 +247,28 @@ def _gres(ctx: TaskContext) -> int:
         "crabka-gres-driver-golden-replay": "bazel-bin/crates/gres-conformance/crabka-gres-driver-golden-replay__bin",
         "crabka-gres-driver-smoke": "bazel-bin/crates/gres-conformance/crabka-gres-driver-smoke__bin",
     }
+    build_targets = [
+        "//crates/cli:crabka__bin",
+        "//crates/broker:crabka-broker__bin",
+        "//crates/gres:crabka-gres__bin",
+        "//crates/gres-activator:crabka-gres-activator__bin",
+        "//crates/gres-conformance:crabka-gres-conformance__bin",
+        "//crates/gres-conformance:crabka-gres-driver-golden-replay__bin",
+        "//crates/gres-conformance:crabka-gres-driver-smoke__bin",
+    ]
+    required_binaries = binaries.keys()
+    if ctx.args.suite == "topology-process-nemesis":
+        build_targets = ["//crates/cli:crabka__bin"]
+        required_binaries = ["crabka"]
     if _run(ctx, "test", ["-x", "target/debug/crabka-gres-driver-smoke"]) != 0:
-        code = _run(ctx, "bazel", ["build", "--config=ci"] + [
-            "//crates/cli:crabka__bin",
-            "//crates/broker:crabka-broker__bin",
-            "//crates/gres:crabka-gres__bin",
-            "//crates/gres-activator:crabka-gres-activator__bin",
-            "//crates/gres-conformance:crabka-gres-conformance__bin",
-            "//crates/gres-conformance:crabka-gres-driver-golden-replay__bin",
-            "//crates/gres-conformance:crabka-gres-driver-smoke__bin",
-        ])
+        code = _run(ctx, "bazel", ["build", "--config=ci"] + build_targets)
         if code != 0:
             return code
         code = _run(ctx, "mkdir", ["-p", "target/debug"])
         if code != 0:
             return code
-        for name, source in binaries.items():
+        for name in required_binaries:
+            source = binaries[name]
             code = _run(ctx, "cp", [source, "target/debug/" + name])
             if code != 0:
                 return code
