@@ -9831,6 +9831,7 @@ fn decode_binary_value(
                 .map_err(ExecError::into_pg)
         }
         ColumnType::Array(elem) => decode_array_binary(value, elem, time_zone),
+        ColumnType::Range(range) => decode_range_binary(value, range, time_zone),
         // A domain's binary representation is its base type's, so it decodes as
         // the base and picks up its constraints on assignment.
         ColumnType::Domain(domain) => decode_binary_value(value, *domain.base, time_zone),
@@ -9838,14 +9839,58 @@ fn decode_binary_value(
         // parameter carries per-field type oids crabka would have to resolve
         // against its own type catalog, and mis-decoding one would be a silent
         // wrong answer. Text-format parameters of both types work.
-        ColumnType::Record(_) | ColumnType::Enum(_) | ColumnType::Range(_) => {
-            Err(ExecError::Unsupported(format!(
-                "binary-format parameters of type {} are not supported; send it in text format",
-                ty.name()
-            ))
-            .into_pg())
-        }
+        ColumnType::Record(_) | ColumnType::Enum(_) => Err(ExecError::Unsupported(format!(
+            "binary-format parameters of type {} are not supported; send it in text format",
+            ty.name()
+        ))
+        .into_pg()),
     }
+}
+
+fn decode_range_binary(
+    value: &[u8],
+    ty: crabka_pgtypes::usertype::RangeRef,
+    time_zone: &jiff::tz::TimeZone,
+) -> Result<Datum, PgError> {
+    let Some((&flags, mut cur)) = value.split_first() else {
+        return Err(malformed_binary_parameter());
+    };
+    if flags & !0x1f != 0 {
+        return Err(malformed_binary_parameter());
+    }
+    let empty = flags & 0x01 != 0;
+    let mut bound = |infinite: u8| -> Result<Option<Box<Datum>>, PgError> {
+        if empty || flags & infinite != 0 {
+            return Ok(None);
+        }
+        if cur.len() < 4 {
+            return Err(malformed_binary_parameter());
+        }
+        let len = usize::try_from(i32::from_be_bytes(cur[..4].try_into().expect("4 bytes")))
+            .map_err(|_| malformed_binary_parameter())?;
+        cur = &cur[4..];
+        if cur.len() < len {
+            return Err(malformed_binary_parameter());
+        }
+        let (raw, rest) = cur.split_at(len);
+        cur = rest;
+        decode_binary_value(raw, *ty.subtype, time_zone)
+            .map(Box::new)
+            .map(Some)
+    };
+    let lower = bound(0x08)?;
+    let upper = bound(0x10)?;
+    if !cur.is_empty() {
+        return Err(malformed_binary_parameter());
+    }
+    Ok(Datum::Range(crabka_pgtypes::RangeValue {
+        ty,
+        lower,
+        upper,
+        lower_inclusive: !empty && flags & 0x02 != 0,
+        upper_inclusive: !empty && flags & 0x04 != 0,
+        empty,
+    }))
 }
 
 /// The lowest byte a JSON document can start with (`\t`). Every smaller byte is

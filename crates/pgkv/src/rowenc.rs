@@ -49,6 +49,8 @@ mod tag {
     pub const POINT: u8 = 22;
     /// Geometric path. Append-only.
     pub const PATH: u8 = 23;
+    /// A range (`[24][u32 type oid][u8 flags][tagged finite bounds...]`).
+    pub const RANGE: u8 = 24;
 }
 
 /// Encodes one row in the current storage format.
@@ -201,6 +203,22 @@ fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
             }
             Datum::TsVector(vector) => encode_search(tag::TSVECTOR, &vector.to_string(), out),
             Datum::TsQuery(query) => encode_search(tag::TSQUERY, &query.to_string(), out),
+            Datum::Range(range) => {
+                out.push(tag::RANGE);
+                out.extend_from_slice(&range.ty.oid.to_be_bytes());
+                let mut flags = u8::from(range.empty);
+                flags |= u8::from(range.lower_inclusive) << 1;
+                flags |= u8::from(range.upper_inclusive) << 2;
+                flags |= u8::from(range.lower.is_none()) << 3;
+                flags |= u8::from(range.upper.is_none()) << 4;
+                out.push(flags);
+                if let Some(lower) = &range.lower {
+                    encode_fields(std::slice::from_ref(lower.as_ref()), out);
+                }
+                if let Some(upper) = &range.upper {
+                    encode_fields(std::slice::from_ref(upper.as_ref()), out);
+                }
+            }
         }
     }
 }
@@ -425,6 +443,39 @@ fn decode_field(cur: &mut &[u8]) -> Result<Datum, KvError> {
             .parse()
             .map(Datum::TsQuery)
             .map_err(|error| KvError::CorruptRow(format!("corrupt tsquery: {error}")))?,
+        tag::RANGE => {
+            let oid = u32::try_from(take_u32_len(cur)?)
+                .map_err(|_| KvError::CorruptRow("range type oid out of range".into()))?;
+            let ty = match crabka_pgtypes::ColumnType::builtin_range(oid)
+                .or_else(|| crabka_pgtypes::usertype::lookup_oid(oid).map(|ty| ty.column_type()))
+            {
+                Some(crabka_pgtypes::ColumnType::Range(range)) => range,
+                _ => {
+                    return Err(KvError::CorruptRow(format!(
+                        "range type {oid} is not registered"
+                    )));
+                }
+            };
+            let flags = take_u8(cur)?;
+            if flags & !0x1f != 0 {
+                return Err(KvError::CorruptRow("invalid range flags".into()));
+            }
+            let empty = flags & 0x01 != 0;
+            let lower = (!empty && flags & 0x08 == 0)
+                .then(|| decode_field(cur).map(Box::new))
+                .transpose()?;
+            let upper = (!empty && flags & 0x10 == 0)
+                .then(|| decode_field(cur).map(Box::new))
+                .transpose()?;
+            Datum::Range(crabka_pgtypes::RangeValue {
+                ty,
+                lower,
+                upper,
+                lower_inclusive: !empty && flags & 0x02 != 0,
+                upper_inclusive: !empty && flags & 0x04 != 0,
+                empty,
+            })
+        }
         other => return Err(KvError::CorruptRow(format!("unknown field tag {other}"))),
     })
 }
@@ -482,6 +533,12 @@ mod tests {
 
     #[test]
     fn roundtrip_all_datum_kinds_including_null() {
+        let crabka_pgtypes::ColumnType::Range(int4range) =
+            crabka_pgtypes::ColumnType::builtin_range(crabka_pgtypes::oids::INT4RANGE)
+                .expect("built-in range")
+        else {
+            unreachable!()
+        };
         let row = vec![
             Datum::Null,
             Datum::Bool(true),
@@ -498,6 +555,10 @@ mod tests {
             Datum::Float8(-0.0),
             Datum::Numeric(crabka_pgtypes::numeric::parse("1.50").expect("n")),
             Datum::Numeric(crabka_pgtypes::numeric::parse("-9999999999999999999.0001").expect("n")),
+            Datum::Range(
+                crabka_pgtypes::range::parse("[1,4)", int4range, &jiff::tz::TimeZone::UTC)
+                    .expect("range"),
+            ),
         ];
         let bytes = encode_row(&row);
         assert_eq!(decode_row(&bytes).expect("decode"), row);

@@ -103,6 +103,7 @@ mod datum_tag {
     pub const REGCLASS: u8 = 11;
     pub const TSVECTOR: u8 = 12;
     pub const TSQUERY: u8 = 13;
+    pub const RANGE: u8 = 14;
 }
 
 mod type_tag {
@@ -438,6 +439,13 @@ fn write_default_value(out: &mut Vec<u8>, default: &Datum) {
             out.push(datum_tag::TSQUERY);
             write_str(out, &value.to_string());
         }
+        Datum::Range(_) => {
+            out.push(datum_tag::RANGE);
+            write_bytes(
+                out,
+                &crabka_pgkv::rowenc::encode_row(std::slice::from_ref(default)),
+            );
+        }
         Datum::Date(_)
         | Datum::Point(_)
         | Datum::Path(_)
@@ -528,6 +536,13 @@ fn read_default_value(cur: &mut &[u8]) -> Result<Datum, KvError> {
             Datum::TsQuery(read_string(cur)?.parse().map_err(|error| {
                 KvError::CorruptRow(format!("invalid tsquery default: {error}"))
             })?)
+        }
+        datum_tag::RANGE => {
+            let mut values = crabka_pgkv::rowenc::decode_row(read_str(cur)?)?;
+            if values.len() != 1 || !matches!(values.first(), Some(Datum::Range(_))) {
+                return Err(KvError::CorruptRow("invalid range default".into()));
+            }
+            values.pop().expect("length checked")
         }
         tag => {
             return Err(KvError::CorruptRow(format!(

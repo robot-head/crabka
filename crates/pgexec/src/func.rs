@@ -100,6 +100,15 @@ enum ScalarFunc {
     /// `pg_input_is_valid(text, text)`: would the type's input function accept
     /// this string?
     PgInputIsValid,
+    RangeConstructor(u32),
+    IsEmpty,
+    LowerInc,
+    LowerInf,
+    UpperInc,
+    UpperInf,
+    RangeContains,
+    RangeContainedBy,
+    RangeOverlaps,
     PgTableIsVisible,
     NextVal,
     CurrVal,
@@ -203,6 +212,20 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "format_type" => ScalarFunc::FormatType,
         "pg_typeof" => ScalarFunc::PgTypeof,
         "pg_input_is_valid" => ScalarFunc::PgInputIsValid,
+        "int4range" => ScalarFunc::RangeConstructor(crabka_pgtypes::oids::INT4RANGE),
+        "numrange" => ScalarFunc::RangeConstructor(crabka_pgtypes::oids::NUMRANGE),
+        "tsrange" => ScalarFunc::RangeConstructor(crabka_pgtypes::oids::TSRANGE),
+        "tstzrange" => ScalarFunc::RangeConstructor(crabka_pgtypes::oids::TSTZRANGE),
+        "daterange" => ScalarFunc::RangeConstructor(crabka_pgtypes::oids::DATERANGE),
+        "int8range" => ScalarFunc::RangeConstructor(crabka_pgtypes::oids::INT8RANGE),
+        "isempty" => ScalarFunc::IsEmpty,
+        "lower_inc" => ScalarFunc::LowerInc,
+        "lower_inf" => ScalarFunc::LowerInf,
+        "upper_inc" => ScalarFunc::UpperInc,
+        "upper_inf" => ScalarFunc::UpperInf,
+        "range_contains" => ScalarFunc::RangeContains,
+        "range_contained_by" => ScalarFunc::RangeContainedBy,
+        "range_overlaps" => ScalarFunc::RangeOverlaps,
         "pg_table_is_visible" => ScalarFunc::PgTableIsVisible,
         "nextval" => ScalarFunc::NextVal,
         "currval" => ScalarFunc::CurrVal,
@@ -321,8 +344,13 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
         }
         ScalarFunc::Upper | ScalarFunc::Lower => {
             require_arity(fc, n == 1)?;
-            require_text(&args[0], scope)?;
-            Ok(ColumnType::Text)
+            let ty = crate::eval::infer_type(&args[0], scope)?;
+            if let ColumnType::Range(range) = ty {
+                Ok(*range.subtype)
+            } else {
+                require_text(&args[0], scope)?;
+                Ok(ColumnType::Text)
+            }
         }
         ScalarFunc::Btrim | ScalarFunc::Ltrim | ScalarFunc::Rtrim => {
             require_arity(fc, n == 1 || n == 2)?;
@@ -581,6 +609,28 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
             require_text(&args[1], scope)?;
             Ok(ColumnType::Bool)
         }
+        ScalarFunc::RangeConstructor(oid) => {
+            require_arity(fc, n == 2 || n == 3)?;
+            Ok(ColumnType::builtin_range(oid).expect("known range constructor"))
+        }
+        ScalarFunc::IsEmpty
+        | ScalarFunc::LowerInc
+        | ScalarFunc::LowerInf
+        | ScalarFunc::UpperInc
+        | ScalarFunc::UpperInf => {
+            require_arity(fc, n == 1)?;
+            if !matches!(
+                crate::eval::infer_type(&args[0], scope)?,
+                ColumnType::Range(_)
+            ) {
+                return Err(no_matching_function());
+            }
+            Ok(ColumnType::Bool)
+        }
+        ScalarFunc::RangeContains | ScalarFunc::RangeContainedBy | ScalarFunc::RangeOverlaps => {
+            require_arity(fc, n == 2)?;
+            Ok(ColumnType::Bool)
+        }
         ScalarFunc::PgTableIsVisible => {
             require_arity(fc, n == 1)?;
             require_int(&args[0], scope)?;
@@ -807,6 +857,9 @@ fn eval_eager(
         }
         return Ok(Datum::Text(s));
     }
+    if let ScalarFunc::RangeConstructor(oid) = f {
+        return eval_range_constructor(oid, fc, vals, ctx);
+    }
     // Strict: a NULL argument short-circuits to NULL.
     if vals.iter().any(Datum::is_null) {
         return Ok(Datum::Null);
@@ -824,11 +877,57 @@ fn eval_eager(
         }
         ScalarFunc::Upper => {
             require_arity(fc, vals.len() == 1)?;
-            Ok(Datum::Text(text_arg(&vals[0])?.to_uppercase()))
+            match &vals[0] {
+                Datum::Range(range) => Ok(range
+                    .upper
+                    .as_deref()
+                    .filter(|_| !range.empty)
+                    .cloned()
+                    .unwrap_or(Datum::Null)),
+                value => Ok(Datum::Text(text_arg(value)?.to_uppercase())),
+            }
         }
         ScalarFunc::Lower => {
             require_arity(fc, vals.len() == 1)?;
-            Ok(Datum::Text(text_arg(&vals[0])?.to_lowercase()))
+            match &vals[0] {
+                Datum::Range(range) => Ok(range
+                    .lower
+                    .as_deref()
+                    .filter(|_| !range.empty)
+                    .cloned()
+                    .unwrap_or(Datum::Null)),
+                value => Ok(Datum::Text(text_arg(value)?.to_lowercase())),
+            }
+        }
+        ScalarFunc::IsEmpty
+        | ScalarFunc::LowerInc
+        | ScalarFunc::LowerInf
+        | ScalarFunc::UpperInc
+        | ScalarFunc::UpperInf => {
+            require_arity(fc, vals.len() == 1)?;
+            let Datum::Range(range) = &vals[0] else {
+                return Err(type_error(&fc.name, &vals[0]));
+            };
+            Ok(Datum::Bool(match f {
+                ScalarFunc::IsEmpty => range.empty,
+                ScalarFunc::LowerInc => !range.empty && range.lower_inclusive,
+                ScalarFunc::LowerInf => !range.empty && range.lower.is_none(),
+                ScalarFunc::UpperInc => !range.empty && range.upper_inclusive,
+                ScalarFunc::UpperInf => !range.empty && range.upper.is_none(),
+                _ => unreachable!(),
+            }))
+        }
+        ScalarFunc::RangeContains | ScalarFunc::RangeContainedBy | ScalarFunc::RangeOverlaps => {
+            require_arity(fc, vals.len() == 2)?;
+            let (Datum::Range(left), Datum::Range(right)) = (&vals[0], &vals[1]) else {
+                return Err(type_error(&fc.name, &vals[0]));
+            };
+            Ok(Datum::Bool(match f {
+                ScalarFunc::RangeContains => crabka_pgtypes::range::contains_range(left, right)?,
+                ScalarFunc::RangeContainedBy => crabka_pgtypes::range::contains_range(right, left)?,
+                ScalarFunc::RangeOverlaps => crabka_pgtypes::range::overlaps(left, right)?,
+                _ => unreachable!(),
+            }))
         }
         ScalarFunc::Btrim | ScalarFunc::Ltrim | ScalarFunc::Rtrim => {
             require_arity(fc, vals.len() == 1 || vals.len() == 2)?;
@@ -1850,6 +1949,66 @@ fn float_sign(x: f64) -> f64 {
     }
 }
 
+fn eval_range_constructor(
+    oid: u32,
+    fc: &FuncCall,
+    vals: &[Datum],
+    ctx: &EvalCtx,
+) -> Result<Datum, ExecError> {
+    require_arity(fc, vals.len() == 2 || vals.len() == 3)?;
+    if vals.get(2).is_some_and(Datum::is_null) {
+        return Ok(Datum::Null);
+    }
+    let ColumnType::Range(ty) = ColumnType::builtin_range(oid).expect("known range constructor")
+    else {
+        unreachable!()
+    };
+    let bounds = vals.get(2).map_or(Ok("[)"), text_arg)?;
+    let [left, right] = bounds.as_bytes() else {
+        return Err(ExecError::Type(crabka_pgtypes::TypeError::Coded {
+            sqlstate: "22023",
+            message: "range constructor flags argument must be two characters".into(),
+        }));
+    };
+    if !matches!(left, b'[' | b'(') || !matches!(right, b']' | b')') {
+        return Err(ExecError::Type(crabka_pgtypes::TypeError::Coded {
+            sqlstate: "22023",
+            message: "range constructor flags argument must contain one of '(', '[' followed by one of ')', ']'".into(),
+        }));
+    }
+    let cast_bound = |value: &Datum| -> Result<Option<Box<Datum>>, ExecError> {
+        if value.is_null() {
+            Ok(None)
+        } else {
+            Ok(Some(Box::new(crabka_pgtypes::cast::cast(
+                value,
+                *ty.subtype,
+                &ctx.time_zone,
+            )?)))
+        }
+    };
+    let value = crabka_pgtypes::RangeValue {
+        ty,
+        lower: cast_bound(&vals[0])?,
+        upper: cast_bound(&vals[1])?,
+        lower_inclusive: *left == b'[',
+        upper_inclusive: *right == b']',
+        empty: false,
+    };
+    let literal = crabka_pgtypes::range::to_text(&value, |bound| {
+        String::from_utf8(crabka_pgtypes::encoding::encode_text_in(
+            bound,
+            ctx.output_style(),
+        ))
+        .expect("a Datum's text encoding is always valid UTF-8")
+    });
+    Ok(Datum::Range(crabka_pgtypes::range::parse(
+        &literal,
+        ty,
+        &ctx.time_zone,
+    )?))
+}
+
 // ---- string helpers ----
 
 fn trim_ws(f: ScalarFunc, s: &str) -> String {
@@ -2198,6 +2357,28 @@ mod tests {
         // strict: NULL argument → NULL.
         assert_eq!(ev("length(null)"), Datum::Null);
         assert_eq!(ev("upper(null)"), Datum::Null);
+    }
+
+    #[test]
+    fn range_constructors_and_accessors_keep_typed_bounds() {
+        let text = |sql: &str| {
+            String::from_utf8(crabka_pgtypes::encoding::encode_text(
+                &ev(sql),
+                &jiff::tz::TimeZone::UTC,
+            ))
+            .expect("range output is UTF-8")
+        };
+        assert_eq!(text("int4range(1, 4, '(]')"), "[2,5)");
+        assert_eq!(ev("lower(int4range(1, 4))"), Datum::Int4(1));
+        assert_eq!(ev("upper(int4range(1, 4))"), Datum::Int4(4));
+        assert_eq!(ev("isempty('empty'::int4range)"), Datum::Bool(true));
+        assert_eq!(ev("lower_inf(int4range(null, 4))"), Datum::Bool(true));
+        assert_eq!(ev("upper_inc(int4range(1, 4, '[]'))"), Datum::Bool(false));
+        assert_eq!(ev("numrange(1.0, 3.0) @> 2.0"), Datum::Bool(true));
+        assert_eq!(
+            ev("numrange(1.0, 3.0) && numrange(2.0, 4.0)"),
+            Datum::Bool(true)
+        );
     }
 
     #[test]

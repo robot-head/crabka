@@ -1655,6 +1655,7 @@ fn to_jsonb(d: &Datum, ctx: &EvalCtx) -> Result<JsonbValue, ExecError> {
         | Datum::Regclass(_)
         | Datum::TsVector(_)
         | Datum::TsQuery(_)
+        | Datum::Range(_)
         | Datum::Bytea(_) => JsonbValue::String(datum_text(d, ctx)),
     })
 }
