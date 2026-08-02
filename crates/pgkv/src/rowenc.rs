@@ -162,7 +162,7 @@ fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
                 out.extend_from_slice(&len.to_be_bytes());
                 out.extend_from_slice(text.as_bytes());
             }
-            Datum::Array(a) => {
+            Datum::Array(a) | Datum::OidVector(a) => {
                 out.push(tag::ARRAY);
                 a.elem.write_code(out);
                 let ndim = u8::try_from(a.dims.len()).expect("array dimensions exceed a byte");

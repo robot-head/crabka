@@ -10405,6 +10405,9 @@ fn param_column_type(param: &BoundParam) -> Result<Option<ColumnType>, PgError> 
         // OID parameters in their pg_catalog typeinfo lookups.
         Some(crabka_pgtypes::oids::OID) => Ok(Some(ColumnType::Int4)),
         Some(crabka_pgtypes::oids::REGCLASS) => Ok(Some(ColumnType::Regclass)),
+        Some(crabka_pgtypes::oids::REGTYPE) => Ok(Some(ColumnType::Regtype)),
+        Some(crabka_pgtypes::oids::REGPROCEDURE) => Ok(Some(ColumnType::Regprocedure)),
+        Some(crabka_pgtypes::oids::OIDVECTOR) => Ok(Some(ColumnType::OidVector)),
         Some(crabka_pgtypes::oids::INT8) => Ok(Some(ColumnType::Int8)),
         Some(crabka_pgtypes::oids::TEXT) => Ok(Some(ColumnType::Text)),
         Some(crabka_pgtypes::oids::VARCHAR) => Ok(Some(ColumnType::Varchar(None))),
@@ -10472,7 +10475,10 @@ fn decode_binary_value(
 ) -> Result<Datum, PgError> {
     match ty {
         ColumnType::Int2 => Ok(Datum::Int2(i16::from_be_bytes(binary_array(value)?))),
-        ColumnType::Int4 | ColumnType::Regclass => {
+        ColumnType::Int4
+        | ColumnType::Regclass
+        | ColumnType::Regtype
+        | ColumnType::Regprocedure => {
             let bytes = binary_array(value)?;
             Ok(Datum::Int4(i32::from_be_bytes(bytes)))
         }
@@ -10581,7 +10587,17 @@ fn decode_binary_value(
                 .map_err(ExecError::from)
                 .map_err(ExecError::into_pg)
         }
-        ColumnType::Array(elem) => decode_array_binary(value, elem, time_zone),
+        ColumnType::Array(elem) => decode_array_binary(value, elem, elem.oid(), time_zone),
+        ColumnType::OidVector => {
+            decode_array_binary(value, ElemType::Int4, crabka_pgtypes::oids::OID, time_zone).map(
+                |value| {
+                    let Datum::Array(array) = value else {
+                        unreachable!("array decoder returns an array")
+                    };
+                    Datum::OidVector(array)
+                },
+            )
+        }
         ColumnType::Range(range) => decode_range_binary(value, range, time_zone),
         ColumnType::Multirange(multirange) => {
             decode_multirange_binary(value, multirange, time_zone)
@@ -10726,6 +10742,7 @@ fn decode_jsonb_binary(value: &[u8]) -> Result<Datum, PgError> {
 fn decode_array_binary(
     value: &[u8],
     elem: ElemType,
+    expected_elem_oid: u32,
     time_zone: &jiff::tz::TimeZone,
 ) -> Result<Datum, PgError> {
     let mut reader = BinaryReader::new(value);
@@ -10734,12 +10751,14 @@ fn decode_array_binary(
     // PostgreSQL's own receiver likewise does not trust the flag.
     let _has_null = reader.read_i32()?;
     let elem_oid = reader.read_u32()?;
-    if !array_element_oid_matches(elem, elem_oid) {
+    if elem_oid != expected_elem_oid
+        && !(elem == ElemType::Jsonb && elem_oid == crabka_pgtypes::oids::JSON)
+    {
         return Err(PgError::error(
             "42804",
             format!(
                 "binary array parameter has element type {elem_oid}, but {} was expected",
-                elem.oid()
+                expected_elem_oid
             ),
         ));
     }
@@ -10784,13 +10803,6 @@ fn decode_array_binary(
     Ok(Datum::Array(crabka_pgtypes::ArrayValue::with_dims(
         elem, elems, dims,
     )))
-}
-
-/// Whether a binary array's declared element OID matches the expected element
-/// type. `json` and `jsonb` elements are interchangeable on input for the same
-/// reason the scalar types are.
-fn array_element_oid_matches(elem: ElemType, elem_oid: u32) -> bool {
-    elem_oid == elem.oid() || (elem == ElemType::Jsonb && elem_oid == crabka_pgtypes::oids::JSON)
 }
 
 /// A cursor over a variable-length binary parameter. Every read is
@@ -15855,6 +15867,21 @@ mod notify_and_binary_parameter_tests {
                 elem.array_name()
             );
         }
+    }
+
+    #[test]
+    fn oidvector_binary_parameters_use_oid_elements() {
+        let expected = Datum::OidVector(ArrayValue::with_dims(
+            ElemType::Int4,
+            vec![Datum::Int4(23), Datum::Int4(25)],
+            vec![crabka_pgtypes::ArrayDim::new(0, 2)],
+        ));
+        let encoded = encoding::encode_binary(&expected);
+        let decoded = decode(
+            &param(oids::OIDVECTOR, 1, &encoded),
+            ColumnType::OidVector,
+        );
+        assert!(decoded.expect("decode") == expected);
     }
 
     #[test]

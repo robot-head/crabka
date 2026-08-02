@@ -30,9 +30,13 @@ pub mod oids {
     /// declares `WHERE t.oid = $1` with OID). Values live in the existing `Int4`
     /// datum, the same representation the catalog's oid-valued columns use.
     pub const OID: u32 = 26;
-    /// PostgreSQL `regclass`: a relation's `pg_class` oid with name-based
+    pub const OIDVECTOR: u32 = 30;
+    /// PostgreSQL `regclass` — a relation's `pg_class` oid with name-based
     /// text input; values live in the `Int4` datum like `oid`.
     pub const REGCLASS: u32 = 2205;
+    pub const REGTYPE: u32 = 2206;
+    pub const REGPROCEDURE: u32 = 2202;
+    pub const REGTYPEARRAY: u32 = 2211;
     pub const BPCHAR: u32 = 1042;
     pub const VARCHAR: u32 = 1043;
     /// PostgreSQL `real`: single-precision IEEE-754 (`f32`).
@@ -160,8 +164,9 @@ pub enum ElemType {
     Jsonb,
     Int2,
     Float4,
-    /// `character varying(n)[]`: the length modifier applies to each element on
-    /// assignment, exactly as `PostgreSQL` applies it to a scalar `varchar(n)`.
+    Regtype,
+    /// `character varying(n)[]` — the length modifier is applied to each element
+    /// on assignment, exactly as `PostgreSQL` applies it to a scalar `varchar(n)`.
     Varchar(Option<u16>),
     /// `character(n)[]`: each element is blank-padded to `n` on assignment.
     Char(Option<u16>),
@@ -171,10 +176,9 @@ pub enum ElemType {
 
 impl ElemType {
     /// Every supported array element type, in `code()` order. The two
-    /// length-modified entries stand for their whole family. `from_code`
-    /// reconstructs the modifier, and neither the OID nor the name depends on
-    /// it.
-    pub const ALL: [ElemType; 18] = [
+    /// length-modified entries stand for their whole family — `from_code`
+    /// reconstructs the modifier, and neither the OID nor the name depends on it.
+    pub const ALL: [ElemType; 19] = [
         ElemType::Bool,
         ElemType::Int4,
         ElemType::Int8,
@@ -193,6 +197,7 @@ impl ElemType {
         ElemType::Float4,
         ElemType::Varchar(None),
         ElemType::Char(None),
+        ElemType::Regtype,
     ];
 
     /// The element type as a column type (`numeric` is unconstrained, because an
@@ -215,6 +220,7 @@ impl ElemType {
             ElemType::Jsonb => ColumnType::Jsonb,
             ElemType::Int2 => ColumnType::Int2,
             ElemType::Float4 => ColumnType::Float4,
+            ElemType::Regtype => ColumnType::Regtype,
             ElemType::Varchar(n) => ColumnType::Varchar(n),
             ElemType::Char(n) => ColumnType::Char(n),
             ElemType::Range(range) => ColumnType::Range(range),
@@ -254,6 +260,8 @@ impl ElemType {
             ColumnType::Point
             | ColumnType::Path
             | ColumnType::Regclass
+            | ColumnType::Regprocedure
+            | ColumnType::OidVector
             | ColumnType::TsVector
             | ColumnType::TsQuery
             | ColumnType::Array(_)
@@ -268,6 +276,7 @@ impl ElemType {
                 elem
             }
             ColumnType::Multirange(multirange) => ElemType::Multirange(multirange),
+            ColumnType::Regtype => ElemType::Regtype,
         })
     }
 
@@ -295,6 +304,7 @@ impl ElemType {
             ElemType::Jsonb => oids::JSONBARRAY,
             ElemType::Int2 => oids::INT2ARRAY,
             ElemType::Float4 => oids::FLOAT4ARRAY,
+            ElemType::Regtype => oids::REGTYPEARRAY,
             ElemType::Varchar(_) => oids::VARCHARARRAY,
             ElemType::Char(_) => oids::BPCHARARRAY,
             ElemType::Range(range) => match range.oid {
@@ -342,6 +352,7 @@ impl ElemType {
             ElemType::Jsonb => "jsonb[]",
             ElemType::Int2 => "smallint[]",
             ElemType::Float4 => "real[]",
+            ElemType::Regtype => "regtype[]",
             ElemType::Varchar(_) => "character varying[]",
             ElemType::Char(_) => "character[]",
             ElemType::Range(range) => match range.oid {
@@ -400,6 +411,7 @@ impl ElemType {
             ElemType::Char(_) => 17,
             ElemType::Range(_) => 18,
             ElemType::Multirange(_) => 19,
+            ElemType::Regtype => 20,
         }
     }
 
@@ -576,6 +588,15 @@ pub enum ColumnType {
     /// resolution, which the session/executor layers do, because the pure
     /// datum-parse path only accepts numeric strings).
     Regclass,
+    /// PostgreSQL `regtype` (OID 2206), represented by the shared named-oid
+    /// datum because its comparison and wire identity are the oid.
+    Regtype,
+    /// PostgreSQL `regprocedure` (OID 2202), a `pg_proc` oid rendered with its
+    /// identity argument types.
+    Regprocedure,
+    /// PostgreSQL `oidvector` (OID 30), an oid array with lower bound zero and
+    /// a space-separated text representation.
+    OidVector,
     /// PostgreSQL's normalized full-text document and query types.
     TsVector,
     TsQuery,
@@ -695,6 +716,9 @@ impl ColumnType {
             "bytea" => Some(ColumnType::Bytea),
             "uuid" => Some(ColumnType::Uuid),
             "regclass" => Some(ColumnType::Regclass),
+            "regtype" => Some(ColumnType::Regtype),
+            "regprocedure" => Some(ColumnType::Regprocedure),
+            "oidvector" => Some(ColumnType::OidVector),
             "tsvector" => Some(ColumnType::TsVector),
             "tsquery" => Some(ColumnType::TsQuery),
             // `json` is an input alias for `jsonb`: values are stored decomposed
@@ -756,6 +780,7 @@ impl ColumnType {
     pub fn array_element(self) -> Option<ElemType> {
         match self {
             ColumnType::Array(elem) => Some(elem),
+            ColumnType::OidVector => Some(ElemType::Int4),
             _ => None,
         }
     }
@@ -783,6 +808,9 @@ impl ColumnType {
             ColumnType::Bytea => oids::BYTEA,
             ColumnType::Uuid => oids::UUID,
             ColumnType::Regclass => oids::REGCLASS,
+            ColumnType::Regtype => oids::REGTYPE,
+            ColumnType::Regprocedure => oids::REGPROCEDURE,
+            ColumnType::OidVector => oids::OIDVECTOR,
             ColumnType::TsVector => oids::TSVECTOR,
             ColumnType::TsQuery => oids::TSQUERY,
             ColumnType::Jsonb => oids::JSONB,
@@ -819,6 +847,9 @@ impl ColumnType {
             ColumnType::Bytea => "bytea",
             ColumnType::Uuid => "uuid",
             ColumnType::Regclass => "regclass",
+            ColumnType::Regtype => "regtype",
+            ColumnType::Regprocedure => "regprocedure",
+            ColumnType::OidVector => "oidvector",
             ColumnType::TsVector => "tsvector",
             ColumnType::TsQuery => "tsquery",
             ColumnType::Jsonb => "jsonb",
@@ -853,6 +884,9 @@ impl ColumnType {
             ColumnType::Bytea => -1,
             ColumnType::Uuid => 16,
             ColumnType::Regclass => 4,
+            ColumnType::Regtype => 4,
+            ColumnType::Regprocedure => 4,
+            ColumnType::OidVector => -1,
             ColumnType::TsVector | ColumnType::TsQuery => -1,
             // jsonb, arrays and composites are variable-length.
             ColumnType::Jsonb | ColumnType::Array(_) | ColumnType::Record(_) => -1,
@@ -945,7 +979,9 @@ pub enum Datum {
     Jsonb(crate::jsonb::JsonbValue),
     /// A one-dimensional PostgreSQL array.
     Array(ArrayValue),
-    /// A composite value: the anonymous `record` a `ROW(…)` produces, or a row
+    /// PostgreSQL's zero-based oid array used by catalog signatures.
+    OidVector(ArrayValue),
+    /// A composite value — the anonymous `record` a `ROW(…)` produces, or a row
     /// of a type created by `CREATE TYPE … AS (…)`.
     Record(RecordValue),
     /// A value of a `CREATE TYPE … AS ENUM` type.
@@ -1334,6 +1370,7 @@ impl PartialEq for Datum {
             (Datum::Jsonb(a), Datum::Jsonb(b)) => a == b,
             // Arrays are equal when their element type and every element are.
             (Datum::Array(a), Datum::Array(b)) => a == b,
+            (Datum::OidVector(a), Datum::OidVector(b)) => a == b,
             // Composites compare field by field; enums by type and label.
             (Datum::Record(a), Datum::Record(b)) => a == b,
             (Datum::Enum(a), Datum::Enum(b)) => a == b,
@@ -1405,6 +1442,7 @@ impl std::hash::Hash for Datum {
             // Both hash scale-normalized numbers internally, matching `Eq`.
             Datum::Jsonb(j) => j.hash(state),
             Datum::Array(a) => a.hash(state),
+            Datum::OidVector(a) => a.hash(state),
             Datum::Record(r) => r.hash(state),
             Datum::Enum(e) => e.hash(state),
             // Hashes the oid alone, matching the `PartialEq` arm above.
@@ -1442,6 +1480,7 @@ impl Datum {
             Datum::Bytea(_) => Some(ColumnType::Bytea),
             Datum::Jsonb(_) => Some(ColumnType::Jsonb),
             Datum::Array(a) => Some(a.column_type()),
+            Datum::OidVector(_) => Some(ColumnType::OidVector),
             Datum::Record(r) => Some(r.column_type()),
             Datum::Enum(e) => Some(e.column_type()),
             Datum::Regclass(_) => Some(ColumnType::Regclass),

@@ -1658,7 +1658,7 @@ fn to_jsonb(d: &Datum, ctx: &EvalCtx) -> Result<JsonbValue, ExecError> {
                 .ok_or(ExecError::Type(crabka_pgtypes::TypeError::Overflow))?,
         ),
         Datum::Jsonb(j) => j.clone(),
-        Datum::Array(a) => JsonbValue::Array(
+        Datum::Array(a) | Datum::OidVector(a) => JsonbValue::Array(
             a.elems
                 .iter()
                 .map(|e| to_jsonb(e, ctx))

@@ -620,6 +620,7 @@ pub fn compare(a: &Datum, b: &Datum) -> Result<Option<Ordering>, TypeError> {
         (Datum::TsQuery(x), Datum::TsQuery(y)) => x.cmp(y),
         // SQL arrays compare element-wise, shorter first on a common prefix.
         (Datum::Array(x), Datum::Array(y)) => compare_arrays(x, y)?,
+        (Datum::OidVector(x), Datum::OidVector(y)) => compare_arrays(x, y)?,
         // `record_cmp`: field by field, left to right.
         (Datum::Record(x), Datum::Record(y)) => compare_records(x, y)?,
         // An enum orders by its labels' declared positions, which is what

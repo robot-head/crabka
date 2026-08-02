@@ -12319,6 +12319,7 @@ fn format_default_value(value: &Datum, ty: ColumnType) -> String {
         // the value's own text, quoted and cast to the column type.
         Datum::Jsonb(_)
         | Datum::Array(_)
+        | Datum::OidVector(_)
         | Datum::Range(_)
         | Datum::Multirange(_)
         | Datum::TsVector(_)
@@ -12915,6 +12916,164 @@ pub(crate) fn regclass_cast(
         .map(Some)
 }
 
+/// PostgreSQL `regtypein`/`regtypeout` using the existing built-in signature
+/// map and user-type registry.
+pub(crate) fn regtype_cast(value: &Datum) -> Result<Option<Datum>, ExecError> {
+    let oid = match value {
+        Datum::Text(text) => {
+            let trimmed = text.trim();
+            match trimmed.parse::<i32>() {
+                Ok(oid) => oid,
+                Err(_) => {
+                    let name = trimmed
+                        .strip_prefix("pg_catalog.")
+                        .unwrap_or(trimmed)
+                        .trim_matches('"')
+                        .to_ascii_lowercase();
+                    regtype_oid(&name)
+                        .or_else(|| {
+                            crabka_pgtypes::usertype::lookup(&name)
+                                .and_then(|ty| i32::try_from(ty.oid).ok())
+                        })
+                        .ok_or_else(|| {
+                            ExecError::UndefinedObject(format!("type \"{name}\" does not exist"))
+                        })?
+                }
+            }
+        }
+        Datum::Int4(oid) => *oid,
+        Datum::Int8(oid) => match i32::try_from(*oid) {
+            Ok(oid) => oid,
+            Err(_) => return Ok(None),
+        },
+        Datum::Regclass(value) => value.oid,
+        _ => return Ok(None),
+    };
+    let name = regtype_name(oid);
+    Ok(Some(Datum::Regclass(crabka_pgtypes::RegclassValue {
+        oid,
+        name: name.into(),
+    })))
+}
+
+fn regtype_oid(name: &str) -> Option<i32> {
+    crate::routine::TYPE_OIDS
+        .iter()
+        .find(|(candidate, _)| *candidate == name)
+        .map(|(_, oid)| *oid)
+}
+
+fn regtype_name(oid: i32) -> String {
+    crabka_pgtypes::usertype::lookup_oid(u32::try_from(oid).unwrap_or(0))
+        .map(|ty| ty.name)
+        .unwrap_or_else(|| {
+            let formatted = crate::func::format_type(i64::from(oid), -1);
+            if formatted == "-" {
+                crate::routine::TYPE_OIDS
+                    .iter()
+                    .find(|(_, candidate_oid)| *candidate_oid == oid)
+                    .map_or_else(|| oid.to_string(), |(name, _)| (*name).to_string())
+            } else {
+                formatted
+            }
+        })
+}
+
+/// PostgreSQL `regprocedurein`/`regprocedureout`, resolved from the same rows
+/// exposed through `pg_proc`.
+pub(crate) fn regprocedure_cast(
+    catalog_kv: &dyn Kv,
+    value: &Datum,
+) -> Result<Option<Datum>, ExecError> {
+    let rows = crate::routine::pg_proc_rows(catalog_kv)?;
+    let oid = match value {
+        Datum::Text(text) => match text.trim().parse::<i32>() {
+            Ok(oid) => oid,
+            Err(_) => {
+                let written = text.trim();
+                let Some((name, args)) = written.strip_suffix(')').and_then(|s| s.split_once('('))
+                else {
+                    return Err(ExecError::UndefinedFunction(format!(
+                        "function \"{written}\" does not exist"
+                    )));
+                };
+                let name = name
+                    .rsplit_once('.')
+                    .map_or(name, |(_, bare)| bare)
+                    .trim_matches('"')
+                    .to_ascii_lowercase();
+                let arg_oids = if args.trim().is_empty() {
+                    Vec::new()
+                } else {
+                    args.split(',')
+                        .map(|arg| {
+                            let arg = arg.trim().trim_matches('"').to_ascii_lowercase();
+                            regtype_oid(&arg).ok_or_else(|| {
+                                ExecError::UndefinedObject(format!("type \"{arg}\" does not exist"))
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                };
+                rows.iter()
+                    .find(|row| {
+                        row.get(1) == Some(&Datum::Text(name.clone()))
+                            && matches!(
+                                row.get(19),
+                                Some(Datum::OidVector(arguments))
+                                    if arguments.elems
+                                        == arg_oids.iter().copied().map(Datum::Int4).collect::<Vec<_>>()
+                            )
+                    })
+                    .and_then(|row| match row.first() {
+                        Some(Datum::Int4(oid)) => Some(*oid),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        ExecError::UndefinedFunction(format!(
+                            "function \"{written}\" does not exist"
+                        ))
+                    })?
+            }
+        },
+        Datum::Int4(oid) => *oid,
+        Datum::Int8(oid) => match i32::try_from(*oid) {
+            Ok(oid) => oid,
+            Err(_) => return Ok(None),
+        },
+        Datum::Regclass(value) => value.oid,
+        _ => return Ok(None),
+    };
+    let name = rows
+        .iter()
+        .find(|row| row.first() == Some(&Datum::Int4(oid)))
+        .and_then(|row| {
+            let Datum::Text(name) = row.get(1)? else {
+                return None;
+            };
+            let Datum::OidVector(arguments) = row.get(19)? else {
+                return None;
+            };
+            Some(format!(
+                "{}({})",
+                name,
+                arguments
+                    .elems
+                    .iter()
+                    .filter_map(|arg| match arg {
+                        Datum::Int4(oid) => Some(regtype_name(*oid)),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ))
+        })
+        .unwrap_or_else(|| oid.to_string());
+    Ok(Some(Datum::Regclass(crabka_pgtypes::RegclassValue {
+        oid,
+        name: name.into(),
+    })))
+}
+
 /// The base-table half of [`resolve_regclass`]: virtual catalog relations and
 /// ordinary/foreign tables. [`crate::catalog_fn`] layers views, sequences and
 /// indexes, the other three `pg_class` kinds, on top.
@@ -12963,12 +13122,36 @@ pub(crate) fn virtual_relation_oid(name: &str) -> i32 {
 fn scalar_type_rows() -> &'static [BuiltinTypeRow] {
     &[
         BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::OIDVECTOR as i32,
+            name: "oidvector",
+            len: -1,
+            category: "A",
+            elem: crabka_pgtypes::oids::OID as i32,
+            array: 1013,
+        },
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::REGPROCEDURE as i32,
+            name: "regprocedure",
+            len: 4,
+            category: "N",
+            elem: 0,
+            array: 2207,
+        },
+        BuiltinTypeRow {
             oid: 2205,
             name: "regclass",
             len: 4,
             category: "N",
             elem: 0,
             array: 0,
+        },
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::REGTYPE as i32,
+            name: "regtype",
+            len: 4,
+            category: "N",
+            elem: 0,
+            array: 2211,
         },
         BuiltinTypeRow {
             oid: crabka_pgtypes::oids::BOOL as i32,
@@ -13229,6 +13412,7 @@ fn array_typname(elem: crabka_pgtypes::ElemType) -> &'static str {
         ElemType::Jsonb => "_jsonb",
         ElemType::Int2 => "_int2",
         ElemType::Float4 => "_float4",
+        ElemType::Regtype => "_regtype",
         ElemType::Varchar(_) => "_varchar",
         ElemType::Char(_) => "_bpchar",
         ElemType::Range(range) => match range.oid {
@@ -13259,6 +13443,24 @@ fn array_typname(elem: crabka_pgtypes::ElemType) -> &'static str {
 fn builtin_type_rows() -> &'static [BuiltinTypeRow] {
     static ROWS: std::sync::LazyLock<Vec<BuiltinTypeRow>> = std::sync::LazyLock::new(|| {
         let mut rows = scalar_type_rows().to_vec();
+        rows.extend([
+            BuiltinTypeRow {
+                oid: 1013,
+                name: "_oidvector",
+                len: -1,
+                category: "A",
+                elem: crabka_pgtypes::oids::OIDVECTOR as i32,
+                array: 0,
+            },
+            BuiltinTypeRow {
+                oid: 2207,
+                name: "_regprocedure",
+                len: -1,
+                category: "A",
+                elem: crabka_pgtypes::oids::REGPROCEDURE as i32,
+                array: 0,
+            },
+        ]);
         for (oid, name, array) in [
             (
                 crabka_pgtypes::oids::INT4MULTIRANGE,
@@ -14541,6 +14743,9 @@ pub(crate) fn column_type_from_oid(oid: u32) -> Result<ColumnType, ExecError> {
         crabka_pgtypes::oids::BOOL => ColumnType::Bool,
         crabka_pgtypes::oids::INT2 => ColumnType::Int2,
         crabka_pgtypes::oids::INT4 => ColumnType::Int4,
+        crabka_pgtypes::oids::OIDVECTOR => ColumnType::OidVector,
+        crabka_pgtypes::oids::REGTYPE => ColumnType::Regtype,
+        crabka_pgtypes::oids::REGPROCEDURE => ColumnType::Regprocedure,
         crabka_pgtypes::oids::INT8 => ColumnType::Int8,
         crabka_pgtypes::oids::TEXT => ColumnType::Text,
         crabka_pgtypes::oids::VARCHAR => ColumnType::Varchar(None),

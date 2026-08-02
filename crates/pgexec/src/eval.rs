@@ -261,6 +261,35 @@ fn eval_depth(
             {
                 return Ok(resolved);
             }
+            if *ty == crabka_pgtypes::ColumnType::Regtype
+                && let Some(resolved) = crate::exec::regtype_cast(&v)?
+            {
+                return Ok(resolved);
+            }
+            if *ty == crabka_pgtypes::ColumnType::Array(crabka_pgtypes::ElemType::Regtype)
+                && let Datum::OidVector(arguments) = &v
+            {
+                let elems = arguments
+                    .elems
+                    .iter()
+                    .map(|argument| {
+                        crate::exec::regtype_cast(argument)?.ok_or_else(|| {
+                            ExecError::TypeMismatch("cannot cast oid to regtype".into())
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                return Ok(Datum::Array(crabka_pgtypes::ArrayValue::with_dims(
+                    crabka_pgtypes::ElemType::Regtype,
+                    elems,
+                    arguments.dims.clone(),
+                )));
+            }
+            if *ty == crabka_pgtypes::ColumnType::Regprocedure
+                && let Some(catalog) = ctx.catalog()
+                && let Some(resolved) = crate::exec::regprocedure_cast(catalog, &v)?
+            {
+                return Ok(resolved);
+            }
             let cast = crabka_pgtypes::cast::cast_in(&v, *ty, ctx.output_style())?;
             // A cast to a domain converts through the base type and then has to
             // satisfy the domain's own NOT NULL and CHECK constraints.
@@ -1365,7 +1394,9 @@ fn apply_containment(op: BinaryOp, l: &Datum, r: &Datum) -> Result<Datum, ExecEr
         };
         return json_fn::eval_json_operator(json_op, l, r);
     }
-    if matches!(l, Datum::Array(_)) || matches!(r, Datum::Array(_)) {
+    if matches!(l, Datum::Array(_) | Datum::OidVector(_))
+        || matches!(r, Datum::Array(_) | Datum::OidVector(_))
+    {
         return if contains {
             array_fn::array_contains(l, r)
         } else {

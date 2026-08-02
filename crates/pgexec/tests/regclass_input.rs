@@ -67,6 +67,77 @@ async fn printed(client: &mut Client, spelling: &str) -> Option<String> {
         .await
 }
 
+#[tokio::test]
+async fn regtype_resolves_names_and_compares_as_an_oid() {
+    let engine = SqlEngine::new();
+    let mut client = Client::new(&engine);
+    for (sql, expected) in [
+        ("SELECT 'int4'::regtype::text", "integer"),
+        ("SELECT 23::regtype::text", "integer"),
+        ("SELECT 'anyrange'::regtype::text", "anyrange"),
+        ("SELECT 23 = 'integer'::regtype", "t"),
+    ] {
+        assert!(client.scalar(sql).await == Some(expected.into()), "{sql}");
+    }
+    assert!(
+        client.fails("SELECT 'nosuch'::regtype").await
+            == ("42704".into(), "type \"nosuch\" does not exist".into())
+    );
+}
+
+#[tokio::test]
+async fn regprocedure_resolves_and_renders_identity_arguments() {
+    let engine = SqlEngine::new();
+    let mut client = Client::new(&engine);
+    client
+        .run("CREATE FUNCTION rp(a int, b text) RETURNS int LANGUAGE sql RETURN a")
+        .await;
+    for (sql, expected) in [
+        (
+            "SELECT 'boolin(cstring)'::regprocedure::text",
+            "boolin(cstring)",
+        ),
+        ("SELECT 1242::regprocedure::text", "boolin(cstring)"),
+        (
+            "SELECT 'rp(int4,text)'::regprocedure::text",
+            "rp(integer,text)",
+        ),
+        ("SELECT 1242 = 'boolin(cstring)'::regprocedure", "t"),
+    ] {
+        assert!(client.scalar(sql).await == Some(expected.into()), "{sql}");
+    }
+}
+
+#[tokio::test]
+async fn pg_proc_argument_vectors_are_zero_based_arrays() {
+    let engine = SqlEngine::new();
+    let mut client = Client::new(&engine);
+    for (sql, expected) in [
+        (
+            "SELECT array_lower(proargtypes, 1) FROM pg_proc WHERE oid = 1242",
+            "0",
+        ),
+        (
+            "SELECT array_upper(proargtypes, 1) FROM pg_proc WHERE oid = 1242",
+            "0",
+        ),
+        (
+            "SELECT proargtypes[0] FROM pg_proc WHERE oid = 1242",
+            "2275",
+        ),
+        (
+            "SELECT 2275 = ANY (proargtypes) FROM pg_proc WHERE oid = 1242",
+            "t",
+        ),
+        (
+            "SELECT proargtypes::regtype[]::text FROM pg_proc WHERE oid = 1242",
+            "[0:0]={cstring}",
+        ),
+    ] {
+        assert!(client.scalar(sql).await == Some(expected.into()), "{sql}");
+    }
+}
+
 // -------------------------------------------------------------- reading a name
 
 /// Every shape `regclassin` accepts, and the relation each one lands on.

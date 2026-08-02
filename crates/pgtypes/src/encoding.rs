@@ -125,6 +125,13 @@ pub fn encode_text_in(d: &Datum, style: OutputStyle<'_>) -> Vec<u8> {
                 .collect();
             crate::array::literal_text(&a.dims, &elements).into_bytes()
         }
+        Datum::OidVector(a) => a
+            .elems
+            .iter()
+            .map(|value| String::from_utf8(encode_text_in(value, style)).expect("valid datum text"))
+            .collect::<Vec<_>>()
+            .join(" ")
+            .into_bytes(),
         // `record_out`: `(f1,f2,…)`, a NULL field written as nothing and any
         // field that would otherwise be ambiguous double-quoted.
         Datum::Record(r) => {
@@ -319,7 +326,8 @@ pub fn encode_binary(d: &Datum) -> Vec<u8> {
         }
         // `array_send`: the standard big-endian array header then each element
         // as `i32 length` (-1 for NULL) plus its own binary encoding.
-        Datum::Array(a) => encode_array_binary(a),
+        Datum::Array(a) => encode_array_binary(a, a.elem.oid()),
+        Datum::OidVector(a) => encode_array_binary(a, crate::oids::OID),
         // `record_send`: the field count, then per field its type oid and its
         // own binary encoding with an `i32` length (-1 for NULL).
         Datum::Record(r) => encode_record_binary(r),
@@ -361,16 +369,16 @@ fn encode_record_binary(r: &crate::datum::RecordValue) -> Vec<u8> {
 }
 
 /// PostgreSQL `array_send`. An empty array is the 12-byte `ndim = 0` header with
-/// no dimension block, the form libpq and `tokio-postgres` emit, which must
-/// round-trip. Every other array carries one `(length, lower bound)` pair per
-/// dimension ahead of its row-major elements.
-fn encode_array_binary(a: &crate::datum::ArrayValue) -> Vec<u8> {
+/// no dimension block — the form libpq and `tokio-postgres` emit, which must
+/// round-trip — and every other array carries one `(length, lower bound)` pair
+/// per dimension ahead of its row-major elements.
+fn encode_array_binary(a: &crate::datum::ArrayValue, elem_oid: u32) -> Vec<u8> {
     let has_null = a.elems.iter().any(Datum::is_null);
     let ndim = i32::try_from(a.dims.len()).expect("array dimensions exceed i32");
     let mut out = Vec::with_capacity(20 + a.elems.len() * 8);
     out.extend_from_slice(&ndim.to_be_bytes());
     out.extend_from_slice(&i32::from(has_null).to_be_bytes());
-    out.extend_from_slice(&a.elem.oid().to_be_bytes());
+    out.extend_from_slice(&elem_oid.to_be_bytes());
     for dim in &a.dims {
         out.extend_from_slice(&dim.len.to_be_bytes());
         out.extend_from_slice(&dim.lower.to_be_bytes());
@@ -581,6 +589,18 @@ mod tests {
         ]
         .concat();
         assert!(encode_binary(&int_array(&[Some(1), Some(2)])) == expected);
+    }
+
+    #[test]
+    fn oidvector_binary_uses_oid_elements() {
+        use assert2::assert;
+        let value = Datum::OidVector(crate::datum::ArrayValue::with_dims(
+            crate::ElemType::Int4,
+            vec![Datum::Int4(23), Datum::Int4(25)],
+            vec![crate::ArrayDim::new(0, 2)],
+        ));
+        let encoded = encode_binary(&value);
+        assert!(encoded[8..12] == crate::oids::OID.to_be_bytes());
     }
 
     #[test]
