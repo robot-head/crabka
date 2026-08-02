@@ -86,6 +86,8 @@ pub enum TypeError {
         sqlstate: &'static str,
         message: String,
     },
+    #[error("malformed range literal: \"{value}\"")]
+    RangeMalformed { value: String, detail: &'static str },
 }
 
 impl TypeError {
@@ -108,6 +110,15 @@ impl TypeError {
             TypeError::FeatureNotSupported { .. } => "0A000",
             TypeError::OutOfRange { .. } => "22003",
             TypeError::Coded { sqlstate, .. } => sqlstate,
+            TypeError::RangeMalformed { .. } => "22P02",
+        }
+    }
+
+    #[must_use]
+    pub fn detail(&self) -> Option<&'static str> {
+        match self {
+            TypeError::RangeMalformed { detail, .. } => Some(detail),
+            _ => None,
         }
     }
 

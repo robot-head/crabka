@@ -330,14 +330,9 @@ fn input_error_info_rows(vals: &[Datum], ctx: &EvalCtx) -> Result<Vec<Vec<Datum>
     let Some(error) = crate::func::input_error(input, type_name, &ctx.time_zone)? else {
         return Ok(vec![vec![Datum::Null; 4]]);
     };
-    let detail = if error.sqlstate() == "22P02"
-        && error.to_string().starts_with("malformed range literal")
-        && !matches!(input.as_bytes().last(), Some(b')' | b']'))
-    {
-        Datum::Text("Unexpected end of input.".into())
-    } else {
-        Datum::Null
-    };
+    let detail = error
+        .detail()
+        .map_or(Datum::Null, |detail| Datum::Text(detail.into()));
     Ok(vec![vec![
         Datum::Text(error.to_string()),
         detail,

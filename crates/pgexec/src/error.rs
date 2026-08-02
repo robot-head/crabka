@@ -543,7 +543,13 @@ impl ExecError {
                     rendered
                 }
             }
-            ExecError::Type(e) => PgError::error(e.sqlstate(), e.to_string()),
+            ExecError::Type(e) => {
+                let rendered = PgError::error(e.sqlstate(), e.to_string());
+                match e.detail() {
+                    Some(detail) => rendered.with_detail(detail),
+                    None => rendered,
+                }
+            }
             ExecError::Kv(e) => match e {
                 crabka_pgkv::KvError::Io(msg) => {
                     PgError::error("58030", format!("storage I/O error: {msg}"))
