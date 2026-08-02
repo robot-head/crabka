@@ -21,7 +21,10 @@
 use std::cmp::Ordering;
 
 use crabka_pgparser::ast::{Expr, FuncArgs, FuncCall};
-use crabka_pgtypes::{ColumnType, Datum, ops, usertype::RangeRef};
+use crabka_pgtypes::{
+    ColumnType, Datum, ops,
+    usertype::{MultirangeRef, RangeRef},
+};
 
 use crate::{clock::EvalCtx, error::ExecError, scope::Scope};
 
@@ -100,6 +103,7 @@ enum ScalarFunc {
     /// this string?
     PgInputIsValid,
     RangeConstructor(RangeRef),
+    MultirangeConstructor(MultirangeRef),
     IsEmpty,
     LowerInc,
     LowerInf,
@@ -232,6 +236,9 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "pg_notify" => ScalarFunc::PgNotify,
         _ => match ColumnType::from_sql_name(name) {
             Some(ColumnType::Range(range)) => ScalarFunc::RangeConstructor(range),
+            Some(ColumnType::Multirange(multirange)) => {
+                ScalarFunc::MultirangeConstructor(multirange)
+            }
             _ => return None,
         },
     })
@@ -612,6 +619,7 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
             require_arity(fc, (1..=3).contains(&n))?;
             Ok(ColumnType::Range(range))
         }
+        ScalarFunc::MultirangeConstructor(multirange) => Ok(ColumnType::Multirange(multirange)),
         ScalarFunc::IsEmpty
         | ScalarFunc::LowerInc
         | ScalarFunc::LowerInf
@@ -871,6 +879,25 @@ fn eval_eager(
     }
     if let ScalarFunc::RangeConstructor(range) = f {
         return eval_range_constructor(range, fc, vals, ctx);
+    }
+    if let ScalarFunc::MultirangeConstructor(multirange) = f {
+        let ranges = vals
+            .iter()
+            .map(|value| {
+                crabka_pgtypes::cast::cast(
+                    value,
+                    ColumnType::Range(multirange.range),
+                    &ctx.time_zone,
+                )
+                .and_then(|value| match value {
+                    Datum::Range(range) => Ok(range),
+                    _ => unreachable!(),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        return crabka_pgtypes::multirange::from_ranges(multirange, ranges)
+            .map(Datum::Multirange)
+            .map_err(ExecError::from);
     }
     // Strict: a NULL argument short-circuits to NULL.
     if vals.iter().any(Datum::is_null) {
@@ -2396,6 +2423,19 @@ mod tests {
         };
         assert_eq!(text("int4range(1, 4, '(]')"), "[2,5)");
         assert_eq!(text("int4range(int4range(1, 4))"), "[1,4)");
+        assert_eq!(text("int4multirange()"), "{}");
+        assert_eq!(
+            text("int4multirange(int4range(5, 8), int4range(1, 5))"),
+            "{[1,8)}"
+        );
+        assert_eq!(
+            ev("int4range(1, 10) @> int4multirange(int4range(2, 4), int4range(6, 8))"),
+            Datum::Bool(true)
+        );
+        assert_eq!(
+            ev("int4range(1, 3) && int4multirange(int4range(2, 4), int4range(6, 8))"),
+            Datum::Bool(true)
+        );
         assert_eq!(ev("lower(int4range(1, 4))"), Datum::Int4(1));
         assert_eq!(ev("upper(int4range(1, 4))"), Datum::Int4(4));
         assert_eq!(ev("isempty('empty'::int4range)"), Datum::Bool(true));

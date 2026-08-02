@@ -152,6 +152,11 @@ pub fn encode_text_in(d: &Datum, style: OutputStyle<'_>) -> Vec<u8> {
                 .expect("a Datum's text encoding is always valid UTF-8")
         })
         .into_bytes(),
+        Datum::Multirange(multirange) => crate::multirange::to_text(multirange, |bound| {
+            String::from_utf8(encode_text_in(bound, style))
+                .expect("a Datum's text encoding is always valid UTF-8")
+        })
+        .into_bytes(),
     }
 }
 
@@ -242,6 +247,24 @@ pub fn encode_binary(d: &Datum) -> Vec<u8> {
                 out.extend_from_slice(
                     &i32::try_from(bytes.len())
                         .expect("range bound exceeds PostgreSQL's wire limit")
+                        .to_be_bytes(),
+                );
+                out.extend_from_slice(&bytes);
+            }
+            out
+        }
+        Datum::Multirange(multirange) => {
+            let mut out = Vec::new();
+            out.extend_from_slice(
+                &i32::try_from(multirange.ranges.len())
+                    .expect("multirange has more than i32::MAX ranges")
+                    .to_be_bytes(),
+            );
+            for range in &multirange.ranges {
+                let bytes = encode_binary(&Datum::Range(range.clone()));
+                out.extend_from_slice(
+                    &i32::try_from(bytes.len())
+                        .expect("multirange component exceeds PostgreSQL's wire limit")
                         .to_be_bytes(),
                 );
                 out.extend_from_slice(&bytes);

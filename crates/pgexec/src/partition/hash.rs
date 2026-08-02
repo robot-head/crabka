@@ -114,6 +114,7 @@ fn column_hash(value: &Datum, seed: u64) -> Result<Option<u64>, ExecError> {
         Datum::TsVector(_) => return Err(unsupported("tsvector")),
         Datum::TsQuery(_) => return Err(unsupported("tsquery")),
         Datum::Range(range) => return Err(unsupported(range.ty.name)),
+        Datum::Multirange(multirange) => return Err(unsupported(multirange.ty.name)),
     };
     Ok(Some(hash))
 }

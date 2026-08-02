@@ -624,6 +624,7 @@ pub fn compare(a: &Datum, b: &Datum) -> Result<Option<Ordering>, TypeError> {
         // `pg_enum.enumsortorder` records.
         (Datum::Enum(x), Datum::Enum(y)) => compare_enums(x, y)?,
         (Datum::Range(x), Datum::Range(y)) => compare_ranges(x, y)?,
+        (Datum::Multirange(x), Datum::Multirange(y)) => compare_multiranges(x, y)?,
         // SP30: any numeric pair with a float promotes to float comparison (NaN is
         // the largest value and equals itself; `-0.0 == +0.0` — PG's float ordering).
         _ if is_float(a) || is_float(b) => match (as_f64(a), as_f64(b)) {
@@ -672,6 +673,24 @@ fn compare_ranges(a: &crate::RangeValue, b: &crate::RangeValue) -> Result<Orderi
         b.upper_inclusive,
         true,
     )
+}
+
+fn compare_multiranges(
+    a: &crate::MultirangeValue,
+    b: &crate::MultirangeValue,
+) -> Result<Ordering, TypeError> {
+    if a.ty != b.ty {
+        return Err(TypeError::TypeMismatch {
+            message: "cannot compare multiranges of different types".into(),
+        });
+    }
+    for (left, right) in a.ranges.iter().zip(&b.ranges) {
+        let order = compare_ranges(left, right)?;
+        if order != Ordering::Equal {
+            return Ok(order);
+        }
+    }
+    Ok(a.ranges.len().cmp(&b.ranges.len()))
 }
 
 fn compare_range_bounds(

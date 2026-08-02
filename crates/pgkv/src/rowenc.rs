@@ -50,6 +50,8 @@ mod tag {
     pub const PATH: u8 = 23;
     /// A range (`[24][u32 type oid][u8 flags][tagged finite bounds...]`).
     pub const RANGE: u8 = 24;
+    /// A multirange (`[25][u32 type oid][u32 count][tagged ranges...]`).
+    pub const MULTIRANGE: u8 = 25;
 }
 
 /// Encode one row using the current storage format.
@@ -216,6 +218,18 @@ fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
                 }
                 if let Some(upper) = &range.upper {
                     encode_fields(std::slice::from_ref(upper.as_ref()), out);
+                }
+            }
+            Datum::Multirange(multirange) => {
+                out.push(tag::MULTIRANGE);
+                out.extend_from_slice(&multirange.ty.oid.to_be_bytes());
+                out.extend_from_slice(
+                    &u32::try_from(multirange.ranges.len())
+                        .expect("multirange exceeds 4G components")
+                        .to_be_bytes(),
+                );
+                for range in &multirange.ranges {
+                    encode_fields(std::slice::from_ref(&Datum::Range(range.clone())), out);
                 }
             }
         }
@@ -474,6 +488,33 @@ fn decode_field(cur: &mut &[u8]) -> Result<Datum, KvError> {
                 upper_inclusive: !empty && flags & 0x04 != 0,
                 empty,
             })
+        }
+        tag::MULTIRANGE => {
+            let oid = u32::try_from(take_u32_len(cur)?)
+                .map_err(|_| KvError::CorruptRow("multirange type oid out of range".into()))?;
+            let Some(crabka_pgtypes::ColumnType::Multirange(ty)) =
+                crabka_pgtypes::ColumnType::builtin_multirange(oid)
+            else {
+                return Err(KvError::CorruptRow(format!(
+                    "multirange type {oid} is not registered"
+                )));
+            };
+            let count = take_u32_len(cur)?;
+            let mut ranges = Vec::with_capacity(count);
+            for _ in 0..count {
+                let Datum::Range(range) = decode_field(cur)? else {
+                    return Err(KvError::CorruptRow(
+                        "multirange component is not a range".into(),
+                    ));
+                };
+                if range.ty != ty.range {
+                    return Err(KvError::CorruptRow(
+                        "multirange component type does not match".into(),
+                    ));
+                }
+                ranges.push(range);
+            }
+            Datum::Multirange(crabka_pgtypes::MultirangeValue { ty, ranges })
         }
         other => return Err(KvError::CorruptRow(format!("unknown field tag {other}"))),
     })

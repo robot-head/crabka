@@ -71,6 +71,26 @@ pub struct RangeRef {
     pub subtype: &'static ColumnType,
 }
 
+/// A multirange type's identity and component range type.
+#[derive(Debug, Clone, Copy, Eq)]
+pub struct MultirangeRef {
+    pub oid: u32,
+    pub name: &'static str,
+    pub range: RangeRef,
+}
+
+impl PartialEq for MultirangeRef {
+    fn eq(&self, other: &Self) -> bool {
+        self.oid == other.oid
+    }
+}
+
+impl std::hash::Hash for MultirangeRef {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.oid.hash(state);
+    }
+}
+
 impl PartialEq for RangeRef {
     fn eq(&self, other: &Self) -> bool {
         self.oid == other.oid

@@ -1016,6 +1016,25 @@ fn coerce_untyped_literal_operands(
                 _ => None,
             };
         }
+        if let Datum::Multirange(multirange) = other {
+            return match op {
+                BinaryOp::Contains
+                | BinaryOp::ContainedBy
+                | BinaryOp::Overlaps
+                | BinaryOp::Shl
+                | BinaryOp::Shr
+                | BinaryOp::DoesNotExtendRight
+                | BinaryOp::DoesNotExtendLeft
+                | BinaryOp::Adjacent
+                | BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge => Some(multirange.column_type()),
+                _ => None,
+            };
+        }
         if !matches!(other, Datum::Jsonb(_)) {
             return match (op, other) {
                 (BinaryOp::JsonPathMatch, Datum::TsVector(_)) => Some(ColumnType::TsQuery),
@@ -1151,8 +1170,16 @@ pub(crate) fn apply_binary(
                 Box::new(right.clone()),
             )))
         }
-        // Array overlap; NULL handling lives in the array function.
-        BinaryOp::Overlaps => array_fn::array_overlap(l, r),
+        BinaryOp::Overlaps => match (l, r) {
+            (Datum::Range(range), Datum::Multirange(multirange))
+            | (Datum::Multirange(multirange), Datum::Range(range)) => Ok(Datum::Bool(
+                crabka_pgtypes::multirange::overlaps_range(multirange, range)?,
+            )),
+            (Datum::Multirange(left), Datum::Multirange(right)) => Ok(Datum::Bool(
+                crabka_pgtypes::multirange::overlaps(left, right)?,
+            )),
+            _ => array_fn::array_overlap(l, r),
+        },
         BinaryOp::DoesNotExtendRight
         | BinaryOp::DoesNotExtendLeft
         | BinaryOp::Adjacent
@@ -1171,6 +1198,36 @@ pub(crate) fn apply_binary(
                 BinaryOp::Shr => crabka_pgtypes::range::strictly_right(a, b)?,
                 _ => unreachable!(),
             }))
+        }
+        BinaryOp::DoesNotExtendRight
+        | BinaryOp::DoesNotExtendLeft
+        | BinaryOp::Adjacent
+        | BinaryOp::Shl
+        | BinaryOp::Shr
+            if matches!((l, r), (Datum::Range(_), Datum::Multirange(_))) =>
+        {
+            let (Datum::Range(range), Datum::Multirange(multirange)) = (l, r) else {
+                unreachable!()
+            };
+            let (relation, use_last) = match op {
+                BinaryOp::DoesNotExtendRight => {
+                    (crabka_pgtypes::range::does_not_extend_right as _, true)
+                }
+                BinaryOp::DoesNotExtendLeft => {
+                    (crabka_pgtypes::range::does_not_extend_left as _, false)
+                }
+                BinaryOp::Shl => (crabka_pgtypes::range::strictly_left as _, false),
+                BinaryOp::Shr => (crabka_pgtypes::range::strictly_right as _, true),
+                BinaryOp::Adjacent => {
+                    return Ok(Datum::Bool(crabka_pgtypes::multirange::adjacent_range(
+                        multirange, range,
+                    )?));
+                }
+                _ => unreachable!(),
+            };
+            Ok(Datum::Bool(crabka_pgtypes::multirange::range_relation(
+                range, multirange, relation, use_last,
+            )?))
         }
         BinaryOp::DoesNotExtendRight | BinaryOp::DoesNotExtendLeft | BinaryOp::Adjacent => {
             if l.is_null() || r.is_null() {
@@ -1219,15 +1276,49 @@ fn apply_containment(op: BinaryOp, l: &Datum, r: &Datum) -> Result<Datum, ExecEr
             crabka_pgtypes::range::contains_range(right, left)?
         }));
     }
+    match (l, r, contains) {
+        (Datum::Range(range), Datum::Multirange(multirange), true)
+        | (Datum::Multirange(multirange), Datum::Range(range), false) => {
+            return Ok(Datum::Bool(crabka_pgtypes::multirange::range_contains(
+                range, multirange,
+            )?));
+        }
+        (Datum::Multirange(multirange), Datum::Range(range), true)
+        | (Datum::Range(range), Datum::Multirange(multirange), false) => {
+            return Ok(Datum::Bool(crabka_pgtypes::multirange::contains_range(
+                multirange, range,
+            )?));
+        }
+        (Datum::Multirange(left), Datum::Multirange(right), true) => {
+            return Ok(Datum::Bool(crabka_pgtypes::multirange::contains(
+                left, right,
+            )?));
+        }
+        (Datum::Multirange(left), Datum::Multirange(right), false) => {
+            return Ok(Datum::Bool(crabka_pgtypes::multirange::contains(
+                right, left,
+            )?));
+        }
+        _ => {}
+    }
     if contains {
         if let Datum::Range(range) = l {
             return Ok(Datum::Bool(crabka_pgtypes::range::contains_element(
                 range, r,
             )?));
         }
+        if let Datum::Multirange(multirange) = l {
+            return Ok(Datum::Bool(crabka_pgtypes::multirange::contains_element(
+                multirange, r,
+            )?));
+        }
     } else if let Datum::Range(range) = r {
         return Ok(Datum::Bool(crabka_pgtypes::range::contains_element(
             range, l,
+        )?));
+    } else if let Datum::Multirange(multirange) = r {
+        return Ok(Datum::Bool(crabka_pgtypes::multirange::contains_element(
+            multirange, l,
         )?));
     }
     if matches!(l, Datum::Jsonb(_)) || matches!(r, Datum::Jsonb(_)) {
@@ -2250,7 +2341,7 @@ fn infer_binary_type(
         // ordinary integer, not part of the result type).
         BinaryOp::DoesNotExtendRight | BinaryOp::DoesNotExtendLeft | BinaryOp::Adjacent => {
             let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
-            if matches!((lt, rt), (ColumnType::Range(a), ColumnType::Range(b)) if a == b)
+            if range_family_compatible(lt, rt)
                 || matches!(lt, ColumnType::Range(_)) && is_unknown_literal(right)
                 || matches!(rt, ColumnType::Range(_)) && is_unknown_literal(left)
             {
@@ -2262,7 +2353,7 @@ fn infer_binary_type(
         BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor | BinaryOp::Shl | BinaryOp::Shr => {
             let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
             if matches!(op, BinaryOp::Shl | BinaryOp::Shr)
-                && (matches!((lt, rt), (ColumnType::Range(a), ColumnType::Range(b)) if a == b)
+                && (range_family_compatible(lt, rt)
                     || matches!(lt, ColumnType::Range(_)) && is_unknown_literal(right)
                     || matches!(rt, ColumnType::Range(_)) && is_unknown_literal(left))
             {
@@ -2344,15 +2435,42 @@ fn json_or_array_operator_result_type(
             ColumnType::Range(left),
             ColumnType::Range(right),
         ) if left == right => return Some(ColumnType::Bool),
+        (BinaryOp::Contains | BinaryOp::ContainedBy | BinaryOp::Overlaps, left, right)
+            if range_family_compatible(left, right) =>
+        {
+            return Some(ColumnType::Bool);
+        }
         (BinaryOp::Contains, ColumnType::Range(range), element) if *range.subtype == element => {
             return Some(ColumnType::Bool);
         }
         (BinaryOp::ContainedBy, element, ColumnType::Range(range)) if element == *range.subtype => {
             return Some(ColumnType::Bool);
         }
+        (BinaryOp::Contains, ColumnType::Multirange(multirange), element)
+            if *multirange.range.subtype == element =>
+        {
+            return Some(ColumnType::Bool);
+        }
+        (BinaryOp::ContainedBy, element, ColumnType::Multirange(multirange))
+            if element == *multirange.range.subtype =>
+        {
+            return Some(ColumnType::Bool);
+        }
         _ => {}
     }
     None
+}
+
+fn range_family_compatible(left: ColumnType, right: ColumnType) -> bool {
+    match (left, right) {
+        (ColumnType::Range(a), ColumnType::Range(b)) => a == b,
+        (ColumnType::Range(range), ColumnType::Multirange(multirange))
+        | (ColumnType::Multirange(multirange), ColumnType::Range(range)) => {
+            range == multirange.range
+        }
+        (ColumnType::Multirange(a), ColumnType::Multirange(b)) => a == b,
+        _ => false,
+    }
 }
 
 /// The element type of an `ARRAY[…]` constructor: its elements unified exactly as

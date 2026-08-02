@@ -7,7 +7,7 @@
 
 use crate::{
     numeric::{NumericValue, Typmod},
-    usertype::{DomainRef, RangeRef, UserTypeRef},
+    usertype::{DomainRef, MultirangeRef, RangeRef, UserTypeRef},
 };
 
 /// PostgreSQL type OIDs (from pg_type.dat) for the slice's types.
@@ -76,6 +76,12 @@ pub mod oids {
     pub const DATERANGEARRAY: u32 = 3913;
     pub const INT8RANGE: u32 = 3926;
     pub const INT8RANGEARRAY: u32 = 3927;
+    pub const INT4MULTIRANGE: u32 = 4451;
+    pub const NUMMULTIRANGE: u32 = 4532;
+    pub const TSMULTIRANGE: u32 = 4533;
+    pub const TSTZMULTIRANGE: u32 = 4534;
+    pub const DATEMULTIRANGE: u32 = 4535;
+    pub const INT8MULTIRANGE: u32 = 4536;
     /// `json[]`.
     pub const JSONARRAY: u32 = 199;
     /// `jsonb[]`.
@@ -243,6 +249,7 @@ impl ElemType {
             | ColumnType::Array(_)
             | ColumnType::Record(_)
             | ColumnType::Enum(_)
+            | ColumnType::Multirange(_)
             | ColumnType::Domain(_) => return None,
             ColumnType::Range(range) => {
                 let elem = ElemType::Range(range);
@@ -515,6 +522,8 @@ pub enum ColumnType {
     Enum(UserTypeRef),
     /// A built-in or user-defined range type.
     Range(RangeRef),
+    /// A canonical ordered set of non-overlapping ranges.
+    Multirange(MultirangeRef),
     /// `CREATE DOMAIN … AS base` — a base type plus constraints. Values are the
     /// base type's values; what the domain adds is the constraint check on
     /// assignment and cast, and the type it reports.
@@ -535,6 +544,23 @@ impl ColumnType {
             _ => return None,
         };
         Some(ColumnType::Range(RangeRef { oid, name, subtype }))
+    }
+
+    #[must_use]
+    pub fn builtin_multirange(oid: u32) -> Option<Self> {
+        let (name, range_oid) = match oid {
+            oids::INT4MULTIRANGE => ("int4multirange", oids::INT4RANGE),
+            oids::NUMMULTIRANGE => ("nummultirange", oids::NUMRANGE),
+            oids::TSMULTIRANGE => ("tsmultirange", oids::TSRANGE),
+            oids::TSTZMULTIRANGE => ("tstzmultirange", oids::TSTZRANGE),
+            oids::DATEMULTIRANGE => ("datemultirange", oids::DATERANGE),
+            oids::INT8MULTIRANGE => ("int8multirange", oids::INT8RANGE),
+            _ => return None,
+        };
+        let ColumnType::Range(range) = Self::builtin_range(range_oid)? else {
+            unreachable!()
+        };
+        Some(ColumnType::Multirange(MultirangeRef { oid, name, range }))
     }
 
     /// Resolve a bare SQL type name (no modifier). `numeric`/`decimal` resolve to
@@ -597,6 +623,12 @@ impl ColumnType {
             "tstzrange" => ColumnType::builtin_range(oids::TSTZRANGE),
             "daterange" => ColumnType::builtin_range(oids::DATERANGE),
             "int8range" => ColumnType::builtin_range(oids::INT8RANGE),
+            "int4multirange" => ColumnType::builtin_multirange(oids::INT4MULTIRANGE),
+            "nummultirange" => ColumnType::builtin_multirange(oids::NUMMULTIRANGE),
+            "tsmultirange" => ColumnType::builtin_multirange(oids::TSMULTIRANGE),
+            "tstzmultirange" => ColumnType::builtin_multirange(oids::TSTZMULTIRANGE),
+            "datemultirange" => ColumnType::builtin_multirange(oids::DATEMULTIRANGE),
+            "int8multirange" => ColumnType::builtin_multirange(oids::INT8MULTIRANGE),
             // A name that is not built in may be a user-defined type; the
             // registry the DDL writes into is what makes `x::my_type` resolve.
             other => crate::usertype::column_type_for_name(other),
@@ -672,6 +704,7 @@ impl ColumnType {
             ColumnType::Record(None) => oids::RECORD,
             ColumnType::Record(Some(named)) | ColumnType::Enum(named) => named.oid,
             ColumnType::Range(range) => range.oid,
+            ColumnType::Multirange(multirange) => multirange.oid,
             ColumnType::Domain(domain) => domain.oid,
         }
     }
@@ -707,6 +740,7 @@ impl ColumnType {
             ColumnType::Record(None) => "record",
             ColumnType::Record(Some(named)) | ColumnType::Enum(named) => named.name,
             ColumnType::Range(range) => range.name,
+            ColumnType::Multirange(multirange) => multirange.name,
             ColumnType::Domain(domain) => domain.name,
         }
     }
@@ -738,7 +772,7 @@ impl ColumnType {
             ColumnType::Jsonb | ColumnType::Array(_) | ColumnType::Record(_) => -1,
             // `pg_type.typlen` of an enum is 4 (the oid of its pg_enum row).
             ColumnType::Enum(_) => 4,
-            ColumnType::Range(_) => -1,
+            ColumnType::Range(_) | ColumnType::Multirange(_) => -1,
             // A domain has its base type's storage.
             ColumnType::Domain(domain) => domain.base.type_size(),
         }
@@ -830,6 +864,8 @@ pub enum Datum {
     Enum(EnumValue),
     /// A built-in or user-defined range with typed bounds.
     Range(RangeValue),
+    /// A built-in multirange in canonical component order.
+    Multirange(MultirangeValue),
     /// PostgreSQL `regclass` — a relation's `pg_class` oid plus the name
     /// `regclassout` prints for it.
     Regclass(RegclassValue),
@@ -853,6 +889,19 @@ impl RangeValue {
     #[must_use]
     pub fn column_type(&self) -> ColumnType {
         ColumnType::Range(self.ty)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MultirangeValue {
+    pub ty: MultirangeRef,
+    pub ranges: Vec<RangeValue>,
+}
+
+impl MultirangeValue {
+    #[must_use]
+    pub fn column_type(&self) -> ColumnType {
+        ColumnType::Multirange(self.ty)
     }
 }
 
@@ -1202,6 +1251,7 @@ impl PartialEq for Datum {
             (Datum::TsVector(a), Datum::TsVector(b)) => a == b,
             (Datum::TsQuery(a), Datum::TsQuery(b)) => a == b,
             (Datum::Range(a), Datum::Range(b)) => a == b,
+            (Datum::Multirange(a), Datum::Multirange(b)) => a == b,
             _ => false,
         }
     }
@@ -1271,6 +1321,7 @@ impl std::hash::Hash for Datum {
             Datum::TsVector(v) => v.hash(state),
             Datum::TsQuery(q) => q.hash(state),
             Datum::Range(range) => range.hash(state),
+            Datum::Multirange(multirange) => multirange.hash(state),
         }
     }
 }
@@ -1306,6 +1357,7 @@ impl Datum {
             Datum::TsVector(_) => Some(ColumnType::TsVector),
             Datum::TsQuery(_) => Some(ColumnType::TsQuery),
             Datum::Range(range) => Some(range.column_type()),
+            Datum::Multirange(multirange) => Some(multirange.column_type()),
         }
     }
 

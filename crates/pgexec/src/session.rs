@@ -9517,6 +9517,9 @@ fn decode_binary_value(
         }
         ColumnType::Array(elem) => decode_array_binary(value, elem, time_zone),
         ColumnType::Range(range) => decode_range_binary(value, range, time_zone),
+        ColumnType::Multirange(multirange) => {
+            decode_multirange_binary(value, multirange, time_zone)
+        }
         // A domain's binary representation is its base type's, so it decodes as
         // the base and picks up its constraints on assignment.
         ColumnType::Domain(domain) => decode_binary_value(value, *domain.base, time_zone),
@@ -9575,6 +9578,44 @@ fn decode_range_binary(
         lower_inclusive: !empty && flags & 0x02 != 0,
         upper_inclusive: !empty && flags & 0x04 != 0,
         empty,
+    }))
+}
+
+fn decode_multirange_binary(
+    mut value: &[u8],
+    ty: crabka_pgtypes::usertype::MultirangeRef,
+    time_zone: &jiff::tz::TimeZone,
+) -> Result<Datum, PgError> {
+    if value.len() < 4 {
+        return Err(malformed_binary_parameter());
+    }
+    let count = usize::try_from(i32::from_be_bytes(value[..4].try_into().expect("4 bytes")))
+        .map_err(|_| malformed_binary_parameter())?;
+    value = &value[4..];
+    let mut ranges = Vec::with_capacity(count);
+    for _ in 0..count {
+        if value.len() < 4 {
+            return Err(malformed_binary_parameter());
+        }
+        let len = usize::try_from(i32::from_be_bytes(value[..4].try_into().expect("4 bytes")))
+            .map_err(|_| malformed_binary_parameter())?;
+        value = &value[4..];
+        if value.len() < len {
+            return Err(malformed_binary_parameter());
+        }
+        let (raw, rest) = value.split_at(len);
+        value = rest;
+        let Datum::Range(range) = decode_range_binary(raw, ty.range, time_zone)? else {
+            unreachable!()
+        };
+        ranges.push(range);
+    }
+    if !value.is_empty() {
+        return Err(malformed_binary_parameter());
+    }
+    Ok(Datum::Multirange(crabka_pgtypes::MultirangeValue {
+        ty,
+        ranges,
     }))
 }
 
