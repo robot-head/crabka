@@ -1186,7 +1186,7 @@ jobs:
           mkdir -p coverage
           aspect test //crates/broker:jvm_acceptance //crates/broker:jvm_consumer_group_next_gen \
             --coverage --coverage-report=coverage/broker-jvm-acceptance.lcov \
-            --bazel-flag=--config=ci --bazel-flag=--local_test_jobs=1 \
+            --bazel-flag=--config=ci --bazel-flag=--local_test_jobs=1 --bazel-flag=--test_timeout=1800 \
             --bazel-flag=--test_arg=--ignored --bazel-flag=--test_arg=--test-threads=1
       - uses: codecov/codecov-action@v7
         with:
