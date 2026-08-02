@@ -44,24 +44,26 @@ def rust_feature_binary(name, crate_root, crate_label = None, features = [], dep
         visibility = ["//visibility:public"],
     )
 
-def rust_package_tests(name, crate_label = None, rustc_env = {}, compile_data = [], harnessless = []):
+def rust_package_tests(name, crate_label = None, rustc_env = {}, compile_data = [], harnessless = [], test_binaries = {}):
     """Declares a package's top-level integration tests for a hand-written library target."""
     metadata = DEP_DATA[native.package_name()]
     srcs = native.glob(["src/**/*.rs"])
     data = depset(native.glob(["**"], exclude = ["**/*.rs", "BUILD.bazel"], allow_empty = True) + compile_data).to_list()
     for test in native.glob(["tests/*.rs"], allow_empty = True):
         test_name = test.removeprefix("tests/").removesuffix(".rs")
+        test_rustc_env = dict(rustc_env)
+        test_rustc_env.update({"CARGO_BIN_EXE_" + binary: "$(rootpath " + target + ")" for binary, target in test_binaries.items()})
         rust_test(
             name = test_name,
             aliases = _aliases("deps", "dev_deps"),
             crate_root = test,
             compile_data = data,
             crate_features = metadata["crate_features"],
-            data = data,
+            data = data + test_binaries.values(),
             deps = all_crate_deps(normal = True, normal_dev = True) + ([crate_label] if crate_label else []),
             edition = "2024",
             use_libtest_harness = test_name not in harnessless,
-            rustc_env = rustc_env,
+            rustc_env = test_rustc_env,
             srcs = srcs + native.glob(["tests/**/*.rs"]),
         )
 

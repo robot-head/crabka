@@ -1,8 +1,14 @@
-filegroup(
-    name = "distribution",
-    srcs = glob(
-        ["build/install/crabka-oracle/**"],
-        allow_empty = True,
-    ),
+load("@rules_java//java:java_binary.bzl", "java_binary")
+
+java_binary(
+    name = "oracle",
+    srcs = glob(["src/main/java/**/*.java"]),
+    main_class = "com.crabka.oracle.Oracle",
+    deps = [
+        "@maven//:com_fasterxml_jackson_core_jackson_databind",
+        "@maven//:com_github_luben_zstd_jni",
+        "@maven//:org_apache_kafka_kafka_clients",
+        "@maven//:org_xerial_snappy_snappy_java",
+    ],
     visibility = ["//visibility:public"],
 )

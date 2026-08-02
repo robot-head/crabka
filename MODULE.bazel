@@ -12,6 +12,8 @@ bazel_dep(name = "platforms", version = "1.1.0")
 bazel_dep(name = "protobuf", version = "34.0.bcr.1")
 bazel_dep(name = "rules_rs", version = "0.0.98")
 bazel_dep(name = "rules_apko", version = "1.5.52")
+bazel_dep(name = "rules_java", version = "9.3.0")
+bazel_dep(name = "rules_jvm_external", version = "6.10")
 bazel_dep(name = "rules_oci", version = "2.3.0")
 bazel_dep(name = "rules_pkg", version = "1.2.0")
 
@@ -24,6 +26,19 @@ apko.translate_lock(
 use_repo(apko, "apko_toolchains", "crabka_runtime")
 
 register_toolchains("@apko_toolchains//:all")
+
+maven = use_extension("@rules_jvm_external//:extensions.bzl", "maven")
+maven.install(
+    artifacts = [
+        "com.fasterxml.jackson.core:jackson-databind:2.22.1",
+        "com.github.luben:zstd-jni:1.5.7-12",
+        "org.apache.kafka:kafka-clients:4.3.1",
+        "org.xerial.snappy:snappy-java:1.1.10.8",
+    ],
+    known_contributing_modules = ["protobuf"],
+    lock_file = "//:maven_install.json",
+)
+use_repo(maven, "maven")
 
 # ---------------------------------------------------------------------------
 # Rust toolchain — pinned to the workspace channel (rust-toolchain.toml).

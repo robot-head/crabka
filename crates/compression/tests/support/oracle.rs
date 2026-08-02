@@ -15,28 +15,28 @@ pub struct Oracle {
 
 impl Oracle {
     pub fn spawn() -> Self {
-        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("tools/oracle/build/install/crabka-oracle");
-        // Gradle's `installDist` produces BOTH wrappers on every platform
-        // (the POSIX shell script and the .bat). Pick by host OS, not by
-        // existence — picking by existence on Linux selects the .bat and
-        // fails with ENOEXEC.
-        let bin = if cfg!(windows) {
-            base.join("bin/crabka-oracle.bat")
+        let mut cmd = if let Some(bin) = option_env!("CARGO_BIN_EXE_crabka-oracle") {
+            Command::new(bin)
         } else {
-            base.join("bin/crabka-oracle")
-        };
-        assert2::assert!(bin.exists());
-        let mut cmd = if cfg!(windows) {
-            Command::new(&bin)
-        } else {
-            let mut c = Command::new("sh");
-            c.arg(&bin);
-            c
+            let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("tools/oracle/build/install/crabka-oracle");
+            let bin = if cfg!(windows) {
+                base.join("bin/crabka-oracle.bat")
+            } else {
+                base.join("bin/crabka-oracle")
+            };
+            assert2::assert!(bin.exists());
+            if cfg!(windows) {
+                Command::new(bin)
+            } else {
+                let mut command = Command::new("sh");
+                command.arg(bin);
+                command
+            }
         };
         if let Some(java_home) = std::env::var_os("JAVA_HOME") {
             cmd.env("JAVA_HOME", java_home);

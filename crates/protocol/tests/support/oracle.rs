@@ -15,39 +15,28 @@ pub struct Oracle {
 
 impl Oracle {
     pub fn spawn() -> Self {
-        let base = std::env::var_os("TEST_SRCDIR")
-            .map(PathBuf::from)
-            .map(|root| root.join("_main/tools/oracle/build/install/crabka-oracle"))
-            .unwrap_or_else(|| {
-                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        let mut cmd = if let Some(bin) = option_env!("CARGO_BIN_EXE_crabka-oracle") {
+            Command::new(bin)
+        } else {
+            let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                     .parent()
                     .unwrap()
                     .parent()
                     .unwrap()
-                    .join("tools/oracle/build/install/crabka-oracle")
-            });
-        // Gradle's `installDist` produces BOTH wrappers on every platform
-        // (the POSIX shell script and the .bat). Pick by host OS, not by
-        // existence — picking by existence on Linux selects the .bat and
-        // fails with ENOEXEC.
-        let bin = if cfg!(windows) {
-            base.join("bin/crabka-oracle.bat")
-        } else {
-            base.join("bin/crabka-oracle")
-        };
-        assert2::assert!(bin.exists());
-        // Invoke the POSIX wrapper through `sh` rather than execve'ing it
-        // directly. Gradle's `installDist` does not always preserve the
-        // executable bit on the generated start script across CI runners,
-        // and a non-executable script gets ENOEXEC from the kernel even
-        // though the shebang is valid. Going through `sh` makes the spawn
-        // independent of file mode bits.
-        let mut cmd = if cfg!(windows) {
-            Command::new(&bin)
-        } else {
-            let mut c = Command::new("sh");
-            c.arg(&bin);
-            c
+                    .join("tools/oracle/build/install/crabka-oracle");
+            let bin = if cfg!(windows) {
+                base.join("bin/crabka-oracle.bat")
+            } else {
+                base.join("bin/crabka-oracle")
+            };
+            assert2::assert!(bin.exists());
+            if cfg!(windows) {
+                Command::new(bin)
+            } else {
+                let mut command = Command::new("sh");
+                command.arg(bin);
+                command
+            }
         };
         if let Some(java_home) = std::env::var_os("JAVA_HOME") {
             cmd.env("JAVA_HOME", java_home);

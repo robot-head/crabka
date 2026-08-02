@@ -4,5 +4,5 @@ rust_package(
     name = "compression",
     cargo_name = "crabka-compression",
     crate_name = "crabka_compression",
-    test_compile_data = ["//tools/oracle:distribution"],
+    test_binaries = {"crabka-oracle": "//tools/oracle:oracle"},
 )

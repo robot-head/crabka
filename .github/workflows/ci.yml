@@ -328,7 +328,7 @@ jobs:
           fail_ci_if_error: false
 
   jvm-differential:
-    needs: changes
+    needs: [changes, affected]
     if: ${{ needs.changes.outputs.jvm_differential == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -338,11 +338,6 @@ jobs:
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - uses: ./.github/actions/free-disk-space
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: 17
-      - run: (cd tools/oracle && ./gradlew installDist --no-daemon)
       # Select the JVM-oracle targets explicitly. A workspace-wide
       # `--include-ignored` sweep also runs thousands of ordinary tests and
       # Docker- or PostgreSQL-gated suites that belong to dedicated jobs.

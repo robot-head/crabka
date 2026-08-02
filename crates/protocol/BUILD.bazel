@@ -58,7 +58,7 @@ rust_package_benches(
 
 rust_package_tests(
     name = "protocol",
-    compile_data = glob(["generated/**/*.rs"]) + ["//tools/oracle:distribution"],
+    compile_data = glob(["generated/**/*.rs"]),
     crate_label = ":protocol",
     harnessless = [
         "corpus_replay",
@@ -68,4 +68,5 @@ rust_package_tests(
     rustc_env = {
         "CARGO_MANIFEST_DIR": "$${pwd}/crates/protocol",
     },
+    test_binaries = {"crabka-oracle": "//tools/oracle:oracle"},
 )
