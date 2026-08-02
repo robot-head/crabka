@@ -10179,6 +10179,45 @@ fn invalid_parameter_encoding(_: std::str::Utf8Error) -> PgError {
 }
 
 impl Session for SqlSession {
+    async fn startup_parameter(&mut self, name: &str, value: &str) -> Result<(), PgError> {
+        if name == "options" {
+            let words = shlex::split(value)
+                .ok_or_else(|| PgError::error("42601", "invalid startup packet options"))?;
+            let mut words = words.iter();
+            while let Some(option) = words.next() {
+                let assignment = if option == "-c" {
+                    words.next().map(String::as_str)
+                } else {
+                    option
+                        .strip_prefix("-c")
+                        .or_else(|| option.strip_prefix("--"))
+                }
+                .ok_or_else(|| {
+                    PgError::error(
+                        "42601",
+                        format!("invalid command-line argument for server process: {option}"),
+                    )
+                })?;
+                let (name, value) = assignment.split_once('=').ok_or_else(|| {
+                    PgError::error(
+                        "42601",
+                        format!("invalid command-line argument for server process: {assignment}"),
+                    )
+                })?;
+                self.guc
+                    .set(name, value, false)
+                    .map_err(ExecError::into_pg)?;
+            }
+            self.guc.commit();
+            return Ok(());
+        }
+        self.guc
+            .set(name, value, false)
+            .map_err(ExecError::into_pg)?;
+        self.guc.commit();
+        Ok(())
+    }
+
     async fn startup(&mut self) -> Result<(), PgError> {
         if !self.login_event_fired {
             self.login_event_fired = true;
@@ -13521,6 +13560,32 @@ mod tests {
         assert_eq!(
             single_text(&session.simple_query("SHOW DateStyle").await.unwrap()),
             "SQL, YMD"
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_packet_gucs_apply_before_queries() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .startup_parameter("datestyle", "Postgres, MDY")
+            .await
+            .unwrap();
+        session
+            .startup_parameter("options", "-c intervalstyle=postgres_verbose")
+            .await
+            .unwrap();
+        session
+            .simple_query("SELECT 1 / 0")
+            .await
+            .expect_err("statement error");
+        assert_eq!(
+            single_text(&session.simple_query("SHOW DateStyle").await.unwrap()),
+            "Postgres, MDY"
+        );
+        assert_eq!(
+            single_text(&session.simple_query("SHOW IntervalStyle").await.unwrap()),
+            "postgres_verbose"
         );
     }
 

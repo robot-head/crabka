@@ -3,8 +3,7 @@
 
 use clap::Parser;
 
-#[tokio::main]
-async fn main() -> std::io::Result<()> {
+fn main() -> std::io::Result<()> {
     crabka_gres_fdw::provider::install_default_provider();
 
     tracing_subscriber::fmt()
@@ -14,5 +13,9 @@ async fn main() -> std::io::Result<()> {
         .init();
 
     let cli = crabka_gres::Cli::parse();
-    crabka_gres::run_serve(cli.serve).await
+    tokio::runtime::Builder::new_multi_thread()
+        .thread_stack_size(8 * 1024 * 1024)
+        .enable_all()
+        .build()?
+        .block_on(crabka_gres::run_serve(cli.serve))
 }

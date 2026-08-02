@@ -275,6 +275,15 @@ pub trait Engine: Send + Sync + 'static {
 /// (`tokio::select!`), then awaits [`Session::cancel_current_query`] before it
 /// reports `ReadyForQuery`. Implementations must make that pair drop-safe.
 pub trait Session: Send {
+    /// Apply a GUC supplied in the startup packet before login hooks run.
+    fn startup_parameter(
+        &mut self,
+        _name: &str,
+        _value: &str,
+    ) -> impl Future<Output = Result<(), PgError>> + Send {
+        async { Ok(()) }
+    }
+
     /// Complete engine-side connection startup before the wire layer reports
     /// `ReadyForQuery`. Returning an error rejects the connection.
     fn startup(&mut self) -> impl Future<Output = Result<(), PgError>> + Send {
