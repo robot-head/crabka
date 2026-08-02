@@ -46,6 +46,7 @@ mod builtin_amproc;
 mod builtin_opclasses;
 mod builtin_opfamilies;
 mod builtin_operators;
+mod builtin_proc_descriptions;
 mod builtin_procs;
 mod catalog_fn;
 mod catalog_rel;
