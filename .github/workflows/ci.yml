@@ -395,7 +395,7 @@ jobs:
             "cargo creusot --replay -p crabka-verified && cargo creusot --replay -p crabka-throttle"
 
   gres-range-scaling:
-    needs: changes
+    needs: [changes, affected]
     if: ${{ needs.changes.outputs.gres == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -460,7 +460,7 @@ jobs:
           retention-days: 30
 
   gres-topology-process-nemesis:
-    needs: changes
+    needs: [changes, affected]
     if: ${{ needs.changes.outputs.gres == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -487,7 +487,7 @@ jobs:
           retention-days: 30
 
   gres-sharded-conformance:
-    needs: changes
+    needs: [changes, affected]
     if: ${{ needs.changes.outputs.gres == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -716,7 +716,7 @@ jobs:
   # website snippets are in sync with their source (doc-drift guard). See
   # the Aspect docs task.
   doc-examples:
-    needs: changes
+    needs: [changes, affected]
     if: ${{ needs.changes.outputs.doc_examples == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -850,7 +850,7 @@ jobs:
   # run psql smoke coverage, then diff against a postgres:18 oracle with the
   # checked-in parity baseline. The parity reports are uploaded for triage.
   gres-conformance:
-    needs: changes
+    needs: [changes, affected]
     if: ${{ needs.changes.outputs.gres == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -1063,7 +1063,7 @@ jobs:
   # services, and CLI have most behavior behind tests/ targets rather than
   # unit tests.
   gres-integration:
-    needs: changes
+    needs: [changes, affected]
     if: ${{ needs.changes.outputs.gres == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -1138,7 +1138,7 @@ jobs:
   # made a hung test waste >1.5h before surfacing. If a single test stalls
   # for more than half an hour something is wedged — fail fast and re-run.
   broker-jvm-acceptance:
-    needs: changes
+    needs: [changes, affected]
     if: ${{ needs.changes.outputs.broker_jvm == 'true' }}
     runs-on: ubuntu-latest
     # 45-minute budget: the suite grew (next-gen consumer-group + KIP-595
@@ -1244,7 +1244,7 @@ jobs:
   # Each tests/<name>.rs file must be listed with `--test <name>` so that
   # the codecov/patch check sees coverage for newly added test files.
   operator-integration:
-    needs: changes
+    needs: [changes, affected]
     if: ${{ needs.changes.outputs.helm_lint == 'true' }}
     timeout-minutes: 45
     runs-on: ubuntu-latest
