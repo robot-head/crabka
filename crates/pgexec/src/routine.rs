@@ -2882,7 +2882,7 @@ pub(crate) fn routine_by_reference(
 pub(crate) fn pg_proc_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     use crabka_pgtypes::{ArrayValue, ElemType};
 
-    let mut rows = Vec::new();
+    let mut rows = builtin_pg_proc_rows()?;
     for routine in list_routines(kv)? {
         let inputs: Vec<&RoutineParam> = routine.input_params().collect();
         let all_default_modes = routine
@@ -2968,6 +2968,71 @@ pub(crate) fn pg_proc_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         ]);
     }
     Ok(rows)
+}
+
+fn builtin_pg_proc_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
+    let corrupt = || ExecError::Unsupported("built-in pg_proc fixture is corrupt".into());
+    let data = crate::builtin_procs::BUILTIN_PROCS
+        .iter()
+        .map(|data| zstd::decode_all(*data).map_err(|_| corrupt()))
+        .collect::<Result<Vec<_>, _>>()?;
+    data.iter()
+        .flat_map(|data| data.split(|byte| *byte == b'\n'))
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let line = std::str::from_utf8(line).map_err(|_| corrupt())?;
+            let fields = line.split('\t').collect::<Vec<_>>();
+            let [oid, name, language, cost, result_rows, variadic, support, kind, flags, volatility, parallel, argument_count, default_count, result_type, argument_types] =
+                fields.as_slice()
+            else {
+                return Err(corrupt());
+            };
+            let int = |value: &str| value.parse::<i32>().map_err(|_| corrupt());
+            let short = |value: &str| value.parse::<i16>().map_err(|_| corrupt());
+            let character = |value: &str| {
+                value
+                    .parse::<u8>()
+                    .map(char::from)
+                    .map_err(|_| corrupt())
+            };
+            let flags = flags.as_bytes();
+            if flags.len() != 4 {
+                return Err(corrupt());
+            }
+            Ok(vec![
+                Datum::Int4(int(oid)?),
+                Datum::Text((*name).to_string()),
+                Datum::Int4(crate::exec::PG_CATALOG_NAMESPACE_OID),
+                Datum::Int4(crate::catalog_fn::BOOTSTRAP_ROLE_OID),
+                Datum::Int4(int(language)?),
+                Datum::Float8(f64::from(int(cost)?)),
+                Datum::Float8(f64::from(int(result_rows)?)),
+                Datum::Int4(int(variadic)?),
+                Datum::Text((*support).to_string()),
+                Datum::Text(character(kind)?.to_string()),
+                Datum::Bool(flags[0] == b'1'),
+                Datum::Bool(flags[1] == b'1'),
+                Datum::Bool(flags[2] == b'1'),
+                Datum::Bool(flags[3] == b'1'),
+                Datum::Text(character(volatility)?.to_string()),
+                Datum::Text(character(parallel)?.to_string()),
+                Datum::Int2(short(argument_count)?),
+                Datum::Int2(short(default_count)?),
+                Datum::Int4(int(result_type)?),
+                Datum::Text((*argument_types).to_string()),
+                Datum::Null,
+                Datum::Null,
+                Datum::Null,
+                Datum::Null,
+                Datum::Null,
+                Datum::Text((*name).to_string()),
+                Datum::Null,
+                Datum::Null,
+                Datum::Null,
+                Datum::Null,
+            ])
+        })
+        .collect()
 }
 
 /// `pg_proc.proallargtypes` — every parameter's type, in declaration order.

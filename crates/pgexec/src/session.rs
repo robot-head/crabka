@@ -17508,8 +17508,6 @@ mod session_conformance_tests {
             .await
                 == "1"
         );
-        assert!(scalar(&mut session, "SELECT count(*) FROM pg_catalog.pg_amop").await == "0");
-        assert!(scalar(&mut session, "SELECT count(*) FROM pg_catalog.pg_amproc").await == "0");
         assert!(
             scalar(
                 &mut session,
@@ -17519,6 +17517,8 @@ mod session_conformance_tests {
             .await
                 == "2"
         );
+        assert!(scalar(&mut session, "SELECT count(*) FROM pg_catalog.pg_amop").await == "945");
+        assert!(scalar(&mut session, "SELECT count(*) FROM pg_catalog.pg_amproc").await == "714");
         assert!(
             scalar(
                 &mut session,

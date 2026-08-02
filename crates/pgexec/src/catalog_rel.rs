@@ -127,6 +127,7 @@ const PG_CATALOG_RELATIONS: &[&str] = &[
     "pg_policy",
     "pg_opclass",
     "pg_opfamily",
+    "pg_operator",
     "pg_proc",
     "pg_publication",
     "pg_publication_namespace",
@@ -180,6 +181,7 @@ static RELATION_NAMES: &[&str] = &[
     "pg_policy",
     "pg_opclass",
     "pg_opfamily",
+    "pg_operator",
     "pg_proc",
     "pg_publication",
     "pg_publication_namespace",
@@ -232,6 +234,7 @@ pub(crate) fn relation_oid(name: &str) -> i32 {
         "pg_policy" => 3256,
         "pg_opclass" => 2616,
         "pg_opfamily" => 2753,
+        "pg_operator" => 2617,
         "pg_proc" => 1255,
         "pg_publication" => 6104,
         "pg_publication_namespace" => 6237,
@@ -556,7 +559,8 @@ pub(crate) fn rows(
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
     match name {
         "pg_am" => Ok(pg_am_rows()),
-        "pg_amop" | "pg_amproc" => Ok(Vec::new()),
+        "pg_amop" => Ok(pg_amop_rows()),
+        "pg_amproc" => Ok(pg_amproc_rows()),
         "pg_language" => Ok(pg_language_rows()),
         "pg_proc" => crate::routine::pg_proc_rows(kv),
         "pg_attrdef" => pg_attrdef_rows(kv),
@@ -566,6 +570,7 @@ pub(crate) fn rows(
         "pg_database" => Ok(pg_database_rows()),
         "pg_opclass" => pg_opclass_rows(kv),
         "pg_opfamily" => pg_opfamily_rows(kv),
+        "pg_operator" => Ok(pg_operator_rows()),
         "pg_depend" => pg_depend_rows(kv),
         "pg_description" => pg_description_rows(kv),
         "pg_event_trigger" => pg_event_trigger_rows(kv),
@@ -861,6 +866,23 @@ fn pg_catalog_columns(name: &str) -> Vec<Column> {
             ("opfname", Text),
             ("opfnamespace", Int4),
             ("opfowner", Int4),
+        ]),
+        "pg_operator" => cols(&[
+            ("oid", Int4),
+            ("oprname", Text),
+            ("oprnamespace", Int4),
+            ("oprowner", Int4),
+            ("oprkind", Text),
+            ("oprcanmerge", Bool),
+            ("oprcanhash", Bool),
+            ("oprleft", Int4),
+            ("oprright", Int4),
+            ("oprresult", Int4),
+            ("oprcom", Int4),
+            ("oprnegate", Int4),
+            ("oprcode", Int4),
+            ("oprrest", Int4),
+            ("oprjoin", Int4),
         ]),
         "pg_rewrite" => cols(&[
             ("oid", Int4),
@@ -1399,9 +1421,103 @@ fn pg_opfamily_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     Ok(rows)
 }
 
+fn pg_amop_rows() -> Vec<Vec<Datum>> {
+    crate::builtin_amop::BUILTIN_AMOP
+        .iter()
+        .map(
+            |(oid, family, left, right, strategy, purpose, operator, method, sort_family)| {
+                vec![
+                    int(*oid),
+                    int(*family),
+                    int(*left),
+                    int(*right),
+                    Datum::Int2(*strategy),
+                    text(&char::from(*purpose).to_string()),
+                    int(*operator),
+                    int(*method),
+                    int(*sort_family),
+                ]
+            },
+        )
+        .collect()
+}
+
+fn pg_amproc_rows() -> Vec<Vec<Datum>> {
+    crate::builtin_amproc::BUILTIN_AMPROC
+        .iter()
+        .map(|(oid, family, left, right, number, procedure)| {
+            vec![
+                int(*oid),
+                int(*family),
+                int(*left),
+                int(*right),
+                Datum::Int2(*number),
+                int(*procedure),
+            ]
+        })
+        .collect()
+}
+
+fn pg_operator_rows() -> Vec<Vec<Datum>> {
+    crate::builtin_operators::BUILTIN_OPERATORS
+        .iter()
+        .map(
+            |(
+                oid,
+                name,
+                kind,
+                can_merge,
+                can_hash,
+                left,
+                right,
+                result,
+                commutator,
+                negator,
+                code,
+                restriction,
+                join,
+            )| {
+                vec![
+                    int(*oid),
+                    text(name),
+                    int(crate::exec::PG_CATALOG_NAMESPACE_OID),
+                    int(crate::catalog_fn::BOOTSTRAP_ROLE_OID),
+                    text(&char::from(*kind).to_string()),
+                    Datum::Bool(*can_merge),
+                    Datum::Bool(*can_hash),
+                    int(*left),
+                    int(*right),
+                    int(*result),
+                    int(*commutator),
+                    int(*negator),
+                    int(*code),
+                    int(*restriction),
+                    int(*join),
+                ]
+            },
+        )
+        .collect()
+}
+
 fn pg_opclass_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let owners = role_oids(kv)?;
-    crabka_pgcatalog::list_operator_classes(kv)?
+    let mut rows = crate::builtin_opclasses::BUILTIN_OPERATOR_CLASSES
+        .iter()
+        .map(|(oid, method, name, family, input_type, default, key_type)| {
+            vec![
+                int(*oid),
+                int(*method),
+                text(name),
+                int(crate::exec::PG_CATALOG_NAMESPACE_OID),
+                int(crate::catalog_fn::BOOTSTRAP_ROLE_OID),
+                int(*family),
+                int(*input_type),
+                Datum::Bool(*default),
+                int(*key_type),
+            ]
+        })
+        .collect::<Vec<_>>();
+    rows.extend(crabka_pgcatalog::list_operator_classes(kv)?
         .into_iter()
         .map(|class| {
             let oid = |oid: u32| {
@@ -1420,7 +1536,8 @@ fn pg_opclass_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 int(oid(class.key_type_oid)?),
             ])
         })
-        .collect()
+        .collect::<Result<Vec<_>, ExecError>>()?);
+    Ok(rows)
 }
 
 /// The current backend, as `pg_stat_activity` describes it. crabka has no

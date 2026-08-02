@@ -3485,6 +3485,7 @@ dependencies = [
  "tracing",
  "unicode-normalization",
  "zerocopy",
+ "zstd",
 ]
 
 [[package]]
