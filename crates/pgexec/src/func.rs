@@ -1339,14 +1339,9 @@ fn eval_eager(
             require_arity(fc, vals.len() == 2)?;
             let input = text_arg(&vals[0])?;
             let type_name = text_arg(&vals[1])?;
-            let ty =
-                ColumnType::from_sql_name(type_name).ok_or_else(|| ExecError::FunctionError {
-                    sqlstate: "42704",
-                    message: format!("type \"{type_name}\" does not exist"),
-                })?;
-            let parsed =
-                crabka_pgtypes::cast::cast(&Datum::Text(input.to_string()), ty, &ctx.time_zone);
-            Ok(Datum::Bool(parsed.is_ok()))
+            Ok(Datum::Bool(
+                input_error(input, type_name, &ctx.time_zone)?.is_none(),
+            ))
         }
         ScalarFunc::PgTableIsVisible => {
             require_arity(fc, vals.len() == 1)?;
@@ -1356,6 +1351,18 @@ fn eval_eager(
         // concat / coalesce / nullif / greatest / least are handled before here.
         _ => unreachable!("non-eager scalar function reached eval_eager"),
     }
+}
+
+pub(crate) fn input_error(
+    input: &str,
+    type_name: &str,
+    time_zone: &jiff::tz::TimeZone,
+) -> Result<Option<crabka_pgtypes::TypeError>, ExecError> {
+    let ty = ColumnType::from_sql_name(type_name).ok_or_else(|| ExecError::FunctionError {
+        sqlstate: "42704",
+        message: format!("type \"{type_name}\" does not exist"),
+    })?;
+    Ok(crabka_pgtypes::cast::cast(&Datum::Text(input.to_string()), ty, time_zone).err())
 }
 
 // ---- argument-type helpers ----

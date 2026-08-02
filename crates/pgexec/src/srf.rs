@@ -81,6 +81,7 @@ enum Srf {
     /// `jsonb_path_query(target, path [, vars [, silent]])` → one row per item
     /// the jsonpath produces.
     JsonbPathQuery,
+    PgInputErrorInfo,
     EventDdlCommands,
     EventDroppedObjects,
 }
@@ -109,6 +110,7 @@ fn classify(name: &str) -> Option<Srf> {
         "jsonb_array_elements" | "json_array_elements" => Srf::JsonbArrayElements,
         "jsonb_array_elements_text" | "json_array_elements_text" => Srf::JsonbArrayElementsText,
         "jsonb_path_query" | "jsonb_path_query_tz" => Srf::JsonbPathQuery,
+        "pg_input_error_info" => Srf::PgInputErrorInfo,
         "pg_event_trigger_ddl_commands" => Srf::EventDdlCommands,
         "pg_event_trigger_dropped_objects" => Srf::EventDroppedObjects,
         _ => return None,
@@ -184,6 +186,15 @@ pub(crate) fn plan(name: &str, args: &[Expr], scope: &Scope) -> Result<SrfPlan, 
         Srf::JsonbPathQuery => {
             require_arity(name, &given, (2, 4))?;
             vec![column(&name.to_ascii_lowercase(), ColumnType::Jsonb)]
+        }
+        Srf::PgInputErrorInfo => {
+            require_arity(name, &given, (2, 2))?;
+            vec![
+                column("message", ColumnType::Text),
+                column("detail", ColumnType::Text),
+                column("hint", ColumnType::Text),
+                column("sql_error_code", ColumnType::Text),
+            ]
         }
         Srf::EventDdlCommands => {
             require_arity(name, &given, (0, 0))?;
@@ -261,6 +272,7 @@ pub(crate) fn rows(
         | Srf::JsonbArrayElements
         | Srf::JsonbArrayElementsText => crate::json_fn::jsonb_srf_rows(json_srf(plan.kind), vals)?,
         Srf::JsonbPathQuery => crate::json_fn::jsonb_path_query_rows(&plan.name, vals)?,
+        Srf::PgInputErrorInfo => input_error_info_rows(vals, ctx)?,
         Srf::EventDdlCommands => event_ddl_command_rows(ctx)?,
         Srf::EventDroppedObjects => event_dropped_object_rows(ctx)?,
     };
@@ -301,8 +313,44 @@ fn param_types(plan: &SrfPlan) -> Vec<Option<ColumnType>> {
             Some(ColumnType::Jsonb),
             Some(ColumnType::Bool),
         ],
+        Srf::PgInputErrorInfo => vec![text, text],
         Srf::EventDdlCommands | Srf::EventDroppedObjects => Vec::new(),
     }
+}
+
+fn input_error_info_rows(vals: &[Datum], ctx: &EvalCtx) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let input = match &vals[0] {
+        Datum::Text(value) => value.as_str(),
+        other => return Err(type_error("pg_input_error_info", other)),
+    };
+    let type_name = match &vals[1] {
+        Datum::Text(value) => value.as_str(),
+        other => return Err(type_error("pg_input_error_info", other)),
+    };
+    let Some(error) = crate::func::input_error(input, type_name, &ctx.time_zone)? else {
+        return Ok(vec![vec![Datum::Null; 4]]);
+    };
+    let detail = if error.sqlstate() == "22P02"
+        && error.to_string().starts_with("malformed range literal")
+        && !matches!(input.as_bytes().last(), Some(b')' | b']'))
+    {
+        Datum::Text("Unexpected end of input.".into())
+    } else {
+        Datum::Null
+    };
+    Ok(vec![vec![
+        Datum::Text(error.to_string()),
+        detail,
+        Datum::Null,
+        Datum::Text(error.sqlstate().into()),
+    ]])
+}
+
+fn type_error(name: &str, value: &Datum) -> ExecError {
+    ExecError::UndefinedFunction(format!(
+        "function {name}({}) does not exist",
+        value.column_type().unwrap_or(ColumnType::Text).name()
+    ))
 }
 
 fn json_srf(kind: Srf) -> crate::json_fn::JsonbSrf {
@@ -1545,6 +1593,7 @@ mod tests {
             "jsonb_object_keys",
             "jsonb_array_elements",
             "jsonb_array_elements_text",
+            "pg_input_error_info",
         ] {
             assert!(is_srf(name), "{name} should be a set-returning function");
             assert!(is_srf(&name.to_ascii_uppercase()), "{name} uppercased");
@@ -1555,6 +1604,23 @@ mod tests {
                 "{name} should not be a set-returning function"
             );
         }
+    }
+
+    #[test]
+    fn input_error_info_returns_postgres_error_fields() {
+        assert_eq!(
+            call("pg_input_error_info", &[text("(1,4"), text("int4range")]).expect("error info"),
+            vec![vec![
+                Datum::Text("malformed range literal: \"(1,4\"".into()),
+                Datum::Text("Unexpected end of input.".into()),
+                Datum::Null,
+                Datum::Text("22P02".into()),
+            ]]
+        );
+        assert_eq!(
+            call("pg_input_error_info", &[text("(1,4)"), text("int4range")]).expect("valid input"),
+            vec![vec![Datum::Null; 4]]
+        );
     }
 
     /// One planning case: the function, its arguments, and the `(name, type)`
