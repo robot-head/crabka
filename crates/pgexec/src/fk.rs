@@ -995,6 +995,23 @@ pub struct DeferralModes {
 }
 
 impl DeferralModes {
+    #[must_use]
+    pub fn is_trigger_deferred(
+        &self,
+        table: TableId,
+        name: &str,
+        deferrable: bool,
+        initially_deferred: bool,
+    ) -> bool {
+        deferrable
+            && self
+                .named
+                .get(&(table, name.to_string()))
+                .copied()
+                .or(self.all)
+                .unwrap_or(initially_deferred)
+    }
+
     /// Apply `SET CONSTRAINTS ALL`. `PostgreSQL` resets every per-constraint
     /// setting with it.
     pub fn set_all(&mut self, deferred: bool) {
@@ -1199,6 +1216,34 @@ pub enum FkCascadeOutcome {
 /// fold is what lets every later probe see the action's effect, so the drain's
 /// searches and re-probes need no record of what it has written.
 pub trait FkCascade {
+    /// Fire statement-level hooks around one referential-action query.
+    ///
+    /// # Errors
+    ///
+    /// Returns an execution error when a `BEFORE` statement trigger fails.
+    fn begin_action(
+        &mut self,
+        _table: &Table,
+        _delete: bool,
+        _updated: &[usize],
+    ) -> Result<(), ExecError> {
+        Ok(())
+    }
+
+    /// Fire the matching statement-level hooks after a referential action.
+    ///
+    /// # Errors
+    ///
+    /// Returns an execution error when an `AFTER` statement trigger fails.
+    fn end_action(
+        &mut self,
+        _table: &Table,
+        _delete: bool,
+        _updated: &[usize],
+    ) -> Result<(), ExecError> {
+        Ok(())
+    }
+
     /// Apply one referential action to one row, returning the ops to add to the
     /// statement's batch — after folding them into the view the drain reads.
     ///
@@ -1821,6 +1866,9 @@ where
     };
     let child_context = catalog.context(&parts.child)?;
     let mut follow_on = Vec::new();
+    let deletes = matches!((*kind, *new_key), (ReferentialAction::Cascade, None));
+    let updated = if deletes { &[][..] } else { &written };
+    cascade.begin_action(&parts.child, deletes, updated)?;
     for (rowid, old_row) in referencing.iter().cloned() {
         let change = match (*kind, *new_key) {
             (ReferentialAction::Cascade, None) => FkRowChange::Delete,
@@ -1896,6 +1944,7 @@ where
             }
         }
     }
+    cascade.end_action(&parts.child, deletes, updated)?;
     Ok(follow_on)
 }
 

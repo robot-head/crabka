@@ -2854,6 +2854,7 @@ impl Parser {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn statement(&mut self) -> Result<ParsedStatement, ParseError> {
         use crate::command::CommandIdentity as I;
 
@@ -2904,6 +2905,15 @@ impl Parser {
             Token::Keyword(Keyword::Create) => self.create_statement(),
             Token::Keyword(Keyword::Drop) => {
                 match self.peek2() {
+                    Token::Ident(s)
+                        if s == "event"
+                            && matches!(self.peek3(), Token::Ident(t) if t == "trigger") =>
+                    {
+                        emitted(I::DropEventTrigger, self.drop_event_trigger())
+                    }
+                    Token::Ident(s) if s == "trigger" => {
+                        emitted(I::DropTrigger, self.drop_trigger())
+                    }
                     Token::Keyword(Keyword::Foreign) => {
                         // DROP FOREIGN ... — look at the third token to distinguish
                         // DROP FOREIGN DATA WRAPPER from DROP FOREIGN TABLE.
@@ -3029,6 +3039,13 @@ impl Parser {
             }
             // SP40: ALTER SERVER / ALTER USER MAPPING; bounded ALTER TABLE rename.
             Token::Ident(s) if s == "alter" => match self.peek2() {
+                Token::Ident(s)
+                    if s == "event"
+                        && matches!(self.peek3(), Token::Ident(t) if t == "trigger") =>
+                {
+                    emitted(I::AlterEventTrigger, self.alter_event_trigger())
+                }
+                Token::Ident(s) if s == "trigger" => emitted(I::AlterTrigger, self.alter_trigger()),
                 Token::Ident(s) if s == "function" || s == "procedure" || s == "routine" => {
                     self.alter_routine_statement()
                 }
@@ -3186,6 +3203,31 @@ impl Parser {
 
     fn alter_table_action(&mut self) -> Result<crate::ast::AlterTableAction, ParseError> {
         use crate::ast::{AlterTableAction, ColumnDef};
+
+        if self.peek_ident_eq("enable") || self.peek_ident_eq("disable") {
+            let enabled = self.eat_ident_eq("enable");
+            if !enabled {
+                self.expect_ident_eq("disable")?;
+            }
+            let mode = if !enabled {
+                crate::ast::TriggerEnableMode::Disabled
+            } else if self.eat_ident_eq("replica") {
+                crate::ast::TriggerEnableMode::Replica
+            } else if self.eat_ident_eq("always") {
+                crate::ast::TriggerEnableMode::Always
+            } else {
+                crate::ast::TriggerEnableMode::Origin
+            };
+            self.expect_ident_eq("trigger")?;
+            let selector = if self.eat_keyword(Keyword::All) {
+                crate::ast::TriggerSelector::All
+            } else if self.eat_keyword(Keyword::User) {
+                crate::ast::TriggerSelector::User
+            } else {
+                crate::ast::TriggerSelector::Named(self.expect_object_name()?)
+            };
+            return Ok(AlterTableAction::SetTriggerMode { selector, mode });
+        }
 
         if self.eat_ident_eq("add") {
             if self.starts_table_constraint() {
@@ -4008,6 +4050,21 @@ impl Parser {
         // between CREATE and the object keyword, so dispatch looks past
         // them.
         match self.peek_n(self.create_object_keyword_offset()) {
+            Token::Ident(word)
+                if word == "event"
+                    && matches!(self.peek_n(self.create_object_keyword_offset() + 1), Token::Ident(next) if next == "trigger") =>
+            {
+                emitted(I::CreateEventTrigger, self.create_event_trigger())
+            }
+            Token::Ident(word) if word == "trigger" || word == "constraint" => {
+                emitted(I::CreateTrigger, self.create_trigger())
+            }
+            Token::Keyword(Keyword::Or)
+                if matches!(self.peek_n(self.create_object_keyword_offset() + 1), Token::Ident(replace) if replace == "replace")
+                    && matches!(self.peek_n(self.create_object_keyword_offset() + 2), Token::Ident(trigger) if trigger == "trigger") =>
+            {
+                emitted(I::CreateTrigger, self.create_trigger())
+            }
             Token::Ident(word)
                 if word == "text"
                     && matches!(self.peek_n(self.create_object_keyword_offset() + 1), Token::Ident(search) if search == "search") =>
@@ -6551,6 +6608,368 @@ impl Parser {
         }
         self.eat_ident_eq("restrict");
         false
+    }
+
+    fn trigger_timing(&mut self) -> Result<crate::ast::TriggerTiming, ParseError> {
+        use crate::ast::TriggerTiming;
+        if self.eat_ident_eq("before") {
+            return Ok(TriggerTiming::Before);
+        }
+        if self.eat_ident_eq("after") {
+            return Ok(TriggerTiming::After);
+        }
+        if self.eat_ident_eq("instead") {
+            self.expect_ident_eq("of")?;
+            return Ok(TriggerTiming::InsteadOf);
+        }
+        Err(ParseError::new(
+            format!(
+                "expected BEFORE, AFTER, or INSTEAD OF, found {:?}",
+                self.peek()
+            ),
+            self.peek_pos(),
+        ))
+    }
+
+    fn trigger_event(&mut self) -> Result<crate::ast::TriggerEvent, ParseError> {
+        use crate::ast::TriggerEvent;
+        if self.eat_keyword(Keyword::Insert) {
+            return Ok(TriggerEvent::Insert);
+        }
+        if self.eat_keyword(Keyword::Update) {
+            let mut columns = Vec::new();
+            if self.eat_ident_eq("of") {
+                columns.push(self.expect_object_name()?);
+                while self.eat_comma() {
+                    columns.push(self.expect_object_name()?);
+                }
+            }
+            return Ok(TriggerEvent::Update { columns });
+        }
+        if self.eat_keyword(Keyword::Delete) {
+            return Ok(TriggerEvent::Delete);
+        }
+        if self.eat_ident_eq("truncate") {
+            return Ok(TriggerEvent::Truncate);
+        }
+        Err(ParseError::new(
+            format!(
+                "expected INSERT, UPDATE, DELETE, or TRUNCATE, found {:?}",
+                self.peek()
+            ),
+            self.peek_pos(),
+        ))
+    }
+
+    /// `CREATE [OR REPLACE] [CONSTRAINT] TRIGGER` in `PostgreSQL` 18's complete
+    /// grammar. Cross-clause semantic restrictions are catalog-aware and are
+    /// therefore validated by the executor.
+    fn create_trigger(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::{CreateTrigger, Statement, TriggerLevel, TriggerTransition};
+
+        self.expect(&Token::Keyword(Keyword::Create))?;
+        let or_replace = if self.eat_keyword(Keyword::Or) {
+            self.expect_ident_eq("replace")?;
+            true
+        } else {
+            false
+        };
+        let constraint = self.eat_ident_eq("constraint");
+        self.expect_ident_eq("trigger")?;
+        let name = self.expect_object_name()?;
+        let timing = self.trigger_timing()?;
+        let mut events = vec![self.trigger_event()?];
+        while self.eat_keyword(Keyword::Or) {
+            events.push(self.trigger_event()?);
+        }
+        self.expect(&Token::Keyword(Keyword::On))?;
+        let table = self.relation_ref()?;
+        let referenced_table = if self.eat_keyword(Keyword::From) {
+            Some(self.relation_ref()?)
+        } else {
+            None
+        };
+
+        let mut deferrable = false;
+        let mut initially_deferred = false;
+        if self.eat_keyword(Keyword::Not) {
+            self.expect_ident_eq("deferrable")?;
+        } else if self.eat_ident_eq("deferrable") {
+            deferrable = true;
+        }
+        if self.eat_ident_eq("initially") {
+            if self.eat_ident_eq("deferred") {
+                initially_deferred = true;
+            } else {
+                self.expect_ident_eq("immediate")?;
+            }
+        }
+
+        let mut transitions = Vec::new();
+        if self.eat_ident_eq("referencing") {
+            loop {
+                let old = if self.eat_ident_eq("old") {
+                    true
+                } else if self.eat_ident_eq("new") {
+                    false
+                } else {
+                    break;
+                };
+                self.expect(&Token::Keyword(Keyword::Table))?;
+                self.eat_keyword(Keyword::As);
+                transitions.push(TriggerTransition {
+                    old,
+                    name: self.expect_object_name()?,
+                });
+            }
+            if transitions.is_empty() {
+                return Err(ParseError::new(
+                    "expected OLD TABLE or NEW TABLE after REFERENCING",
+                    self.peek_pos(),
+                ));
+            }
+        }
+
+        let level = if self.eat_keyword(Keyword::For) {
+            self.eat_ident_eq("each");
+            if self.eat_ident_eq("row") {
+                TriggerLevel::Row
+            } else {
+                self.expect_ident_eq("statement")?;
+                TriggerLevel::Statement
+            }
+        } else {
+            TriggerLevel::Statement
+        };
+        let (when, when_source) = if self.eat_keyword(Keyword::When) {
+            self.expect(&Token::LParen)?;
+            let start = self.peek_pos();
+            let condition = self.expr(0)?;
+            let end = self.peek_pos();
+            self.expect(&Token::RParen)?;
+            (
+                Some(condition),
+                Some(self.source[start..end].trim().to_string()),
+            )
+        } else {
+            (None, None)
+        };
+
+        self.expect_ident_eq("execute")?;
+        if !self.eat_ident_eq("function") {
+            self.expect_ident_eq("procedure")?;
+        }
+        let function = self.qualified_name_text()?;
+        self.expect(&Token::LParen)?;
+        let mut arguments = Vec::new();
+        if *self.peek() != Token::RParen {
+            loop {
+                let position = self.peek_pos();
+                match self.bump() {
+                    Token::StringLit(value)
+                    | Token::Ident(value)
+                    | Token::IntLit(value)
+                    | Token::FloatLit(value) => arguments.push(value),
+                    Token::Minus => match self.bump() {
+                        Token::IntLit(value) | Token::FloatLit(value) => {
+                            arguments.push(format!("-{value}"));
+                        }
+                        other => {
+                            return Err(ParseError::new(
+                                format!("expected numeric trigger argument, found {other:?}"),
+                                position,
+                            ));
+                        }
+                    },
+                    other => {
+                        return Err(ParseError::new(
+                            format!("trigger arguments must be string literals, found {other:?}"),
+                            position,
+                        ));
+                    }
+                }
+                if !self.eat_comma() {
+                    break;
+                }
+            }
+        }
+        self.expect(&Token::RParen)?;
+
+        Ok(Statement::CreateTrigger(CreateTrigger {
+            name,
+            or_replace,
+            constraint,
+            timing,
+            events,
+            table,
+            referenced_table,
+            deferrable,
+            initially_deferred,
+            transitions,
+            level,
+            when,
+            when_source,
+            function,
+            arguments,
+        }))
+    }
+
+    fn alter_trigger(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::{AlterTriggerAction, Statement};
+        self.expect_ident_eq("alter")?;
+        self.expect_ident_eq("trigger")?;
+        let name = self.expect_object_name()?;
+        self.expect(&Token::Keyword(Keyword::On))?;
+        let table = self.relation_ref()?;
+        let action = if self.eat_ident_eq("rename") {
+            self.expect(&Token::Keyword(Keyword::To))?;
+            AlterTriggerAction::RenameTo(self.expect_object_name()?)
+        } else {
+            let dependent = !self.eat_ident_eq("no");
+            self.expect_ident_eq("depends")?;
+            self.expect(&Token::Keyword(Keyword::On))?;
+            self.expect_ident_eq("extension")?;
+            AlterTriggerAction::DependsOnExtension {
+                extension: self.expect_object_name()?,
+                dependent,
+            }
+        };
+        Ok(Statement::AlterTrigger {
+            name,
+            table,
+            action,
+        })
+    }
+
+    fn drop_trigger(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::Statement;
+        self.expect(&Token::Keyword(Keyword::Drop))?;
+        self.expect_ident_eq("trigger")?;
+        let if_exists = self.eat_if_exists()?;
+        let name = self.expect_object_name()?;
+        self.expect(&Token::Keyword(Keyword::On))?;
+        let table = self.relation_ref()?;
+        let cascade = self.eat_drop_behavior();
+        Ok(Statement::DropTrigger {
+            name,
+            table,
+            if_exists,
+            cascade,
+        })
+    }
+
+    fn event_trigger_event(&mut self) -> Result<crate::ast::EventTriggerEvent, ParseError> {
+        use crate::ast::EventTriggerEvent;
+        let position = self.peek_pos();
+        let event = self.expect_ident()?;
+        match event.as_str() {
+            "login" => Ok(EventTriggerEvent::Login),
+            "ddl_command_start" => Ok(EventTriggerEvent::DdlCommandStart),
+            "ddl_command_end" => Ok(EventTriggerEvent::DdlCommandEnd),
+            "sql_drop" => Ok(EventTriggerEvent::SqlDrop),
+            "table_rewrite" => Ok(EventTriggerEvent::TableRewrite),
+            _ => Err(ParseError::new(
+                format!("unrecognized event name \"{event}\""),
+                position,
+            )),
+        }
+    }
+
+    fn create_event_trigger(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::{CreateEventTrigger, EventTriggerFilter, Statement};
+        self.expect(&Token::Keyword(Keyword::Create))?;
+        self.expect_ident_eq("event")?;
+        self.expect_ident_eq("trigger")?;
+        let name = self.expect_object_name()?;
+        self.expect(&Token::Keyword(Keyword::On))?;
+        let event = self.event_trigger_event()?;
+        let mut filters = Vec::new();
+        if self.eat_keyword(Keyword::When) {
+            loop {
+                let variable = self.expect_object_name()?;
+                self.expect(&Token::Keyword(Keyword::In))?;
+                self.expect(&Token::LParen)?;
+                let mut values = Vec::new();
+                loop {
+                    let position = self.peek_pos();
+                    match self.bump() {
+                        Token::StringLit(value) => values.push(value),
+                        other => {
+                            return Err(ParseError::new(
+                                format!(
+                                    "event trigger filter values must be string literals, found {other:?}"
+                                ),
+                                position,
+                            ));
+                        }
+                    }
+                    if !self.eat_comma() {
+                        break;
+                    }
+                }
+                self.expect(&Token::RParen)?;
+                filters.push(EventTriggerFilter { variable, values });
+                if !self.eat_keyword(Keyword::And) {
+                    break;
+                }
+            }
+        }
+        self.expect_ident_eq("execute")?;
+        if !self.eat_ident_eq("function") {
+            self.expect_ident_eq("procedure")?;
+        }
+        let function = self.qualified_name_text()?;
+        self.expect(&Token::LParen)?;
+        self.expect(&Token::RParen)?;
+        Ok(Statement::CreateEventTrigger(CreateEventTrigger {
+            name,
+            event,
+            filters,
+            function,
+        }))
+    }
+
+    fn alter_event_trigger(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::{AlterEventTriggerAction, Statement, TriggerEnableMode};
+        self.expect_ident_eq("alter")?;
+        self.expect_ident_eq("event")?;
+        self.expect_ident_eq("trigger")?;
+        let name = self.expect_object_name()?;
+        let action = if self.eat_ident_eq("disable") {
+            AlterEventTriggerAction::Enable(TriggerEnableMode::Disabled)
+        } else if self.eat_ident_eq("enable") {
+            let mode = if self.eat_ident_eq("replica") {
+                TriggerEnableMode::Replica
+            } else if self.eat_ident_eq("always") {
+                TriggerEnableMode::Always
+            } else {
+                TriggerEnableMode::Origin
+            };
+            AlterEventTriggerAction::Enable(mode)
+        } else if self.eat_ident_eq("owner") {
+            self.expect(&Token::Keyword(Keyword::To))?;
+            AlterEventTriggerAction::OwnerTo(self.expect_object_name()?)
+        } else {
+            self.expect_ident_eq("rename")?;
+            self.expect(&Token::Keyword(Keyword::To))?;
+            AlterEventTriggerAction::RenameTo(self.expect_object_name()?)
+        };
+        Ok(Statement::AlterEventTrigger { name, action })
+    }
+
+    fn drop_event_trigger(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::Statement;
+        self.expect(&Token::Keyword(Keyword::Drop))?;
+        self.expect_ident_eq("event")?;
+        self.expect_ident_eq("trigger")?;
+        let if_exists = self.eat_if_exists()?;
+        let name = self.expect_object_name()?;
+        let cascade = self.eat_drop_behavior();
+        Ok(Statement::DropEventTrigger {
+            name,
+            if_exists,
+            cascade,
+        })
     }
 
     fn create_view(&mut self) -> Result<crate::ast::Statement, ParseError> {

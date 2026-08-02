@@ -11,6 +11,8 @@
 //! planning context or a unit test), where they report 0A000 rather than
 //! silently answering NULL.
 
+use std::fmt::Write;
+
 use crabka_pgcatalog::{
     CommentObject, ForeignKey, Index, MatchType, ReferentialAction, RelationName, Table, View,
 };
@@ -28,6 +30,8 @@ use crate::{
 
 /// `pg_class`'s own oid — the `classoid` every relation comment carries.
 pub(crate) const PG_CLASS_OID: i32 = 1259;
+pub(crate) const PG_CONSTRAINT_OID: i32 = 2606;
+pub(crate) const PG_TRIGGER_OID: i32 = 2620;
 /// First oid of the band reserved for roles.
 pub(crate) const ROLE_OID_BASE: i32 = 100_000;
 /// The oid of the bootstrap superuser, which owns every object — PostgreSQL's
@@ -58,6 +62,7 @@ enum CatalogFunc {
     ViewDef,
     IndexDef,
     ConstraintDef,
+    TriggerDef,
     Expr,
     UserById,
     SerialSequence,
@@ -85,6 +90,9 @@ enum CatalogFunc {
     IsPublishable,
     InRecovery,
     TablespaceLocation,
+    TriggerDepth,
+    EventRewriteOid,
+    EventRewriteReason,
 }
 
 /// Classify a (lowercased) function name.
@@ -93,8 +101,8 @@ fn catalog_func(name: &str) -> Option<CatalogFunc> {
         BackendPid, CharToEncoding, ClusterSize, ColDescription, ConstraintDef, CurrentSchemas,
         EncodingToChar, Expr as ExprDef, HasPrivilege, HasRole, InRecovery, IndexDef,
         IsPublishable, IsVisible, NullDef, ObjDescription, RelationSize, RoutineDef,
-        SerialSequence, ShobjDescription, SizePretty, StartTime, TablespaceLocation, UserById,
-        ViewDef,
+        SerialSequence, ShobjDescription, SizePretty, StartTime, TablespaceLocation, TriggerDef,
+        TriggerDepth, UserById, ViewDef,
     };
     Some(match name {
         "pg_get_viewdef" => ViewDef,
@@ -107,10 +115,8 @@ fn catalog_func(name: &str) -> Option<CatalogFunc> {
         "pg_get_function_arguments" => RoutineDef(RoutineDefKind::Arguments),
         "pg_get_function_identity_arguments" => RoutineDef(RoutineDefKind::IdentityArguments),
         "pg_get_function_result" => RoutineDef(RoutineDefKind::Result),
-        "pg_get_ruledef"
-        | "pg_get_triggerdef"
-        | "pg_get_partkeydef"
-        | "pg_get_statisticsobjdef" => NullDef,
+        "pg_get_triggerdef" => TriggerDef,
+        "pg_get_ruledef" | "pg_get_partkeydef" | "pg_get_statisticsobjdef" => NullDef,
         "pg_type_is_visible"
         | "pg_function_is_visible"
         | "pg_opclass_is_visible"
@@ -135,6 +141,9 @@ fn catalog_func(name: &str) -> Option<CatalogFunc> {
         "pg_relation_is_publishable" => IsPublishable,
         "pg_is_in_recovery" => InRecovery,
         "pg_tablespace_location" => TablespaceLocation,
+        "pg_trigger_depth" => TriggerDepth,
+        "pg_event_trigger_table_rewrite_oid" => CatalogFunc::EventRewriteOid,
+        "pg_event_trigger_table_rewrite_reason" => CatalogFunc::EventRewriteReason,
         _ if is_privilege_func(name) => HasPrivilege,
         "pg_has_role" => HasRole,
         _ => return None,
@@ -187,7 +196,11 @@ pub(crate) fn catalog_func_result_type(
     Ok(match f {
         IsVisible | HasPrivilege | HasRole | IsPublishable | InRecovery => ColumnType::Bool,
         RelationSize | ClusterSize => ColumnType::Int8,
-        BackendPid | CharToEncoding => ColumnType::Int4,
+        BackendPid
+        | CharToEncoding
+        | CatalogFunc::TriggerDepth
+        | CatalogFunc::EventRewriteOid
+        | CatalogFunc::EventRewriteReason => ColumnType::Int4,
         StartTime => ColumnType::Timestamptz,
         CurrentSchemas => ColumnType::Array(ElemType::Text),
         _ => ColumnType::Text,
@@ -203,7 +216,7 @@ fn arity_ok(f: CatalogFunc, n: usize) -> bool {
         ShobjDescription, SizePretty, StartTime, TablespaceLocation, UserById, ViewDef,
     };
     match f {
-        ViewDef | ConstraintDef | NullDef => n == 1 || n == 2,
+        ViewDef | ConstraintDef | CatalogFunc::TriggerDef | NullDef => n == 1 || n == 2,
         CatalogFunc::RoutineDef(_) => n == 1,
         IndexDef => n == 1 || n == 3,
         ExprDef => n == 2 || n == 3,
@@ -212,7 +225,12 @@ fn arity_ok(f: CatalogFunc, n: usize) -> bool {
         SerialSequence | ColDescription | ShobjDescription | HasRole => n == 2 || n == 3,
         ObjDescription | RelationSize => n == 1 || n == 2,
         ClusterSize => n == 1,
-        BackendPid | StartTime | InRecovery => n == 0,
+        BackendPid
+        | StartTime
+        | InRecovery
+        | CatalogFunc::TriggerDepth
+        | CatalogFunc::EventRewriteOid
+        | CatalogFunc::EventRewriteReason => n == 0,
         HasPrivilege => (1..=4).contains(&n),
     }
 }
@@ -255,6 +273,25 @@ fn eval_resolved(
         // a relation, so its argument is taken as given rather than resolved.
         ClusterSize => Ok(cluster_size(&vals[0])),
         BackendPid => Ok(Datum::Int4(ctx.backend_pid)),
+        CatalogFunc::TriggerDepth => Ok(Datum::Int4(
+            i32::try_from(ctx.trigger_depth).unwrap_or(i32::MAX),
+        )),
+        CatalogFunc::EventRewriteOid | CatalogFunc::EventRewriteReason => {
+            let Some((oid, reason)) = ctx.event_trigger.as_ref().and_then(|event| event.rewrite)
+            else {
+                return Err(ExecError::FunctionError {
+                    sqlstate: "39P03",
+                    message: format!(
+                        "{name}() can only be called in a table_rewrite event trigger"
+                    ),
+                });
+            };
+            Ok(Datum::Int4(if matches!(f, CatalogFunc::EventRewriteOid) {
+                oid
+            } else {
+                reason
+            }))
+        }
         StartTime => Ok(Datum::Timestamptz(process_start_time())),
         CurrentSchemas => current_schemas(&vals[0], ctx),
         EncodingToChar => Ok(encoding_to_char(&vals[0])),
@@ -281,6 +318,7 @@ fn eval_catalog_reading(f: CatalogFunc, vals: &[Datum], ctx: &EvalCtx) -> Result
         ViewDef => view_def(kv, scope, vals),
         IndexDef => index_def(kv, scope, &vals[0]),
         ConstraintDef => constraint_def(kv, &vals[0]),
+        CatalogFunc::TriggerDef => trigger_def(kv, &vals[0]),
         // crabka stores a default/`CHECK` predicate as source text, so
         // "decompiling" it is the identity on the stored text.
         ExprDef => Ok(vals[0].clone()),
@@ -299,6 +337,111 @@ fn eval_catalog_reading(f: CatalogFunc, vals: &[Datum], ctx: &EvalCtx) -> Result
         CatalogFunc::RoutineDef(kind) => routine_def(kv, kind, &vals[0]),
         _ => Ok(Datum::Null),
     }
+}
+
+fn trigger_def(kv: &dyn Kv, reference: &Datum) -> Result<Datum, ExecError> {
+    let Ok(oid) = u32::try_from(int_arg(reference)?) else {
+        return Ok(Datum::Null);
+    };
+    let Some(trigger) = crabka_pgcatalog::trigger::list_triggers(kv)?
+        .into_iter()
+        .find(|trigger| trigger.oid == oid)
+    else {
+        return Ok(Datum::Null);
+    };
+    use crabka_pgcatalog::trigger::{TriggerLevel, TriggerTiming};
+    let mut sql = if trigger.constraint {
+        format!(
+            "CREATE CONSTRAINT TRIGGER {}",
+            quote_identifier(&trigger.name)
+        )
+    } else {
+        format!("CREATE TRIGGER {}", quote_identifier(&trigger.name))
+    };
+    sql.push(' ');
+    sql.push_str(match trigger.timing {
+        TriggerTiming::Before => "BEFORE",
+        TriggerTiming::After => "AFTER",
+        TriggerTiming::InsteadOf => "INSTEAD OF",
+    });
+    let mut events = Vec::new();
+    if trigger.events.insert {
+        events.push("INSERT".into());
+    }
+    if trigger.events.delete {
+        events.push("DELETE".into());
+    }
+    if trigger.events.update {
+        let columns = trigger
+            .events
+            .update_columns
+            .iter()
+            .map(|column| quote_identifier(column))
+            .collect::<Vec<_>>();
+        events.push(if columns.is_empty() {
+            "UPDATE".into()
+        } else {
+            format!("UPDATE OF {}", columns.join(", "))
+        });
+    }
+    if trigger.events.truncate {
+        events.push("TRUNCATE".into());
+    }
+    sql.push(' ');
+    sql.push_str(&events.join(" OR "));
+    let _ = write!(
+        sql,
+        " ON {}.{}",
+        quote_identifier(&trigger.table.schema),
+        quote_identifier(&trigger.table.name)
+    );
+    if let Some(referenced) = trigger.referenced_table_id
+        && let Ok(table) = crabka_pgcatalog::table_by_id(kv, referenced)
+    {
+        let _ = write!(
+            sql,
+            " FROM {}.{}",
+            quote_identifier(&table.name.schema),
+            quote_identifier(&table.name.name)
+        );
+    }
+    if trigger.deferrable {
+        sql.push_str(" DEFERRABLE");
+    } else if trigger.constraint {
+        sql.push_str(" NOT DEFERRABLE");
+    }
+    if trigger.initially_deferred {
+        sql.push_str(" INITIALLY DEFERRED");
+    } else if trigger.constraint {
+        sql.push_str(" INITIALLY IMMEDIATE");
+    }
+    if trigger.old_transition.is_some() || trigger.new_transition.is_some() {
+        sql.push_str(" REFERENCING");
+        if let Some(name) = &trigger.old_transition {
+            let _ = write!(sql, " OLD TABLE AS {}", quote_identifier(name));
+        }
+        if let Some(name) = &trigger.new_transition {
+            let _ = write!(sql, " NEW TABLE AS {}", quote_identifier(name));
+        }
+    }
+    sql.push_str(match trigger.level {
+        TriggerLevel::Row => " FOR EACH ROW",
+        TriggerLevel::Statement => " FOR EACH STATEMENT",
+    });
+    if let Some(predicate) = &trigger.when {
+        let _ = write!(sql, " WHEN ({predicate})");
+    }
+    let args = trigger
+        .arguments
+        .iter()
+        .map(|arg| format!("'{}'", arg.replace(char::from(39), "''")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let function =
+        crate::routine::routine_by_oid(kv, i32::try_from(trigger.function_oid).unwrap_or(0))?
+            .map_or(trigger.function, |routine| routine.name);
+    let _ = write!(sql, " EXECUTE FUNCTION {function}({args})");
+    Ok(Datum::Text(sql))
 }
 
 /// The `pg_get_function*` family. A reference that resolves to no routine is

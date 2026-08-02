@@ -270,6 +270,46 @@ pub(crate) fn execute_ddl(
             let (tag, ops) = crate::text_search_catalog::execute(kv, ddl)?;
             Ok((command(tag), ops))
         }
+        Statement::CreateTrigger(trigger) => {
+            let table =
+                resolve_relation(kv, resolution, &trigger.table, SchemaDisposition::Reference)?;
+            let referenced = trigger
+                .referenced_table
+                .as_ref()
+                .map(|name| resolve_relation(kv, resolution, name, SchemaDisposition::Reference))
+                .transpose()?;
+            crate::trigger::create(kv, trigger, table, referenced)
+        }
+        Statement::AlterTrigger {
+            name,
+            table,
+            action,
+        } => crate::trigger::alter(
+            kv,
+            name,
+            resolve_relation(kv, resolution, table, SchemaDisposition::Reference)?,
+            action,
+        ),
+        Statement::DropTrigger {
+            name,
+            table,
+            if_exists,
+            ..
+        } => crate::trigger::drop(
+            kv,
+            name,
+            resolve_relation(kv, resolution, table, SchemaDisposition::Reference)?,
+            *if_exists,
+        ),
+        Statement::CreateEventTrigger(trigger) => {
+            crate::trigger::create_event(kv, trigger, fctx.current_user)
+        }
+        Statement::AlterEventTrigger { name, action } => {
+            crate::trigger::alter_event(kv, name, action)
+        }
+        Statement::DropEventTrigger {
+            name, if_exists, ..
+        } => crate::trigger::drop_event(kv, name, *if_exists),
         // P2: SQL routines. Definition, lifecycle and catalog storage live in
         // `routine`; only the DDL routing is here.
         Statement::CreateRoutine(routine) => crate::routine::create(kv, routine, fctx.current_user),
@@ -488,6 +528,10 @@ pub(crate) fn execute_ddl(
             }
             if let Some((parent, bound)) = &attachment {
                 ops.extend(crate::partition::attach_ops(parent, name, bound));
+                let parent = crabka_pgcatalog::get_table(kv, parent)?;
+                ops.extend(crate::trigger::clone_new_partition_triggers(
+                    kv, &parent, &table,
+                )?);
             }
             if temporary {
                 ops.splice(..0, ensure_schema_ops(kv, &name.schema)?);
@@ -751,7 +795,7 @@ pub(crate) fn execute_ddl(
                 }
                 Err(error) => return Err(error),
             };
-            let ops = match crabka_pgcatalog::drop_view_ops(kv, name) {
+            let ops = match drop_view_with_triggers_ops(kv, name) {
                 Ok(mut ops) => {
                     // A view may itself be read by other views. PostgreSQL
                     // refuses the drop unless CASCADE is written, and then drops
@@ -764,13 +808,17 @@ pub(crate) fn execute_ddl(
                             )));
                         }
                         for view in &dependents {
-                            ops.extend(crabka_pgcatalog::drop_view_ops(kv, view)?);
+                            ops.extend(drop_view_with_triggers_ops(kv, view)?);
                         }
                     }
                     ops
                 }
-                Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) if *if_exists => Vec::new(),
-                Err(error) => return Err(error.into()),
+                Err(ExecError::Catalog(crabka_pgcatalog::CatalogError::UndefinedTable(_)))
+                    if *if_exists =>
+                {
+                    Vec::new()
+                }
+                Err(error) => return Err(error),
             };
             Ok((command("DROP VIEW"), ops))
         }
@@ -2207,6 +2255,58 @@ struct StatementCascade<'a, 'w> {
 }
 
 impl crate::fk::FkCascade for StatementCascade<'_, '_> {
+    fn begin_action(
+        &mut self,
+        table: &Table,
+        delete: bool,
+        updated: &[usize],
+    ) -> Result<(), ExecError> {
+        let event = if delete {
+            crate::trigger::DmlEvent::Delete
+        } else {
+            crate::trigger::DmlEvent::Update
+        };
+        let columns = updated
+            .iter()
+            .filter_map(|index| table.columns.get(*index))
+            .map(|column| column.name.clone())
+            .collect::<Vec<_>>();
+        crate::trigger::fire_statement(
+            self.write_ctx.catalog_kv,
+            table,
+            event,
+            crabka_pgcatalog::trigger::TriggerTiming::Before,
+            &columns,
+            self.write_ctx.eval_ctx,
+        )
+    }
+
+    fn end_action(
+        &mut self,
+        table: &Table,
+        delete: bool,
+        updated: &[usize],
+    ) -> Result<(), ExecError> {
+        let event = if delete {
+            crate::trigger::DmlEvent::Delete
+        } else {
+            crate::trigger::DmlEvent::Update
+        };
+        let columns = updated
+            .iter()
+            .filter_map(|index| table.columns.get(*index))
+            .map(|column| column.name.clone())
+            .collect::<Vec<_>>();
+        crate::trigger::fire_statement(
+            self.write_ctx.catalog_kv,
+            table,
+            event,
+            crabka_pgcatalog::trigger::TriggerTiming::After,
+            &columns,
+            self.write_ctx.eval_ctx,
+        )
+    }
+
     async fn modify_row(
         &mut self,
         request: crate::fk::FkCascadeRequest<'_>,
@@ -2260,25 +2360,42 @@ impl crate::fk::FkCascade for StatementCascade<'_, '_> {
         if !writes.claim_row_for_action(table.id, rowid, constraint) {
             return Ok((crate::fk::FkCascadeOutcome::Skipped, ops));
         }
-        let next = match change {
-            crate::fk::FkRowChange::Delete => None,
+        let (next, updated_columns) = match change {
+            crate::fk::FkRowChange::Delete => (None, Vec::new()),
             crate::fk::FkRowChange::Assign(pairs) => {
                 let mut next = cur_row.clone();
+                let mut updated = Vec::new();
                 for (ordinal, value) in pairs {
                     let ty = cascade_column(table, ordinal)?.ty;
                     next[ordinal] = coerce(value, ty, ctx)?;
+                    updated.push(table.columns[ordinal].name.clone());
                 }
-                Some(next)
+                (Some(next), updated)
             }
             crate::fk::FkRowChange::AssignDefaults(ordinals) => {
                 let mut next = cur_row.clone();
+                let mut updated = Vec::new();
                 for ordinal in ordinals {
                     next[ordinal] = default_value(cascade_column(table, ordinal)?, ctx)?;
+                    updated.push(table.columns[ordinal].name.clone());
                 }
-                Some(next)
+                (Some(next), updated)
             }
         };
         let Some(next) = next else {
+            if crate::trigger::fire_before_row(
+                write_ctx.catalog_kv,
+                table,
+                crate::trigger::DmlEvent::Delete,
+                &[],
+                Some(&cur_row),
+                None,
+                ctx,
+            )?
+            .is_none()
+            {
+                return Ok((crate::fk::FkCascadeOutcome::Skipped, ops));
+            }
             apply_locked_row_delete(
                 write_ctx,
                 table,
@@ -2292,8 +2409,29 @@ impl crate::fk::FkCascade for StatementCascade<'_, '_> {
                 writes,
                 &mut ops,
             )?;
+            crate::trigger::fire_after_row(
+                write_ctx.catalog_kv,
+                table,
+                crate::trigger::DmlEvent::Delete,
+                &[],
+                Some(&cur_row),
+                None,
+                ctx,
+            )?;
             staged.stage(&ops);
             return Ok((crate::fk::FkCascadeOutcome::Applied { new_row: None }, ops));
+        };
+        let Some(next) = crate::trigger::fire_before_row(
+            write_ctx.catalog_kv,
+            table,
+            crate::trigger::DmlEvent::Update,
+            &updated_columns,
+            Some(&cur_row),
+            Some(next),
+            ctx,
+        )?
+        else {
+            return Ok((crate::fk::FkCascadeOutcome::Skipped, ops));
         };
         // The follow-on checks a cascaded update owes are computed by the drain
         // from the row it returns, so this write queues none of its own.
@@ -2314,6 +2452,15 @@ impl crate::fk::FkCascade for StatementCascade<'_, '_> {
             &mut ops,
         )
         .await?;
+        crate::trigger::fire_after_row(
+            write_ctx.catalog_kv,
+            table,
+            crate::trigger::DmlEvent::Update,
+            &updated_columns,
+            Some(&cur_row),
+            Some(&next),
+            ctx,
+        )?;
         staged.stage(&ops);
         Ok((
             crate::fk::FkCascadeOutcome::Applied {
@@ -2449,10 +2596,166 @@ async fn execute_write_with_ctes(
     stmt: &Statement,
     writes: &mut StatementWrites,
 ) -> Result<(WriteOutcome, Vec<crabka_pgkv::WriteOp>), ExecError> {
+    let mut statement_triggers = Vec::new();
+    if let Some(with) = statement_with_clause(stmt) {
+        for cte in &with.ctes {
+            if let crabka_pgparser::ast::CteBody::Dml(dml) = &cte.body {
+                statement_triggers.extend(statement_trigger_targets(write_ctx, dml)?);
+            }
+        }
+    }
+    statement_triggers.extend(statement_trigger_targets(write_ctx, stmt)?);
+    for (table, event, updated) in &statement_triggers {
+        crate::trigger::fire_statement(
+            write_ctx.catalog_kv,
+            table,
+            *event,
+            crabka_pgcatalog::trigger::TriggerTiming::Before,
+            updated,
+            write_ctx.eval_ctx,
+        )?;
+    }
     let (outcome, mut ops) = execute_write_parts(write_ctx, ctes, stmt, writes).await?;
     let fk_ops = drain_statement_fk_checks(write_ctx, writes, &ops).await?;
     ops.extend(fk_ops);
+    for (table, event, updated) in statement_triggers.iter().rev() {
+        crate::trigger::fire_statement(
+            write_ctx.catalog_kv,
+            table,
+            *event,
+            crabka_pgcatalog::trigger::TriggerTiming::After,
+            updated,
+            write_ctx.eval_ctx,
+        )?;
+    }
     Ok((outcome, ops))
+}
+
+fn statement_trigger_targets(
+    write_ctx: &WriteContext<'_>,
+    stmt: &Statement,
+) -> Result<Vec<(Table, crate::trigger::DmlEvent, Vec<String>)>, ExecError> {
+    if let Statement::Truncate { names, cascade, .. } = stmt {
+        let names = resolve_relations(
+            write_ctx.catalog_kv,
+            write_ctx.eval_ctx.resolution(),
+            names,
+            SchemaDisposition::Utility,
+        )?;
+        let tables = names
+            .iter()
+            .map(|name| crabka_pgcatalog::get_table(write_ctx.catalog_kv, name))
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(
+            crate::fk::expand_truncate_set(write_ctx.catalog_kv, &tables, *cascade)?
+                .tables
+                .into_iter()
+                .map(|table| (table, crate::trigger::DmlEvent::Truncate, Vec::new()))
+                .collect(),
+        );
+    }
+    if let Statement::Insert {
+        table,
+        on_conflict:
+            Some(crabka_pgparser::ast::OnConflict {
+                action: crabka_pgparser::ast::OnConflictAction::DoUpdate { assignments, .. },
+                ..
+            }),
+        ..
+    } = stmt
+    {
+        let name = resolve_relation(
+            write_ctx.catalog_kv,
+            write_ctx.eval_ctx.resolution(),
+            table,
+            SchemaDisposition::Reference,
+        )?;
+        let table = crate::trigger::relation_trigger_table(write_ctx.catalog_kv, &name)?;
+        return Ok(vec![
+            (table.clone(), crate::trigger::DmlEvent::Insert, Vec::new()),
+            (
+                table,
+                crate::trigger::DmlEvent::Update,
+                assignments
+                    .iter()
+                    .map(|(column, _)| column.clone())
+                    .collect(),
+            ),
+        ]);
+    }
+    if let Statement::Merge { table, clauses, .. } = stmt {
+        let name = resolve_relation(
+            write_ctx.catalog_kv,
+            write_ctx.eval_ctx.resolution(),
+            table,
+            SchemaDisposition::Reference,
+        )?;
+        let table = crate::trigger::relation_trigger_table(write_ctx.catalog_kv, &name)?;
+        let mut insert = false;
+        let mut delete = false;
+        let mut updated = Vec::new();
+        for clause in clauses {
+            match &clause.action {
+                crabka_pgparser::ast::MergeAction::Insert { .. } => insert = true,
+                crabka_pgparser::ast::MergeAction::Delete => delete = true,
+                crabka_pgparser::ast::MergeAction::Update(assignments) => {
+                    for column in assignments
+                        .iter()
+                        .flat_map(|assignment| assignment.targets.iter())
+                    {
+                        if !updated.contains(column) {
+                            updated.push(column.clone());
+                        }
+                    }
+                }
+                crabka_pgparser::ast::MergeAction::DoNothing => {}
+            }
+        }
+        let mut targets = Vec::new();
+        if insert {
+            targets.push((table.clone(), crate::trigger::DmlEvent::Insert, Vec::new()));
+        }
+        if !updated.is_empty() {
+            targets.push((table.clone(), crate::trigger::DmlEvent::Update, updated));
+        }
+        if delete {
+            targets.push((table, crate::trigger::DmlEvent::Delete, Vec::new()));
+        }
+        return Ok(targets);
+    }
+    let (reference, event, updated) = match stmt {
+        Statement::Insert { table, .. } => (table, crate::trigger::DmlEvent::Insert, Vec::new()),
+        Statement::Update {
+            table, assignments, ..
+        } => (
+            table,
+            crate::trigger::DmlEvent::Update,
+            assignments
+                .iter()
+                .flat_map(|assignment| assignment.targets.iter().cloned())
+                .collect(),
+        ),
+        Statement::Delete { table, .. } => (table, crate::trigger::DmlEvent::Delete, Vec::new()),
+        _ => return Ok(Vec::new()),
+    };
+    let name = resolve_relation(
+        write_ctx.catalog_kv,
+        write_ctx.eval_ctx.resolution(),
+        reference,
+        SchemaDisposition::Reference,
+    )?;
+    let table = crate::trigger::relation_trigger_table(write_ctx.catalog_kv, &name)?;
+    if crabka_pgcatalog::get_view(write_ctx.catalog_kv, &name).is_ok()
+        && !crate::trigger::has_instead_row_trigger(
+            write_ctx.catalog_kv,
+            table.id,
+            event,
+            &updated,
+        )?
+    {
+        return Ok(Vec::new());
+    }
+    Ok(vec![(table, event, updated)])
 }
 
 /// Evaluate the statement's `WITH` list — including any data-modifying entries,
@@ -2847,6 +3150,19 @@ async fn partitioned_insert(
         let Some((leaf, leaf_row)) = route_row_to_leaf(catalog_kv, &parent, &full)? else {
             return Err(ExecError::NoPartitionForRow(parent.name.to_string()));
         };
+        let Some(leaf_row) = crate::trigger::fire_before_row(
+            catalog_kv,
+            &leaf,
+            crate::trigger::DmlEvent::Insert,
+            &[],
+            None,
+            Some(leaf_row),
+            ctx,
+        )?
+        else {
+            continue;
+        };
+        check_partition_constraint(catalog_kv, &leaf, &leaf_row)?;
         let local_indexes = writable_local_indexes(catalog_kv, &leaf)?;
         let fk_ctx = match leaf_fk.entry(leaf.id) {
             std::collections::hash_map::Entry::Occupied(slot) => slot.into_mut(),
@@ -2865,8 +3181,13 @@ async fn partitioned_insert(
             writes.fk_checks.after_insert(fk_ctx, rowid, &leaf_row)?;
         }
         if returning.is_some() {
+            let ordinals = column_mapping(&parent, &leaf)?;
+            let returned = ordinals
+                .iter()
+                .map(|ordinal| leaf_row[*ordinal].clone())
+                .collect();
             returned_rows.push(ReturnedRow {
-                new: Some(full.clone()),
+                new: Some(returned),
                 old: None,
                 source: Vec::new(),
                 action: None,
@@ -2886,6 +3207,15 @@ async fn partitioned_insert(
             rowid,
             &leaf_row,
         )?);
+        crate::trigger::fire_after_row(
+            catalog_kv,
+            &leaf,
+            crate::trigger::DmlEvent::Insert,
+            &[],
+            None,
+            Some(&leaf_row),
+            ctx,
+        )?;
         inserted += 1;
     }
     let spec = ReturningSpec::new(
@@ -2899,6 +3229,211 @@ async fn partitioned_insert(
         spec.outcome(format!("INSERT 0 {inserted}"), returned_rows, ctx)?,
         ops,
     ))
+}
+
+fn is_view_ref(
+    kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
+    reference: &crabka_pgparser::ast::RelationRef,
+) -> Result<bool, ExecError> {
+    let name = resolve_relation(kv, resolution, reference, SchemaDisposition::Reference)?;
+    match crabka_pgcatalog::get_view(kv, &name) {
+        Ok(_) => Ok(true),
+        Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+async fn execute_view_dml(
+    write_ctx: &WriteContext<'_>,
+    ctes: &crate::cte::CteContext,
+    stmt: &Statement,
+) -> Result<(WriteOutcome, Vec<crabka_pgkv::WriteOp>), ExecError> {
+    let reference = match stmt {
+        Statement::Insert { table, .. }
+        | Statement::Update { table, .. }
+        | Statement::Delete { table, .. } => table,
+        _ => unreachable!("view DML only accepts INSERT, UPDATE, or DELETE"),
+    };
+    let name = resolve_relation(
+        write_ctx.catalog_kv,
+        write_ctx.eval_ctx.resolution(),
+        reference,
+        SchemaDisposition::Reference,
+    )?;
+    let view = crate::trigger::relation_trigger_table(write_ctx.catalog_kv, &name)?;
+    let ctx = write_ctx.eval_ctx;
+
+    match stmt {
+        Statement::Insert {
+            columns,
+            source,
+            on_conflict,
+            returning,
+            ..
+        } => {
+            if on_conflict.is_some() {
+                return Err(ExecError::Unsupported(
+                    "INSERT ... ON CONFLICT is not supported on views".into(),
+                ));
+            }
+            let (targets, rows) = insert_source_rows(write_ctx, ctes, &view, columns, source)?;
+            let spec = ReturningSpec::new(&view, &view.name.name, returning.as_ref(), None, false)?;
+            let mut returned = Vec::new();
+            let mut count = 0_u64;
+            for row in rows {
+                let proposed = build_insert_row(&view, &targets, &row, ctx)?;
+                let Some(result) = crate::trigger::fire_instead_row(
+                    write_ctx.catalog_kv,
+                    &view,
+                    crate::trigger::DmlEvent::Insert,
+                    &[],
+                    None,
+                    Some(proposed),
+                    ctx,
+                )?
+                else {
+                    continue;
+                };
+                count += 1;
+                if returning.is_some() {
+                    returned.push(ReturnedRow {
+                        new: Some(result),
+                        old: None,
+                        source: Vec::new(),
+                        action: None,
+                    });
+                }
+            }
+            Ok((
+                spec.outcome(format!("INSERT 0 {count}"), returned, ctx)?,
+                Vec::new(),
+            ))
+        }
+        Statement::Update {
+            alias,
+            assignments,
+            from,
+            filter,
+            returning,
+            ..
+        } => {
+            let qualifier = table_qualifier(&view, alias);
+            let read = write_ctx.read_ctx(ctes);
+            let target_expr = crabka_pgparser::ast::TableExpr::Table {
+                name: reference.clone(),
+                alias: alias.clone(),
+                columns: None,
+                sample: None,
+            };
+            let target_rows =
+                build_from(&read, std::slice::from_ref(&target_expr), None, None)?.rows;
+            let source = DmlSource::build(write_ctx, ctes, &view, qualifier, from)?;
+            let targets = resolve_assignments(write_ctx, ctes, &view, assignments)?;
+            let spec = ReturningSpec::new(
+                &view,
+                qualifier,
+                returning.as_ref(),
+                Some(&source.scope),
+                false,
+            )?;
+            let updated: Vec<String> = assignments
+                .iter()
+                .flat_map(|assignment| assignment.targets.iter().cloned())
+                .collect();
+            let mut returned = Vec::new();
+            let mut count = 0_u64;
+            for old in target_rows {
+                let Some(joined) = source.first_match(filter.as_ref(), &old, ctx)? else {
+                    continue;
+                };
+                let proposed = apply_assignments(&view, &targets, &source.scope, &joined, ctx)?;
+                let Some(result) = crate::trigger::fire_instead_row(
+                    write_ctx.catalog_kv,
+                    &view,
+                    crate::trigger::DmlEvent::Update,
+                    &updated,
+                    Some(&old),
+                    Some(proposed),
+                    ctx,
+                )?
+                else {
+                    continue;
+                };
+                count += 1;
+                if returning.is_some() {
+                    returned.push(ReturnedRow::updated(
+                        result,
+                        old,
+                        joined[view.columns.len()..].to_vec(),
+                    ));
+                }
+            }
+            Ok((
+                spec.outcome(format!("UPDATE {count}"), returned, ctx)?,
+                Vec::new(),
+            ))
+        }
+        Statement::Delete {
+            alias,
+            using,
+            filter,
+            returning,
+            ..
+        } => {
+            let qualifier = table_qualifier(&view, alias);
+            let read = write_ctx.read_ctx(ctes);
+            let target_expr = crabka_pgparser::ast::TableExpr::Table {
+                name: reference.clone(),
+                alias: alias.clone(),
+                columns: None,
+                sample: None,
+            };
+            let target_rows =
+                build_from(&read, std::slice::from_ref(&target_expr), None, None)?.rows;
+            let source = DmlSource::build(write_ctx, ctes, &view, qualifier, using)?;
+            let spec = ReturningSpec::new(
+                &view,
+                qualifier,
+                returning.as_ref(),
+                Some(&source.scope),
+                false,
+            )?;
+            let mut returned = Vec::new();
+            let mut count = 0_u64;
+            for old in target_rows {
+                let Some(joined) = source.first_match(filter.as_ref(), &old, ctx)? else {
+                    continue;
+                };
+                let Some(result) = crate::trigger::fire_instead_row(
+                    write_ctx.catalog_kv,
+                    &view,
+                    crate::trigger::DmlEvent::Delete,
+                    &[],
+                    Some(&old),
+                    None,
+                    ctx,
+                )?
+                else {
+                    continue;
+                };
+                count += 1;
+                if returning.is_some() {
+                    returned.push(ReturnedRow {
+                        new: None,
+                        old: Some(result),
+                        source: joined[view.columns.len()..].to_vec(),
+                        action: None,
+                    });
+                }
+            }
+            Ok((
+                spec.outcome(format!("DELETE {count}"), returned, ctx)?,
+                Vec::new(),
+            ))
+        }
+        _ => unreachable!(),
+    }
 }
 
 async fn execute_write_body(
@@ -2931,6 +3466,13 @@ async fn execute_write_body(
                 },
                 ops,
             ))
+        }
+        Statement::Insert { table, .. }
+        | Statement::Update { table, .. }
+        | Statement::Delete { table, .. }
+            if is_view_ref(catalog_kv, resolution, table)? =>
+        {
+            Box::pin(execute_view_dml(write_ctx, ctes, stmt)).await
         }
         Statement::Insert { table, .. } if is_partitioned_ref(catalog_kv, resolution, table)? => {
             partitioned_insert(write_ctx, ctes, stmt, writes).await
@@ -3000,6 +3542,18 @@ async fn execute_write_body(
                 // when ON CONFLICT would go on to skip it — PostgreSQL raises
                 // 23502 on a DO NOTHING row too.
                 let full = build_insert_row(&t, &target_idx, row_exprs, ctx)?;
+                let Some(full) = crate::trigger::fire_before_row(
+                    catalog_kv,
+                    &t,
+                    crate::trigger::DmlEvent::Insert,
+                    &[],
+                    None,
+                    Some(full),
+                    ctx,
+                )?
+                else {
+                    continue;
+                };
                 check_partition_constraint(catalog_kv, &t, &full)?;
                 if let Some(on_conflict) = on_conflict {
                     let plan =
@@ -3085,6 +3639,15 @@ async fn execute_write_body(
                     ),
                 });
                 ops.extend(local_index_entry_ops(&t, &local_indexes, rowid, &full)?);
+                crate::trigger::fire_after_row(
+                    catalog_kv,
+                    &t,
+                    crate::trigger::DmlEvent::Insert,
+                    &[],
+                    None,
+                    Some(&full),
+                    ctx,
+                )?;
                 inserted_or_updated += 1;
             }
             let tag = format!("INSERT 0 {inserted_or_updated}");
@@ -3163,6 +3726,22 @@ async fn execute_write_body(
                     continue;
                 }
                 let next = apply_assignments(&t, &targets, &source.scope, &joined, ctx)?;
+                let updated_columns: Vec<String> = assignments
+                    .iter()
+                    .flat_map(|assignment| assignment.targets.iter().cloned())
+                    .collect();
+                let Some(next) = crate::trigger::fire_before_row(
+                    catalog_kv,
+                    &t,
+                    crate::trigger::DmlEvent::Update,
+                    &updated_columns,
+                    Some(&cur_row),
+                    Some(next),
+                    ctx,
+                )?
+                else {
+                    continue;
+                };
                 check_partition_constraint(catalog_kv, &t, &next)?;
                 apply_locked_row_update(
                     write_ctx,
@@ -3180,6 +3759,15 @@ async fn execute_write_body(
                     &mut ops,
                 )
                 .await?;
+                crate::trigger::fire_after_row(
+                    catalog_kv,
+                    &t,
+                    crate::trigger::DmlEvent::Update,
+                    &updated_columns,
+                    Some(&cur_row),
+                    Some(&next),
+                    ctx,
+                )?;
                 if returning.is_some() {
                     returned_rows.push(ReturnedRow::updated(
                         next,
@@ -3212,6 +3800,7 @@ async fn execute_write_body(
                 &t,
                 &writes.truncate_set,
             )?;
+            let is_truncate = writes.truncate_set.contains(&t.id);
             let qualifier = table_qualifier(&t, alias);
             let source = DmlSource::build(write_ctx, ctes, &t, qualifier, using)?;
             let spec = ReturningSpec::new(
@@ -3262,6 +3851,20 @@ async fn execute_write_body(
                 if !writes.claim_row(t.id, rowid) {
                     continue;
                 }
+                if !is_truncate
+                    && crate::trigger::fire_before_row(
+                        catalog_kv,
+                        &t,
+                        crate::trigger::DmlEvent::Delete,
+                        &[],
+                        Some(&cur_row),
+                        None,
+                        ctx,
+                    )?
+                    .is_none()
+                {
+                    continue;
+                }
                 // Append only: the parent-side probe needs the KV and the lock
                 // manager, and the row's tombstone is only staged, so the check
                 // waits for the end of the statement.
@@ -3289,6 +3892,17 @@ async fn execute_write_body(
                     writes,
                     &mut ops,
                 )?;
+                if !is_truncate {
+                    crate::trigger::fire_after_row(
+                        catalog_kv,
+                        &t,
+                        crate::trigger::DmlEvent::Delete,
+                        &[],
+                        Some(&cur_row),
+                        None,
+                        ctx,
+                    )?;
+                }
                 n += 1;
             }
             let tag = format!("DELETE {n}");
@@ -4160,6 +4774,18 @@ async fn execute_merge(
             })
             .collect::<Result<Vec<_>, ExecError>>()?;
         let full = build_insert_row(&t, &target_idx, &evaluated, ctx)?;
+        let Some(full) = crate::trigger::fire_before_row(
+            write_ctx.catalog_kv,
+            &t,
+            crate::trigger::DmlEvent::Insert,
+            &[],
+            None,
+            Some(full),
+            ctx,
+        )?
+        else {
+            continue;
+        };
         let (rowid, seq_op) = write_ctx.seq.alloc(write_ctx.kv, t.id, 1)?;
         if let Some(op) = seq_op {
             ops.push(op);
@@ -4177,6 +4803,15 @@ async fn execute_merge(
             ),
         });
         ops.extend(local_index_entry_ops(&t, &local_indexes, rowid, &full)?);
+        crate::trigger::fire_after_row(
+            write_ctx.catalog_kv,
+            &t,
+            crate::trigger::DmlEvent::Insert,
+            &[],
+            None,
+            Some(&full),
+            ctx,
+        )?;
         n += 1;
         if spec.active {
             returned_rows.push(ReturnedRow {
@@ -4302,6 +4937,22 @@ async fn apply_merge_row_action(
             let mut joined = cur_row.clone();
             joined.extend_from_slice(&source);
             let next = apply_assignments(t, &targets, request.scope, &joined, ctx)?;
+            let updated_columns = assignments
+                .iter()
+                .flat_map(|assignment| assignment.targets.iter().cloned())
+                .collect::<Vec<_>>();
+            let Some(next) = crate::trigger::fire_before_row(
+                write_ctx.catalog_kv,
+                t,
+                crate::trigger::DmlEvent::Update,
+                &updated_columns,
+                Some(&cur_row),
+                Some(next),
+                ctx,
+            )?
+            else {
+                return Ok(None);
+            };
             apply_locked_row_update(
                 write_ctx,
                 t,
@@ -4318,6 +4969,15 @@ async fn apply_merge_row_action(
                 ops,
             )
             .await?;
+            crate::trigger::fire_after_row(
+                write_ctx.catalog_kv,
+                t,
+                crate::trigger::DmlEvent::Update,
+                &updated_columns,
+                Some(&cur_row),
+                Some(&next),
+                ctx,
+            )?;
             Ok(Some(ReturnedRow {
                 new: Some(next),
                 old: Some(cur_row),
@@ -4326,6 +4986,19 @@ async fn apply_merge_row_action(
             }))
         }
         MergeAction::Delete => {
+            if crate::trigger::fire_before_row(
+                write_ctx.catalog_kv,
+                t,
+                crate::trigger::DmlEvent::Delete,
+                &[],
+                Some(&cur_row),
+                None,
+                ctx,
+            )?
+            .is_none()
+            {
+                return Ok(None);
+            }
             // The deleted row's unique keys are free for a later part of this
             // statement, exactly as on the plain DELETE path.
             writes.release_row_keys(t, request.local_indexes, request.rowid, &cur_row, None)?;
@@ -4353,6 +5026,15 @@ async fn apply_merge_row_action(
                     value: crabka_pgmvcc::version::encode_tuple(cur_xmin, write_ctx.xid, &cur_row),
                 });
             }
+            crate::trigger::fire_after_row(
+                write_ctx.catalog_kv,
+                t,
+                crate::trigger::DmlEvent::Delete,
+                &[],
+                Some(&cur_row),
+                None,
+                ctx,
+            )?;
             Ok(Some(ReturnedRow {
                 new: None,
                 old: Some(cur_row),
@@ -4445,7 +5127,23 @@ pub(crate) async fn execute_copy_write(
     let mut writes = StatementWrites::default();
     let target_idx = resolve_targets(&table, &copy.columns)?;
     let n_rows = rows.len() as u64;
+    crate::trigger::fire_statement(
+        catalog_kv,
+        &table,
+        crate::trigger::DmlEvent::Insert,
+        crabka_pgcatalog::trigger::TriggerTiming::Before,
+        &[],
+        ctx,
+    )?;
     if n_rows == 0 {
+        crate::trigger::fire_statement(
+            catalog_kv,
+            &table,
+            crate::trigger::DmlEvent::Insert,
+            crabka_pgcatalog::trigger::TriggerTiming::After,
+            &[],
+            ctx,
+        )?;
         return Ok((command("COPY 0"), ops));
     }
     let (start, seq_op) = seq.alloc(kv, table.id, n_rows)?;
@@ -4453,6 +5151,7 @@ pub(crate) async fn execute_copy_write(
         ops.push(op);
     }
     let partitioned = crate::partition::is_partitioned(catalog_kv, &table.name)?;
+    let mut copied = 0_u64;
     for (rowid, row_values) in (start..).zip(rows.iter()) {
         if row_values.len() != target_idx.len() {
             return Err(ExecError::TypeMismatch(
@@ -4473,6 +5172,18 @@ pub(crate) async fn execute_copy_write(
         } else {
             check_partition_constraint(catalog_kv, &table, &full)?;
             (table.clone(), rowid, full, false)
+        };
+        let Some(full) = crate::trigger::fire_before_row(
+            catalog_kv,
+            &table,
+            crate::trigger::DmlEvent::Insert,
+            &[],
+            None,
+            Some(full),
+            ctx,
+        )?
+        else {
+            continue;
         };
         let routed_indexes = if routed {
             Some(writable_local_indexes(catalog_kv, &table)?)
@@ -4504,12 +5215,30 @@ pub(crate) async fn execute_copy_write(
             ),
         });
         ops.extend(local_index_entry_ops(&table, local_indexes, rowid, &full)?);
+        crate::trigger::fire_after_row(
+            catalog_kv,
+            &table,
+            crate::trigger::DmlEvent::Insert,
+            &[],
+            None,
+            Some(&full),
+            ctx,
+        )?;
+        copied += 1;
     }
     // `COPY` is one command, so its referential checks fire once, after every
     // row is staged — the same timing an `INSERT` of the same rows would give.
     let fk_ops = drain_statement_fk_checks(write_ctx, &mut writes, &ops).await?;
     ops.extend(fk_ops);
-    Ok((command(&format!("COPY {n_rows}")), ops))
+    crate::trigger::fire_statement(
+        catalog_kv,
+        &table,
+        crate::trigger::DmlEvent::Insert,
+        crabka_pgcatalog::trigger::TriggerTiming::After,
+        &[],
+        ctx,
+    )?;
+    Ok((command(&format!("COPY {copied}")), ops))
 }
 
 pub(crate) fn execute_timestamp_copy_write(
@@ -4717,7 +5446,7 @@ pub(crate) fn drop_schema_contents_ops(
             }
             handled.insert(relation.clone());
             if crabka_pgcatalog::get_view(kv, relation).is_ok() {
-                ops.extend(crabka_pgcatalog::drop_view_ops(kv, relation)?);
+                ops.extend(drop_view_with_triggers_ops(kv, relation)?);
             } else if let Ok(table) = crabka_pgcatalog::get_table(kv, relation) {
                 handled.extend(crate::partition::descendants(kv, relation)?);
                 ops.extend(drop_table_and_dependents_ops(kv, &table, &dropping, true)?);
@@ -4769,16 +5498,42 @@ fn drop_table_and_dependents_ops(
             )));
         }
         for view in &dependents {
-            ops.extend(crabka_pgcatalog::drop_view_ops(kv, view)?);
+            ops.extend(drop_view_with_triggers_ops(kv, view)?);
         }
     }
     ops.extend(drop_blocking_foreign_keys(kv, table, dropping, cascade)?);
     for descendant in crate::partition::descendants(kv, name)? {
+        if let Ok(descendant_table) = crabka_pgcatalog::get_table(kv, &descendant) {
+            ops.extend(crabka_pgcatalog::trigger::drop_triggers_for_table_ops(
+                kv,
+                descendant_table.id,
+            )?);
+        }
         ops.extend(crabka_pgcatalog::drop_table_ops(kv, &descendant)?);
         ops.extend(crate::partition::drop_metadata_ops(kv, &descendant)?);
     }
     ops.extend(crate::partition::drop_metadata_ops(kv, name)?);
+    ops.extend(crabka_pgcatalog::trigger::drop_triggers_for_table_ops(
+        kv, table.id,
+    )?);
     ops.extend(table_ops);
+    Ok(ops)
+}
+
+fn drop_view_with_triggers_ops(
+    kv: &dyn Kv,
+    name: &crabka_pgcatalog::RelationName,
+) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
+    let view_id = crate::catalog_rel::view_oids(kv)?
+        .get(name)
+        .copied()
+        .and_then(|oid| u32::try_from(oid).ok());
+    let mut ops = crabka_pgcatalog::drop_view_ops(kv, name)?;
+    if let Some(view_id) = view_id {
+        ops.extend(crabka_pgcatalog::trigger::drop_triggers_for_table_ops(
+            kv, view_id,
+        )?);
+    }
     Ok(ops)
 }
 
@@ -4890,7 +5645,15 @@ fn table_requires_unique_local_serialization(
     catalog_kv: &dyn Kv,
     table_name: &crabka_pgcatalog::RelationName,
 ) -> Result<UniqueLocalSerialization, ExecError> {
-    let table = crabka_pgcatalog::get_table(catalog_kv, table_name)?;
+    let table = match crabka_pgcatalog::get_table(catalog_kv, table_name) {
+        Ok(table) => table,
+        Err(crabka_pgcatalog::CatalogError::UndefinedTable(_))
+            if crabka_pgcatalog::get_view(catalog_kv, table_name).is_ok() =>
+        {
+            return Ok(UniqueLocalSerialization::None);
+        }
+        Err(error) => return Err(error.into()),
+    };
     if table.sharded {
         return Ok(UniqueLocalSerialization::None);
     }
@@ -5537,6 +6300,23 @@ async fn apply_insert_conflict_update(
         let value = crate::eval::eval(expr, &scope, &bindings, ctx)?;
         next[idx] = coerce(value, table.columns[idx].ty, ctx)?;
     }
+    let updated_columns = update
+        .assignments
+        .iter()
+        .map(|(column, _)| column.clone())
+        .collect::<Vec<_>>();
+    let Some(next) = crate::trigger::fire_before_row(
+        write_ctx.catalog_kv,
+        table,
+        crate::trigger::DmlEvent::Update,
+        &updated_columns,
+        Some(update.cur_row),
+        Some(next),
+        ctx,
+    )?
+    else {
+        return Ok(None);
+    };
     apply_locked_row_update(
         write_ctx,
         table,
@@ -5553,6 +6333,15 @@ async fn apply_insert_conflict_update(
         ops,
     )
     .await?;
+    crate::trigger::fire_after_row(
+        write_ctx.catalog_kv,
+        table,
+        crate::trigger::DmlEvent::Update,
+        &updated_columns,
+        Some(update.cur_row),
+        Some(&next),
+        ctx,
+    )?;
     Ok(Some(next))
 }
 
@@ -6097,7 +6886,33 @@ pub(crate) fn execute_timestamp_write(
                     "INSERT ... SELECT / DEFAULT VALUES on sharded tables is not supported".into(),
                 ));
             };
-            execute_timestamp_insert(kv, seq, &table, &global_indexes, columns, rows, ctx)
+            crate::trigger::fire_statement(
+                catalog_kv,
+                &table,
+                crate::trigger::DmlEvent::Insert,
+                crabka_pgcatalog::trigger::TriggerTiming::Before,
+                &[],
+                ctx,
+            )?;
+            let plan = execute_timestamp_insert(
+                catalog_kv,
+                kv,
+                seq,
+                &table,
+                &global_indexes,
+                columns,
+                rows,
+                ctx,
+            )?;
+            crate::trigger::fire_statement(
+                catalog_kv,
+                &table,
+                crate::trigger::DmlEvent::Insert,
+                crabka_pgcatalog::trigger::TriggerTiming::After,
+                &[],
+                ctx,
+            )?;
+            Ok(plan)
         }
         Statement::Update {
             assignments,
@@ -6110,14 +6925,36 @@ pub(crate) fn execute_timestamp_write(
                     "UPDATE ... FROM on sharded tables is not supported".into(),
                 ));
             }
-            execute_timestamp_update(
+            let updated = assignments
+                .iter()
+                .flat_map(|assignment| assignment.targets.iter().cloned())
+                .collect::<Vec<_>>();
+            crate::trigger::fire_statement(
+                catalog_kv,
+                &table,
+                crate::trigger::DmlEvent::Update,
+                crabka_pgcatalog::trigger::TriggerTiming::Before,
+                &updated,
+                ctx,
+            )?;
+            let plan = execute_timestamp_update(
+                catalog_kv,
                 kv,
                 &table,
                 &global_indexes,
                 assignments,
                 filter.as_ref(),
                 ctx,
-            )
+            )?;
+            crate::trigger::fire_statement(
+                catalog_kv,
+                &table,
+                crate::trigger::DmlEvent::Update,
+                crabka_pgcatalog::trigger::TriggerTiming::After,
+                &updated,
+                ctx,
+            )?;
+            Ok(plan)
         }
         Statement::Delete { using, filter, .. } => {
             if !using.is_empty() {
@@ -6125,7 +6962,31 @@ pub(crate) fn execute_timestamp_write(
                     "DELETE ... USING on sharded tables is not supported".into(),
                 ));
             }
-            execute_timestamp_delete(kv, &table, &global_indexes, filter.as_ref(), ctx)
+            crate::trigger::fire_statement(
+                catalog_kv,
+                &table,
+                crate::trigger::DmlEvent::Delete,
+                crabka_pgcatalog::trigger::TriggerTiming::Before,
+                &[],
+                ctx,
+            )?;
+            let plan = execute_timestamp_delete(
+                catalog_kv,
+                kv,
+                &table,
+                &global_indexes,
+                filter.as_ref(),
+                ctx,
+            )?;
+            crate::trigger::fire_statement(
+                catalog_kv,
+                &table,
+                crate::trigger::DmlEvent::Delete,
+                crabka_pgcatalog::trigger::TriggerTiming::After,
+                &[],
+                ctx,
+            )?;
+            Ok(plan)
         }
         _ => Err(ExecError::Unsupported(
             "this statement is not supported on sharded tables".into(),
@@ -6133,7 +6994,9 @@ pub(crate) fn execute_timestamp_write(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_timestamp_insert(
+    catalog_kv: &dyn Kv,
     kv: &dyn Kv,
     seq: &crate::seq::SequenceManager,
     table: &Table,
@@ -6154,12 +7017,33 @@ fn execute_timestamp_insert(
         return Err(ExecError::ValuesColumnCount);
     }
     let target_idx = resolve_insert_targets(table, columns, width)?;
-    let n_rows = rows.len() as u64;
-    let (start, seq_op) = seq.alloc(kv, table.id, n_rows)?;
+    let proposed_rows = rows.len() as u64;
+    let (start, seq_op) = seq.alloc(kv, table.id, proposed_rows)?;
     let mut writes = Vec::with_capacity(rows.len());
     for (rowid, row_exprs) in (start..).zip(rows.iter()) {
         let full = build_insert_row(table, &target_idx, row_exprs, ctx)?;
+        let Some(full) = crate::trigger::fire_before_row(
+            catalog_kv,
+            table,
+            crate::trigger::DmlEvent::Insert,
+            &[],
+            None,
+            Some(full),
+            ctx,
+        )?
+        else {
+            continue;
+        };
         let bucket = hash_bucket_for_row(table, &full)?;
+        crate::trigger::fire_after_row(
+            catalog_kv,
+            table,
+            crate::trigger::DmlEvent::Insert,
+            &[],
+            None,
+            Some(&full),
+            ctx,
+        )?;
         writes.push(TimestampWrite {
             table_id: table.id,
             bucket,
@@ -6174,6 +7058,7 @@ fn execute_timestamp_insert(
             delete: false,
         });
     }
+    let n_rows = writes.len();
     Ok(TimestampWritePlan {
         result: command(&format!("INSERT 0 {n_rows}")),
         writes,
@@ -6182,6 +7067,7 @@ fn execute_timestamp_insert(
 }
 
 fn execute_timestamp_update(
+    catalog_kv: &dyn Kv,
     kv: &dyn Kv,
     table: &Table,
     global_indexes: &[&crabka_pgcatalog::Index],
@@ -6218,6 +7104,22 @@ fn execute_timestamp_update(
             next[*index] = coerce(value, table.columns[*index].ty, ctx)?;
         }
         finish_written_row(table, &mut next, ctx)?;
+        let updated = assignments
+            .iter()
+            .flat_map(|assignment| assignment.targets.iter().cloned())
+            .collect::<Vec<_>>();
+        let Some(next) = crate::trigger::fire_before_row(
+            catalog_kv,
+            table,
+            crate::trigger::DmlEvent::Update,
+            &updated,
+            Some(&row),
+            Some(next),
+            ctx,
+        )?
+        else {
+            continue;
+        };
         let old_bucket = hash_bucket_for_row(table, &row)?;
         let bucket = hash_bucket_for_row(table, &next)?;
         let global_index_intents =
@@ -6232,6 +7134,15 @@ fn execute_timestamp_update(
                 delete: true,
             });
         }
+        crate::trigger::fire_after_row(
+            catalog_kv,
+            table,
+            crate::trigger::DmlEvent::Update,
+            &updated,
+            Some(&row),
+            Some(&next),
+            ctx,
+        )?;
         writes.push(TimestampWrite {
             table_id: table.id,
             bucket,
@@ -6252,6 +7163,7 @@ fn execute_timestamp_update(
 }
 
 fn execute_timestamp_delete(
+    catalog_kv: &dyn Kv,
     kv: &dyn Kv,
     table: &Table,
     global_indexes: &[&crabka_pgcatalog::Index],
@@ -6265,9 +7177,31 @@ fn execute_timestamp_delete(
         if !row_matches(filter, &scope, &row, ctx)? {
             continue;
         }
+        if crate::trigger::fire_before_row(
+            catalog_kv,
+            table,
+            crate::trigger::DmlEvent::Delete,
+            &[],
+            Some(&row),
+            None,
+            ctx,
+        )?
+        .is_none()
+        {
+            continue;
+        }
         let global_index_intents =
             global_index_delete_intents_for_row(table, global_indexes, rowid, &row)?;
         let bucket = hash_bucket_for_row(table, &row)?;
+        crate::trigger::fire_after_row(
+            catalog_kv,
+            table,
+            crate::trigger::DmlEvent::Delete,
+            &[],
+            Some(&row),
+            None,
+            ctx,
+        )?;
         writes.push(TimestampWrite {
             table_id: table.id,
             bucket,
@@ -6627,7 +7561,7 @@ fn find_visible_one_keyed(
 
 /// Coerce an evaluated value into a target column type (assignment context). `ctx`
 /// supplies the session zone for any temporal numeric conversion.
-fn coerce(
+pub(crate) fn coerce(
     value: crabka_pgtypes::Datum,
     target: crabka_pgtypes::ColumnType,
     ctx: &crate::clock::EvalCtx,
@@ -7946,7 +8880,7 @@ fn partitioned_scan(
 /// `source` — the permutation that rewrites a `source`-shaped row into a
 /// `target`-shaped one. A partition and its parent always declare the same
 /// column names, but `ATTACH PARTITION` maps them by name, not by position.
-fn column_mapping(target: &Table, source: &Table) -> Result<Vec<usize>, ExecError> {
+pub(crate) fn column_mapping(target: &Table, source: &Table) -> Result<Vec<usize>, ExecError> {
     target
         .columns
         .iter()
@@ -8050,6 +8984,30 @@ fn build_table_expr(
             {
                 let qualifier = alias.as_deref().unwrap_or(&name.name);
                 return Ok(crate::cte::requalify_cte(rel, qualifier));
+            }
+            if name.schema.is_none()
+                && let Some(runtime) = &ctx.transition_relations
+                && let Some(transition) = runtime
+                    .lock()
+                    .expect("transition relation mutex")
+                    .get(&name.name)
+                    .cloned()
+            {
+                let qualifier = alias.as_deref().unwrap_or(&name.name);
+                return Ok(Relation {
+                    scope: Scope {
+                        columns: transition
+                            .columns
+                            .into_iter()
+                            .map(|(name, ty)| ColumnBinding {
+                                qualifier: Some(qualifier.to_string()),
+                                name,
+                                ty,
+                            })
+                            .collect(),
+                    },
+                    rows: transition.rows,
+                });
             }
             let name =
                 &resolve_relation(catalog_kv, resolution, name, SchemaDisposition::Reference)?;
@@ -9364,18 +10322,28 @@ pub(crate) fn build_from_schema_with_ctes(
     from: &[crabka_pgparser::ast::TableExpr],
     ctes: &crate::cte::CteContext,
 ) -> Result<Relation, ExecError> {
+    build_from_schema_with_ctes_and_context(catalog_kv, resolution, from, ctes, None)
+}
+
+pub(crate) fn build_from_schema_with_ctes_and_context(
+    catalog_kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
+    from: &[crabka_pgparser::ast::TableExpr],
+    ctes: &crate::cte::CteContext,
+    ctx: Option<&crate::clock::EvalCtx>,
+) -> Result<Relation, ExecError> {
     let mut iter = from.iter();
     let first = iter
         .next()
         .ok_or_else(|| ExecError::Unsupported("build_from_schema on empty FROM".into()))?;
-    let mut acc = build_table_expr_schema_with_ctes(catalog_kv, resolution, first, ctes)?;
+    let mut acc = build_table_expr_schema_with_ctes(catalog_kv, resolution, first, ctes, ctx)?;
     for te in iter {
         // A lateral item references the accumulated columns, which no schema
         // description of it on its own can resolve. Substituting NULLs of the
         // right types leaves an item the ordinary describe understands and whose
         // output columns are unchanged.
         let te = &lateral_schema_item(catalog_kv, resolution, ctes, te, &acc.scope);
-        let next = build_table_expr_schema_with_ctes(catalog_kv, resolution, te, ctes)?;
+        let next = build_table_expr_schema_with_ctes(catalog_kv, resolution, te, ctes, ctx)?;
         // Schema-only: no rows, so no ON predicate is ever evaluated — a default
         // (UTC/epoch) eval context is correct here.
         acc = join_relations(
@@ -9395,6 +10363,7 @@ fn build_table_expr_schema_with_ctes(
     resolution: &crate::relname::ResolutionScope,
     te: &crabka_pgparser::ast::TableExpr,
     ctes: &crate::cte::CteContext,
+    ctx: Option<&crate::clock::EvalCtx>,
 ) -> Result<Relation, ExecError> {
     use crabka_pgparser::ast::TableExpr;
     match te {
@@ -9415,6 +10384,7 @@ fn build_table_expr_schema_with_ctes(
                         sample: None,
                     },
                     ctes,
+                    ctx,
                 )?;
                 let qualifier = alias.clone().unwrap_or_else(|| name.to_string());
                 return crate::values::requalify_derived(base, &qualifier, &Some(names.clone()));
@@ -9426,6 +10396,30 @@ fn build_table_expr_schema_with_ctes(
                 let mut rel = crate::cte::requalify_cte(rel, qualifier);
                 rel.rows.clear();
                 return Ok(rel);
+            }
+            if name.schema.is_none()
+                && let Some(runtime) = ctx.and_then(|ctx| ctx.transition_relations.as_ref())
+                && let Some(transition) = runtime
+                    .lock()
+                    .expect("transition relation mutex")
+                    .get(&name.name)
+                    .cloned()
+            {
+                let qualifier = alias.as_deref().unwrap_or(&name.name);
+                return Ok(Relation {
+                    scope: Scope {
+                        columns: transition
+                            .columns
+                            .into_iter()
+                            .map(|(name, ty)| ColumnBinding {
+                                qualifier: Some(qualifier.to_string()),
+                                name,
+                                ty,
+                            })
+                            .collect(),
+                    },
+                    rows: Vec::new(),
+                });
             }
             let name =
                 &resolve_relation(catalog_kv, resolution, name, SchemaDisposition::Reference)?;
@@ -9466,9 +10460,9 @@ fn build_table_expr_schema_with_ctes(
             kind,
             constraint,
         } => {
-            let l = build_table_expr_schema_with_ctes(catalog_kv, resolution, left, ctes)?;
+            let l = build_table_expr_schema_with_ctes(catalog_kv, resolution, left, ctes, ctx)?;
             let right = &lateral_schema_item(catalog_kv, resolution, ctes, right, &l.scope);
-            let r = build_table_expr_schema_with_ctes(catalog_kv, resolution, right, ctes)?;
+            let r = build_table_expr_schema_with_ctes(catalog_kv, resolution, right, ctes, ctx)?;
             // Schema-only: no rows, so no ON predicate is ever evaluated.
             join_relations(
                 l,
@@ -9659,6 +10653,8 @@ fn virtual_table(name: &str) -> Option<&'static str> {
         "schemata" => Some("information_schema.schemata"),
         "tables" => Some("information_schema.tables"),
         "columns" => Some("information_schema.columns"),
+        "triggers" => Some("information_schema.triggers"),
+        "triggered_update_columns" => Some("information_schema.triggered_update_columns"),
         _ => None,
     })
     // F-2 owns the rest of the `psql`/ORM introspection surface.
@@ -9844,6 +10840,34 @@ fn virtual_catalog_columns(name: &str) -> Vec<Column> {
             ("is_nullable", Text),
             ("column_default", Text),
         ]),
+        "information_schema.triggers" => cols(&[
+            ("trigger_catalog", Text),
+            ("trigger_schema", Text),
+            ("trigger_name", Text),
+            ("event_manipulation", Text),
+            ("event_object_catalog", Text),
+            ("event_object_schema", Text),
+            ("event_object_table", Text),
+            ("action_order", Int4),
+            ("action_condition", Text),
+            ("action_statement", Text),
+            ("action_orientation", Text),
+            ("action_timing", Text),
+            ("action_reference_old_table", Text),
+            ("action_reference_new_table", Text),
+            ("action_reference_old_row", Text),
+            ("action_reference_new_row", Text),
+            ("created", Timestamptz),
+        ]),
+        "information_schema.triggered_update_columns" => cols(&[
+            ("trigger_catalog", Text),
+            ("trigger_schema", Text),
+            ("trigger_name", Text),
+            ("event_object_catalog", Text),
+            ("event_object_schema", Text),
+            ("event_object_table", Text),
+            ("event_object_column", Text),
+        ]),
         _ => crate::catalog_rel::columns(name),
     }
 }
@@ -9956,6 +10980,10 @@ fn virtual_catalog_rows(
         "information_schema.columns" => {
             information_schema_columns_rows(catalog_kv, ctx.backend_pid)
         }
+        "information_schema.triggers" => information_schema_trigger_rows(catalog_kv),
+        "information_schema.triggered_update_columns" => {
+            information_schema_triggered_update_column_rows(catalog_kv)
+        }
         "pg_inherits" => pg_inherits_rows(catalog_kv),
         "pg_partitioned_table" => pg_partitioned_table_rows(catalog_kv),
         _ => crate::catalog_rel::rows(catalog_kv, name, ctx.backend_pid),
@@ -10048,6 +11076,10 @@ fn schema_owner_oid(owner: &str) -> i32 {
 /// the virtual catalog relations `v`. `psql`'s `\dt`/`\dv`/`\di`/`\ds` differ
 /// only in the `relkind` they filter on, so all four need this one list.
 fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let triggered_relation_ids = crabka_pgcatalog::trigger::list_triggers(catalog_kv)?
+        .into_iter()
+        .map(|trigger| trigger.table_id)
+        .collect::<std::collections::HashSet<_>>();
     let indexes = crabka_pgcatalog::list_indexes(catalog_kv)?;
     let indexed_table_ids = indexes
         .iter()
@@ -10070,6 +11102,7 @@ fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         row.relnatts = table.columns.len();
         row.relchecks = table.checks.len();
         row.relhasindex = indexed_table_ids.contains(&table.id);
+        row.relhastriggers = triggered_relation_ids.contains(&table.id);
         row.relam = crate::catalog_rel::BTREE_AM_OID;
         row.relispartition = crate::partition::parent_of(catalog_kv, &table.name)?.is_some();
         row.relpersistence = crabka_pgcatalog::relpersistence_of(&table.name.schema);
@@ -10088,6 +11121,8 @@ fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         );
         row.relnatts = view.columns.len();
         row.relhasrules = true;
+        row.relhastriggers =
+            u32::try_from(oid).is_ok_and(|oid| triggered_relation_ids.contains(&oid));
         row.relpersistence = crabka_pgcatalog::relpersistence_of(&view.name.schema);
         rows.push(row.build()?);
     }
@@ -10139,6 +11174,7 @@ fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
 /// The handful of `pg_class` fields that actually vary between crabka's
 /// relation kinds. Everything else in the row is the same constant for all of
 /// them, and [`PgClassRow::build`] writes it.
+#[allow(clippy::struct_excessive_bools)]
 struct PgClassRow<'a> {
     oid: i32,
     relname: &'a str,
@@ -10148,6 +11184,7 @@ struct PgClassRow<'a> {
     relchecks: usize,
     relhasindex: bool,
     relhasrules: bool,
+    relhastriggers: bool,
     relam: i32,
     relispartition: bool,
     /// `p` for an ordinary relation, `t` for one in a session's temporary
@@ -10167,6 +11204,7 @@ impl<'a> PgClassRow<'a> {
             relchecks: 0,
             relhasindex: false,
             relhasrules: false,
+            relhastriggers: false,
             relam: 0,
             relispartition: false,
             relpersistence: 'p',
@@ -10202,7 +11240,7 @@ impl<'a> PgClassRow<'a> {
             Datum::Int2(natts),
             Datum::Int2(checks),
             Datum::Bool(self.relhasrules),
-            Datum::Bool(false),
+            Datum::Bool(self.relhastriggers),
             Datum::Bool(false),
             Datum::Bool(false),
             Datum::Bool(false),
@@ -10368,6 +11406,115 @@ fn information_schema_columns_rows(
                 }),
                 text(if column.not_null { "NO" } else { "YES" }),
                 column_default_datum(catalog_kv, column),
+            ]);
+        }
+    }
+    Ok(rows)
+}
+
+fn information_schema_trigger_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    use crabka_pgcatalog::trigger::{TriggerLevel, TriggerTiming};
+    let triggers = crabka_pgcatalog::trigger::list_triggers(catalog_kv)?;
+    let mut rows = Vec::new();
+    for trigger in triggers.iter().filter(|trigger| !trigger.is_internal) {
+        let function = crate::routine::routine_by_oid(
+            catalog_kv,
+            i32::try_from(trigger.function_oid).unwrap_or(0),
+        )?
+        .map_or_else(|| trigger.function.clone(), |routine| routine.name);
+        let events = [
+            (trigger.events.insert, "INSERT"),
+            (trigger.events.update, "UPDATE"),
+            (trigger.events.delete, "DELETE"),
+            (trigger.events.truncate, "TRUNCATE"),
+        ];
+        for (_, event) in events.into_iter().filter(|(enabled, _)| *enabled) {
+            let action_order = triggers
+                .iter()
+                .filter(|candidate| {
+                    candidate.table_id == trigger.table_id
+                        && candidate.timing == trigger.timing
+                        && candidate.level == trigger.level
+                        && candidate.name <= trigger.name
+                        && match event {
+                            "INSERT" => candidate.events.insert,
+                            "UPDATE" => candidate.events.update,
+                            "DELETE" => candidate.events.delete,
+                            _ => candidate.events.truncate,
+                        }
+                })
+                .count();
+            let arguments = trigger
+                .arguments
+                .iter()
+                .map(|argument| format!("'{}'", argument.replace(char::from(39), "''")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            rows.push(vec![
+                text(CURRENT_DATABASE),
+                text(&trigger.table.schema),
+                text(&trigger.name),
+                text(event),
+                text(CURRENT_DATABASE),
+                text(&trigger.table.schema),
+                text(&trigger.table.name),
+                Datum::Int4(i32::try_from(action_order).unwrap_or(i32::MAX)),
+                trigger
+                    .when
+                    .as_ref()
+                    .map_or(Datum::Null, |value| text(value)),
+                text(&format!("EXECUTE FUNCTION {function}({arguments})")),
+                text(match trigger.level {
+                    TriggerLevel::Row => "ROW",
+                    TriggerLevel::Statement => "STATEMENT",
+                }),
+                text(match trigger.timing {
+                    TriggerTiming::Before => "BEFORE",
+                    TriggerTiming::After => "AFTER",
+                    TriggerTiming::InsteadOf => "INSTEAD OF",
+                }),
+                trigger
+                    .old_transition
+                    .as_ref()
+                    .map_or(Datum::Null, |value| text(value)),
+                trigger
+                    .new_transition
+                    .as_ref()
+                    .map_or(Datum::Null, |value| text(value)),
+                if trigger.level == TriggerLevel::Row {
+                    text("OLD")
+                } else {
+                    Datum::Null
+                },
+                if trigger.level == TriggerLevel::Row {
+                    text("NEW")
+                } else {
+                    Datum::Null
+                },
+                Datum::Null,
+            ]);
+        }
+    }
+    Ok(rows)
+}
+
+fn information_schema_triggered_update_column_rows(
+    catalog_kv: &dyn Kv,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let mut rows = Vec::new();
+    for trigger in crabka_pgcatalog::trigger::list_triggers(catalog_kv)?
+        .into_iter()
+        .filter(|trigger| !trigger.is_internal && trigger.events.update)
+    {
+        for column in &trigger.events.update_columns {
+            rows.push(vec![
+                text(CURRENT_DATABASE),
+                text(&trigger.table.schema),
+                text(&trigger.name),
+                text(CURRENT_DATABASE),
+                text(&trigger.table.schema),
+                text(&trigger.table.name),
+                text(column),
             ]);
         }
     }
@@ -10811,6 +11958,8 @@ pub(crate) fn virtual_table_names() -> &'static [&'static str] {
             "information_schema.schemata",
             "information_schema.tables",
             "information_schema.columns",
+            "information_schema.triggers",
+            "information_schema.triggered_update_columns",
         ];
         names.extend_from_slice(crate::catalog_rel::relation_names());
         names
@@ -11032,6 +12181,8 @@ pub(crate) fn virtual_relation_oid(name: &str) -> i32 {
         "information_schema.schemata" => 100_010,
         "information_schema.tables" => 100_011,
         "information_schema.columns" => 100_012,
+        "information_schema.triggers" => 100_013,
+        "information_schema.triggered_update_columns" => 100_014,
         _ => crate::catalog_rel::relation_oid(name),
     }
 }
@@ -13787,6 +14938,13 @@ fn alter_table_ops(
             Ok(mut ops) => {
                 ops.extend(rename_relation_comment_ops(kv, table_name, new_name)?);
                 ops.extend(rename_table_view_ops(kv, table_name, new_name)?);
+                if let Ok(table) = crabka_pgcatalog::get_table(kv, table_name) {
+                    for mut trigger in crabka_pgcatalog::trigger::triggers_for_table(kv, table.id)?
+                    {
+                        trigger.table = new_name.clone();
+                        ops.extend(crabka_pgcatalog::trigger::put_trigger_ops(kv, &trigger)?);
+                    }
+                }
                 Ok((command("ALTER TABLE"), ops))
             }
             Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) if if_exists => {
@@ -13871,6 +15029,7 @@ fn alter_action_label(action: &crabka_pgparser::ast::AlterTableAction) -> &'stat
         Action::SetStorageParameters(_) => "SET",
         Action::ResetStorageParameters(_) => "RESET",
         Action::OwnerTo(_) => "OWNER TO",
+        Action::SetTriggerMode { .. } => "ENABLE/DISABLE TRIGGER",
         Action::AttachPartition { .. } => "ATTACH PARTITION",
         Action::DetachPartition { .. } => "DETACH PARTITION",
         Action::Unsupported(_) => "ALTER",
@@ -14037,7 +15196,7 @@ fn alter_table_action_ops(
                     )));
                 }
                 for view in &dependents {
-                    state.ops.extend(crabka_pgcatalog::drop_view_ops(kv, view)?);
+                    state.ops.extend(drop_view_with_triggers_ops(kv, view)?);
                 }
                 // CASCADE takes the dependent generated columns with it. They
                 // are removed first, so `index` still addresses the target.
@@ -14357,6 +15516,15 @@ fn alter_table_action_ops(
                 "role \"{role}\" does not exist"
             )))
         }
+        Action::SetTriggerMode { selector, mode } => {
+            state.ops.extend(crate::trigger::set_table_trigger_mode(
+                kv,
+                &state.table,
+                selector,
+                *mode,
+            )?);
+            Ok(())
+        }
         Action::RenameTable { .. } => Err(ExecError::Syntax(
             "RENAME TO cannot be combined with other ALTER TABLE subcommands".into(),
         )),
@@ -14393,6 +15561,13 @@ fn alter_table_action_ops(
                         }
                     }
                 })?;
+            state
+                .ops
+                .extend(crate::trigger::drop_partition_trigger_clones(
+                    kv,
+                    &state.table,
+                    partition,
+                )?);
             state
                 .ops
                 .extend(crate::partition::detach_ops(&parent, partition));
@@ -14469,7 +15644,9 @@ fn attach_partition_ops(
             ));
         }
     }
-    Ok(crate::partition::attach_ops(&parent.name, child, &resolved))
+    let mut ops = crate::partition::attach_ops(&parent.name, child, &resolved);
+    ops.extend(crate::trigger::clone_partition_triggers(kv, parent, child)?);
+    Ok(ops)
 }
 
 /// `NOT VALID` applies only to constraints `PostgreSQL` can validate lazily —
@@ -14955,6 +16132,45 @@ fn drop_table_column(
         return Ok(());
     };
     let table_name = state.table.name.clone();
+    let triggers = crabka_pgcatalog::trigger::triggers_for_table(kv, state.table.id)?;
+    for trigger in triggers {
+        let references_column = trigger
+            .events
+            .update_columns
+            .iter()
+            .any(|name| name == column)
+            || trigger.when.as_ref().is_some_and(|predicate| {
+                check_references_column(
+                    predicate,
+                    column,
+                    &state
+                        .table
+                        .columns
+                        .iter()
+                        .map(|column| column.name.clone())
+                        .collect::<Vec<_>>(),
+                )
+            });
+        if references_column {
+            state
+                .ops
+                .extend(crabka_pgcatalog::trigger::drop_trigger_ops(
+                    trigger.table_id,
+                    &trigger.name,
+                ));
+            for clone in crabka_pgcatalog::trigger::list_triggers(kv)?
+                .into_iter()
+                .filter(|candidate| candidate.parent_oid == trigger.oid)
+            {
+                state
+                    .ops
+                    .extend(crabka_pgcatalog::trigger::drop_trigger_ops(
+                        clone.table_id,
+                        &clone.name,
+                    ));
+            }
+        }
+    }
     for (_, _, _, row) in state.rows_mut(kv)? {
         if index < row.len() {
             row.remove(index);
@@ -15076,6 +16292,25 @@ fn rename_column_dependencies(
             }
         }
         state.ops.extend(crabka_pgcatalog::put_index_ops(&index));
+    }
+    for mut trigger in crabka_pgcatalog::trigger::triggers_for_table(kv, state.table.id)? {
+        let mut touched = false;
+        for column in &mut trigger.events.update_columns {
+            if column == old_name {
+                *column = new_name.to_string();
+                touched = true;
+            }
+        }
+        if let Some(predicate) = &mut trigger.when {
+            let rewritten = rewrite_identifier_tokens(predicate, old_name, new_name);
+            touched |= rewritten != *predicate;
+            *predicate = rewritten;
+        }
+        if touched {
+            state
+                .ops
+                .extend(crabka_pgcatalog::trigger::put_trigger_ops(kv, &trigger)?);
+        }
     }
     // Foreign keys store their columns as names, so both sides follow the
     // rename. A self-referencing constraint appears on both lists and is
@@ -15439,7 +16674,7 @@ fn drop_blocking_foreign_keys(
     Ok(ops)
 }
 
-fn dependent_view_names(
+pub(crate) fn dependent_view_names(
     kv: &dyn Kv,
     table: &crabka_pgcatalog::RelationName,
     column: Option<&str>,

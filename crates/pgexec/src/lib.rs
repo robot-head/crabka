@@ -92,6 +92,7 @@ mod subquery;
 mod text_search_catalog;
 mod text_search_fn;
 pub mod timestamp_txn;
+mod trigger;
 pub mod ts_gc;
 mod usertype;
 mod values;
@@ -1942,6 +1943,7 @@ impl SqlEngine {
             // No connection was ever opened for this write, so there is no
             // backend id to report.
             backend_pid: 0,
+            trigger_depth: 0,
             clock: Arc::clone(&self.clock),
             sequence: Some(Arc::new(crate::clock::SequenceRuntime {
                 kv: Arc::clone(&self.catalog_kv),
@@ -1960,6 +1962,8 @@ impl SqlEngine {
             // in one reports "requires a SQL session" rather than silently
             // dropping the notification.
             notify: None,
+            transition_relations: None,
+            event_trigger: None,
         };
         crate::exec::execute_timestamp_write(
             self.catalog_kv.as_ref(),

@@ -2143,6 +2143,12 @@ fn establishes_transaction_activity(stmt: &Statement) -> bool {
         | Statement::GrantTablePrivileges { .. }
         | Statement::RevokeTablePrivileges { .. }
         | Statement::ImportForeignSchema { .. }
+        | Statement::CreateTrigger(_)
+        | Statement::AlterTrigger { .. }
+        | Statement::DropTrigger { .. }
+        | Statement::CreateEventTrigger(_)
+        | Statement::AlterEventTrigger { .. }
+        | Statement::DropEventTrigger { .. }
         | Statement::CreateRoutine(_)
         | Statement::DropRoutine { .. }
         | Statement::AlterRoutine { .. }
@@ -2483,6 +2489,12 @@ pub struct SqlSession {
     /// (not owned) because the per-statement `WriteContext` reaches it from
     /// `&self` while the write path holds it.
     deferred_fk: Arc<Mutex<crate::fk::DeferredConstraints>>,
+    pending_after_triggers: Vec<crate::trigger::PendingTrigger>,
+    deferred_after_triggers: Vec<crate::trigger::PendingTrigger>,
+    trigger_depth: u32,
+    login_event_fired: bool,
+    transition_relations: Arc<Mutex<HashMap<String, crate::clock::TransitionRelation>>>,
+    event_trigger: Option<Arc<crate::clock::EventTriggerContext>>,
     /// Cross-node notification replication (shared from the engine): the origin
     /// stamp and record sequence of the WAL records a committing transaction
     /// appends for its notifications. Inert — and the commit batch unchanged —
@@ -2925,6 +2937,12 @@ impl SqlSession {
             notify_pending: Arc::new(Mutex::new(NotifyPending::default())),
             notify_reserved: Mutex::new(None),
             deferred_fk: Arc::new(Mutex::new(crate::fk::DeferredConstraints::default())),
+            pending_after_triggers: Vec::new(),
+            deferred_after_triggers: Vec::new(),
+            trigger_depth: 0,
+            login_event_fired: false,
+            transition_relations: Arc::new(Mutex::new(HashMap::new())),
+            event_trigger: None,
             notify_replication,
             backend_pid,
             session_user: "public".into(),
@@ -3094,6 +3112,7 @@ impl SqlSession {
             current_user: self.current_role.clone(),
             session_user: self.session_user.clone(),
             backend_pid: self.backend_pid,
+            trigger_depth: self.trigger_depth,
             clock: Arc::clone(&self.clock),
             // A session reads the catalog through `sequence`, which carries
             // the same handle.
@@ -3106,6 +3125,8 @@ impl SqlSession {
             })),
             resolution: Some(Arc::new(self.resolution_scope())),
             notify: Some(Arc::clone(&self.notify_pending)),
+            transition_relations: Some(Arc::clone(&self.transition_relations)),
+            event_trigger: self.event_trigger.clone(),
         }
     }
 
@@ -3316,8 +3337,7 @@ impl SqlSession {
                 Ok((value, ty))
             })
         });
-        self.drive_scalar_worker(worker_id, worker, request_rx)
-            .await?
+        Box::pin(self.drive_scalar_worker(worker_id, worker, request_rx, false)).await?
     }
 
     pub(crate) fn plpgsql_render(&self, value: &Datum) -> String {
@@ -3426,8 +3446,9 @@ impl SqlSession {
     /// overrides. Both are transaction-scoped, so every path that ends a
     /// transaction — commit, abort, and the autocommit statement epilogue —
     /// runs this, exactly as it runs [`Self::discard_pending_notifications`].
-    fn discard_deferred_constraints(&self) {
+    fn discard_deferred_constraints(&mut self) {
         self.deferred_constraints().clear();
+        self.deferred_after_triggers.clear();
     }
 
     /// This session's bus registration, or the error `LISTEN`/`NOTIFY` reports
@@ -4724,52 +4745,64 @@ impl SqlSession {
         match names {
             None => self.deferred_constraints().modes_mut().set_all(deferred),
             Some(names) => {
-                let resolved = self.resolve_constraint_names(names)?;
+                let catalog = crabka_pgcatalog::list_foreign_keys(self.catalog_kv.as_ref())?;
+                let triggers = crabka_pgcatalog::trigger::list_triggers(self.catalog_kv.as_ref())?;
                 let mut store = self.deferred_constraints();
-                for fk in &resolved {
-                    store.modes_mut().set_one(fk.table_id, &fk.name, deferred);
+                for name in names {
+                    let mut found = false;
+                    for fk in catalog.iter().filter(|fk| fk.name == *name) {
+                        if !fk.deferrable {
+                            return Err(ExecError::WrongObjectType(format!(
+                                "constraint \"{name}\" is not deferrable"
+                            )));
+                        }
+                        store.modes_mut().set_one(fk.table_id, &fk.name, deferred);
+                        found = true;
+                    }
+                    for trigger in triggers
+                        .iter()
+                        .filter(|trigger| trigger.constraint && trigger.name == *name)
+                    {
+                        if !trigger.deferrable {
+                            return Err(ExecError::WrongObjectType(format!(
+                                "constraint \"{name}\" is not deferrable"
+                            )));
+                        }
+                        store
+                            .modes_mut()
+                            .set_one(trigger.table_id, &trigger.name, deferred);
+                        found = true;
+                    }
+                    if !found {
+                        return Err(ExecError::UndefinedObject(format!(
+                            "constraint \"{name}\" does not exist"
+                        )));
+                    }
                 }
             }
         }
         if !deferred {
             let checks = self.deferred_constraints().take_immediate();
             self.drain_deferred_checks_now(checks).await?;
+            let mut ready = Vec::new();
+            let mut still_deferred = Vec::new();
+            let pending = std::mem::take(&mut self.deferred_after_triggers);
+            for trigger in pending {
+                let selected = names.is_none_or(|names| names.contains(&trigger.name));
+                if selected {
+                    ready.push(trigger);
+                } else {
+                    still_deferred.push(trigger);
+                }
+            }
+            self.deferred_after_triggers = still_deferred;
+            for trigger in ready {
+                self.execute_pending_trigger(trigger).await?;
+            }
         }
         Ok(QueryResult::Command {
             tag: "SET CONSTRAINTS".into(),
         })
-    }
-
-    /// The foreign keys each `SET CONSTRAINTS` name refers to.
-    ///
-    /// # Errors
-    ///
-    /// 42704 when no constraint carries the name, and 42809 when one does but
-    /// is not `DEFERRABLE` — `SET CONSTRAINTS` cannot change a constraint whose
-    /// triggers were never created deferrable.
-    fn resolve_constraint_names(
-        &self,
-        names: &[String],
-    ) -> Result<Vec<crabka_pgcatalog::ForeignKey>, ExecError> {
-        let catalog = crabka_pgcatalog::list_foreign_keys(self.catalog_kv.as_ref())?;
-        let mut resolved = Vec::new();
-        for name in names {
-            let before = resolved.len();
-            for fk in catalog.iter().filter(|fk| fk.name == *name) {
-                if !fk.deferrable {
-                    return Err(ExecError::WrongObjectType(format!(
-                        "constraint \"{name}\" is not deferrable"
-                    )));
-                }
-                resolved.push(fk.clone());
-            }
-            if resolved.len() == before {
-                return Err(ExecError::UndefinedObject(format!(
-                    "constraint \"{name}\" does not exist"
-                )));
-            }
-        }
-        Ok(resolved)
     }
 
     /// Run checks that stopped being deferred mid-transaction, committing
@@ -4932,6 +4965,20 @@ impl SqlSession {
     }
 
     pub(crate) async fn run_one(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
+        if !self.login_event_fired {
+            self.login_event_fired = true;
+            if let Err(error) = self
+                .fire_event_triggers(
+                    crabka_pgcatalog::trigger::EventTriggerEvent::Login,
+                    "LOGIN",
+                    None,
+                )
+                .await
+            {
+                self.login_event_fired = false;
+                return Err(error);
+            }
+        }
         // Pin the garbage horizon for this autocommit statement's duration.
         // The pin (the ProcArray xmin now) is <= the xmin of any snapshot the
         // statement takes below, so a concurrent pruner/vacuum can never
@@ -5006,6 +5053,12 @@ impl SqlSession {
             | Statement::GrantTablePrivileges { .. }
             | Statement::RevokeTablePrivileges { .. }
             | Statement::ImportForeignSchema { .. }
+            | Statement::CreateTrigger(_)
+            | Statement::AlterTrigger { .. }
+            | Statement::DropTrigger { .. }
+            | Statement::CreateEventTrigger(_)
+            | Statement::AlterEventTrigger { .. }
+            | Statement::DropEventTrigger { .. }
         // P2: SQL routines take the same catalog-lock + execute_ddl + commit path.
         | Statement::CreateRoutine(_)
         | Statement::DropRoutine { .. }
@@ -5190,7 +5243,7 @@ impl SqlSession {
 
     /// Record an aborted transaction's outcome (clog Aborted + deregister) and
     /// release its row locks. Shared by ROLLBACK and COMMIT-of-failed.
-    async fn abort_ctx(&self, ctx: TxnCtx) -> Result<(), ExecError> {
+    async fn abort_ctx(&mut self, ctx: TxnCtx) -> Result<(), ExecError> {
         // Queued notifications, queued LISTEN/UNLISTEN and deferred referential
         // checks all die with the transaction that queued them.
         self.discard_pending_notifications();
@@ -5353,6 +5406,13 @@ impl SqlSession {
     }
 
     pub(crate) async fn commit_cmd(&mut self, chain: bool) -> Result<QueryResult, ExecError> {
+        if matches!(self.state, TxnState::InTransaction(_))
+            && let Err(error) = self.fire_deferred_after_triggers().await
+        {
+            self.deferred_after_triggers.clear();
+            let _ = self.rollback_cmd(false).await;
+            return Err(error);
+        }
         let chained = self.chained_isolation("COMMIT AND CHAIN", chain)?;
         let result = self.end_block_commit().await;
         // A plain `COMMIT` returns the session to idle, where the ordinary
@@ -5624,15 +5684,21 @@ impl SqlSession {
             | Statement::Merge { table, .. } => table,
             _ => return Ok(false),
         };
-        let table = crabka_pgcatalog::get_table(
+        let name = crate::relname::resolve_relation(
             self.catalog_kv.as_ref(),
-            &crate::relname::resolve_relation(
-                self.catalog_kv.as_ref(),
-                &self.resolution_scope(),
-                table,
-                crate::relname::SchemaDisposition::Reference,
-            )?,
+            &self.resolution_scope(),
+            table,
+            crate::relname::SchemaDisposition::Reference,
         )?;
+        let table = match crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &name) {
+            Ok(table) => table,
+            Err(crabka_pgcatalog::CatalogError::UndefinedTable(_))
+                if crabka_pgcatalog::get_view(self.catalog_kv.as_ref(), &name).is_ok() =>
+            {
+                return Ok(false);
+            }
+            Err(error) => return Err(error.into()),
+        };
         Ok(crate::exec::table_uses_global_visibility(&table))
     }
 
@@ -5824,9 +5890,8 @@ impl SqlSession {
                 })
             })
         });
-        let (result, mutations) = self
-            .drive_scalar_worker(worker_id, worker, request_rx)
-            .await?;
+        let (result, mutations) =
+            Box::pin(self.drive_scalar_worker(worker_id, worker, request_rx, false)).await?;
         if result.is_ok() {
             self.apply_guc_mutations(mutations)?;
         }
@@ -5838,6 +5903,7 @@ impl SqlSession {
         worker_id: usize,
         mut worker: tokio::task::JoinHandle<T>,
         mut requests: mpsc::Receiver<crate::routine::ScalarFunctionRequest>,
+        trigger_only: bool,
     ) -> Result<T, ExecError> {
         let result = loop {
             tokio::select! {
@@ -5861,6 +5927,12 @@ impl SqlSession {
                     )) {
                         Err(error) => Err(error),
                         Ok(_guard) => match request.kind {
+                            crate::routine::FunctionRequestKind::Scalar if trigger_only => Err(
+                                ExecError::Unsupported(
+                                    "mixed local and timestamp side effects are not supported"
+                                        .into(),
+                                ),
+                            ),
                             crate::routine::FunctionRequestKind::Scalar => {
                                 crate::plpgsql::execute_scalar_function(
                                     self,
@@ -5870,6 +5942,12 @@ impl SqlSession {
                                 .await
                                 .map(crate::routine::FunctionRequestResult::Scalar)
                             }
+                            crate::routine::FunctionRequestKind::Table(_) if trigger_only => Err(
+                                ExecError::Unsupported(
+                                    "mixed local and timestamp side effects are not supported"
+                                        .into(),
+                                ),
+                            ),
                             crate::routine::FunctionRequestKind::Table(columns) => {
                                 crate::plpgsql::execute_table_function(
                                     self,
@@ -5879,6 +5957,17 @@ impl SqlSession {
                                 )
                                 .await
                                 .map(crate::routine::FunctionRequestResult::Table)
+                            }
+                            crate::routine::FunctionRequestKind::Trigger(invocation) => {
+                                self.trigger_depth = self.trigger_depth.saturating_add(1);
+                                let result = crate::plpgsql::execute_trigger_function(
+                                    self,
+                                    &request.routine,
+                                    *invocation,
+                                )
+                                .await;
+                                self.trigger_depth = self.trigger_depth.saturating_sub(1);
+                                result.map(crate::routine::FunctionRequestResult::Scalar)
                             }
                         },
                     };
@@ -6502,7 +6591,62 @@ impl SqlSession {
     /// The table-id counter is NOT covered by that lock. It has its own, taken
     /// and released before this one, so a `CREATE TABLE` that draws on an
     /// already-claimed block never touches it at all.
+    async fn fire_event_triggers(
+        &mut self,
+        event: crabka_pgcatalog::trigger::EventTriggerEvent,
+        tag: &str,
+        context: Option<Arc<crate::clock::EventTriggerContext>>,
+    ) -> Result<(), ExecError> {
+        let replication_role = self.guc.effective("session_replication_role")?;
+        let triggers = crate::trigger::matching_event_triggers(
+            &*self.catalog_kv,
+            event,
+            tag,
+            &replication_role,
+        )?;
+        for trigger in triggers {
+            let routine = crate::routine::routine_by_oid(
+                &*self.catalog_kv,
+                i32::try_from(trigger.function_oid).unwrap_or(0),
+            )?
+            .ok_or_else(|| {
+                ExecError::UndefinedFunction(format!(
+                    "function {}() does not exist",
+                    trigger.function
+                ))
+            })?;
+            let invocation = crate::trigger::event_invocation(&trigger, tag);
+            let previous = self.event_trigger.clone();
+            self.event_trigger = context.clone();
+            let result = crate::plpgsql::execute_trigger_function(self, &routine, invocation).await;
+            self.event_trigger = previous;
+            let _ = result?;
+        }
+        Ok(())
+    }
+
     async fn run_ddl(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
+        let fires_event_triggers = !crate::trigger::event_trigger_ddl_is_excluded(stmt);
+        let event_tag = crate::trigger::event_command_tag(stmt);
+        let drop_event_context = if fires_event_triggers && crate::trigger::is_drop_ddl(stmt) {
+            Some(crate::trigger::event_trigger_context(
+                &*self.catalog_kv,
+                &self.resolution_scope(),
+                stmt,
+                crabka_pgcatalog::trigger::EventTriggerEvent::SqlDrop,
+                event_tag,
+            )?)
+        } else {
+            None
+        };
+        if fires_event_triggers {
+            self.fire_event_triggers(
+                crabka_pgcatalog::trigger::EventTriggerEvent::DdlCommandStart,
+                event_tag,
+                None,
+            )
+            .await?;
+        }
         // Taken before `catalog_lock` on the one path that needs both, which
         // fixes the order for every path that could.
         let _id_guard = match crate::exec::ddl_table_id_demand(stmt) {
@@ -6567,7 +6711,7 @@ impl SqlSession {
             },
         };
         let (result, ops) = crate::exec::execute_ddl(&*self.catalog_kv, stmt, fctx)?;
-        let catalog_before = if self.savepoints.is_empty() {
+        let catalog_before = if self.savepoints.is_empty() && !fires_event_triggers {
             BTreeMap::new()
         } else {
             let mut before = BTreeMap::new();
@@ -6601,12 +6745,84 @@ impl SqlSession {
         // Both guards borrow `self`, and the bookkeeping below needs it back.
         // The batch has landed, so neither has anything left to protect.
         if let Some(frame) = self.savepoints.last_mut() {
-            for (key, value) in catalog_before {
-                frame.catalog_undo.entry(key).or_insert(value);
+            for (key, value) in &catalog_before {
+                frame
+                    .catalog_undo
+                    .entry(key.clone())
+                    .or_insert_with(|| value.clone());
             }
         }
         drop(_g);
         drop(_id_guard);
+        drop(_unique_guard);
+        let ddl_end_context = if let Some(dropped) = &drop_event_context {
+            Some(Arc::new(crate::clock::EventTriggerContext {
+                event: crabka_pgcatalog::trigger::EventTriggerEvent::DdlCommandEnd,
+                tag: event_tag.to_string(),
+                commands: dropped.dropped.clone(),
+                dropped: Vec::new(),
+                rewrite: None,
+            }))
+        } else if fires_event_triggers {
+            Some(crate::trigger::event_trigger_context(
+                &*self.catalog_kv,
+                &self.resolution_scope(),
+                stmt,
+                crabka_pgcatalog::trigger::EventTriggerEvent::DdlCommandEnd,
+                event_tag,
+            )?)
+        } else {
+            None
+        };
+        let event_result = async {
+            if fires_event_triggers && crate::trigger::is_drop_ddl(stmt) {
+                self.fire_event_triggers(
+                    crabka_pgcatalog::trigger::EventTriggerEvent::SqlDrop,
+                    event_tag,
+                    drop_event_context.clone(),
+                )
+                .await?;
+            }
+            if fires_event_triggers && crate::trigger::is_table_rewrite_ddl(stmt) {
+                self.fire_event_triggers(
+                    crabka_pgcatalog::trigger::EventTriggerEvent::TableRewrite,
+                    event_tag,
+                    Some(crate::trigger::event_trigger_context(
+                        &*self.catalog_kv,
+                        &self.resolution_scope(),
+                        stmt,
+                        crabka_pgcatalog::trigger::EventTriggerEvent::TableRewrite,
+                        event_tag,
+                    )?),
+                )
+                .await?;
+            }
+            if fires_event_triggers {
+                self.fire_event_triggers(
+                    crabka_pgcatalog::trigger::EventTriggerEvent::DdlCommandEnd,
+                    event_tag,
+                    ddl_end_context.clone(),
+                )
+                .await?;
+            }
+            Ok::<(), ExecError>(())
+        }
+        .await;
+        if let Err(error) = event_result {
+            let undo = catalog_before
+                .into_iter()
+                .map(|(key, value)| match value {
+                    Some(value) => WriteOp::Put { key, value },
+                    None => WriteOp::Delete { key },
+                })
+                .collect::<Vec<_>>();
+            if Arc::ptr_eq(&self.kv, &self.catalog_kv) {
+                self.committer.commit(undo).await?;
+            } else {
+                self.catalog_kv.write_batch(&undo)?;
+            }
+            return Err(error);
+        }
         self.record_on_commit(stmt)?;
         Ok(result)
     }
@@ -6704,8 +6920,7 @@ impl SqlSession {
                 })
             })
         });
-        self.drive_scalar_worker(worker_id, worker, request_rx)
-            .await?
+        Box::pin(self.drive_scalar_worker(worker_id, worker, request_rx, false)).await?
     }
 
     async fn execute_write_with_scalar_actor(
@@ -6722,6 +6937,9 @@ impl SqlSession {
         let deferred_fk = Arc::clone(&self.deferred_fk);
         let defer_constraints = matches!(self.state, TxnState::InTransaction(_));
         let lock_wait_cap = self.lock_wait_cap;
+        let guc_values = self.guc.effective_map();
+        let guc_settings = self.guc.settings();
+        let prepared = self.prepared_statement_rows();
         let (request_tx, request_rx) = mpsc::channel(1);
         let (worker_id, mut cancel, finished) = self.register_worker();
         let worker = tokio::task::spawn_blocking(move || {
@@ -6734,10 +6952,18 @@ impl SqlSession {
                 eval_ctx,
                 prune_horizon,
             } = statement;
-            let runtime = tokio::runtime::Builder::new_current_thread()
+            let runtime = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .map_err(|error| ExecError::Unsupported(error.to_string()))?;
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    return (
+                        (Err(ExecError::Unsupported(error.to_string())), Vec::new()),
+                        Vec::new(),
+                    );
+                }
+            };
             let ctes = crate::cte::CteContext::empty();
             let write_ctx = crate::exec::WriteContext {
                 catalog_kv: catalog_kv.as_ref(),
@@ -6758,21 +6984,110 @@ impl SqlSession {
                 ctes: &ctes,
                 deferred_fk: defer_constraints.then(|| &*deferred_fk),
             };
-            crate::routine::with_scalar_runtime(&catalog_kv, Some(request_tx), || {
-                runtime.block_on(async {
-                    tokio::select! {
-                        biased;
-                        _ = cancel.signal.changed() => Err(ExecError::Remote(PgError::error(
-                            sqlstate::QUERY_CANCELED,
-                            "canceling statement due to user request",
-                        ))),
-                        result = crate::exec::execute_write(&write_ctx, &stmt) => result,
-                    }
+            with_guc_runtime(guc_values, guc_settings, prepared, || {
+                crate::trigger::with_after_trigger_queue(|| {
+                    crate::routine::with_scalar_runtime(&catalog_kv, Some(request_tx), || {
+                        runtime.block_on(async {
+                            tokio::select! {
+                                biased;
+                                _ = cancel.signal.changed() => Err(ExecError::Remote(PgError::error(
+                                    sqlstate::QUERY_CANCELED,
+                                    "canceling statement due to user request",
+                                ))),
+                                result = crate::exec::execute_write(&write_ctx, &stmt) => result,
+                            }
+                        })
+                    })
                 })
             })
         });
-        self.drive_scalar_worker(worker_id, worker, request_rx)
-            .await?
+        let ((result, pending), mutations) =
+            Box::pin(self.drive_scalar_worker(worker_id, worker, request_rx, false)).await?;
+        if result.is_ok() {
+            self.apply_guc_mutations(mutations)?;
+            self.pending_after_triggers.extend(pending);
+        } else {
+            self.pending_after_triggers.clear();
+        }
+        result
+    }
+
+    async fn fire_pending_after_triggers(&mut self) -> Result<(), ExecError> {
+        while !self.pending_after_triggers.is_empty() {
+            let pending = std::mem::take(&mut self.pending_after_triggers);
+            for pending in pending {
+                let deferred = pending.constraint
+                    && self.deferred_constraints().modes().is_trigger_deferred(
+                        pending.table_id,
+                        &pending.name,
+                        pending.deferrable,
+                        pending.initially_deferred,
+                    );
+                if deferred {
+                    self.deferred_after_triggers.push(pending);
+                } else {
+                    self.execute_pending_trigger(pending).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn execute_pending_trigger(
+        &mut self,
+        mut pending: crate::trigger::PendingTrigger,
+    ) -> Result<(), ExecError> {
+        let routine = crate::routine::routine_by_oid(
+            &*self.catalog_kv,
+            i32::try_from(pending.function_oid).unwrap_or(0),
+        )?
+        .ok_or_else(|| {
+            ExecError::UndefinedFunction(format!("function {}() does not exist", pending.function))
+        })?;
+        let columns = pending
+            .invocation
+            .column_names
+            .iter()
+            .cloned()
+            .zip(pending.invocation.column_types.iter().copied())
+            .collect::<Vec<_>>();
+        let relations = std::mem::take(&mut pending.invocation.transitions)
+            .into_iter()
+            .map(|(name, rows)| {
+                (
+                    name,
+                    crate::clock::TransitionRelation {
+                        columns: columns.clone(),
+                        rows,
+                    },
+                )
+            })
+            .collect();
+        let previous = {
+            let mut runtime = self
+                .transition_relations
+                .lock()
+                .expect("transition relation mutex");
+            std::mem::replace(&mut *runtime, relations)
+        };
+        self.trigger_depth = self.trigger_depth.saturating_add(1);
+        let result =
+            crate::plpgsql::execute_trigger_function(self, &routine, pending.invocation).await;
+        self.trigger_depth = self.trigger_depth.saturating_sub(1);
+        *self
+            .transition_relations
+            .lock()
+            .expect("transition relation mutex") = previous;
+        let _ = result?;
+        Ok(())
+    }
+
+    async fn fire_deferred_after_triggers(&mut self) -> Result<(), ExecError> {
+        let pending = std::mem::take(&mut self.deferred_after_triggers);
+        for pending in pending {
+            self.execute_pending_trigger(pending).await?;
+        }
+        Ok(())
     }
 
     async fn run_write(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
@@ -6916,6 +7231,7 @@ impl SqlSession {
                 }
                 ops.extend(self.take_pending_sequence_ops());
                 self.commit_local_data_ops(ops).await?;
+                self.fire_pending_after_triggers().await?;
                 if self.global_xid.is_some() {
                     self.procarray.finish(xid); // deregister-at-prepare
                 }
@@ -7023,6 +7339,7 @@ impl SqlSession {
                 self.procarray.finish(xid);
                 self.lockmgr.release_all(xid);
                 r?;
+                self.fire_pending_after_triggers().await?;
                 if let Some(g) = sharded_global {
                     let status = self.commit_global_decision(g, XidStatus::Committed).await?;
                     self.global_xid = None;
@@ -7218,18 +7535,45 @@ impl SqlSession {
         stmt: &Statement,
     ) -> Result<QueryResult, ExecError> {
         let ctx = self.eval_ctx();
-        // See the timestamp COPY path: session-bearing calls need a mixed-domain
-        // atomic commit before they can safely run here.
-        let plan = crate::routine::with_scalar_runtime(&self.catalog_kv, None, || {
-            crate::exec::execute_timestamp_write(
-                self.catalog_kv.as_ref(),
-                self.kv.as_ref(),
-                self.seq.as_ref(),
-                stmt,
-                &ctx,
-            )
-        })?;
-        self.commit_timestamp_write_plan(plan).await
+        let catalog_kv = Arc::clone(&self.catalog_kv);
+        let kv = Arc::clone(&self.kv);
+        let seq = Arc::clone(&self.seq);
+        let stmt = stmt.clone();
+        let guc_values = self.guc.effective_map();
+        let guc_settings = self.guc.settings();
+        let prepared = self.prepared_statement_rows();
+        let (request_tx, request_rx) = mpsc::channel(1);
+        let (worker_id, _cancel, finished) = self.register_worker();
+        let worker = tokio::task::spawn_blocking(move || {
+            let _finished = finished;
+            with_guc_runtime(guc_values, guc_settings, prepared, || {
+                crate::trigger::with_after_trigger_queue(|| {
+                    crate::routine::with_scalar_runtime(&catalog_kv, Some(request_tx), || {
+                        crate::exec::execute_timestamp_write(
+                            catalog_kv.as_ref(),
+                            kv.as_ref(),
+                            seq.as_ref(),
+                            &stmt,
+                            &ctx,
+                        )
+                    })
+                })
+            })
+        });
+        let ((plan, pending), mutations) =
+            Box::pin(self.drive_scalar_worker(worker_id, worker, request_rx, true)).await?;
+        let plan = match plan {
+            Ok(plan) => plan,
+            Err(error) => {
+                self.pending_after_triggers.clear();
+                return Err(error);
+            }
+        };
+        self.apply_guc_mutations(mutations)?;
+        let result = self.commit_timestamp_write_plan(plan).await?;
+        self.pending_after_triggers.extend(pending);
+        self.fire_pending_after_triggers().await?;
+        Ok(result)
     }
 
     async fn commit_timestamp_write_plan(
@@ -9695,6 +10039,24 @@ fn invalid_parameter_encoding(_: std::str::Utf8Error) -> PgError {
 }
 
 impl Session for SqlSession {
+    async fn startup(&mut self) -> Result<(), PgError> {
+        if !self.login_event_fired {
+            self.login_event_fired = true;
+            if let Err(error) = self
+                .fire_event_triggers(
+                    crabka_pgcatalog::trigger::EventTriggerEvent::Login,
+                    "LOGIN",
+                    None,
+                )
+                .await
+            {
+                self.login_event_fired = false;
+                return Err(error.into_pg());
+            }
+        }
+        Ok(())
+    }
+
     /// A session's temporary relations die with it.
     ///
     /// A failure here is not the client's to hear — the connection is already

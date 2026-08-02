@@ -1157,11 +1157,14 @@ mod tests {
             current_user: "public".into(),
             session_user: "public".into(),
             backend_pid: 0,
+            trigger_depth: 0,
             clock: Arc::new(FixedClock(now)),
             sequence: None,
             catalog: None,
             resolution: None,
             notify: None,
+            transition_relations: None,
+            event_trigger: None,
         }
     }
     fn ev(sql: &str, ctx: &EvalCtx) -> Datum {
@@ -1272,11 +1275,14 @@ mod tests {
             current_user: "public".into(),
             session_user: "public".into(),
             backend_pid: 0,
+            trigger_depth: 0,
             clock: Arc::new(FixedClock(ny)),
             sequence: None,
             catalog: None,
             resolution: None,
             notify: None,
+            transition_relations: None,
+            event_trigger: None,
         };
         assert_eq!(
             ev("current_date", &ctx),
@@ -1355,11 +1361,14 @@ mod tests {
             current_user: "public".into(),
             session_user: "public".into(),
             backend_pid: 0,
+            trigger_depth: 0,
             clock: Arc::new(FixedClock(ts)),
             sequence: None,
             catalog: None,
             resolution: None,
             notify: None,
+            transition_relations: None,
+            event_trigger: None,
         };
         assert_eq!(
             ev(

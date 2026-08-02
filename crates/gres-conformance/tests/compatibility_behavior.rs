@@ -103,6 +103,22 @@ fn probe_setup(command: &str) -> &'static [&'static str] {
             &["CREATE DOMAIN parser_commands_domain AS int4 CHECK (VALUE > 0)"]
         }
         "ALTER SCHEMA" | "DROP SCHEMA" => &["CREATE SCHEMA parser_commands_schema"],
+        "CREATE TRIGGER" => &[
+            "CREATE TABLE parser_commands_probe (id int4)",
+            "CREATE FUNCTION parser_commands_trigger_fn() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$",
+        ],
+        "ALTER TRIGGER" | "DROP TRIGGER" => &[
+            "CREATE TABLE parser_commands_probe (id int4)",
+            "CREATE FUNCTION parser_commands_trigger_fn() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$",
+            "CREATE TRIGGER parser_commands_trigger BEFORE INSERT ON parser_commands_probe FOR EACH ROW EXECUTE FUNCTION parser_commands_trigger_fn()",
+        ],
+        "CREATE EVENT TRIGGER" => &[
+            "CREATE FUNCTION parser_commands_event_trigger_fn() RETURNS event_trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$",
+        ],
+        "ALTER EVENT TRIGGER" | "DROP EVENT TRIGGER" => &[
+            "CREATE FUNCTION parser_commands_event_trigger_fn() RETURNS event_trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$",
+            "CREATE EVENT TRIGGER parser_commands_event_trigger ON ddl_command_start EXECUTE FUNCTION parser_commands_event_trigger_fn()",
+        ],
         "SAVEPOINT" | "SET TRANSACTION" => &["BEGIN"],
         _ => &[],
     }
@@ -140,7 +156,7 @@ async fn execute_probe(command: &str, sql: &str) {
 #[tokio::test]
 async fn every_resolved_behavior_probe_reaches_the_session_contract() {
     let report = parser_command_report().expect("behavior manifest parses");
-    assert!(report.probes.len() == 149);
+    assert!(report.probes.len() == 155);
     let mut executed = 0;
     let mut refused = 0;
     for probe in report.probes {
@@ -176,7 +192,7 @@ async fn every_resolved_behavior_probe_reaches_the_session_contract() {
         );
         refused += 1;
     }
-    assert!(executed == 95);
+    assert!(executed == 101);
     assert!(refused == 54);
 }
 

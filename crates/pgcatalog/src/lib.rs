@@ -5,6 +5,7 @@
 
 pub mod routine;
 pub mod serde;
+pub mod trigger;
 
 use std::collections::{BTreeMap, HashSet};
 
