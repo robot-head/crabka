@@ -117,6 +117,8 @@ def rust_package(
         compile_data = [],
         test_compile_data = [],
         test_features = {},
+        test_tags = {},
+        harnessless = [],
         features = [],
         extra_deps = [],
         examples = False):
@@ -214,6 +216,9 @@ def rust_package(
                 testonly = True,
             )
         binary_data = [":" + binary + "__bin" for binary in metadata["binaries"]]
+        test_rustc_env = dict(rustc_env)
+        test_rustc_env["CARGO_MANIFEST_DIR"] = "$${pwd}/" + native.package_name()
+        test_rustc_env.update({"CARGO_BIN_EXE_" + binary: "$(rootpath :" + binary + "__bin)" for binary in metadata["binaries"]})
         rust_test(
             name = test_name,
             aliases = _aliases("deps", "dev_deps"),
@@ -223,6 +228,8 @@ def rust_package(
             deps = all_crate_deps(normal = True, normal_dev = True) + ([":_build_script"] if build_script else []) + ([test_library] if crate_name else []),
             data = data + test_compile_data + binary_data,
             edition = "2024",
-            rustc_env = {"CARGO_BIN_EXE_" + binary: "$(rootpath :" + binary + "__bin)" for binary in metadata["binaries"]},
+            rustc_env = test_rustc_env,
             srcs = srcs + native.glob(["tests/**/*.rs"]),
+            tags = test_tags.get(test_name, []),
+            use_libtest_harness = test_name not in harnessless,
         )

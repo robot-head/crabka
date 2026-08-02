@@ -4,4 +4,5 @@ rust_package(
     name = "promql",
     cargo_name = "crabka-promql",
     crate_name = "crabka_promql",
+    harnessless = ["conformance"],
 )

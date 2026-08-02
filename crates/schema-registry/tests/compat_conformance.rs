@@ -8,6 +8,23 @@ use std::path::Path;
 
 use crabka_schema_registry::{compat, format::SchemaType, store::StoreState};
 
+fn corpus_root() -> String {
+    let root = std::env::var_os("TEST_SRCDIR")
+        .map(|root| {
+            std::path::PathBuf::from(root)
+                .join("_main/crates/schema-registry/tests/fixtures/compat")
+        })
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/compat")
+        });
+    std::fs::canonicalize(root.join("json_matrix.json"))
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned()
+}
+
 #[derive(serde::Deserialize)]
 struct Case {
     #[serde(rename = "case")]
@@ -70,5 +87,5 @@ fn engine_matches_cp_verdicts(path: &Path) -> datatest_stable::Result<()> {
 }
 
 datatest_stable::harness! {
-    { test = engine_matches_cp_verdicts, root = "tests/fixtures/compat", pattern = r".*_matrix\.json$" },
+    { test = engine_matches_cp_verdicts, root = corpus_root(), pattern = r".*_matrix\.json$" },
 }

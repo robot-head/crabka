@@ -1,4 +1,4 @@
-load("//:bazel/rust_package.bzl", "rust_package")
+load("//:bazel/rust_package.bzl", "rust_feature_binary", "rust_package")
 
 rust_package(
     name = "observability-demo-app",
@@ -6,4 +6,11 @@ rust_package(
     cargo_name = "observability-demo-app",
     crate_name = "observability_demo_app",
     test_compile_data = ["//:observability_demo_test_data"],
+)
+
+rust_feature_binary(
+    name = "observability-demo-app-heap__bin",
+    crate_label = ":observability-demo-app",
+    crate_root = "src/main.rs",
+    features = ["heap-profiling"],
 )

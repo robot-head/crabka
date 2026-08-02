@@ -17,6 +17,6 @@ rust_library(
         "//crates/client-consumer",
         "//crates/client-core",
         "//crates/client-producer",
-        "//crates/schema-serde",
+        "//crates/schema-serde:schema-serde-minimal",
     ],
 )

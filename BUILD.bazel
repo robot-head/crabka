@@ -5,12 +5,22 @@ These aliases are the stable names embedders depend on, e.g.
 targets under //crates/... and //bazel/....
 """
 
+load("@rules_rust//rust:toolchain.bzl", "current_rustfmt_toolchain")
+
 package(default_visibility = ["//visibility:public"])
 
 exports_files([
     "Cargo.lock",
     "Cargo.toml",
 ])
+
+current_rustfmt_toolchain(name = "rustfmt")
+
+filegroup(
+    name = "bench_scenarios",
+    srcs = glob(["bench/scenarios/**"]),
+    visibility = ["//crates/bench-driver:__pkg__"],
+)
 
 filegroup(
     name = "observability_demo_test_data",

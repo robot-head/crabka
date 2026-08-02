@@ -58,7 +58,7 @@ rust_package_benches(
 
 rust_package_tests(
     name = "protocol",
-    compile_data = glob(["generated/**/*.rs"]),
+    compile_data = glob(["generated/**/*.rs"]) + ["//tools/oracle:distribution"],
     crate_label = ":protocol",
     harnessless = [
         "corpus_replay",

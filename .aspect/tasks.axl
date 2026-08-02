@@ -82,12 +82,14 @@ def _affected(ctx: TaskContext) -> int:
         return code
 
     builds = [target for target in builds_output.split("\n") if target]
+    cargo_connect_derive = "//crates/connect-derive:derive" in tests_output.split("\n")
     tests = [target for target in tests_output.split("\n") if target and not any([
         target.startswith("//crates/admin-ui:"),
         target.startswith("//crates/broker:"),
         target.startswith("//crates/client-consumer:"),
         target.startswith("//crates/client-core:"),
         target.startswith("//crates/client-streams:"),
+        target.startswith("//crates/connect-derive:"),
         target.startswith("//crates/gres"),
         target.startswith("//crates/grpc-gateway:"),
         target.startswith("//crates/log:"),
@@ -105,6 +107,10 @@ def _affected(ctx: TaskContext) -> int:
             return code
     if tests:
         code = _run(ctx, "mkdir", ["-p", "coverage"])
+        if code != 0:
+            return code
+    if cargo_connect_derive:
+        code = _run(ctx, "cargo", ["test", "-p", "crabka-connect-derive", "--test", "derive"])
         if code != 0:
             return code
         code = _run(ctx, "aspect", ["test"] + tests + [
@@ -130,6 +136,7 @@ def _codegen(ctx: TaskContext) -> int:
         "build",
         "//crates/operator:crabka-operator__bin",
         "//crates/protocol-codegen:crabka-protocol-codegen__bin",
+        "//:rustfmt",
     ])
     if code != 0:
         return code

@@ -4,4 +4,6 @@ rust_package(
     name = "bench-driver",
     cargo_name = "crabka-bench-driver",
     crate_name = "crabka_bench_driver",
+    harnessless = ["scenario_files"],
+    test_compile_data = ["//:bench_scenarios"],
 )

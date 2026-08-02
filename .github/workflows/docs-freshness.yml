@@ -32,7 +32,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-bazel
-
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       # Re-derive the whole reference tree from current code. A failure here
       # means doc generation itself broke against the live APIs.
       - name: Regenerate reference markdown

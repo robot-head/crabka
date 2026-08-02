@@ -1,5 +1,9 @@
 name: Set up Bazel and Aspect
 description: Install Bazel/Aspect and restore the shared Bazel caches.
+inputs:
+  aspect-api-token:
+    description: Aspect API token.
+    required: true
 runs:
   using: composite
   steps:
@@ -14,3 +18,5 @@ runs:
         external-cache: true
         cache-save: true
     - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
+      with:
+        aspect-api-token: ${{ inputs.aspect-api-token }}

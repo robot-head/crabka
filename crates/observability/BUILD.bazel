@@ -1,7 +1,15 @@
-load("//:bazel/rust_package.bzl", "rust_package")
+load("//:bazel/rust_package.bzl", "rust_feature_binary", "rust_package")
 
 rust_package(
     name = "observability",
     cargo_name = "crabka-observability",
     crate_name = "crabka_observability",
+)
+
+rust_feature_binary(
+    name = "crabka-observability-heap__bin",
+    crate_label = ":observability",
+    crate_root = "src/main.rs",
+    features = ["heap-profiling"],
+    deps = ["@crates//:tikv-jemallocator"],
 )

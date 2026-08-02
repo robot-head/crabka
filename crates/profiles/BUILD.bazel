@@ -1,4 +1,4 @@
-load("//:bazel/rust_package.bzl", "rust_package")
+load("//:bazel/rust_package.bzl", "rust_feature_binary", "rust_package")
 
 rust_package(
     name = "profiles",
@@ -6,4 +6,12 @@ rust_package(
     cargo_name = "crabka-profiles",
     crate_name = "crabka_profiles",
     protoc = True,
+)
+
+rust_feature_binary(
+    name = "crabka-profiles-heap__bin",
+    crate_label = ":profiles",
+    crate_root = "src/bin/crabka-profiles.rs",
+    features = ["heap-profiling"],
+    deps = ["@crates//:tikv-jemallocator"],
 )

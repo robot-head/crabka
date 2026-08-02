@@ -42,6 +42,8 @@ jobs:
       # images intact for testcontainers).
       - uses: ./.github/actions/free-disk-space
       - uses: ./.github/actions/setup-bazel
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       # The in-process Crabka server binds the host; the Grafana container dials
       # it back via the advertised `host.docker.internal` datasource URL. On
       # Linux runners the host has no such resolution, so add it (same trick the

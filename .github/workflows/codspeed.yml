@@ -53,9 +53,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-bazel
-
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Run the benchmarks
         uses: CodSpeedHQ/action@v5
         with:
           mode: simulation
-          run: aspect run '${{ matrix.target }}' --bazel-flag=--config=ci
+          run: aspect run '${{ matrix.target }}' --bazel-flag=--config=ci --bazel-flag=--config=codspeed

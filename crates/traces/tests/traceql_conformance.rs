@@ -2,6 +2,23 @@ use std::path::Path;
 
 const KNOWN_UNSUPPORTED: &[(&str, &str)] = &[];
 
+fn corpus_root() -> String {
+    let root = std::env::var_os("TEST_SRCDIR")
+        .map(|root| {
+            std::path::PathBuf::from(root).join("_main/crates/traceql/tests/testdata/traceql")
+        })
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../traceql/tests/testdata/traceql")
+        });
+    std::fs::canonicalize(root.join("metrics.case"))
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn traceql_case_file(path: &Path) -> datatest_stable::Result<()> {
     std::fs::metadata(path)?;
     let report = crabka_traceql::testkit::run_corpus_file(path);
@@ -23,5 +40,5 @@ fn traceql_case_file(path: &Path) -> datatest_stable::Result<()> {
 }
 
 datatest_stable::harness! {
-    { test = traceql_case_file, root = "../traceql/tests/testdata/traceql", pattern = r".*\.case$" },
+    { test = traceql_case_file, root = corpus_root(), pattern = r".*\.case$" },
 }

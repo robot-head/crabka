@@ -41,6 +41,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-bazel
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -86,6 +88,8 @@ jobs:
       # preinstalled SDKs like the other Docker-heavy Linux jobs do.
       - uses: ./.github/actions/free-disk-space
       - uses: ./.github/actions/setup-bazel
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Run traces differential-vs-Tempo + Grafana suites (Docker)
         run: aspect test //crates/traces:tempo_differential --bazel-flag=--config=ci --bazel-flag=--test_arg=--ignored --bazel-flag=--test_arg=--nocapture
       - name: Create issue on failure

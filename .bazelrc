@@ -19,5 +19,8 @@ build:ci --compilation_mode=opt
 build:ci --strip=always
 test:ci --build_tests_only
 
+# codspeed-criterion-compat selects its instrumented implementation with this cfg.
+build:codspeed --@rules_rust//rust/settings:extra_rustc_flag=--cfg=codspeed
+
 # Optional developer-local overrides (registry mirrors, remote cache, etc.).
 try-import %workspace%/user.bazelrc

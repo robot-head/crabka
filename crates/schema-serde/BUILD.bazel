@@ -1,7 +1,32 @@
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
 load("//:bazel/rust_package.bzl", "rust_package")
 
 rust_package(
     name = "schema-serde",
     cargo_name = "crabka-schema-serde",
     crate_name = "crabka_schema_serde",
+)
+
+rust_library(
+    name = "schema-serde-minimal",
+    srcs = glob(["src/**/*.rs"]),
+    crate_features = [
+        "avro",
+        "protobuf",
+    ],
+    crate_name = "crabka_schema_serde",
+    edition = "2024",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//crates/units",
+        "@crates//:apache-avro",
+        "@crates//:bytes",
+        "@crates//:prost",
+        "@crates//:prost-reflect",
+        "@crates//:reqwest",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:thiserror",
+        "@crates//:tokio",
+    ],
 )

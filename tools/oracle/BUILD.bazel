@@ -1,0 +1,8 @@
+filegroup(
+    name = "distribution",
+    srcs = glob(
+        ["build/install/crabka-oracle/**"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

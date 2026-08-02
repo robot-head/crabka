@@ -1,8 +1,19 @@
 load("//:bazel/rust_package.bzl", "rust_package")
 
+filegroup(
+    name = "derive_data",
+    srcs = glob([
+        "tests/pass/**",
+        "tests/ui/**",
+    ]),
+)
+
 rust_package(
     name = "connect-derive",
     cargo_name = "crabka-connect-derive",
     crate_name = "crabka_connect_derive",
+    harnessless = ["derive"],
     proc_macro = True,
+    test_compile_data = [":derive_data"],
+    test_tags = {"derive": ["manual"]},
 )
