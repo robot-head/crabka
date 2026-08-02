@@ -7425,7 +7425,13 @@ impl Parser {
         let name = self.relation_ref()?;
         self.expect_keyword_or_ident(Keyword::Using, "using")?;
         let method = self.expect_object_name()?;
-        let action = if self.eat_ident_eq("rename") {
+        let action = if kind == OperatorObjectKind::Family && self.eat_ident_eq("add") {
+            OperatorObjectAlterAction::AddMembers(self.operator_family_add_members()?)
+        } else if kind == OperatorObjectKind::Family
+            && (self.eat_keyword(Keyword::Drop) || self.eat_ident_eq("drop"))
+        {
+            OperatorObjectAlterAction::DropMembers(self.operator_family_drop_members()?)
+        } else if self.eat_ident_eq("rename") {
             self.expect_keyword_or_ident(Keyword::To, "to")?;
             OperatorObjectAlterAction::RenameTo(self.expect_object_name()?)
         } else if self.eat_ident_eq("owner") {
@@ -7436,7 +7442,7 @@ impl Parser {
             OperatorObjectAlterAction::SetSchema(self.expect_object_name()?)
         } else {
             return Err(ParseError::new(
-                "expected RENAME, OWNER or SET SCHEMA",
+                "expected ADD, DROP, RENAME, OWNER or SET SCHEMA",
                 self.peek_pos(),
             ));
         };
@@ -7448,6 +7454,162 @@ impl Parser {
                 action,
             },
         ))
+    }
+
+    fn operator_family_add_members(
+        &mut self,
+    ) -> Result<Vec<crate::ast::OperatorFamilyMember>, ParseError> {
+        use crate::ast::OperatorFamilyMember;
+
+        let mut members = Vec::new();
+        loop {
+            let member = if self.eat_ident_eq("operator") {
+                let number = self.expect_u16("operator number")?;
+                let position = self.peek_pos();
+                let token = self.bump();
+                let operator = operator_spelling(&token)
+                    .ok_or_else(|| ParseError::new("expected operator name", position))?
+                    .to_string();
+                if *self.peek() != Token::LParen {
+                    return Err(ParseError::new_sqlstate(
+                        "42601",
+                        "operator argument types must be specified in ALTER OPERATOR FAMILY",
+                        self.peek_pos(),
+                    ));
+                }
+                let (left_type, right_type) = self.operator_family_type_pair(false)?;
+                let order_family = if self.eat_keyword(Keyword::For) {
+                    self.expect_keyword_or_ident(Keyword::Order, "order")?;
+                    self.expect_keyword_or_ident(Keyword::By, "by")?;
+                    Some(self.relation_ref()?)
+                } else {
+                    None
+                };
+                OperatorFamilyMember::Operator {
+                    number,
+                    operator,
+                    left_type,
+                    right_type,
+                    order_family,
+                }
+            } else if self.eat_ident_eq("function") {
+                let number = self.expect_u16("function number")?;
+                let (left_type, right_type) = if *self.peek() == Token::LParen {
+                    let (left, right) = self.operator_family_type_pair(true)?;
+                    (Some(left), Some(right))
+                } else {
+                    (None, None)
+                };
+                let function = self.relation_ref()?;
+                let argument_types = self.operator_family_type_list()?;
+                OperatorFamilyMember::Function {
+                    number,
+                    left_type,
+                    right_type,
+                    function,
+                    argument_types,
+                }
+            } else if self.eat_ident_eq("storage") {
+                return Err(ParseError::new_sqlstate(
+                    "42601",
+                    "STORAGE cannot be specified in ALTER OPERATOR FAMILY",
+                    self.peek_pos(),
+                ));
+            } else {
+                return Err(ParseError::new(
+                    "expected OPERATOR or FUNCTION",
+                    self.peek_pos(),
+                ));
+            };
+            members.push(member);
+            if !self.eat_comma() {
+                break;
+            }
+        }
+        Ok(members)
+    }
+
+    fn operator_family_drop_members(
+        &mut self,
+    ) -> Result<Vec<crate::ast::OperatorFamilyMemberKey>, ParseError> {
+        use crate::ast::OperatorFamilyMemberKey;
+
+        let mut members = Vec::new();
+        loop {
+            let operator = self.eat_ident_eq("operator");
+            if !operator {
+                self.expect_ident_eq("function")?;
+            }
+            let number = self.expect_u16(if operator {
+                "operator number"
+            } else {
+                "function number"
+            })?;
+            let (left_type, right_type) = self.operator_family_type_pair(true)?;
+            members.push(if operator {
+                OperatorFamilyMemberKey::Operator {
+                    number,
+                    left_type,
+                    right_type,
+                }
+            } else {
+                OperatorFamilyMemberKey::Function {
+                    number,
+                    left_type,
+                    right_type,
+                }
+            });
+            if !self.eat_comma() {
+                break;
+            }
+        }
+        Ok(members)
+    }
+
+    fn operator_family_type_pair(
+        &mut self,
+        allow_one: bool,
+    ) -> Result<(crabka_pgtypes::ColumnType, crabka_pgtypes::ColumnType), ParseError> {
+        self.expect(&Token::LParen)?;
+        let left = self.parse_type_name()?;
+        let right = if self.eat_comma() {
+            let right = self.parse_type_name()?;
+            if self.eat_comma() {
+                return Err(ParseError::new_sqlstate(
+                    "42601",
+                    "one or two argument types must be specified",
+                    self.peek_pos(),
+                ));
+            }
+            right
+        } else if allow_one {
+            left.clone()
+        } else {
+            return Err(ParseError::new_sqlstate(
+                "42601",
+                "operator argument types must be specified in ALTER OPERATOR FAMILY",
+                self.peek_pos(),
+            ));
+        };
+        self.expect(&Token::RParen)?;
+        Ok((left, right))
+    }
+
+    fn operator_family_type_list(
+        &mut self,
+    ) -> Result<Vec<crabka_pgtypes::ColumnType>, ParseError> {
+        self.expect(&Token::LParen)?;
+        let mut types = Vec::new();
+        if *self.peek() != Token::RParen {
+            loop {
+                types.push(self.parse_type_name()?);
+                if !self.eat_comma() {
+                    break;
+                }
+            }
+        }
+        self.expect(&Token::RParen)?;
+        Ok(types)
     }
 
     fn drop_operator_object(&mut self) -> Result<crate::ast::Statement, ParseError> {
@@ -17688,6 +17850,57 @@ mod q1_statement_completeness_tests {
                     collation: Some("C".into()),
                 })
         );
+    }
+
+    #[test]
+    fn alter_operator_family_members_preserve_catalog_keys() {
+        use crate::ast::{OperatorFamilyMember, OperatorFamilyMemberKey, OperatorObjectAlterAction};
+        use crabka_pgtypes::ColumnType;
+
+        let Statement::Utility(crate::ast::UtilityStatement::AlterOperatorObject {
+            action: OperatorObjectAlterAction::AddMembers(add),
+            ..
+        }) = one(
+            "ALTER OPERATOR FAMILY f USING btree ADD \
+             OPERATOR 1 < (int4, int2), FUNCTION 1 btint42cmp(int4, int2)",
+        ) else {
+            panic!("expected operator-family ADD");
+        };
+        assert!(matches!(
+            &add[0],
+            OperatorFamilyMember::Operator {
+                number: 1,
+                operator,
+                left_type: ColumnType::Int4,
+                right_type: ColumnType::Int2,
+                ..
+            } if operator == "<"
+        ));
+        assert!(matches!(
+            &add[1],
+            OperatorFamilyMember::Function {
+                number: 1,
+                argument_types,
+                ..
+            } if argument_types == &[ColumnType::Int4, ColumnType::Int2]
+        ));
+
+        let Statement::Utility(crate::ast::UtilityStatement::AlterOperatorObject {
+            action: OperatorObjectAlterAction::DropMembers(drop),
+            ..
+        }) = one(
+            "ALTER OPERATOR FAMILY f USING btree DROP \
+             OPERATOR 1 (int4, int2), FUNCTION 1 (int4)",
+        ) else {
+            panic!("expected operator-family DROP");
+        };
+        assert!(matches!(
+            drop.as_slice(),
+            [
+                OperatorFamilyMemberKey::Operator { number: 1, .. },
+                OperatorFamilyMemberKey::Function { number: 1, left_type: ColumnType::Int4, right_type: ColumnType::Int4 }
+            ]
+        ));
     }
 }
 
