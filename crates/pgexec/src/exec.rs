@@ -11986,6 +11986,7 @@ fn format_default_value(value: &Datum, ty: ColumnType) -> String {
         Datum::Jsonb(_)
         | Datum::Array(_)
         | Datum::Range(_)
+        | Datum::Multirange(_)
         | Datum::TsVector(_)
         | Datum::TsQuery(_) => {
             match zone_independent_text(value) {

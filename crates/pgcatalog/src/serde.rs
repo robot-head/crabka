@@ -107,6 +107,7 @@ mod datum_tag {
     pub const TSVECTOR: u8 = 12;
     pub const TSQUERY: u8 = 13;
     pub const RANGE: u8 = 14;
+    pub const MULTIRANGE: u8 = 15;
 }
 
 mod type_tag {
@@ -245,6 +246,10 @@ pub(crate) fn write_type(out: &mut Vec<u8>, ty: ColumnType) {
             out.push(type_tag::USER);
             out.extend_from_slice(&range.oid.to_be_bytes());
         }
+        ColumnType::Multirange(multirange) => {
+            out.push(type_tag::USER);
+            out.extend_from_slice(&multirange.oid.to_be_bytes());
+        }
         ColumnType::Domain(domain) => {
             out.push(type_tag::USER);
             out.extend_from_slice(&domain.oid.to_be_bytes());
@@ -325,8 +330,10 @@ pub(crate) fn read_type(cur: &mut &[u8]) -> Result<ColumnType, KvError> {
         type_tag::USER => {
             let raw = take_n(cur, 4)?;
             let oid = u32::from_be_bytes(raw.try_into().expect("4 bytes fit u32"));
-            if let Some(range) = crabka_pgtypes::ColumnType::builtin_range(oid) {
-                range
+            if let Some(builtin) = crabka_pgtypes::ColumnType::builtin_range(oid)
+                .or_else(|| crabka_pgtypes::ColumnType::builtin_multirange(oid))
+            {
+                builtin
             } else {
                 crabka_pgtypes::usertype::lookup_oid(oid)
                     .ok_or_else(|| {
@@ -449,6 +456,13 @@ fn write_default_value(out: &mut Vec<u8>, default: &Datum) {
                 &crabka_pgkv::rowenc::encode_row(std::slice::from_ref(default)),
             );
         }
+        Datum::Multirange(_) => {
+            out.push(datum_tag::MULTIRANGE);
+            write_bytes(
+                out,
+                &crabka_pgkv::rowenc::encode_row(std::slice::from_ref(default)),
+            );
+        }
         Datum::Date(_)
         | Datum::Point(_)
         | Datum::Path(_)
@@ -542,6 +556,13 @@ fn read_default_value(cur: &mut &[u8]) -> Result<Datum, KvError> {
             let mut values = crabka_pgkv::rowenc::decode_row(read_str(cur)?)?;
             if values.len() != 1 || !matches!(values.first(), Some(Datum::Range(_))) {
                 return Err(KvError::CorruptRow("invalid range default".into()));
+            }
+            values.pop().expect("length checked")
+        }
+        datum_tag::MULTIRANGE => {
+            let mut values = crabka_pgkv::rowenc::decode_row(read_str(cur)?)?;
+            if values.len() != 1 || !matches!(values.first(), Some(Datum::Multirange(_))) {
+                return Err(KvError::CorruptRow("invalid multirange default".into()));
             }
             values.pop().expect("length checked")
         }

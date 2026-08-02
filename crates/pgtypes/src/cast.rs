@@ -568,6 +568,28 @@ fn cast_user_type(
     to: ColumnType,
     style: crate::encoding::OutputStyle<'_>,
 ) -> Result<Option<Datum>, TypeError> {
+    if let ColumnType::Multirange(multirange) = to {
+        if let Datum::Multirange(existing) = value {
+            return if existing.ty == multirange {
+                Ok(Some(Datum::Multirange(existing.clone())))
+            } else {
+                Err(cannot_cast(value, to))
+            };
+        }
+        if let Datum::Range(range) = value
+            && range.ty == multirange.range
+        {
+            return crate::multirange::from_ranges(multirange, vec![range.clone()])
+                .map(Datum::Multirange)
+                .map(Some);
+        }
+        let Datum::Text(text) = value else {
+            return Err(cannot_cast(value, to));
+        };
+        return crate::multirange::parse(text, multirange, style.time_zone)
+            .map(Datum::Multirange)
+            .map(Some);
+    }
     if let ColumnType::Range(range) = to {
         if let Datum::Range(existing) = value {
             return if existing.ty == range {
@@ -608,11 +630,11 @@ fn cast_user_type(
             Ok(Some(value.clone()))
         }
         (Datum::Enum(e), _) if to.is_string() => Ok(Some(string_result(e.label.clone(), to)?)),
-        (Datum::Range(_), _) if to.is_string() => {
+        (Datum::Range(_) | Datum::Multirange(_), _) if to.is_string() => {
             Ok(Some(string_result(text_of(value, style), to)?))
         }
         // Either operand is a user type and no rule above applies.
-        (Datum::Record(_) | Datum::Enum(_) | Datum::Range(_), _)
+        (Datum::Record(_) | Datum::Enum(_) | Datum::Range(_) | Datum::Multirange(_), _)
         | (_, ColumnType::Record(_) | ColumnType::Enum(_)) => Err(cannot_cast(value, to)),
         _ => Ok(None),
     }
