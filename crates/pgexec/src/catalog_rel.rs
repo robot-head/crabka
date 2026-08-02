@@ -559,8 +559,8 @@ pub(crate) fn rows(
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
     match name {
         "pg_am" => Ok(pg_am_rows()),
-        "pg_amop" => Ok(pg_amop_rows()),
-        "pg_amproc" => Ok(pg_amproc_rows()),
+        "pg_amop" => pg_amop_rows(kv),
+        "pg_amproc" => pg_amproc_rows(kv),
         "pg_language" => Ok(pg_language_rows()),
         "pg_proc" => crate::routine::pg_proc_rows(kv),
         "pg_attrdef" => pg_attrdef_rows(kv),
@@ -1421,8 +1421,8 @@ fn pg_opfamily_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     Ok(rows)
 }
 
-fn pg_amop_rows() -> Vec<Vec<Datum>> {
-    crate::builtin_amop::BUILTIN_AMOP
+fn pg_amop_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let mut rows = crate::builtin_amop::BUILTIN_AMOP
         .iter()
         .map(
             |(oid, family, left, right, strategy, purpose, operator, method, sort_family)| {
@@ -1439,11 +1439,56 @@ fn pg_amop_rows() -> Vec<Vec<Datum>> {
                 ]
             },
         )
-        .collect()
+        .collect::<Vec<_>>();
+    let methods = crabka_pgcatalog::list_operator_families(kv)?
+        .into_iter()
+        .map(|family| (family.oid, access_method_oid(&family.method).unwrap_or_default()))
+        .collect::<BTreeMap<_, _>>();
+    for (index, (family, member)) in crabka_pgcatalog::list_operator_family_members(kv)?
+        .into_iter()
+        .filter(|(_, member)| {
+            matches!(
+                member,
+                crabka_pgcatalog::OperatorFamilyMember::Operator { .. }
+            )
+        })
+        .enumerate()
+    {
+        let crabka_pgcatalog::OperatorFamilyMember::Operator {
+            number,
+            operator,
+            left_type_oid,
+            right_type_oid,
+            order_family_oid,
+        } = member else {
+            continue;
+        };
+        let operator = operator.rsplit('.').next().unwrap_or(&operator);
+        let operator_oid = crate::builtin_operators::BUILTIN_OPERATORS
+            .iter()
+            .find(|(_, name, _, _, _, left, right, ..)| {
+                *name == operator
+                    && *left == i32::try_from(left_type_oid).unwrap_or_default()
+                    && *right == i32::try_from(right_type_oid).unwrap_or_default()
+            })
+            .map_or(0, |row| row.0);
+        rows.push(vec![
+            int(330_000 + i32::try_from(index).unwrap_or_default()),
+            int(i32::try_from(family).unwrap_or_default()),
+            int(i32::try_from(left_type_oid).unwrap_or_default()),
+            int(i32::try_from(right_type_oid).unwrap_or_default()),
+            Datum::Int2(i16::try_from(number).unwrap_or_default()),
+            text(if order_family_oid == 0 { "s" } else { "o" }),
+            int(operator_oid),
+            int(*methods.get(&family).unwrap_or(&0)),
+            int(i32::try_from(order_family_oid).unwrap_or_default()),
+        ]);
+    }
+    Ok(rows)
 }
 
-fn pg_amproc_rows() -> Vec<Vec<Datum>> {
-    crate::builtin_amproc::BUILTIN_AMPROC
+fn pg_amproc_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let mut rows = crate::builtin_amproc::BUILTIN_AMPROC
         .iter()
         .map(|(oid, family, left, right, number, procedure)| {
             vec![
@@ -1455,7 +1500,71 @@ fn pg_amproc_rows() -> Vec<Vec<Datum>> {
                 int(*procedure),
             ]
         })
-        .collect()
+        .collect::<Vec<_>>();
+    let mut procedures = crate::routine::builtin_pg_proc_rows()?
+        .into_iter()
+        .filter_map(|row| match (&row[0], &row[1], &row[19]) {
+            (Datum::Int4(oid), Datum::Text(name), Datum::Text(arguments)) => {
+                Some(((name.clone(), arguments.clone()), *oid))
+            }
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    for routine in crabka_pgcatalog::routine::list_routines(kv)? {
+        let arguments = routine
+            .input_params()
+            .map(|param| param.ty.column.map(ColumnType::oid))
+            .collect::<Option<Vec<_>>>();
+        if let Some(arguments) = arguments {
+            procedures.insert(
+                (
+                    routine.name,
+                    arguments
+                        .iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                ),
+                i32::try_from(routine.oid).unwrap_or_default(),
+            );
+        }
+    }
+    for (index, (family, member)) in crabka_pgcatalog::list_operator_family_members(kv)?
+        .into_iter()
+        .filter(|(_, member)| {
+            matches!(
+                member,
+                crabka_pgcatalog::OperatorFamilyMember::Function { .. }
+            )
+        })
+        .enumerate()
+    {
+        let crabka_pgcatalog::OperatorFamilyMember::Function {
+            number,
+            function,
+            left_type_oid,
+            right_type_oid,
+            argument_type_oids,
+        } = member else {
+            continue;
+        };
+        let name = function.rsplit('.').next().unwrap_or(&function).to_string();
+        let arguments = argument_type_oids
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let procedure = procedures.get(&(name, arguments)).copied().unwrap_or_default();
+        rows.push(vec![
+            int(340_000 + i32::try_from(index).unwrap_or_default()),
+            int(i32::try_from(family).unwrap_or_default()),
+            int(i32::try_from(left_type_oid).unwrap_or_default()),
+            int(i32::try_from(right_type_oid).unwrap_or_default()),
+            Datum::Int2(i16::try_from(number).unwrap_or_default()),
+            int(procedure),
+        ]);
+    }
+    Ok(rows)
 }
 
 fn pg_operator_rows() -> Vec<Vec<Datum>> {

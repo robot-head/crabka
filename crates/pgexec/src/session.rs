@@ -17597,6 +17597,26 @@ mod session_conformance_tests {
             )
             .await
             .expect("add family members");
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT count(*) FROM pg_catalog.pg_amop a, pg_catalog.pg_opfamily f \
+                 WHERE a.amopfamily = f.oid AND f.opfname = 'member_family' \
+                   AND a.amopstrategy = 1 AND a.amopopr = 535 AND a.amopmethod = 403",
+            )
+            .await
+                == "1"
+        );
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT count(*) FROM pg_catalog.pg_amproc p, pg_catalog.pg_opfamily f \
+                 WHERE p.amprocfamily = f.oid AND f.opfname = 'member_family' \
+                   AND p.amprocnum = 1 AND p.amproc = 2191",
+            )
+            .await
+                == "1"
+        );
         let duplicate = session
             .simple_query(
                 "ALTER OPERATOR FAMILY member_family USING btree ADD OPERATOR 1 < (int4, int2)",
@@ -17614,6 +17634,24 @@ mod session_conformance_tests {
             )
             .await
             .expect("drop family members");
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT count(*) FROM pg_catalog.pg_amop a, pg_catalog.pg_opfamily f \
+                 WHERE a.amopfamily = f.oid AND f.opfname = 'member_family'",
+            )
+            .await
+                == "0"
+        );
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT count(*) FROM pg_catalog.pg_amproc p, pg_catalog.pg_opfamily f \
+                 WHERE p.amprocfamily = f.oid AND f.opfname = 'member_family'",
+            )
+            .await
+                == "0"
+        );
         let missing = session
             .simple_query(
                 "ALTER OPERATOR FAMILY member_family USING btree DROP FUNCTION 1 (int4, int2)",
