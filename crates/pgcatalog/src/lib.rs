@@ -1123,6 +1123,81 @@ pub fn operator_family_member_exists(
         .is_some())
 }
 
+/// List every durable user-defined operator-family member with its family oid.
+///
+/// # Errors
+///
+/// Returns catalog storage or corruption errors.
+pub fn list_operator_family_members(
+    kv: &dyn Kv,
+) -> Result<Vec<(u32, OperatorFamilyMember)>, CatalogError> {
+    let mut out = Vec::new();
+    for (prefix, operator) in [
+        (OPERATOR_FAMILY_OPERATOR_PREFIX, true),
+        (OPERATOR_FAMILY_FUNCTION_PREFIX, false),
+    ] {
+        for (key, value) in kv.scan_prefix(prefix)? {
+            let parts = key::key_parts(&key[prefix.len()..], 4).ok_or_else(|| {
+                KvError::CorruptRow("operator family member key is incomplete".into())
+            })?;
+            let parse = |part: &str| -> Result<u32, CatalogError> {
+                part.parse::<u32>().map_err(|_| {
+                    KvError::CorruptRow("operator family member key is invalid".into()).into()
+                })
+            };
+            let family_oid = parse(parts[0])?;
+            let number = u16::try_from(parse(parts[1])?).map_err(|_| {
+                KvError::CorruptRow("operator family member number is invalid".into())
+            })?;
+            let left_type_oid = parse(parts[2])?;
+            let right_type_oid = parse(parts[3])?;
+            let separator = value.iter().position(|byte| *byte == 0).ok_or_else(|| {
+                KvError::CorruptRow("operator family member value is incomplete".into())
+            })?;
+            let name = std::str::from_utf8(&value[..separator])
+                .map_err(|_| KvError::CorruptRow("operator family member name is invalid".into()))?
+                .to_string();
+            let mut trailing = &value[separator + 1..];
+            let member = if operator {
+                let (order_family_oid, rest) = U32::read_from_prefix(trailing).map_err(|_| {
+                    KvError::CorruptRow("operator family member oid is invalid".into())
+                })?;
+                if !rest.is_empty() {
+                    return Err(KvError::CorruptRow(
+                        "operator family member value has trailing data".into(),
+                    )
+                    .into());
+                }
+                OperatorFamilyMember::Operator {
+                    number,
+                    operator: name,
+                    left_type_oid,
+                    right_type_oid,
+                    order_family_oid: order_family_oid.get(),
+                }
+            } else {
+                let mut argument_type_oids = Vec::new();
+                while !trailing.is_empty() {
+                    let (oid, rest) = U32::read_from_prefix(trailing).map_err(|_| {
+                        KvError::CorruptRow("operator family member oid is invalid".into())
+                    })?;
+                    argument_type_oids.push(oid.get());
+                    trailing = rest;
+                }
+                OperatorFamilyMember::Function {
+                    number,
+                    function: name,
+                    left_type_oid,
+                    right_type_oid,
+                    argument_type_oids,
+                }
+            };
+            out.push((family_oid, member));
+        }
+    }
+    Ok(out)
+}
+
 /// Add durable operator and support-function members to one family atomically.
 ///
 /// # Errors

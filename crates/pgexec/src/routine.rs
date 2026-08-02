@@ -2972,7 +2972,7 @@ pub(crate) fn pg_proc_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     Ok(rows)
 }
 
-fn builtin_pg_proc_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
+pub(crate) fn builtin_pg_proc_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
     let corrupt = || ExecError::Unsupported("built-in pg_proc fixture is corrupt".into());
     let data = crate::builtin_procs::BUILTIN_PROCS
         .iter()
