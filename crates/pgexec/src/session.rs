@@ -10582,6 +10582,46 @@ fn invalid_parameter_encoding(_: std::str::Utf8Error) -> PgError {
     PgError::error("22021", "invalid byte sequence for encoding \"UTF8\"")
 }
 
+fn attach_known_runtime_position(sql: &str, error: PgError) -> PgError {
+    attach_undefined_function_position(sql, attach_range_literal_position(sql, error))
+}
+
+fn attach_undefined_function_position(sql: &str, error: PgError) -> PgError {
+    use crabka_pgparser::token::Token;
+
+    if error.code != "42883"
+        || error
+            .diagnostics
+            .as_ref()
+            .is_some_and(|diagnostics| diagnostics.position.is_some())
+    {
+        return error;
+    }
+    let Some(signature) = error.message.strip_prefix("function ") else {
+        return error;
+    };
+    let Some(name) = signature.split_once('(').map(|(name, _)| name) else {
+        return error;
+    };
+    let name = name.rsplit('.').next().unwrap_or(name);
+    let Ok(tokens) = crabka_pgparser::lexer::lex(sql) else {
+        return error;
+    };
+    let positions: Vec<usize> = tokens
+        .windows(2)
+        .filter_map(|pair| match (&pair[0].0, &pair[1].0) {
+            (Token::Ident(candidate), Token::LParen) if candidate == name => {
+                Some(sql[..pair[0].1].chars().count() + 1)
+            }
+            _ => None,
+        })
+        .collect();
+    match positions.as_slice() {
+        [position] => error.with_position(*position),
+        _ => error,
+    }
+}
+
 /// Add PostgreSQL's caret only when the source proves which range cast failed.
 /// General runtime errors and ambiguous repeated literals remain undecorated.
 fn attach_range_literal_position(sql: &str, error: PgError) -> PgError {
@@ -10705,7 +10745,7 @@ impl Session for SqlSession {
                 Err(error) => {
                     let error = error.into_pg();
                     return Err(if single {
-                        attach_range_literal_position(sql, error)
+                        attach_known_runtime_position(sql, error)
                     } else {
                         error
                     });
@@ -10754,7 +10794,7 @@ impl Session for SqlSession {
                 .map_err(ExecError::into_pg)
                 .map_err(|error| {
                     if statements.len() == 1 {
-                        attach_range_literal_position(sql, error)
+                        attach_known_runtime_position(sql, error)
                     } else {
                         error
                     }
@@ -16496,6 +16536,39 @@ mod session_conformance_tests {
                 .and_then(|diagnostics| diagnostics.position)
                 .is_none(),
             "an unrelated text cast is not blamed"
+        );
+    }
+
+    #[tokio::test]
+    async fn undefined_function_errors_point_at_the_unique_call() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        let error = session
+            .simple_query("SELECT definitely_missing(1)")
+            .await
+            .expect_err("undefined function");
+        assert!(
+            error
+                .diagnostics
+                .as_ref()
+                .and_then(|diagnostics| diagnostics.position)
+                == Some(8)
+        );
+
+        let ambiguous = super::attach_undefined_function_position(
+            "SELECT missing(1), missing(2)",
+            crabka_pgwire::error::PgError::error(
+                "42883",
+                "function missing(integer) does not exist",
+            ),
+        );
+        assert!(
+            ambiguous
+                .diagnostics
+                .as_ref()
+                .and_then(|diagnostics| diagnostics.position)
+                .is_none(),
+            "an ambiguous call is not guessed"
         );
     }
 
