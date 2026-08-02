@@ -2115,7 +2115,12 @@ fn read_only_command_tag(stmt: &Statement) -> &'static str {
 /// undo.
 fn statement_has_effects(stmt: &Statement) -> bool {
     match stmt {
-        Statement::Utility(UtilityStatement::TextSearch(_)) => true,
+        Statement::Utility(
+            UtilityStatement::TextSearch(_)
+            | UtilityStatement::CreateTablespace { .. }
+            | UtilityStatement::DropTablespace { .. }
+            | UtilityStatement::AlterTablespace { .. },
+        ) => true,
         Statement::Query(_)
         | Statement::Begin { .. }
         | Statement::Commit { .. }
@@ -2152,7 +2157,12 @@ fn statement_has_effects(stmt: &Statement) -> bool {
 /// bypass the transaction-activity rule.
 fn establishes_transaction_activity(stmt: &Statement) -> bool {
     match stmt {
-        Statement::Utility(UtilityStatement::TextSearch(_)) => true,
+        Statement::Utility(
+            UtilityStatement::TextSearch(_)
+            | UtilityStatement::CreateTablespace { .. }
+            | UtilityStatement::DropTablespace { .. }
+            | UtilityStatement::AlterTablespace { .. },
+        ) => true,
         Statement::Query(_)
         | Statement::Insert { .. }
         | Statement::Update { .. }
@@ -4750,9 +4760,134 @@ impl SqlSession {
             UtilityStatement::Checkpoint => Ok(QueryResult::Command {
                 tag: "CHECKPOINT".into(),
             }),
-            UtilityStatement::CreateTablespace => Ok(QueryResult::Command {
-                tag: "CREATE TABLESPACE".into(),
-            }),
+            UtilityStatement::CreateTablespace {
+                name,
+                owner,
+                location,
+                options,
+            } => {
+                if location.is_empty() {
+                    if self.guc.effective("allow_in_place_tablespaces")? != "on" {
+                        return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+                            "42P17",
+                            "tablespace location must be an absolute path",
+                        )));
+                    }
+                } else if !std::path::Path::new(location).is_absolute() {
+                    return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+                        "42P17",
+                        "tablespace location must be an absolute path",
+                    )));
+                }
+                validate_tablespace_options(options.iter().map(|(name, _)| name.as_str()))?;
+                let owner = owner.as_deref().unwrap_or(&self.current_role);
+                if !crabka_pgcatalog::role_exists(&*self.catalog_kv, owner)? {
+                    return Err(crabka_pgcatalog::CatalogError::UndefinedObject(owner.into()).into());
+                }
+                let _catalog_guard = Arc::clone(&self.catalog_lock).lock_owned().await;
+                let ops = crabka_pgcatalog::create_tablespace_ops(
+                    &*self.catalog_kv,
+                    name,
+                    owner,
+                    location,
+                    options.clone(),
+                )
+                .map_err(|error| match error {
+                    crabka_pgcatalog::CatalogError::DuplicateObject(_) => {
+                        tablespace_duplicate(name)
+                    }
+                    other => other.into(),
+                })?;
+                self.commit_catalog(ops).await?;
+                Ok(QueryResult::Command {
+                    tag: "CREATE TABLESPACE".into(),
+                })
+            }
+            UtilityStatement::DropTablespace { name, if_exists } => {
+                let _catalog_guard = Arc::clone(&self.catalog_lock).lock_owned().await;
+                match crabka_pgcatalog::drop_tablespace_ops(&*self.catalog_kv, name) {
+                    Ok(ops) => self.commit_catalog(ops).await?,
+                    Err(crabka_pgcatalog::CatalogError::UndefinedObject(_)) if *if_exists => {}
+                    Err(crabka_pgcatalog::CatalogError::UndefinedObject(_)) => {
+                        return Err(tablespace_missing(name));
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+                Ok(QueryResult::Command {
+                    tag: "DROP TABLESPACE".into(),
+                })
+            }
+            UtilityStatement::AlterTablespace { name, action } => {
+                use crabka_pgparser::ast::TablespaceAlterAction;
+
+                let _catalog_guard = Arc::clone(&self.catalog_lock).lock_owned().await;
+                let mut tablespace = crabka_pgcatalog::get_tablespace(&*self.catalog_kv, name)
+                    .map_err(|error| match error {
+                        crabka_pgcatalog::CatalogError::UndefinedObject(_) => {
+                            tablespace_missing(name)
+                        }
+                        other => other.into(),
+                    })?;
+                match action {
+                    TablespaceAlterAction::Set(options) => {
+                        validate_tablespace_options(
+                            options.iter().map(|(name, _)| name.as_str()),
+                        )?;
+                        for (name, value) in options {
+                            if let Some(existing) = tablespace
+                                .options
+                                .iter_mut()
+                                .find(|(existing, _)| existing == name)
+                            {
+                                existing.1.clone_from(value);
+                            } else {
+                                tablespace.options.push((name.clone(), value.clone()));
+                            }
+                        }
+                    }
+                    TablespaceAlterAction::Reset(options) => {
+                        validate_tablespace_options(options.iter().map(String::as_str))?;
+                        tablespace
+                            .options
+                            .retain(|(name, _)| !options.contains(name));
+                    }
+                    TablespaceAlterAction::RenameTo(new_name) => {
+                        tablespace.name.clone_from(new_name);
+                    }
+                    TablespaceAlterAction::OwnerTo(owner) => {
+                        let owner = if matches!(owner.as_str(), "current_user" | "user") {
+                            &self.current_role
+                        } else {
+                            owner
+                        };
+                        if !crabka_pgcatalog::role_exists(&*self.catalog_kv, owner)? {
+                            return Err(
+                                crabka_pgcatalog::CatalogError::UndefinedObject(owner.clone())
+                                    .into(),
+                            );
+                        }
+                        tablespace.owner.clone_from(owner);
+                    }
+                }
+                let ops = crabka_pgcatalog::replace_tablespace_ops(
+                    &*self.catalog_kv,
+                    name,
+                    &tablespace,
+                )
+                .map_err(|error| match error {
+                    crabka_pgcatalog::CatalogError::DuplicateObject(_) => {
+                        tablespace_duplicate(&tablespace.name)
+                    }
+                    crabka_pgcatalog::CatalogError::UndefinedObject(_) => {
+                        tablespace_missing(name)
+                    }
+                    other => other.into(),
+                })?;
+                self.commit_catalog(ops).await?;
+                Ok(QueryResult::Command {
+                    tag: "ALTER TABLESPACE".into(),
+                })
+            }
             UtilityStatement::CreateOperatorClass => Ok(QueryResult::Command {
                 tag: "CREATE OPERATOR CLASS".into(),
             }),
@@ -10580,6 +10715,40 @@ impl SqlSession {
 
 fn invalid_parameter_encoding(_: std::str::Utf8Error) -> PgError {
     PgError::error("22021", "invalid byte sequence for encoding \"UTF8\"")
+}
+
+fn validate_tablespace_options<'a>(
+    options: impl IntoIterator<Item = &'a str>,
+) -> Result<(), ExecError> {
+    for option in options {
+        if !matches!(
+            option,
+            "random_page_cost"
+                | "seq_page_cost"
+                | "effective_io_concurrency"
+                | "maintenance_io_concurrency"
+        ) {
+            return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+                "22023",
+                format!("unrecognized parameter \"{option}\""),
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn tablespace_missing(name: &str) -> ExecError {
+    ExecError::Remote(crabka_pgwire::error::PgError::error(
+        "42704",
+        format!("tablespace \"{name}\" does not exist"),
+    ))
+}
+
+fn tablespace_duplicate(name: &str) -> ExecError {
+    ExecError::Remote(crabka_pgwire::error::PgError::error(
+        "42710",
+        format!("tablespace \"{name}\" already exists"),
+    ))
 }
 
 fn attach_known_runtime_position(sql: &str, error: PgError) -> PgError {
@@ -16570,6 +16739,86 @@ mod session_conformance_tests {
                 .is_none(),
             "an ambiguous call is not guessed"
         );
+    }
+
+    #[tokio::test]
+    async fn created_tablespaces_are_catalog_visible() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE TABLESPACE user_space LOCATION '/tmp/user_space' \
+                 WITH (random_page_cost = 3.0)",
+            )
+            .await
+            .expect("create tablespace");
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT spcname FROM pg_catalog.pg_tablespace \
+                 WHERE spcname = 'user_space'",
+            )
+            .await
+                == "user_space"
+        );
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT pg_tablespace_location(oid) FROM pg_catalog.pg_tablespace \
+                 WHERE spcname = 'user_space'",
+            )
+            .await
+                == "/tmp/user_space"
+        );
+        assert!(
+            state(
+                &mut session,
+                "CREATE TABLESPACE user_space LOCATION '/tmp/other_space'",
+            )
+            .await
+                == "42710"
+        );
+        session
+            .simple_query(
+                "ALTER TABLESPACE user_space SET \
+                 (random_page_cost = 1.0, seq_page_cost = 1.1)",
+            )
+            .await
+            .expect("set tablespace options");
+        session
+            .simple_query("ALTER TABLESPACE user_space RESET (random_page_cost)")
+            .await
+            .expect("reset tablespace option");
+        session
+            .simple_query("ALTER TABLESPACE user_space RENAME TO renamed_space")
+            .await
+            .expect("rename tablespace");
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT spcname FROM pg_catalog.pg_tablespace \
+                 WHERE spcname = 'renamed_space'",
+            )
+            .await
+                == "renamed_space"
+        );
+        session
+            .simple_query("DROP TABLESPACE renamed_space")
+            .await
+            .expect("drop tablespace");
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT count(*) FROM pg_catalog.pg_tablespace \
+                 WHERE spcname = 'user_space'",
+            )
+            .await
+                == "0"
+        );
+        session
+            .simple_query("DROP TABLESPACE IF EXISTS user_space")
+            .await
+            .expect("conditional drop");
     }
 
     #[test]

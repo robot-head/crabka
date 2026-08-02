@@ -274,7 +274,8 @@ fn eval_resolved(
         TablespaceLocation,
     };
     match f {
-        NullDef | TablespaceLocation => Ok(Datum::Null),
+        NullDef => Ok(Datum::Null),
+        TablespaceLocation => tablespace_location(&vals[0], ctx),
         IsVisible | IsPublishable => Ok(visibility_answer(&vals[0])),
         InRecovery => Ok(Datum::Bool(false)),
         // A whole-database or whole-tablespace size names something that is not
@@ -309,6 +310,37 @@ fn eval_resolved(
         HasRole => Ok(Datum::Bool(true)),
         _ => eval_catalog_reading(f, vals, ctx),
     }
+}
+
+fn tablespace_location(value: &Datum, ctx: &EvalCtx) -> Result<Datum, ExecError> {
+    let oid = match value {
+        Datum::Int4(oid) => *oid as u32,
+        Datum::Int8(oid) => u32::try_from(*oid).map_err(|_| ExecError::TypeMismatch(
+            "pg_tablespace_location expects a tablespace oid".into(),
+        ))?,
+        Datum::Null => return Ok(Datum::Null),
+        _ => {
+            return Err(ExecError::TypeMismatch(
+                "pg_tablespace_location expects a tablespace oid".into(),
+            ));
+        }
+    };
+    if oid == crate::catalog_rel::DEFAULT_TABLESPACE_OID as u32 || oid == 1664 {
+        return Ok(Datum::Text(String::new()));
+    }
+    let kv = ctx.catalog().ok_or_else(|| {
+        ExecError::Unsupported("pg_tablespace_location requires a catalog".into())
+    })?;
+    Ok(crabka_pgcatalog::list_tablespaces(kv)?
+        .into_iter()
+        .find(|tablespace| tablespace.oid == oid)
+        .map_or(Datum::Null, |tablespace| {
+            Datum::Text(if tablespace.location.is_empty() {
+                format!("pg_tblspc/{oid}")
+            } else {
+                tablespace.location
+            })
+        }))
 }
 
 /// The half of the family that reads the catalog.

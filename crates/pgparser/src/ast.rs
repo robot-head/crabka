@@ -822,8 +822,20 @@ pub enum UtilityStatement {
     Reindex,
     /// `CHECKPOINT`.
     Checkpoint,
-    /// Catalog DDL accepted while physical placement remains chapter-owned.
-    CreateTablespace,
+    /// `CREATE TABLESPACE name [OWNER role] LOCATION 'path' [WITH (...)]`.
+    CreateTablespace {
+        name: String,
+        owner: Option<String>,
+        location: String,
+        options: OptionList,
+    },
+    /// `DROP TABLESPACE [IF EXISTS] name`.
+    DropTablespace { name: String, if_exists: bool },
+    /// `ALTER TABLESPACE` catalog metadata changes.
+    AlterTablespace {
+        name: String,
+        action: TablespaceAlterAction,
+    },
     /// Operator-class metadata; partition hashing still uses the resolved type.
     CreateOperatorClass,
     /// `ALTER SYSTEM SET <name> = <value>` / `ALTER SYSTEM RESET { <name> | ALL }`.
@@ -850,6 +862,14 @@ pub enum UtilityStatement {
     /// SQL-managed text-search configurations and dictionaries. Parser and
     /// template objects remain explicit C-bound non-goals.
     TextSearch(TextSearchDdl),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TablespaceAlterAction {
+    Set(OptionList),
+    Reset(Vec<String>),
+    RenameTo(String),
+    OwnerTo(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1261,7 +1281,6 @@ pub enum NonGoalCommand {
     AlterPublication,
     AlterRule,
     AlterSubscription,
-    AlterTablespace,
     AlterTextSearchParser,
     AlterTextSearchTemplate,
     CreateAccessMethod,
@@ -1284,7 +1303,6 @@ pub enum NonGoalCommand {
     DropPublication,
     DropRule,
     DropSubscription,
-    DropTablespace,
     DropTextSearchParser,
     DropTextSearchTemplate,
     DropTransform,
@@ -1305,7 +1323,6 @@ impl NonGoalCommand {
             Self::AlterPublication => "ALTER PUBLICATION",
             Self::AlterRule => "ALTER RULE",
             Self::AlterSubscription => "ALTER SUBSCRIPTION",
-            Self::AlterTablespace => "ALTER TABLESPACE",
             Self::AlterTextSearchParser => "ALTER TEXT SEARCH PARSER",
             Self::AlterTextSearchTemplate => "ALTER TEXT SEARCH TEMPLATE",
             Self::CreateAccessMethod => "CREATE ACCESS METHOD",
@@ -1328,7 +1345,6 @@ impl NonGoalCommand {
             Self::DropPublication => "DROP PUBLICATION",
             Self::DropRule => "DROP RULE",
             Self::DropSubscription => "DROP SUBSCRIPTION",
-            Self::DropTablespace => "DROP TABLESPACE",
             Self::DropTextSearchParser => "DROP TEXT SEARCH PARSER",
             Self::DropTextSearchTemplate => "DROP TEXT SEARCH TEMPLATE",
             Self::DropTransform => "DROP TRANSFORM",
@@ -1363,9 +1379,6 @@ impl NonGoalCommand {
             | Self::DropSubscription => "physical replication SQL is not supported",
             Self::AlterRule | Self::CreateRule | Self::DropRule => {
                 "the legacy rewrite rule system is not supported"
-            }
-            Self::AlterTablespace | Self::DropTablespace => {
-                "tablespaces are not part of the chapter storage model"
             }
             Self::AlterTextSearchParser
             | Self::AlterTextSearchTemplate
@@ -1424,7 +1437,6 @@ non_goal_specs!(
     (AlterPublication, "ALTER PUBLICATION pub ADD TABLE t"),
     (AlterRule, "ALTER RULE r ON t RENAME TO r2"),
     (AlterSubscription, "ALTER SUBSCRIPTION sub DISABLE"),
-    (AlterTablespace, "ALTER TABLESPACE ts RENAME TO ts2"),
     (
         AlterTextSearchParser,
         "ALTER TEXT SEARCH PARSER p RENAME TO p2"
@@ -1480,7 +1492,6 @@ non_goal_specs!(
     (DropPublication, "DROP PUBLICATION pub"),
     (DropRule, "DROP RULE r ON t"),
     (DropSubscription, "DROP SUBSCRIPTION sub"),
-    (DropTablespace, "DROP TABLESPACE ts"),
     (DropTextSearchParser, "DROP TEXT SEARCH PARSER p"),
     (DropTextSearchTemplate, "DROP TEXT SEARCH TEMPLATE t"),
     (DropTransform, "DROP TRANSFORM FOR integer LANGUAGE sql"),
