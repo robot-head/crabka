@@ -77,7 +77,11 @@ def _affected(ctx: TaskContext) -> int:
     (code, tests_output) = _output(ctx, "bazel", ["query", "kind(rust_test, %s)" % target_set])
     if code != 0:
         return code
-    (code, builds_output) = _output(ctx, "bazel", ["query", "%s except kind('.*_test rule', %s) except attr(target_compatible_with, '.*wasm32.*', %s)" % (target_set, target_set, target_set)])
+    # Images, packaging, docs, and environment-heavy tests have dedicated CI
+    # jobs below this graph gate. Compile only affected host code here so those
+    # jobs do not duplicate APKO/OCI cross-platform builds.
+    host_code = "kind('(rust_(binary|library|proc_macro|shared_library)|java_binary)', %s)" % target_set
+    (code, builds_output) = _output(ctx, "bazel", ["query", "%s except attr(target_compatible_with, '.*wasm32.*', %s)" % (host_code, host_code)])
     if code != 0:
         return code
 
