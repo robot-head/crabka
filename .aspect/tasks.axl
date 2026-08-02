@@ -234,6 +234,19 @@ _GRES_SUITES = {
 }
 
 def _gres(ctx: TaskContext) -> int:
+    bazel_tests = {
+        "coldstart": [
+            "//scripts:gres_kind_lifecycle_structure_test",
+            "//scripts:gres_kind_lifecycle_test",
+        ],
+        "range-scaling-ci": ["//scripts:gres_range_scaling_contract_test"],
+    }
+    if ctx.args.suite in bazel_tests:
+        return _run(ctx, "bazel", [
+            "test",
+            "--config=ci",
+            "--test_output=streamed",
+        ] + bazel_tests[ctx.args.suite])
     executable = _GRES_SUITES.get(ctx.args.suite)
     if executable == None:
         print("unknown suite %r; choose one of: %s" % (ctx.args.suite, ", ".join(sorted(_GRES_SUITES.keys()))))

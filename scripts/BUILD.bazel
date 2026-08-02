@@ -1,0 +1,68 @@
+load("//:bazel/integration_test.bzl", "host_integration_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(glob(["**/*.sh", "**/*.py"]))
+
+host_integration_test(
+    name = "gres_kind_lifecycle_structure_test",
+    script = "tests/gres-kind-lifecycle-structure.sh",
+    data = [
+        "gres-kind-lifecycle.sh",
+        "//packaging:test_data",
+    ],
+    required_commands = [
+        "bash",
+        "grep",
+    ],
+    size = "small",
+)
+
+host_integration_test(
+    name = "gres_range_scaling_contract_test",
+    script = "tests/gres-range-scaling-ci.sh",
+    data = [
+        "gres-range-scaling.sh",
+        "check-gres-primary-distribution.py",
+        "//:.github/workflows/ci.yml",
+    ],
+    required_commands = [
+        "bash",
+        "python3",
+    ],
+    size = "small",
+)
+
+host_integration_test(
+    name = "gres_kind_lifecycle_test",
+    script = "gres-kind-lifecycle.sh",
+    data = [
+        "//:deploy/crds/crabka.io_greses.yaml",
+        "//:deploy/crds/crabka.io_grestenants.yaml",
+        "//:deploy/crds/crabka.io_kafkanodepools.yaml",
+        "//:deploy/crds/crabka.io_kafkas.yaml",
+    ],
+    image_loaders = [
+        "//packaging:operator_image_load",
+        "//packaging:broker_image_load",
+        "//packaging:gres_image_load",
+        "//packaging:gres_activator_image_load",
+    ],
+    required_commands = [
+        "docker",
+        "kind",
+        "kubectl",
+        "openssl",
+        "psql",
+        "python3",
+        "timeout",
+    ],
+    size = "enormous",
+    tags = [
+        "exclusive",
+        "manual",
+        "no-sandbox",
+        "requires-network",
+    ],
+    timeout = "long",
+)

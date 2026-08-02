@@ -12,6 +12,12 @@ package(default_visibility = ["//visibility:public"])
 exports_files([
     "Cargo.lock",
     "Cargo.toml",
+    ".github/workflows/ci.yml",
+    "bazel/integration_test.bzl",
+    "deploy/crds/crabka.io_greses.yaml",
+    "deploy/crds/crabka.io_grestenants.yaml",
+    "deploy/crds/crabka.io_kafkanodepools.yaml",
+    "deploy/crds/crabka.io_kafkas.yaml",
 ])
 
 current_rustfmt_toolchain(name = "rustfmt")

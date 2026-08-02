@@ -54,8 +54,10 @@ deadline_wait() {
 
 load_image() {
     local target=$1 image=$2
-    timeout 900s bazel run --config=ci "//packaging:${target}_image_load" \
-        >"$ARTIFACT_DIR/load-${target}.log" 2>&1
+    if [ "${CRABKA_GRES_IMAGES_LOADED:-0}" != 1 ]; then
+        timeout 900s bazel run --config=ci "//packaging:${target}_image_load" \
+            >"$ARTIFACT_DIR/load-${target}.log" 2>&1
+    fi
     timeout 120s kind load docker-image "$image" --name "$CLUSTER"
 }
 
@@ -117,7 +119,8 @@ print((time.monotonic_ns() - start) // 1_000_000)
 PY
 }
 
-for command in kind kubectl docker bazel openssl psql python3 timeout; do need "$command"; done
+for command in kind kubectl docker openssl psql python3 timeout; do need "$command"; done
+if [ "${CRABKA_GRES_IMAGES_LOADED:-0}" != 1 ]; then need bazel; fi
 [[ "$ITERATIONS" =~ ^[1-9][0-9]*$ ]] || fail "iterations must be positive"
 rm -rf "$ARTIFACT_DIR"
 mkdir -p "$ARTIFACT_DIR"

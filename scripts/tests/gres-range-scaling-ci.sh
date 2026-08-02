@@ -24,12 +24,12 @@ def validate(source, benchmark=script):
     required_job = [
         'runs-on: ubuntu-latest', 'timeout-minutes: 30',
         'dtolnay/rust-toolchain@stable', 'Swatinem/rust-cache@v2',
-        'postgresql-client', 'bash scripts/tests/gres-range-scaling-ci.sh',
+        'postgresql-client', 'aspect gres --task:name=gres-range-scaling-contract --suite range-scaling-ci',
         'CRABKA_GRES_RANGE_SCALING_MODE=fast',
         'CRABKA_GRES_RANGE_SCALING_FLOOR=2.1',
         'CRABKA_GRES_SHARDED_SCALING_FLOOR=2.1',
         'CRABKA_GRES_DECISION_CEILING_MIN_RATIO=0.5',
-        './scripts/gres-range-scaling.sh', 'artifact["mode"] == "live"',
+        'aspect gres --task:name=gres-range-scaling --suite range-scaling', 'artifact["mode"] == "live"',
         '"range4_vs_range1_min": 2.1',
         '"sharded_range4_vs_range1_min": 2.1',
         '"decision_ceiling_range4_min_ratio": 0.5',
@@ -40,8 +40,8 @@ def validate(source, benchmark=script):
     forbidden = ['continue-on-error:', '|| true', 'if: false', 'if: ${{ false }}']
     for needle in forbidden:
         assert needle not in job, f'non-gating scaling job token: {needle}'
-    invocation_lines = [line.strip() for line in job.splitlines() if './scripts/gres-range-scaling.sh' in line and not line.lstrip().startswith('#')]
-    assert invocation_lines == ['./scripts/gres-range-scaling.sh'], invocation_lines
+    invocation_lines = [line.strip() for line in job.splitlines() if '--suite range-scaling' in line and '--suite range-scaling-ci' not in line and not line.lstrip().startswith('#')]
+    assert invocation_lines == ['aspect gres --task:name=gres-range-scaling --suite range-scaling'], invocation_lines
     dependencies = [
         "'crates/broker/**'", "'crates/client-admin/**'", "'crates/client-core/**'",
         "'crates/client-producer/**'", "'crates/client-consumer/**'", "'crates/protocol/**'",
@@ -49,7 +49,8 @@ def validate(source, benchmark=script):
         "'rust-toolchain.toml'", "'scripts/gres-range-scaling.sh'",
         "'scripts/tests/gres-range-scaling-ci.sh'", "'.github/workflows/ci.yml'",
     ]
-    gres_filter = source[source.index('            gres:'):source.index('\n  rust:', source.index('            gres:'))]
+    gres_start = source.index('            gres:')
+    gres_filter = source[gres_start:source.index('\n\n  affected:', gres_start)]
     for needle in dependencies:
         assert needle in gres_filter, f'missing direct dependency path: {needle}'
     required_script = [
@@ -84,7 +85,7 @@ def validate(source, benchmark=script):
 validate(workflow)
 
 mutations = [
-    ('script path', workflow.replace('./scripts/gres-range-scaling.sh', './scripts/not-the-scaling-script.sh', 1)),
+    ('script task', workflow.replace('--suite range-scaling', '--suite not-range-scaling', 1)),
     ('live artifact', workflow.replace('artifact["mode"] == "live"', 'artifact["mode"] == "dry-run"', 1)),
     ('continue on error', workflow.replace('  gres-range-scaling:\n', '  gres-range-scaling:\n    continue-on-error: ${{ true }}\n', 1)),
     ('fast mode', workflow.replace('CRABKA_GRES_RANGE_SCALING_MODE=fast', '# fast mode removed', 1)),
