@@ -20,6 +20,7 @@ command_identities!(
     (AlterEventTrigger, "ALTER EVENT TRIGGER"),
     (AlterExtension, "ALTER EXTENSION"),
     (AlterFunction, "ALTER FUNCTION"),
+    (AlterIndex, "ALTER INDEX"),
     (AlterLanguage, "ALTER LANGUAGE"),
     (AlterLargeObject, "ALTER LARGE OBJECT"),
     (AlterOperator, "ALTER OPERATOR"),

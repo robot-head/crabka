@@ -2095,6 +2095,7 @@ fn read_only_command_tag(stmt: &Statement) -> &'static str {
         Statement::Truncate { .. } => "TRUNCATE TABLE",
         Statement::CreateTable { .. } | Statement::CreateTableAs { .. } => "CREATE TABLE",
         Statement::CreateIndex { .. } => "CREATE INDEX",
+        Statement::AlterIndexTablespace { .. } => "ALTER INDEX",
         Statement::CreateView { .. } => "CREATE VIEW",
         Statement::CreateSchema { .. } => "CREATE SCHEMA",
         Statement::CreateType { .. } => "CREATE TYPE",
@@ -2172,6 +2173,7 @@ fn establishes_transaction_activity(stmt: &Statement) -> bool {
         | Statement::Truncate { .. }
         | Statement::CreateTable { .. }
         | Statement::CreateIndex { .. }
+        | Statement::AlterIndexTablespace { .. }
         | Statement::DropIndex { .. }
         | Statement::DropTable { .. }
         | Statement::AlterTable { .. }
@@ -5375,6 +5377,7 @@ impl SqlSession {
             Statement::Rollback { chain } => self.rollback_cmd(*chain).await,
             Statement::CreateTable { .. }
             | Statement::CreateIndex { .. }
+            | Statement::AlterIndexTablespace { .. }
             | Statement::DropIndex { .. }
             | Statement::DropTable { .. }
             | Statement::AlterTable { .. }
@@ -6582,6 +6585,7 @@ impl SqlSession {
             columns,
             query,
             with_data,
+            tablespace,
         } = stmt
         else {
             return Err(ExecError::Unsupported("not a CREATE TABLE AS".into()));
@@ -6659,6 +6663,7 @@ impl SqlSession {
             on_commit: None,
             partition_by: None,
             partition_of: None,
+            tablespace: tablespace.clone(),
         };
         self.run_ddl(&create).await?;
         if !with_data {
@@ -16819,6 +16824,90 @@ mod session_conformance_tests {
             .simple_query("DROP TABLESPACE IF EXISTS user_space")
             .await
             .expect("conditional drop");
+    }
+
+    #[tokio::test]
+    async fn relation_tablespace_placement_is_visible_and_blocks_drop() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query("CREATE TABLESPACE placed LOCATION '/tmp/placed'")
+            .await
+            .expect("create tablespace");
+        let oid = scalar(
+            &mut session,
+            "SELECT oid FROM pg_catalog.pg_tablespace WHERE spcname = 'placed'",
+        )
+        .await;
+        assert!(
+            state(
+                &mut session,
+                "CREATE TABLE missing_space (id int) TABLESPACE nowhere",
+            )
+            .await
+                == "42704"
+        );
+        assert!(
+            state(
+                &mut session,
+                "CREATE TABLE global_space (id int) TABLESPACE pg_global",
+            )
+            .await
+                == "0A000"
+        );
+        session
+            .simple_query("CREATE TABLE placed_table (id int) TABLESPACE placed")
+            .await
+            .expect("create placed table");
+        session
+            .simple_query("CREATE INDEX placed_index ON placed_table (id) TABLESPACE placed")
+            .await
+            .expect("create placed index");
+        session
+            .simple_query("CREATE TABLE placed_as TABLESPACE placed AS SELECT 1 AS id")
+            .await
+            .expect("create placed table as");
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT reltablespace FROM pg_catalog.pg_class WHERE relname = 'placed_table'",
+            )
+            .await
+                == oid
+        );
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT reltablespace FROM pg_catalog.pg_class WHERE relname = 'placed_as'",
+            )
+            .await
+                == oid
+        );
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT reltablespace FROM pg_catalog.pg_class WHERE relname = 'placed_index'",
+            )
+            .await
+                == oid
+        );
+        assert!(state(&mut session, "DROP TABLESPACE placed").await == "2BP01");
+        session
+            .simple_query("ALTER TABLE placed_table SET TABLESPACE pg_default")
+            .await
+            .expect("move table to default");
+        session
+            .simple_query("ALTER INDEX placed_index SET TABLESPACE pg_default")
+            .await
+            .expect("move index to default");
+        session
+            .simple_query("DROP TABLE placed_as")
+            .await
+            .expect("drop placed table as");
+        session
+            .simple_query("DROP TABLESPACE placed")
+            .await
+            .expect("drop empty tablespace");
     }
 
     #[test]

@@ -398,6 +398,7 @@ pub(crate) fn execute_ddl(
             on_commit,
             partition_by,
             partition_of,
+            tablespace,
         } => {
             if (partition_by.is_some() || partition_of.is_some()) && *sharded {
                 return Err(crate::partition::reject_sharded_partitioned());
@@ -481,6 +482,10 @@ pub(crate) fn execute_ddl(
                 checks.clone(),
                 fctx.table_id(),
             )?;
+            if let Some(tablespace) = tablespace {
+                let oid = resolve_relation_tablespace_oid(kv, tablespace)?;
+                ops.push(crabka_pgcatalog::set_relation_tablespace_op(name, oid));
+            }
             let table = crabka_pgcatalog::Table {
                 id,
                 name: name.clone(),
@@ -850,6 +855,7 @@ pub(crate) fn execute_ddl(
             method,
             include,
             predicate,
+            tablespace,
         } => {
             let _ = concurrently;
             // `CREATE SEQUENCE` borrows this variant, naming the sequence in
@@ -930,6 +936,10 @@ pub(crate) fn execute_ddl(
                 placement,
                 index_method,
             )?;
+            if let Some(tablespace) = tablespace {
+                let oid = resolve_relation_tablespace_oid(kv, tablespace)?;
+                ops.push(crabka_pgcatalog::set_relation_tablespace_op(name, oid));
+            }
             if placement == crabka_pgcatalog::IndexPlacement::Local {
                 reject_unwritable_local_index(&table_meta)?;
                 let index = crabka_pgcatalog::Index {
@@ -1007,6 +1017,15 @@ pub(crate) fn execute_ddl(
                 ops.push(crabka_pgkv::WriteOp::Delete { key });
             }
             Ok((command("DROP INDEX"), ops))
+        }
+        Statement::AlterIndexTablespace { name, tablespace } => {
+            let name = &resolve_relation(kv, resolution, name, SchemaDisposition::Utility)?;
+            crabka_pgcatalog::get_index(kv, name)?;
+            let oid = resolve_relation_tablespace_oid(kv, tablespace)?;
+            Ok((
+                command("ALTER INDEX"),
+                vec![crabka_pgcatalog::set_relation_tablespace_op(name, oid)],
+            ))
         }
         Statement::CreateRole { name, can_login } => {
             let ops = crabka_pgcatalog::create_role_ops(kv, name, *can_login)?;
@@ -1456,6 +1475,24 @@ fn validate_view_expr(expr: &Expr) -> Result<(), ExecError> {
 /// A `QueryResult::Command` with the given PostgreSQL completion tag.
 fn command(tag: &str) -> QueryResult {
     QueryResult::Command { tag: tag.into() }
+}
+
+fn resolve_relation_tablespace_oid(kv: &dyn Kv, name: &str) -> Result<u32, ExecError> {
+    if name == "pg_global" {
+        return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+            "0A000",
+            "only shared relations can be placed in pg_global tablespace",
+        )));
+    }
+    crabka_pgcatalog::tablespace_oid(kv, name).map_err(|error| match error {
+        crabka_pgcatalog::CatalogError::UndefinedObject(_) => {
+            ExecError::Remote(crabka_pgwire::error::PgError::error(
+                "42704",
+                format!("tablespace \"{name}\" does not exist"),
+            ))
+        }
+        other => other.into(),
+    })
 }
 
 fn create_table_constraint_index(
@@ -11729,6 +11766,7 @@ fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         row.relam = crate::catalog_rel::BTREE_AM_OID;
         row.relispartition = crate::partition::parent_of(catalog_kv, &table.name)?.is_some();
         row.relpersistence = crabka_pgcatalog::relpersistence_of(&table.name.schema);
+        row.reltablespace = crabka_pgcatalog::relation_tablespace_oid(catalog_kv, &table.name)?;
         rows.push(row.build()?);
     }
     for view in crabka_pgcatalog::list_views(catalog_kv)? {
@@ -11792,6 +11830,8 @@ fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             crabka_pgcatalog::IndexMethod::Spgist => crate::catalog_rel::SPGIST_AM_OID,
         };
         row.relpersistence = crabka_pgcatalog::relpersistence_of(&index.table.schema);
+        row.reltablespace =
+            crabka_pgcatalog::relation_tablespace_oid(catalog_kv, &index.qualified_name())?;
         rows.push(row.build()?);
     }
     Ok(rows)
@@ -11813,6 +11853,7 @@ struct PgClassRow<'a> {
     relhastriggers: bool,
     relam: i32,
     relispartition: bool,
+    reltablespace: u32,
     /// `p` for an ordinary relation, `t` for one in a session's temporary
     /// namespace. That is where every temporary relation is, so the schema is
     /// the whole fact and nothing stores it twice.
@@ -11833,6 +11874,7 @@ impl<'a> PgClassRow<'a> {
             relhastriggers: false,
             relam: 0,
             relispartition: false,
+            reltablespace: 0,
             relpersistence: 'p',
         }
     }
@@ -11851,7 +11893,8 @@ impl<'a> PgClassRow<'a> {
             int(crate::catalog_fn::BOOTSTRAP_ROLE_OID),
             int(self.relam),
             int(self.oid),
-            int(0),
+            int(i32::try_from(self.reltablespace)
+                .map_err(|_| ExecError::Unsupported("tablespace oid exceeds int4".into()))?),
             int(0),
             Datum::Float4(-1.0),
             int(0),
@@ -16012,6 +16055,7 @@ fn alter_action_label(action: &crabka_pgparser::ast::AlterTableAction) -> &'stat
         Action::RenameTable { .. } => "RENAME",
         Action::SetStorageParameters(_) => "SET",
         Action::ResetStorageParameters(_) => "RESET",
+        Action::SetTablespace(_) => "SET TABLESPACE",
         Action::OwnerTo(_) => "OWNER TO",
         Action::SetTriggerMode { .. } => "ENABLE/DISABLE TRIGGER",
         Action::AttachPartition { .. } => "ATTACH PARTITION",
@@ -16224,6 +16268,14 @@ fn alter_table_action_ops(
         Action::DropDefault(column) => {
             let index = state.column_index(column)?;
             state.table.columns[index].default = None;
+            Ok(())
+        }
+        Action::SetTablespace(tablespace) => {
+            let oid = resolve_relation_tablespace_oid(kv, tablespace)?;
+            state.ops.push(crabka_pgcatalog::set_relation_tablespace_op(
+                &table_name,
+                oid,
+            ));
             Ok(())
         }
         Action::SetType { column, ty, using } => {

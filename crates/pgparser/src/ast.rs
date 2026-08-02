@@ -238,6 +238,8 @@ pub enum Statement {
         /// `PARTITION OF <parent> <bound>`: the relation is a leaf (or an
         /// intermediate parent, when `partition_by` is also set).
         partition_of: Option<PartitionOf>,
+        /// Explicit non-default relation placement.
+        tablespace: Option<String>,
     },
     CreateIndex {
         /// An index name is never schema-qualified in `PostgreSQL`'s grammar,
@@ -257,6 +259,7 @@ pub enum Statement {
         include: Vec<String>,
         /// Source text of a partial index's `WHERE` predicate.
         predicate: Option<String>,
+        tablespace: Option<String>,
     },
     /// `COMMENT ON <kind> <name> IS {'text' | NULL}`.
     Comment {
@@ -273,6 +276,10 @@ pub enum Statement {
         /// the drop being refused with 2BP01. `RESTRICT` is the default and is
         /// accepted as the explicit spelling of it.
         cascade: bool,
+    },
+    AlterIndexTablespace {
+        name: RelationRef,
+        tablespace: String,
     },
     CreateView {
         name: RelationRef,
@@ -418,6 +425,7 @@ pub enum Statement {
         /// `WITH DATA` (the default) populates the table; `WITH NO DATA` creates
         /// it empty.
         with_data: bool,
+        tablespace: Option<String>,
     },
     /// `VACUUM` with any option/table tail, accepted as a hint: reclamation is
     /// autonomous (adaptive background vacuum with idle drain), so the command
@@ -1546,6 +1554,7 @@ pub enum AlterTableAction {
     SetStorageParameters(Vec<(String, Option<String>)>),
     /// `RESET (param, …)`.
     ResetStorageParameters(Vec<String>),
+    SetTablespace(String),
     OwnerTo(String),
     SetTriggerMode {
         selector: TriggerSelector,
@@ -1562,9 +1571,9 @@ pub enum AlterTableAction {
         concurrently: bool,
         finalize: bool,
     },
-    /// `SET SCHEMA name`, `SET TABLESPACE name`, `SET {LOGGED|UNLOGGED}`,
-    /// `CLUSTER ON`, `SET WITHOUT CLUSTER`, `{EN,DIS}ABLE TRIGGER`, and the
-    /// other subcommands that parse but have no counterpart in Crabka's storage
+    /// `SET SCHEMA name`, `SET {LOGGED|UNLOGGED}`,
+    /// `CLUSTER ON`, `SET WITHOUT CLUSTER`, `{EN,DIS}ABLE TRIGGER`, … — the
+    /// subcommands that parse but have no counterpart in Crabka's storage
     /// model. `label` is the `PostgreSQL` subcommand text for the refusal.
     Unsupported(String),
 }

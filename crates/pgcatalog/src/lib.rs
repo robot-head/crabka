@@ -494,6 +494,8 @@ pub enum CatalogError {
     UndefinedIndex(String),
     #[error("cannot drop index \"{0}\" because it is required by a table constraint")]
     DependentObjectsStillExist(String),
+    #[error("tablespace \"{0}\" is not empty")]
+    TablespaceNotEmpty(String),
     /// A relation already carries a constraint of this name. Constraint names
     /// are per-relation, so `PostgreSQL` reports the relation beside the name.
     /// It reports 42710, not the 42P07 that an index name collision gets.
@@ -570,6 +572,7 @@ impl CatalogError {
             | CatalogError::UndefinedObject(_)
             | CatalogError::UndefinedConstraint(_) => "42704",
             CatalogError::DependentObjectsStillExist(_)
+            | CatalogError::TablespaceNotEmpty(_)
             | CatalogError::SystemSchemaDrop(_)
             | CatalogError::SchemaNotEmpty(_) => "2BP01",
             CatalogError::InvalidSequence(_) => "22023",
@@ -599,8 +602,7 @@ pub struct Schema {
     pub owner: String,
 }
 
-/// A user-created tablespace catalog row. Physical placement remains outside
-/// the KV storage model, but SQL-visible identity and options are durable.
+/// A user-created tablespace catalog row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tablespace {
     pub oid: u32,
@@ -702,6 +704,7 @@ pub fn create_temp_schema_op(name: &str) -> WriteOp {
 
 const SCHEMA_PREFIX: &[u8] = b"\0\0\0\0catalog_schema/by-name/";
 const TABLESPACE_PREFIX: &[u8] = b"\0\0\0\0catalog_tablespace/by-name/";
+const RELATION_TABLESPACE_PREFIX: &[u8] = b"\0\0\0\0catalog_tablespace/by-relation/";
 const NEXT_TABLESPACE_OID_KEY: &[u8] = b"\0\0\0\0meta/next_tablespace_oid";
 const FIRST_USER_TABLESPACE_OID: u32 = 300_000;
 
@@ -709,6 +712,55 @@ fn tablespace_key(name: &str) -> Vec<u8> {
     let mut key = TABLESPACE_PREFIX.to_vec();
     key.extend_from_slice(name.as_bytes());
     key
+}
+
+fn relation_tablespace_key(relation: &RelationName) -> Vec<u8> {
+    let mut out = RELATION_TABLESPACE_PREFIX.to_vec();
+    key::push_key_part(&mut out, &relation.schema);
+    key::push_key_part(&mut out, &relation.name);
+    out
+}
+
+/// Resolve a bootstrap or user-created tablespace name to its catalog oid.
+pub fn tablespace_oid(kv: &dyn Kv, name: &str) -> Result<u32, CatalogError> {
+    match name {
+        "pg_default" => Ok(0),
+        "pg_global" => Ok(1664),
+        _ => Ok(get_tablespace(kv, name)?.oid),
+    }
+}
+
+/// Store the SQL-visible placement of a table or index.
+#[must_use]
+pub fn set_relation_tablespace_op(relation: &RelationName, oid: u32) -> WriteOp {
+    if oid == 0 {
+        WriteOp::Delete {
+            key: relation_tablespace_key(relation),
+        }
+    } else {
+        WriteOp::Put {
+            key: relation_tablespace_key(relation),
+            value: U32::new(oid).as_bytes().to_vec(),
+        }
+    }
+}
+
+/// Read a relation's placement; zero means the database default tablespace.
+pub fn relation_tablespace_oid(kv: &dyn Kv, relation: &RelationName) -> Result<u32, CatalogError> {
+    kv.get(&relation_tablespace_key(relation))?
+        .map_or(Ok(0), |bytes| {
+            U32::read_from_prefix(&bytes)
+                .map(|(oid, _)| oid.get())
+                .map_err(|_| {
+                    KvError::CorruptRow("relation tablespace oid is not u32".into()).into()
+                })
+        })
+}
+
+fn drop_relation_tablespace_op(relation: &RelationName) -> WriteOp {
+    WriteOp::Delete {
+        key: relation_tablespace_key(relation),
+    }
 }
 
 fn serialize_tablespace(tablespace: &Tablespace) -> Vec<u8> {
@@ -862,10 +914,17 @@ pub fn replace_tablespace_ops(
 /// Returns undefined-object or catalog storage errors. Bootstrap tablespaces
 /// cannot be dropped.
 pub fn drop_tablespace_ops(kv: &dyn Kv, name: &str) -> Result<Vec<WriteOp>, CatalogError> {
-    // ponytail: relation placement is not stored yet; add a dependency scan
-    // here when tables/indexes retain their TABLESPACE clause.
-    if matches!(name, "pg_default" | "pg_global") || kv.get(&tablespace_key(name))?.is_none() {
+    if matches!(name, "pg_default" | "pg_global") {
         return Err(CatalogError::UndefinedObject(name.to_string()));
+    }
+    let tablespace = get_tablespace(kv, name)?;
+    for (_, bytes) in kv.scan_prefix(RELATION_TABLESPACE_PREFIX)? {
+        let oid = U32::read_from_prefix(&bytes)
+            .map(|(oid, _)| oid.get())
+            .map_err(|_| KvError::CorruptRow("relation tablespace oid is not u32".into()))?;
+        if oid == tablespace.oid {
+            return Err(CatalogError::TablespaceNotEmpty(name.to_string()));
+        }
     }
     Ok(vec![WriteOp::Delete {
         key: tablespace_key(name),
@@ -1207,6 +1266,13 @@ pub fn rename_table_ops(
         },
         catalog_by_id_op(table_id, new_name),
     ];
+    if let Some(placement) = kv.get(&relation_tablespace_key(name))? {
+        ops.push(drop_relation_tablespace_op(name));
+        ops.push(WriteOp::Put {
+            key: relation_tablespace_key(new_name),
+            value: placement,
+        });
+    }
     if let Some(sharding) = kv.get(&sharding_key(name))? {
         ops.push(WriteOp::Delete {
             key: sharding_key(name),
@@ -2272,6 +2338,7 @@ fn drop_index_record_ops(index: &Index) -> Vec<WriteOp> {
         WriteOp::Delete {
             key: catalog_table_index_key(index.table_id, &index.name),
         },
+        drop_relation_tablespace_op(&index.qualified_name()),
     ]
 }
 
@@ -2901,6 +2968,7 @@ pub fn drop_table_ops(kv: &dyn Kv, name: &RelationName) -> Result<Vec<WriteOp>, 
         WriteOp::Delete {
             key: key::catalog_by_id_key(table.id),
         },
+        drop_relation_tablespace_op(name),
     ];
     for (row_key, _) in kv.scan_prefix(&key::table_prefix(table.id))? {
         ops.push(WriteOp::Delete { key: row_key });
@@ -2913,6 +2981,7 @@ pub fn drop_table_ops(kv: &dyn Kv, name: &RelationName) -> Result<Vec<WriteOp>, 
         ops.push(WriteOp::Delete {
             key: index_table_key,
         });
+        ops.push(drop_relation_tablespace_op(&index.qualified_name()));
     }
     ops.extend(drop_table_foreign_key_ops(kv, table.id)?);
     Ok(ops)
