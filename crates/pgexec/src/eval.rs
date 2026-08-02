@@ -1153,6 +1153,12 @@ pub(crate) fn apply_binary(
             };
             Ok(Datum::Range(crabka_pgtypes::range::union(a, b)?))
         }
+        BinaryOp::Add if matches!((l, r), (Datum::Multirange(_), Datum::Multirange(_))) => {
+            let (Datum::Multirange(a), Datum::Multirange(b)) = (l, r) else {
+                unreachable!()
+            };
+            Ok(Datum::Multirange(crabka_pgtypes::multirange::union(a, b)?))
+        }
         BinaryOp::Add => Ok(ops::add(l, r)?),
         // jsonb `-` (delete a key, an index, or a set of keys) overloads the
         // arithmetic `-`; a jsonb LEFT operand is what selects it, so every
@@ -1166,12 +1172,28 @@ pub(crate) fn apply_binary(
             };
             Ok(Datum::Range(crabka_pgtypes::range::difference(a, b)?))
         }
+        BinaryOp::Sub if matches!((l, r), (Datum::Multirange(_), Datum::Multirange(_))) => {
+            let (Datum::Multirange(a), Datum::Multirange(b)) = (l, r) else {
+                unreachable!()
+            };
+            Ok(Datum::Multirange(crabka_pgtypes::multirange::difference(
+                a, b,
+            )?))
+        }
         BinaryOp::Sub => Ok(ops::sub(l, r)?),
         BinaryOp::Mul if matches!((l, r), (Datum::Range(_), Datum::Range(_))) => {
             let (Datum::Range(a), Datum::Range(b)) = (l, r) else {
                 unreachable!()
             };
             Ok(Datum::Range(crabka_pgtypes::range::intersection(a, b)?))
+        }
+        BinaryOp::Mul if matches!((l, r), (Datum::Multirange(_), Datum::Multirange(_))) => {
+            let (Datum::Multirange(a), Datum::Multirange(b)) = (l, r) else {
+                unreachable!()
+            };
+            Ok(Datum::Multirange(crabka_pgtypes::multirange::intersection(
+                a, b,
+            )?))
         }
         BinaryOp::Mul => Ok(ops::mul(l, r)?),
         BinaryOp::Div => Ok(ops::div(l, r)?),
@@ -2362,6 +2384,9 @@ fn infer_binary_type(
             if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul) {
                 match (lt, rt) {
                     (ColumnType::Range(a), ColumnType::Range(b)) if a == b => return Ok(lt),
+                    (ColumnType::Multirange(a), ColumnType::Multirange(b)) if a == b => {
+                        return Ok(lt);
+                    }
                     (ColumnType::Range(_), _) if is_unknown_literal(right) => return Ok(lt),
                     (_, ColumnType::Range(_)) if is_unknown_literal(left) => return Ok(rt),
                     _ => {}

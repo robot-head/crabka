@@ -136,6 +136,73 @@ pub fn overlaps_range(multirange: &MultirangeValue, range: &RangeValue) -> Resul
     Ok(false)
 }
 
+pub fn union(a: &MultirangeValue, b: &MultirangeValue) -> Result<MultirangeValue, TypeError> {
+    same_multirange_type(a, b)?;
+    from_ranges(a.ty, a.ranges.iter().chain(&b.ranges).cloned().collect())
+}
+
+pub fn intersection(
+    a: &MultirangeValue,
+    b: &MultirangeValue,
+) -> Result<MultirangeValue, TypeError> {
+    same_multirange_type(a, b)?;
+    let mut ranges = Vec::new();
+    for left in &a.ranges {
+        for right in &b.ranges {
+            let overlap = crate::range::intersection(left, right)?;
+            if !overlap.empty {
+                ranges.push(overlap);
+            }
+        }
+    }
+    from_ranges(a.ty, ranges)
+}
+
+pub fn difference(a: &MultirangeValue, b: &MultirangeValue) -> Result<MultirangeValue, TypeError> {
+    same_multirange_type(a, b)?;
+    let mut ranges = a.ranges.clone();
+    for cut in &b.ranges {
+        let mut next = Vec::new();
+        for source in ranges {
+            let overlap = crate::range::intersection(&source, cut)?;
+            if overlap.empty {
+                next.push(source);
+                continue;
+            }
+            if overlap.lower.is_some() {
+                let left_mask = RangeValue {
+                    ty: source.ty,
+                    lower: None,
+                    upper: overlap.lower.clone(),
+                    lower_inclusive: false,
+                    upper_inclusive: !overlap.lower_inclusive,
+                    empty: false,
+                };
+                let left = crate::range::intersection(&source, &left_mask)?;
+                if !left.empty {
+                    next.push(left);
+                }
+            }
+            if overlap.upper.is_some() {
+                let right_mask = RangeValue {
+                    ty: source.ty,
+                    lower: overlap.upper.clone(),
+                    upper: None,
+                    lower_inclusive: !overlap.upper_inclusive,
+                    upper_inclusive: false,
+                    empty: false,
+                };
+                let right = crate::range::intersection(&source, &right_mask)?;
+                if !right.empty {
+                    next.push(right);
+                }
+            }
+        }
+        ranges = next;
+    }
+    from_ranges(a.ty, ranges)
+}
+
 pub fn range_relation(
     range: &RangeValue,
     multirange: &MultirangeValue,
@@ -174,6 +241,16 @@ fn same_type(multirange: &MultirangeValue, range: &RangeValue) -> Result<(), Typ
     } else {
         Err(TypeError::TypeMismatch {
             message: "range and multirange types do not match".into(),
+        })
+    }
+}
+
+fn same_multirange_type(a: &MultirangeValue, b: &MultirangeValue) -> Result<(), TypeError> {
+    if a.ty == b.ty {
+        Ok(())
+    } else {
+        Err(TypeError::TypeMismatch {
+            message: "multirange types do not match".into(),
         })
     }
 }
@@ -246,5 +323,23 @@ mod tests {
             .expect("external range");
         assert!(!adjacent_range(&split, &internal).expect("internal adjacency"));
         assert!(adjacent_range(&split, &external).expect("external adjacency"));
+
+        let left = parse("{[1,5),[10,15)}", ty, &jiff::tz::TimeZone::UTC).expect("left");
+        let right = parse("{[3,12)}", ty, &jiff::tz::TimeZone::UTC).expect("right");
+        let render = |value: &MultirangeValue| {
+            to_text(value, |bound| match bound {
+                Datum::Int4(value) => value.to_string(),
+                _ => unreachable!(),
+            })
+        };
+        assert_eq!(render(&union(&left, &right).expect("union")), "{[1,15)}");
+        assert_eq!(
+            render(&intersection(&left, &right).expect("intersection")),
+            "{[3,5),[10,12)}"
+        );
+        assert_eq!(
+            render(&difference(&left, &right).expect("difference")),
+            "{[1,3),[12,15)}"
+        );
     }
 }
