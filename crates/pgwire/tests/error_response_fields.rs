@@ -120,3 +120,12 @@ fn empty_detail_string_still_produces_a_field() {
 
     assert!(fields.last() == Some(&(b'D', String::new())));
 }
+
+#[test]
+fn source_position_uses_the_postgres_p_field() {
+    let fields = decode_error_response(&encode(
+        &PgError::error(sqlstate::SYNTAX_ERROR, "oops").with_position(17),
+    ));
+
+    assert!(fields.last() == Some(&(b'P', "17".to_owned())));
+}

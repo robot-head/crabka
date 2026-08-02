@@ -203,6 +203,13 @@ fn diagnostic_response(out: &mut BytesMut, tag: u8, diagnostic: &PgError) {
         for (tag, value) in [
             (b'D', fields.and_then(|fields| fields.detail.as_deref())),
             (b'H', fields.and_then(|fields| fields.hint.as_deref())),
+            (
+                b'P',
+                fields
+                    .and_then(|fields| fields.position.as_ref())
+                    .map(usize::to_string)
+                    .as_deref(),
+            ),
             (b'W', fields.and_then(|fields| fields.context.as_deref())),
             (b's', fields.and_then(|fields| fields.schema.as_deref())),
             (b't', fields.and_then(|fields| fields.table.as_deref())),

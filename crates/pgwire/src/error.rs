@@ -77,6 +77,8 @@ pub struct PgError {
 pub struct DiagnosticFields {
     pub detail: Option<String>,
     pub hint: Option<String>,
+    /// One-based character position in the original query (`P`).
+    pub position: Option<usize>,
     /// `PostgreSQL`'s `W` diagnostic field (often rendered as `CONTEXT`).
     pub context: Option<String>,
     pub schema: Option<String>,
@@ -145,6 +147,12 @@ impl PgError {
     #[must_use]
     pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
         self.diagnostics_mut().hint = Some(hint.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_position(mut self, position: usize) -> Self {
+        self.diagnostics_mut().position = Some(position);
         self
     }
 
