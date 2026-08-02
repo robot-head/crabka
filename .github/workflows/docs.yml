@@ -1,6 +1,7 @@
 name: docs
 
 on:
+  workflow_call:
   push:
     branches: [main]
     paths:
@@ -21,19 +22,6 @@ on:
     tags:
       # Same anchor as publish-images: one Helm repo update per workspace release.
       - "crabka-broker-v*"
-  pull_request:
-    paths:
-      - "website/**"
-      - "crates/docgen/**"
-      - "crates/raft/**"
-      - "crates/kraft-core/**"
-      - "crates/voters/**"
-      - "crates/playground/**"
-      - "charts/**"
-      - "README.md"
-      - "**/README.md"
-      - "lychee.toml"
-      - ".github/workflows/docs.yml"
   workflow_dispatch:
 
 permissions:

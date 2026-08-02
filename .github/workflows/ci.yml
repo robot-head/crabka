@@ -45,6 +45,9 @@ jobs:
       traces: ${{ steps.filter.outputs.traces }}
       metrics: ${{ steps.filter.outputs.metrics }}
       gres: ${{ steps.filter.outputs.gres }}
+      docs: ${{ steps.filter.outputs.docs }}
+      codegen: ${{ steps.filter.outputs.codegen }}
+      codspeed: ${{ steps.filter.outputs.codspeed }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
@@ -242,6 +245,39 @@ jobs:
               - 'Cargo.lock'
               - '.config/nextest.toml'
               - '.github/workflows/ci.yml'
+            docs:
+              - 'website/**'
+              - 'crates/docgen/**'
+              - 'crates/raft/**'
+              - 'crates/kraft-core/**'
+              - 'crates/voters/**'
+              - 'crates/playground/**'
+              - 'charts/**'
+              - 'README.md'
+              - '**/README.md'
+              - 'lychee.toml'
+              - '.github/workflows/docs.yml'
+              - '.github/workflows/ci.yml'
+            codegen:
+              - 'crates/protocol/**'
+              - 'crates/protocol-codegen/**'
+              - 'deploy/crds/**'
+              - 'tools/regenerate.sh'
+              - 'tools/regen-crds.sh'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/codegen-check.yml'
+              - '.github/workflows/ci.yml'
+            codspeed:
+              - 'crates/protocol/**'
+              - 'crates/log/**'
+              - 'crates/compression/**'
+              - 'crates/security/**'
+              - 'crates/metadata/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/codspeed.yml'
+              - '.github/workflows/ci.yml'
             gres:
               - 'Cargo.toml'
               - 'Cargo.lock'
@@ -305,7 +341,6 @@ jobs:
 
   affected:
     needs: changes
-    if: ${{ needs.changes.outputs.rust == 'true' }}
     timeout-minutes: 60
     runs-on: ubuntu-latest
     steps:
@@ -326,6 +361,53 @@ jobs:
           disable_search: true
           flags: affected
           fail_ci_if_error: false
+
+  docs:
+    needs: [changes, affected]
+    if: ${{ github.event_name == 'pull_request' && needs.changes.outputs.docs == 'true' }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/docs.yml
+    secrets: inherit
+
+  codegen-check:
+    needs: [changes, affected]
+    if: ${{ github.event_name == 'pull_request' && needs.changes.outputs.codegen == 'true' }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/codegen-check.yml
+    secrets: inherit
+
+  codspeed:
+    needs: [changes, affected]
+    if: ${{ github.event_name == 'pull_request' && needs.changes.outputs.codspeed == 'true' }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/codspeed.yml
+    secrets: inherit
+
+  operator-e2e:
+    needs: affected
+    if: ${{ github.event_name == 'pull_request' }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/operator-e2e.yml
+    secrets: inherit
+
+  gatekeeper-operator:
+    needs: operator-e2e
+    if: ${{ always() && github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Check operator e2e result
+        if: ${{ needs.operator-e2e.result == 'failure' || needs.operator-e2e.result == 'cancelled' }}
+        run: exit 1
 
   jvm-differential:
     needs: [changes, affected]
@@ -364,6 +446,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
+          rust-version: "1.97.1"
           command: check advisories bans sources licenses
 
   creusot-verify:
@@ -1345,6 +1428,10 @@ jobs:
     needs:
       - changes
       - affected
+      - docs
+      - codegen-check
+      - codspeed
+      - operator-e2e
       - jvm-differential
       - cargo-deny
       - creusot-verify

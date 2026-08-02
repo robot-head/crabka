@@ -68,6 +68,7 @@ fn split_banner(src: &str) -> (&str, &str) {
 }
 
 fn run_rustfmt(src: &str) -> Result<String, FmtError> {
+    let empty_config = if cfg!(windows) { "NUL" } else { "/dev/null" };
     let mut child = Command::new("rustfmt")
         .args([
             "--edition",
@@ -75,6 +76,8 @@ fn run_rustfmt(src: &str) -> Result<String, FmtError> {
             "--emit",
             "stdout",
             "--quiet",
+            "--config-path",
+            empty_config,
             "--config",
             "max_width=240",
         ])

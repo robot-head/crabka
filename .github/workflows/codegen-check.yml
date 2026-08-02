@@ -1,15 +1,6 @@
 name: codegen-check
 on:
-  pull_request:
-    paths:
-      - 'crates/protocol/**'
-      - 'crates/protocol-codegen/**'
-      - 'deploy/crds/**'
-      - 'tools/regenerate.sh'
-      - 'tools/regen-crds.sh'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.github/workflows/codegen-check.yml'
+  workflow_call:
   push:
     branches: [main]
     paths:
@@ -28,6 +19,7 @@ concurrency:
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
   drift:

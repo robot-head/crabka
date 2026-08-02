@@ -15,6 +15,6 @@ bazel-bin/crates/protocol-codegen/crabka-protocol-codegen__bin \
 # rules_rs rustfmt binary over generated and module sources.
 rustfmt="$(bazel info output_base)/$(bazel cquery --output=files //:rustfmt)"
 find crates/protocol/generated crates/protocol/src -name '*.rs' -print0 \
-    | xargs -0 "${rustfmt}" --edition 2024
+    | xargs -0 "${rustfmt}" --edition 2024 --config-path /dev/null
 
 echo "Regenerated. Review the diff with: git diff crates/protocol/generated crates/protocol/src"
