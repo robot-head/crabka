@@ -1,5 +1,7 @@
 load("@crates//:defs.bzl", "aliases", "all_crate_deps")
-load("@rules_rust//rust:defs.bzl", "rust_library")
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rust//rust:defs.bzl", "rust_doc")
+load("//:bazel/rust_package.bzl", "cargo_features", "normal_aliases", "rust_package_benches", "rust_package_tests")
 
 # Manifest is consumed by crate_universe (see //MODULE.bazel).
 exports_files(["Cargo.toml"])
@@ -13,24 +15,18 @@ exports_files(["Cargo.toml"])
 rust_library(
     name = "protocol",
     srcs = glob(["src/**/*.rs"]),
-    aliases = aliases(),
-    # The generated wire-codec sources are pulled in at compile time via
-    # `include!(concat!(env!("CARGO_MANIFEST_DIR"), "/generated/...))`.
+    aliases = normal_aliases(),
     compile_data = glob([
         "generated/**",
         "schemas/**",
     ]),
-    crate_name = "crabka_protocol",
+    # The generated wire-codec sources are pulled in at compile time via
+    # `include!(concat!(env!("CARGO_MANIFEST_DIR"), "/generated/...))`.
     # Codec features forwarded to crabka-compression. `arbitrary` (fuzzing
     # helper) is intentionally left off for the client build.
-    crate_features = [
-        "gzip",
-        "snappy",
-        "lz4",
-        "zstd",
-    ],
+    crate_features = cargo_features(),
+    crate_name = "crabka_protocol",
     edition = "2024",
-    proc_macro_deps = all_crate_deps(proc_macro = True),
     # The generated sources are pulled in via
     # `include!(concat!(env!("CARGO_MANIFEST_DIR"), "/generated/..."))`, which
     # needs an *absolute* manifest dir (a relative one resolves against each
@@ -44,7 +40,32 @@ rust_library(
         "CARGO_MANIFEST_DIR": "$${pwd}/crates/protocol",
     },
     visibility = ["//visibility:public"],
-    deps = all_crate_deps(normal = True) + [
-        "//crates/compression",
+    deps = all_crate_deps(normal = True),
+)
+
+rust_doc(
+    name = "protocol_doc",
+    crate = ":protocol",
+)
+
+rust_package_benches(
+    compile_data = glob(["generated/**/*.rs"]),
+    crate_label = ":protocol",
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "$${pwd}/crates/protocol",
+    },
+)
+
+rust_package_tests(
+    name = "protocol",
+    compile_data = glob(["generated/**/*.rs"]),
+    crate_label = ":protocol",
+    harnessless = [
+        "corpus_replay",
+        "kraft_metadata_roundtrip",
+        "kraft_rpc_roundtrip",
     ],
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "$${pwd}/crates/protocol",
+    },
 )

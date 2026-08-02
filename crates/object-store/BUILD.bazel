@@ -1,0 +1,7 @@
+load("//:bazel/rust_package.bzl", "rust_package")
+
+rust_package(
+    name = "object-store",
+    cargo_name = "crabka-object-store",
+    crate_name = "crabka_object_store",
+)

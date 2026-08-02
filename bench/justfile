@@ -111,20 +111,9 @@ run STACK SCENARIO TOPOLOGY="1broker-rf1":
     BENCH_DRIVER_IMAGE={{bench_driver_image}} \
         bench/scripts/run-scenario.sh {{STACK}} {{SCENARIO}} {{TOPOLOGY}}
 
-# Build the bench-driver OCI image via melange + apko (matches the
-# packaging pipeline for the broker / operator images).
+# Build the bench-driver OCI image through the Bazel packaging graph.
 build-driver-image:
-    @echo "→ building crabka-bench-driver apk + OCI"
-    mkdir -p packages
-    test -f melange.rsa || melange keygen
-    melange build packaging/melange/crabka.yaml \
-        --source-dir . --signing-key melange.rsa \
-        --arch x86_64 --runner docker --out-dir packages/
-    apko build packaging/apko/bench-driver.yaml \
-        {{bench_driver_image}} crabka-bench-driver.tar \
-        --arch x86_64 \
-        --repository-append "$PWD/packages" \
-        --keyring-append "$PWD/melange.rsa.pub"
+    aspect run //packaging:bench_driver_image_load --bazel-flag=--config=ci
 
 # Bring up a local KinD cluster sized for the bench. No-op if one already
 # exists.

@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 
 if ! command -v psql >/dev/null; then
     echo "SKIP: psql not installed"
-    cargo test -p crabka-gres runtime_reopens_durable_local_storage
+    bazel test //crates/gres:gres_lib_test --test_filter=runtime_reopens_durable_local_storage
     exit 0
 fi
 
@@ -56,7 +56,9 @@ stop_server() {
     PID=""
 }
 
-cargo build -p crabka-gres
+if [ "${CRABKA_GRES_SKIP_BUILD:-}" != "1" ]; then
+    cargo build -p crabka-gres
+fi
 
 start_server
 if ! wait_until_ready; then

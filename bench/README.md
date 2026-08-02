@@ -211,4 +211,4 @@ showing.
 - `bench/justfile` — top-level orchestration.
 - `bench/terraform/gke/` — Terraform for the GKE benchmark cluster, plus the end-to-end provision → install → run → aggregate README.
 - `.github/workflows/benchmark.yml` — `workflow_dispatch` + weekly cron CI run.
-- `packaging/melange/bench-driver.yaml` + `packaging/apko/bench-driver.yaml` — driver image build.
+- `//packaging:bench_driver_image` — hermetic multi-platform driver image build.

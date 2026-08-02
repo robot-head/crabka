@@ -1,5 +1,0 @@
-# Exports the Cargo manifests of workspace members that don't (yet) have their
-# own Bazel package, so `crate_universe` (//MODULE.bazel) can splice the full
-# Cargo workspace. The in-scope client crates own their own BUILD packages, so
-# the `*/Cargo.toml` glob skips them automatically at the package boundary.
-exports_files(glob(["*/Cargo.toml"]))

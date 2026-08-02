@@ -1,17 +1,23 @@
-# Crabka Bazel configuration.
-#
-# Bazel is a *secondary*, client-focused build path: it produces the lean Kafka
-# client libraries (producer/consumer/admin/core + serdes) for embedders who
-# want a slim dependency closure. Cargo remains the source of truth for the
-# full workspace; Bazel reads the same Cargo.toml / Cargo.lock via crate_universe.
+# Crabka Bazel configuration. Bazel is the build and test source of truth;
+# Cargo.toml and Cargo.lock remain the crates.io metadata and dependency lock.
 
 # bzlmod is the only dependency-resolution path (no legacy WORKSPACE).
 common --enable_bzlmod
+common --enable_platform_specific_config
+common:windows --host_platform=//platforms:local_windows_msvc
 
 # Keep the action environment hermetic so build-script outputs are reproducible.
 build --incompatible_strict_action_env
 
 test --test_output=errors
+
+build:ci --announce_rc
+build:ci --color=yes
+build:ci --curses=no
+build:ci --show_timestamps
+build:ci --compilation_mode=opt
+build:ci --strip=always
+test:ci --build_tests_only
 
 # Optional developer-local overrides (registry mirrors, remote cache, etc.).
 try-import %workspace%/user.bazelrc

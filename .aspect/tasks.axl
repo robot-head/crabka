@@ -1,0 +1,176 @@
+"""Crabka's non-Bazel orchestration tasks."""
+
+def _run(ctx, executable, argv = []):
+    return ctx.std.process.command(executable).args(argv).spawn().wait().code
+
+def _codegen(ctx: TaskContext) -> int:
+    code = _run(ctx, "bazel", [
+        "build",
+        "//crates/operator:crabka-operator__bin",
+        "//crates/protocol-codegen:crabka-protocol-codegen__bin",
+    ])
+    if code != 0:
+        return code
+    for executable in ["tools/regenerate.sh", "tools/regen-crds.sh"]:
+        code = _run(ctx, executable)
+        if code != 0:
+            return code
+    return 0 if ctx.args.fix else _run(ctx, "git", ["diff", "--exit-code"])
+
+codegen = task(
+    implementation = _codegen,
+    summary = "Regenerate checked-in sources and verify a clean diff.",
+    args = {
+        "fix": args.boolean(default = False, description = "Keep regenerated source changes."),
+    },
+)
+
+def _docs(ctx: TaskContext) -> int:
+    examples = [
+        "avro_pipeline",
+        "dataframe_serde",
+        "format_arrow",
+        "format_dsl",
+        "format_json",
+        "format_pipeline",
+        "json_pipeline",
+        "polars_pipeline",
+        "profile_streams",
+        "protobuf_pipeline",
+    ]
+    targets = ["//crates/client-streams:example_" + example for example in examples]
+    code = _run(ctx, "bazel", ["build", "--config=ci"] + targets)
+    if code != 0:
+        return code
+    for example in ["format_json", "format_arrow", "format_dsl", "format_pipeline"]:
+        code = _run(ctx, "bazel-bin/crates/client-streams/example_" + example)
+        if code != 0:
+            return code
+    code = _run(ctx, "bazel", ["run", "//crates/docgen:crabka-docgen__bin", "--config=ci", "--", "snippets"])
+    if code != 0:
+        return code
+    return _run(ctx, "git", ["diff", "--exit-code", "--", "website/content"])
+
+docs = task(
+    implementation = _docs,
+    summary = "Build and test documentation examples.",
+    args = {},
+)
+
+def _playground(ctx: TaskContext) -> int:
+    code = _run(ctx, "bazel", ["build", "//crates/playground:playground_web", "--platforms=//platforms:wasm", "--config=ci"])
+    if code != 0:
+        return code
+    code = _run(ctx, "mkdir", ["-p", "website/static/playground"])
+    if code != 0:
+        return code
+    for filename in ["crabka_playground.js", "crabka_playground_bg.wasm"]:
+        code = _run(ctx, "cp", ["bazel-bin/crates/playground/playground_web/" + filename, "website/static/playground/" + filename])
+        if code != 0:
+            return code
+    return 0
+
+playground = task(
+    implementation = _playground,
+    summary = "Build and stage the hermetic WASM playground.",
+    args = {},
+)
+
+def _publish_check(ctx: TaskContext) -> int:
+    code = _run(ctx, "tools/check-publish-allowlist.sh")
+    return code if code != 0 else _run(ctx, "tools/publish-dryrun.sh")
+
+publish_check = task(
+    implementation = _publish_check,
+    summary = "Validate the crates.io package set and dry-run publication.",
+    args = {},
+)
+
+_GRES_SUITES = {
+    "adopt-regress": "tools/gres-adopt-regress.sh",
+    "check-pg-compat": "tools/check-pg-compat-matrix.sh",
+    "coldstart": "scripts/gres-coldstart.sh",
+    "driver-goldens": "scripts/gres-driver-goldens-gate.sh",
+    "durable-restart": "scripts/gres-durable-restart-smoke.sh",
+    "e2e": "scripts/gres-e2e.sh",
+    "kind-lifecycle": "scripts/gres-kind-lifecycle.sh",
+    "psql": "scripts/gres-psql-smoke.sh",
+    "psql-introspection": "scripts/gres-psql-introspection-smoke.sh",
+    "range-scaling": "scripts/gres-range-scaling.sh",
+    "range-scaling-ci": "scripts/tests/gres-range-scaling-ci.sh",
+    "sharded-conformance": "scripts/gres-sharded-conformance.sh",
+    "substrate": "scripts/gres-substrate-smoke.sh",
+    "topology-process-nemesis": "scripts/tests/gres-topology-process-nemesis-ci.sh",
+}
+
+def _gres(ctx: TaskContext) -> int:
+    executable = _GRES_SUITES.get(ctx.args.suite)
+    if executable == None:
+        print("unknown suite %r; choose one of: %s" % (ctx.args.suite, ", ".join(sorted(_GRES_SUITES.keys()))))
+        return 2
+    binaries = {
+        "crabka": "bazel-bin/crates/cli/crabka__bin",
+        "crabka-broker": "bazel-bin/crates/broker/crabka-broker__bin",
+        "crabka-gres": "bazel-bin/crates/gres/crabka-gres__bin",
+        "crabka-gres-activator": "bazel-bin/crates/gres-activator/crabka-gres-activator__bin",
+        "crabka-gres-conformance": "bazel-bin/crates/gres-conformance/crabka-gres-conformance__bin",
+        "crabka-gres-driver-golden-replay": "bazel-bin/crates/gres-conformance/crabka-gres-driver-golden-replay__bin",
+        "crabka-gres-driver-smoke": "bazel-bin/crates/gres-conformance/crabka-gres-driver-smoke__bin",
+    }
+    if _run(ctx, "test", ["-x", "target/debug/crabka-gres-driver-smoke"]) != 0:
+        code = _run(ctx, "bazel", ["build", "--config=ci"] + [
+            "//crates/cli:crabka__bin",
+            "//crates/broker:crabka-broker__bin",
+            "//crates/gres:crabka-gres__bin",
+            "//crates/gres-activator:crabka-gres-activator__bin",
+            "//crates/gres-conformance:crabka-gres-conformance__bin",
+            "//crates/gres-conformance:crabka-gres-driver-golden-replay__bin",
+            "//crates/gres-conformance:crabka-gres-driver-smoke__bin",
+        ])
+        if code != 0:
+            return code
+        code = _run(ctx, "mkdir", ["-p", "target/debug"])
+        if code != 0:
+            return code
+        for name, source in binaries.items():
+            code = _run(ctx, "cp", [source, "target/debug/" + name])
+            if code != 0:
+                return code
+    return _run(ctx, "env", ["CRABKA_GRES_SKIP_BUILD=1", executable] + ctx.args.args)
+
+gres = task(
+    implementation = _gres,
+    summary = "Run a GRES integration suite.",
+    args = {
+        "suite": args.string(required = True, description = "GRES suite name."),
+        "args": args.trailing_var_args(description = "Arguments forwarded to the suite."),
+    },
+)
+
+def _benchmark(ctx: TaskContext) -> int:
+    argv = [ctx.args.stack, ctx.args.scenario, ctx.args.topology] + (["true"] if ctx.args.tls else [])
+    code = _run(ctx, "bench/scripts/run-scenario.sh", argv)
+    cleanup = _run(ctx, "bench/scripts/teardown.sh", [ctx.args.stack])
+    return code if code != 0 else cleanup
+
+benchmark = task(
+    implementation = _benchmark,
+    summary = "Run a benchmark scenario.",
+    args = {
+        "stack": args.string(required = True),
+        "scenario": args.string(required = True),
+        "topology": args.string(required = True),
+        "tls": args.boolean(default = False),
+    },
+)
+
+def _publish_creusot_image(ctx: TaskContext) -> int:
+    return _run(ctx, "tools/build-creusot-image.sh", [ctx.args.image])
+
+publish_creusot_image = task(
+    implementation = _publish_creusot_image,
+    summary = "Build and push the Creusot CI image.",
+    args = {
+        "image": args.string(required = True),
+    },
+)

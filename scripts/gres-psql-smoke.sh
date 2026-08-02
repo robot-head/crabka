@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 
 if ! command -v psql >/dev/null; then
     echo "SKIP: psql not installed"
-    cargo test -p crabka-gres runtime_serves_sql_over_pgwire
+    bazel test //crates/gres:gres_lib_test --test_filter=runtime_serves_sql_over_pgwire
     exit 0
 fi
 
@@ -73,7 +73,9 @@ expect_select_one() {
     return 1
 }
 
-cargo build -p crabka-gres
+if [ "${CRABKA_GRES_SKIP_BUILD:-}" != "1" ]; then
+    cargo build -p crabka-gres
+fi
 
 ./target/debug/crabka-gres --listen "127.0.0.1:${PORT}" \
     --data-dir "${DATA_ROOT}/plain" \

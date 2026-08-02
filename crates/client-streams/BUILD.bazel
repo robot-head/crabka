@@ -1,0 +1,25 @@
+load("//:bazel/rust_package.bzl", "rust_package")
+
+filegroup(
+    name = "example_gen",
+    srcs = glob(["examples/gen/**"]),
+    visibility = ["//visibility:public"],
+)
+
+rust_package(
+    name = "client-streams",
+    cargo_name = "crabka-client-streams",
+    crate_name = "crabka_client_streams",
+    examples = True,
+    extra_deps = [
+        "@crates//:arrow",
+        "@crates//:polars",
+        "@crates//:polars-arrow",
+        "@crates//:serde_json",
+    ],
+    features = [
+        "arrow",
+        "polars",
+    ],
+    test_compile_data = [":example_gen"],
+)

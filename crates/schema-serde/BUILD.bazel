@@ -1,35 +1,7 @@
-load("@rules_rust//rust:defs.bzl", "rust_library")
+load("//:bazel/rust_package.bzl", "rust_package")
 
-# Manifest is consumed by crate_universe (see //MODULE.bazel).
-exports_files(["Cargo.toml"])
-
-# Confluent-compatible schema serdes.
-#
-# Deps are listed explicitly rather than via `all_crate_deps()`: the workspace's
-# `client-streams` crate enables schema-serde's `json` feature, and Cargo unifies
-# features across the resolution graph, so `all_crate_deps()` would drag
-# `jsonschema` (and `schemars`) into *every* consumer. This target ships the
-# Avro + Protobuf serdes only — the lean closure the //:client_minimal facade
-# wants — so it pins the dep list by hand and omits the JSON-Schema crates.
-rust_library(
+rust_package(
     name = "schema-serde",
-    srcs = glob(["src/**/*.rs"]),
+    cargo_name = "crabka-schema-serde",
     crate_name = "crabka_schema_serde",
-    crate_features = [
-        "avro",
-        "protobuf",
-    ],
-    edition = "2024",
-    visibility = ["//visibility:public"],
-    deps = [
-        "@crates//:apache-avro",
-        "@crates//:bytes",
-        "@crates//:prost",
-        "@crates//:prost-reflect",
-        "@crates//:reqwest",
-        "@crates//:serde",
-        "@crates//:serde_json",
-        "@crates//:thiserror",
-        "@crates//:tokio",
-    ],
 )

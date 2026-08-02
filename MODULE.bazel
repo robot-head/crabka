@@ -1,36 +1,52 @@
-"""Crabka — Bazel module (bzlmod).
-
-Bazel is the client-focused build path. It produces the lean Kafka client
-libraries via `rust_library` targets that draw their third-party dependencies
-from `crate_universe`, which reads the *same* `Cargo.toml` / `Cargo.lock` that
-Cargo uses. Cargo stays the source of truth; nothing here forks the dep set.
-
-Re-exported targets (see //:BUILD.bazel):
-    @crabka//:client_producer   @crabka//:client_consumer
-    @crabka//:client_admin      @crabka//:client_core
-    @crabka//:schema_serde      @crabka//:protocol
-    @crabka//:security          @crabka//:compression
-    @crabka//:metadata
-    @crabka//:client_minimal    # lean facade: no polars/arrow/jsonschema
-"""
+"""Crabka's hermetic Bazel module."""
 
 module(
     name = "crabka",
     version = "0.3.6",
 )
 
-bazel_dep(name = "rules_rust", version = "0.73.0")
+bazel_dep(name = "llvm", version = "0.8.9")
+bazel_dep(name = "openssl", version = "3.5.5.bcr.0")
+bazel_dep(name = "platforms", version = "1.1.0")
+bazel_dep(name = "protobuf", version = "34.0.bcr.1")
+bazel_dep(name = "rules_rs", version = "0.0.98")
+bazel_dep(name = "rules_apko", version = "1.5.52")
+bazel_dep(name = "rules_oci", version = "2.3.0")
+bazel_dep(name = "rules_pkg", version = "1.2.0")
+
+apko = use_extension("@rules_apko//apko:extensions.bzl", "apko")
+apko.toolchain(apko_version = "v1.2.25")
+apko.translate_lock(
+    name = "crabka_runtime",
+    lock = "//packaging/apko:runtime-base.lock.json",
+)
+use_repo(apko, "apko_toolchains", "crabka_runtime")
+
+register_toolchains("@apko_toolchains//:all")
 
 # ---------------------------------------------------------------------------
 # Rust toolchain — pinned to the workspace channel (rust-toolchain.toml).
 # ---------------------------------------------------------------------------
-rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
-rust.toolchain(
+toolchains = use_extension("@rules_rs//rs/toolchains:module_extension.bzl", "toolchains")
+toolchains.toolchain(
     edition = "2024",
-    versions = ["1.97.0"],
+    version = "1.97.1",
 )
-use_repo(rust, "rust_toolchains")
-register_toolchains("@rust_toolchains//:all")
+use_repo(toolchains, "default_rust_toolchains")
+
+# Compatibility facade for rules_rs features that are still exposed by the
+# patched rules_rust repository (build scripts, prost, rustfmt and clippy).
+rules_rust = use_extension("@rules_rs//rs:rules_rust.bzl", "rules_rust")
+use_repo(rules_rust, "rules_rust")
+
+wasm_bindgen = use_extension("@rules_rs//rs:rules_rust_wasm_bindgen.bzl", "rules_rust_wasm_bindgen")
+use_repo(wasm_bindgen, "rules_rust_wasm_bindgen")
+
+register_toolchains(
+    "@default_rust_toolchains//:all",
+    "@llvm//toolchain:all",
+    "//platforms:wasm_bindgen_toolchain",
+)
 
 # ---------------------------------------------------------------------------
 # Third-party crates, spliced straight from the Cargo workspace.
@@ -45,63 +61,40 @@ register_toolchains("@rust_toolchains//:all")
 # The `sspi` GSSAPI dependency is a normal crates.io dependency and is included
 # through the same Cargo.lock splice as the rest of the workspace.
 # ---------------------------------------------------------------------------
-crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+crate = use_extension("@rules_rs//rs:extensions.bzl", "crate")
+crate.annotation(
+    build_script_data = ["@openssl//:gen_dir"],
+    build_script_env = {
+        "OPENSSL_DIR": "$(execpath @openssl//:gen_dir)",
+        "OPENSSL_NO_VENDOR": "1",
+        "OPENSSL_STATIC": "1",
+    },
+    crate = "openssl-sys",
+    data = ["@openssl//:gen_dir"],
+    gen_build_script = "on",
+)
+crate.annotation(
+    crate = "wasm-bindgen-cli",
+    gen_binaries = ["wasm-bindgen"],
+)
+crate.annotation(
+    crate = "sqlx-postgres",
+    crate_features = ["offline"],
+)
 crate.from_cargo(
     name = "crates",
-    cargo_lockfile = "//:Cargo.lock",
-    manifests = [
-        "//:Cargo.toml",
-        # In-scope client crates (own BUILD package).
-        "//crates/client-core:Cargo.toml",
-        "//crates/client-producer:Cargo.toml",
-        "//crates/client-consumer:Cargo.toml",
-        "//crates/client-admin:Cargo.toml",
-        "//crates/schema-serde:Cargo.toml",
-        "//crates/protocol:Cargo.toml",
-        "//crates/security:Cargo.toml",
-        "//crates/compression:Cargo.toml",
-        "//crates/metadata:Cargo.toml",
-        "//crates/voters:Cargo.toml",
-        # Remaining workspace members (exported from //crates:BUILD.bazel).
-        "//crates:authz/Cargo.toml",
-        "//crates:bench-driver/Cargo.toml",
-        "//crates:broker/Cargo.toml",
-        "//crates:cli/Cargo.toml",
-        "//crates:client-streams/Cargo.toml",
-        "//crates:connect/Cargo.toml",
-        "//crates:docgen/Cargo.toml",
-        "//crates:grpc-gateway/Cargo.toml",
-        "//crates:integration-tests/Cargo.toml",
-        "//crates:kafka-tap/Cargo.toml",
-        "//crates:kraft-core/Cargo.toml",
-        "//crates:log/Cargo.toml",
-        "//crates:log-iobench/Cargo.toml",
-        "//crates:logfmt/Cargo.toml",
-        "//crates:operator/Cargo.toml",
-        "//crates:playground/Cargo.toml",
-        "//crates:pgtypes/Cargo.toml",
-        "//crates:pgparser/Cargo.toml",
-        "//crates:pgwire/Cargo.toml",
-        "//crates:pgkv/Cargo.toml",
-        "//crates:pgmvcc/Cargo.toml",
-        "//crates:pgcatalog/Cargo.toml",
-        "//crates:pgexec/Cargo.toml",
-        "//crates:gres/Cargo.toml",
-        "//crates:gres-activator/Cargo.toml",
-        "//crates:gres-balancer/Cargo.toml",
-        "//crates:gres-control/Cargo.toml",
-        "//crates:gres-fdw/Cargo.toml",
-        "//crates:gres-ranges/Cargo.toml",
-        "//crates:gres-substrate/Cargo.toml",
-        "//crates:gres-conformance/Cargo.toml",
-        "//crates:protocol-codegen/Cargo.toml",
-        "//crates:raft/Cargo.toml",
-        "//crates:rebalancer/Cargo.toml",
-        "//crates:records-legacy/Cargo.toml",
-        "//crates:remote-storage/Cargo.toml",
-        "//crates:remote-storage-topic/Cargo.toml",
-        "//crates:schema-registry/Cargo.toml",
-        "//crates:telemetry/Cargo.toml",
+    cargo_lock = "//:Cargo.lock",
+    cargo_toml = "//:Cargo.toml",
+    platform_triples = [
+        "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "wasm32-unknown-unknown",
+        "x86_64-apple-darwin",
+        "x86_64-pc-windows-msvc",
+        "x86_64-unknown-linux-gnu",
     ],
 )
+
+inject_repo(crate, "openssl")
+
 use_repo(crate, "crates")

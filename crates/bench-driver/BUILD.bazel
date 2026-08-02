@@ -1,0 +1,7 @@
+load("//:bazel/rust_package.bzl", "rust_package")
+
+rust_package(
+    name = "bench-driver",
+    cargo_name = "crabka-bench-driver",
+    crate_name = "crabka_bench_driver",
+)

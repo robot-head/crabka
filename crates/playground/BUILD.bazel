@@ -1,0 +1,30 @@
+load("@crates//:defs.bzl", "all_crate_deps")
+load("@rules_rs//rs:rust_shared_library.bzl", "rust_shared_library")
+load("@rules_rust_wasm_bindgen//:defs.bzl", "rust_wasm_bindgen")
+load("//:bazel/rust_package.bzl", "cargo_features", "normal_aliases", "rust_package")
+
+rust_package(
+    name = "playground",
+    cargo_name = "crabka-playground",
+    crate_name = "crabka_playground",
+)
+
+rust_shared_library(
+    name = "playground_wasm",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = normal_aliases(),
+    crate_features = cargo_features(),
+    crate_name = "crabka_playground",
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    target_compatible_with = ["@platforms//cpu:wasm32"],
+    deps = all_crate_deps(normal = True),
+)
+
+rust_wasm_bindgen(
+    name = "playground_web",
+    bindgen_flags = ["--no-typescript"],
+    out_name = "crabka_playground",
+    target = "web",
+    wasm_file = ":playground_wasm",
+)

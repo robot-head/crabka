@@ -1,0 +1,11 @@
+load("//:bazel/rust_package.bzl", "rust_package")
+
+rust_package(
+    name = "gres",
+    cargo_name = "crabka-gres",
+    crate_name = "crabka_gres",
+    test_compile_data = [
+        "//crates/gres-ranges:test_harness",
+        "//crates/security:test_fixtures",
+    ],
+)

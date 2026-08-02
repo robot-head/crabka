@@ -1,0 +1,4 @@
+version(
+    "2026.31.17",
+    sources = [github(org = "aspect-build", repo = "aspect-cli")],
+)

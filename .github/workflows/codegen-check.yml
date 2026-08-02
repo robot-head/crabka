@@ -35,17 +35,5 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - run: rustup toolchain install nightly --profile minimal --component rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: codegen-check
-      - run: ./tools/regenerate.sh
-      - run: ./tools/regen-crds.sh
-      - name: Fail on drift
-        run: |
-          if ! git diff --quiet crates/protocol/generated deploy/crds; then
-            echo "::error::Generated files are out of sync. Run tools/regenerate.sh and tools/regen-crds.sh and commit."
-            git --no-pager diff crates/protocol/generated deploy/crds
-            exit 1
-          fi
+      - uses: ./.github/actions/setup-bazel
+      - run: aspect codegen --task:name=codegen-drift

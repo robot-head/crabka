@@ -1,0 +1,7 @@
+load("//:bazel/rust_package.bzl", "rust_package")
+
+rust_package(
+    name = "pgcatalog",
+    cargo_name = "crabka-pgcatalog",
+    crate_name = "crabka_pgcatalog",
+)

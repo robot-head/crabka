@@ -76,31 +76,12 @@ avoid a replay-time OOM while keeping the normal RSS small.
 ### Rebuild from source
 
 To build the image locally instead of pulling it (e.g. to try local changes),
-build + tag it under the same name from the **repo root** with melange + apko,
+build + tag it under the same name from the **repo root** with Bazel + Aspect,
 then start as usual — Compose uses the local image when present:
 
 ```bash
-go install chainguard.dev/melange@latest
-go install chainguard.dev/apko@latest
-
-mkdir -p packages .melange-cache
-melange keygen melange.rsa
-melange build packaging/melange/crabka-demo.yaml \
-  --source-dir . \
-  --signing-key melange.rsa \
-  --arch x86_64 \
-  --runner docker \
-  --cache-dir "$PWD/.melange-cache" \
-  --out-dir packages/
-
-apko build packaging/apko/crabka-demo.yaml \
-  ghcr.io/robot-head/crabka-demo:latest \
-  crabka-demo.tar \
-  --arch x86_64 \
-  --repository-append "$PWD/packages" \
-  --keyring-append "$PWD/melange.rsa.pub"
-
-docker load < crabka-demo.tar
+aspect run //packaging:demo_image_load --bazel-flag=--config=ci
+docker tag crabka-demo:e2e ghcr.io/robot-head/crabka-demo:latest
 cd demo/observability && docker compose up -d
 ```
 
@@ -182,8 +163,7 @@ curl -s -H 'X-Scope-OrgID: demo' -X POST -H 'content-type: application/json' \
 ## Layout
 
 - `docker-compose.yml` — the stack
-- `../../packaging/melange/crabka-demo.yaml` — builds the all-in-one demo APK package
-- `../../packaging/apko/crabka-demo.yaml` — assembles the demo OCI image from that package
+- `../../packaging/BUILD.bazel` — builds the multi-architecture demo OCI image
 - `alloy/config.alloy` — Alloy collects all four signals from both sources and
   scrapes cAdvisor container resource metrics
 - `grafana/provisioning/` — datasources, dashboards (overview + broker + one per subsystem), and alert rules

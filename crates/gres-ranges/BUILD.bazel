@@ -1,0 +1,14 @@
+load("//:bazel/rust_package.bzl", "rust_package")
+
+filegroup(
+    name = "test_harness",
+    srcs = glob(["tests/harness/**"]),
+    visibility = ["//visibility:public"],
+)
+
+rust_package(
+    name = "gres-ranges",
+    cargo_name = "crabka-gres-ranges",
+    compile_data = ["//crates/security:test_fixtures"],
+    crate_name = "crabka_gres_ranges",
+)

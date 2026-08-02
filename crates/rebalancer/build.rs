@@ -9,7 +9,11 @@
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proto = "proto/crabka/rebalancer/v1/rebalancer.proto";
-    let protoc_path = protoc_bin_vendored::protoc_bin_path()?;
+    let protoc_path = if let Some(path) = std::env::var_os("PROTOC") {
+        path.into()
+    } else {
+        protoc_bin_vendored::protoc_bin_path()?
+    };
     connectrpc_axum_build::compile_protos(&[proto], &["proto"])
         .with_prost_config(move |config| {
             config.protoc_executable(protoc_path.clone());

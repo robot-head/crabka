@@ -29,8 +29,8 @@ test "$(grep -Fc 'kubectl port-forward deploy/tenant-a-gres 17432:5432' "$gate")
 ! grep -Fq 'kubectl port-forward svc/tenant-a-gres 17432:5432' "$gate"
 ! grep -Fq '.items[0].metadata.uid' "$gate"
 
-grep -Fq -- '-p crabka-gres -p crabka-gres-activator' packaging/melange/crabka.yaml
-test -f packaging/apko/crabka-gres.yaml
-test -f packaging/apko/crabka-gres-activator.yaml
+grep -Fq 'name = "gres_image"' packaging/BUILD.bazel
+grep -Fq 'name = "gres_activator_image"' packaging/BUILD.bazel
+test -f packaging/apko/runtime-base.lock.json
 
 echo 'PASS: operator-backed Gres lifecycle gate is structurally wired'

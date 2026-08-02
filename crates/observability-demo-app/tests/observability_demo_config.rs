@@ -3,6 +3,9 @@ use std::path::{Path, PathBuf};
 use assert2::check;
 
 fn repo_root() -> PathBuf {
+    if let Ok(test_srcdir) = std::env::var("TEST_SRCDIR") {
+        return Path::new(&test_srcdir).join("_main");
+    }
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(2)
@@ -38,14 +41,9 @@ fn compose_service_block<'a>(compose: &'a str, service: &str) -> &'a str {
     rest
 }
 
-fn demo_melange_config() -> String {
-    std::fs::read_to_string(repo_root().join("packaging/melange/crabka-demo.yaml"))
-        .expect("read demo melange config")
-}
-
-fn demo_apko_config() -> String {
-    std::fs::read_to_string(repo_root().join("packaging/apko/crabka-demo.yaml"))
-        .expect("read demo apko config")
+fn bazel_packaging() -> String {
+    std::fs::read_to_string(repo_root().join("packaging/BUILD.bazel"))
+        .expect("read Bazel image definitions")
 }
 
 fn demo_publish_workflow() -> String {
@@ -393,42 +391,29 @@ fn idle_profile_scrapes_are_lower_frequency() {
 
 #[test]
 fn demo_app_image_does_not_enable_conflicting_heap_allocator() {
-    let melange = demo_melange_config();
-    let demo_app_build = melange
-        .split("cargo build --release \\\n        -p crabka-cli")
-        .nth(1)
-        .and_then(|rest| rest.split("mkdir -p dist").next())
-        .expect("demo app cargo build block exists");
+    let bazel = bazel_packaging();
+    check!(bazel.contains("//crates/observability-demo-app:observability-demo-app__bin"));
+    check!(!bazel.contains("observability-demo-app-heap__bin"));
     check!(
-        melange.contains("-p observability-demo-app"),
-        "demo image package should still build the demo app"
-    );
-    check!(
-        !demo_app_build.contains("--features heap-profiling"),
-        "demo app depends on turso, which already defines a global allocator"
-    );
-    check!(
-        melange.contains("--features heap-profiling"),
+        bazel.contains("crabka-broker-heap__bin")
+            && bazel.contains("crabka-metrics-service-heap__bin"),
         "Crabka service binaries should still expose jemalloc heap profiling"
     );
 }
 
 #[test]
 fn demo_runtime_image_does_not_ship_full_dwarf_debug_sections() {
-    let melange = demo_melange_config();
-    assert2::assert!(!melange.contains("CARGO_PROFILE_RELEASE_DEBUG=true"));
-    assert2::assert!(melange.contains("strip --strip-debug"));
+    let bazelrc = std::fs::read_to_string(repo_root().join(".bazelrc")).expect("read Bazel config");
+    assert2::assert!(bazelrc.contains("build:ci --strip=always"));
 }
 
 #[test]
-fn demo_image_is_built_with_apko_and_melange() {
+fn demo_image_is_built_with_bazel_and_apko() {
     let compose = docker_compose();
-    let melange = demo_melange_config();
-    let apko = demo_apko_config();
     let workflow = demo_publish_workflow();
+    let bazel = bazel_packaging();
 
     assert2::assert!(!repo_root().join("demo/observability/Dockerfile").exists());
-    assert2::assert!(melange.contains("package:\n  name: crabka-demo"));
     for bin in [
         "crabka-broker",
         "crabka",
@@ -440,24 +425,10 @@ fn demo_image_is_built_with_apko_and_melange() {
         "crabka-schema-registry",
         "observability-demo-app",
     ] {
-        assert2::assert!(melange.contains(bin));
+        assert2::assert!(bazel.contains(bin));
     }
-    check!(
-        apko.contains("- crabka-demo"),
-        "apko image should install the local crabka-demo package"
-    );
-    check!(
-        apko.contains("- curl"),
-        "demo image should keep curl for compose healthchecks"
-    );
-    check!(
-        workflow.contains("melange build packaging/melange/crabka-demo.yaml"),
-        "publish-demo-image should build the demo APK with melange"
-    );
-    check!(
-        workflow.contains("apko publish packaging/apko/crabka-demo.yaml"),
-        "publish-demo-image should publish the demo OCI image with apko"
-    );
+    check!(bazel.contains("name = \"demo_image\""));
+    check!(workflow.contains("aspect run //packaging:demo_image_push"));
     check!(
         !workflow.contains("docker/build-push-action"),
         "publish-demo-image should not use the Dockerfile build action"

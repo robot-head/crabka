@@ -40,33 +40,22 @@ jobs:
     name: Run benchmarks
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - //crates/protocol:bench_codec
+          - //crates/protocol:bench_records
+          - //crates/log:bench_log
+          - //crates/compression:bench_codec
+          - //crates/security:bench_scram
+          - //crates/metadata:bench_image
     steps:
       - uses: actions/checkout@v7
-
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.97.1"
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: codspeed
-
-      - name: Install cargo-codspeed
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-codspeed
-
-      - name: Build the benchmark target(s)
-        run: |
-          cargo codspeed build \
-            --package crabka-protocol \
-            --package crabka-log \
-            --package crabka-compression \
-            --package crabka-security \
-            --package crabka-metadata
+      - uses: ./.github/actions/setup-bazel
 
       - name: Run the benchmarks
         uses: CodSpeedHQ/action@v5
         with:
           mode: simulation
-          run: cargo codspeed run
+          run: aspect run '${{ matrix.target }}' --bazel-flag=--config=ci

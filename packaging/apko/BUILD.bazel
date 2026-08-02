@@ -1,0 +1,22 @@
+load("@rules_apko//apko:defs.bzl", "apko_image")
+
+filegroup(
+    name = "test_data",
+    srcs = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//packaging:__pkg__"],
+)
+
+apko_image(
+    name = "runtime_base",
+    architecture = select({
+        "@platforms//cpu:arm64": "arm64",
+        "@platforms//cpu:x86_64": "amd64",
+    }),
+    config = "runtime-base.yaml",
+    contents = "@crabka_runtime//:contents",
+    tag = "crabka-runtime:latest",
+    visibility = ["//packaging:__pkg__"],
+)

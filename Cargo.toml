@@ -92,6 +92,7 @@ reqwest = { version = "0.13", default-features = false, features = ["blocking", 
 # WASM consensus playground bindings (crates/playground). The matching
 # wasm-bindgen-cli version is derived from Cargo.lock at build time.
 wasm-bindgen = "0.2"
+wasm-bindgen-cli = "=0.2.126"
 tempfile = "3"
 hex = "0.4"
 toml = "1.1"

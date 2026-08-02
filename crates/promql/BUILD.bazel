@@ -1,0 +1,7 @@
+load("//:bazel/rust_package.bzl", "rust_package")
+
+rust_package(
+    name = "promql",
+    cargo_name = "crabka-promql",
+    crate_name = "crabka_promql",
+)

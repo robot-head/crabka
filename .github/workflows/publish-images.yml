@@ -1,31 +1,8 @@
 name: publish-images
 
-# Publishes the multi-arch Crabka container images and their supply-chain
-# attestations.
-#
-# Images are built for linux/amd64 (x86_64) and linux/arm64 (aarch64). Each
-# arch's APK packages are compiled natively on a matching runner (no QEMU), then
-# apko assembles a single multi-arch OCI image index per service.
-#
-# For every published image we generate, keylessly sign (Sigstore/Fulcio), and
-# publish two attestations against the image index digest:
-#   * SLSA build provenance (actions/attest-build-provenance)
-#   * SPDX SBOM produced by apko    (actions/attest-sbom)
-# Attestations are stored in GitHub's attestation API *and* pushed to GHCR as
-# OCI referrers. Verify with:
-#   gh attestation verify oci://ghcr.io/robot-head/crabka-broker:<tag> \
-#     --repo robot-head/crabka
-# The same command works for the Docker Hub mirror (robothead/<image>) because
-# verification resolves the digest from the registry and looks the attestation
-# up in GitHub's store by digest.
-
 on:
   push:
     tags:
-      # release-plz tags every crate per release at the shared workspace
-      # version (e.g. crabka-broker-v0.3.5) — there is no bare `v0.3.5` tag.
-      # Anchor on the broker tag so the image set publishes exactly once per
-      # release rather than once per crate tag.
       - "crabka-broker-v*"
   workflow_dispatch:
     inputs:
@@ -42,7 +19,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Resolve the image tag once so the build/publish matrices agree on it.
   version:
     runs-on: ubuntu-latest
     outputs:
@@ -52,139 +28,46 @@ jobs:
         id: tags
         run: |
           if [[ -n "${{ inputs.tag }}" ]]; then
-            VERSION="${{ inputs.tag }}"
+            version="${{ inputs.tag }}"
           elif [[ "${GITHUB_REF_NAME}" == crabka-broker-v* ]]; then
-            VERSION="${GITHUB_REF_NAME#crabka-broker-v}"
+            version="${GITHUB_REF_NAME#crabka-broker-v}"
           else
-            VERSION="edge"
+            version=edge
           fi
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
 
-  # Compile the APK packages once per architecture, natively on a matching
-  # runner. Each leg signs its repo with its own ephemeral key and uploads only
-  # the public half — the private signing key never leaves the build runner.
-  build:
+  publish:
+    needs: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
         include:
-          - arch: x86_64
-            runner: ubuntu-latest
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-go@v7.0.0
-        with:
-          go-version: stable
-
-      - name: Install melange
-        run: |
-          go install chainguard.dev/melange@latest
-          echo "$HOME/go/bin" >> "$GITHUB_PATH"
-
-      - name: Cache melange/cargo build artifacts
-        uses: actions/cache@v6
-        with:
-          path: .melange-cache
-          key: melange-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            melange-${{ matrix.arch }}-
-
-      - name: Set melange package version from the workspace
-        run: |
-          set -euo pipefail
-          # Derive the APK package version from the workspace manifest so it
-          # tracks the crate release automatically — no hand-edited version in
-          # packaging/melange/crabka.yaml.
-          ver="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')"
-          sed -i -E "s/^(  version:).*/\1 ${ver}/" packaging/melange/crabka.yaml
-          echo "melange package version set to ${ver}"
-
-      - name: Build APK packages (single compile for all images)
-        run: |
-          mkdir -p packages .melange-cache
-          # Each arch's repo is signed with its own key. apk references signing
-          # keys by basename, so the keys must have arch-unique names — otherwise
-          # the two `melange.rsa.pub` files collide in apko's keyring and one
-          # arch's APKINDEX fails verification at publish time.
-          melange keygen "melange-${{ matrix.arch }}.rsa"
-          melange build packaging/melange/crabka.yaml \
-            --source-dir . \
-            --signing-key "melange-${{ matrix.arch }}.rsa" \
-            --arch ${{ matrix.arch }} \
-            --runner docker \
-            --cache-dir "$PWD/.melange-cache" \
-            --out-dir packages/
-
-      - name: Upload APK repository + keyring
-        uses: actions/upload-artifact@v7
-        with:
-          name: apk-repository-${{ matrix.arch }}
-          path: |
-            packages/
-            melange-${{ matrix.arch }}.rsa.pub
-          retention-days: 1
-          if-no-files-found: error
-
-  # One leg per image: assemble the multi-arch index with apko, then attest the
-  # index digest.
-  publish:
-    needs: [version, build]
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-      packages: write # push images + attestation referrers to GHCR
-      id-token: write # request the Sigstore OIDC token (keyless signing)
-      attestations: write # write to GitHub's attestation store
-    strategy:
-      fail-fast: false
-      matrix:
-        image:
-          - crabka-broker
-          - crabka-operator
-          - crabka-schema-registry
-          - bench-driver
+          - image: crabka-broker
+            target: broker_image
+          - image: crabka-operator
+            target: operator_image
+          - image: crabka-schema-registry
+            target: schema_registry_image
+          - image: crabka-gres
+            target: gres_image
+          - image: crabka-gres-activator
+            target: gres_activator_image
+          - image: bench-driver
+            target: bench_driver_image
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-bazel
 
-      - uses: actions/setup-go@v7.0.0
-        with:
-          go-version: stable
-
-      - name: Install apko
-        run: |
-          go install chainguard.dev/apko@latest
-          echo "$HOME/go/bin" >> "$GITHUB_PATH"
-
-      - name: Download x86_64 APK repository
-        uses: actions/download-artifact@v8
-        with:
-          name: apk-repository-x86_64
-          path: dist/x86_64
-
-      - name: Download aarch64 APK repository
-        uses: actions/download-artifact@v8
-        with:
-          name: apk-repository-aarch64
-          path: dist/aarch64
-
-      - name: Assemble multi-arch APK repository
-        run: |
-          set -euo pipefail
-          # Each arch lands under packages/<arch>/; merge both into one local
-          # repo so apko can resolve every arch the image config requests.
-          mkdir -p packages
-          cp -r dist/x86_64/packages/. packages/
-          cp -r dist/aarch64/packages/. packages/
-
-      - name: Log in to DockerHub
+      - name: Log in to Docker Hub
         uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -197,55 +80,32 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Publish image + capture digest
+      - name: Build and publish Bazel OCI index
+        run: |
+          tags=(--tag "${VERSION}")
+          if [[ "${VERSION}" != edge ]]; then
+            tags+=(--tag latest)
+          fi
+          aspect run "//packaging:${{ matrix.target }}_push" --bazel-flag=--config=ci -- \
+            --repository "ghcr.io/robot-head/${{ matrix.image }}" "${tags[@]}"
+          aspect run "//packaging:${{ matrix.target }}_push" --bazel-flag=--config=ci -- \
+            --repository "index.docker.io/robothead/${{ matrix.image }}" "${tags[@]}"
+
+      - name: Capture published digest
         id: publish
         run: |
-          set -euo pipefail
-          IMAGE='${{ matrix.image }}'
-          DOCKERHUB_IMAGE="robothead/${IMAGE}"
-          GHCR_IMAGE="ghcr.io/robot-head/${IMAGE}"
+          digest="$(docker buildx imagetools inspect \
+            "ghcr.io/robot-head/${{ matrix.image }}:${VERSION}" \
+            --format '{{.Manifest.Digest}}')"
+          test -n "${digest}"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
-          TAGS=(
-            "${DOCKERHUB_IMAGE}:${VERSION}"
-            "${GHCR_IMAGE}:${VERSION}"
-          )
-          # Also tag as latest on proper release tags (not edge builds).
-          if [[ "${VERSION}" != "edge" ]]; then
-            TAGS+=(
-              "${DOCKERHUB_IMAGE}:latest"
-              "${GHCR_IMAGE}:latest"
-            )
-          fi
-
-          mkdir -p sbom
-          # apko prints the published image reference (with @sha256: digest) to
-          # stdout; build logs go to stderr. The arch set comes from each apko
-          # config; both per-arch keyrings are trusted so every APKINDEX
-          # verifies. The digest is content-addressed and identical across every
-          # tag/registry it was pushed to.
-          REF="$(apko publish "packaging/apko/${IMAGE}.yaml" \
-            "${TAGS[@]}" \
-            --sbom-path sbom \
-            --repository-append "${PWD}/packages" \
-            --keyring-append "${PWD}/dist/x86_64/melange-x86_64.rsa.pub" \
-            --keyring-append "${PWD}/dist/aarch64/melange-aarch64.rsa.pub")"
-          echo "apko published: ${REF}"
-
-          DIGEST="$(printf '%s\n' "${REF}" | grep -oE 'sha256:[0-9a-f]{64}' | head -n1)"
-          if [[ -z "${DIGEST}" ]]; then
-            echo "::error::could not parse image digest from apko output" >&2
-            exit 1
-          fi
-          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
-
-          # Prefer the SBOM describing the published index (covers all arches).
-          SBOM="$(ls sbom/*index*.spdx.json 2>/dev/null | head -n1 || true)"
-          [[ -z "${SBOM}" ]] && SBOM="$(ls sbom/*.spdx.json 2>/dev/null | head -n1 || true)"
-          if [[ -z "${SBOM}" ]]; then
-            echo "::error::no SBOM produced by apko in ./sbom" >&2
-            exit 1
-          fi
-          echo "sbom=${SBOM}" >> "$GITHUB_OUTPUT"
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: ghcr.io/robot-head/${{ matrix.image }}@${{ steps.publish.outputs.digest }}
+          format: spdx-json
+          output-file: sbom.spdx.json
 
       - name: Attest build provenance (SLSA)
         uses: actions/attest-build-provenance@v4
@@ -259,5 +119,5 @@ jobs:
         with:
           subject-name: ghcr.io/robot-head/${{ matrix.image }}
           subject-digest: ${{ steps.publish.outputs.digest }}
-          sbom-path: ${{ steps.publish.outputs.sbom }}
+          sbom-path: sbom.spdx.json
           push-to-registry: true

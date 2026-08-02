@@ -1,0 +1,9 @@
+load("//:bazel/rust_package.bzl", "rust_package")
+
+rust_package(
+    name = "gres-substrate",
+    cargo_name = "crabka-gres-substrate",
+    crate_name = "crabka_gres_substrate",
+    test_compile_data = ["//crates/broker:test_support"],
+    test_features = {"checkpoint_crashes": ["checkpoint-test-hooks"]},
+)

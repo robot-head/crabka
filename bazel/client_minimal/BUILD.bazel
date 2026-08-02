@@ -1,4 +1,4 @@
-load("@rules_rust//rust:defs.bzl", "rust_library")
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
 
 # Lean client facade. See lib.rs for the rationale; re-exported as
 # @crabka//:client_minimal from //:BUILD.bazel.

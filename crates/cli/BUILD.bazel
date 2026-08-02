@@ -1,0 +1,6 @@
+load("//:bazel/rust_package.bzl", "rust_package")
+
+rust_package(
+    name = "cli",
+    cargo_name = "crabka-cli",
+)

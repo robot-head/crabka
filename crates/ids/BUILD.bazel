@@ -1,0 +1,7 @@
+load("//:bazel/rust_package.bzl", "rust_package")
+
+rust_package(
+    name = "ids",
+    cargo_name = "crabka-ids",
+    crate_name = "crabka_ids",
+)

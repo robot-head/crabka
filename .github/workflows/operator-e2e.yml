@@ -47,10 +47,8 @@ jobs:
               - '.github/workflows/operator-e2e.yml'
 
   # Build the operator + broker OCI images once and share them with every
-  # kind job below via an artifact. melange/apko compile the Rust binaries
-  # inside a docker build container (`--runner docker`), so the host Rust
-  # toolchain and a host-side build cache would not be exercised here —
-  # deduplicating the build across the four e2e jobs is the real win.
+  # kind job below via an artifact. Bazel builds the Rust binaries and locked
+  # Wolfi images once, then the e2e jobs reuse the resulting OCI tarballs.
   build-images:
     needs: changes
     # Run when the change touches operator-relevant code, and on PRs
@@ -64,46 +62,17 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7.0.0
-        with:
-          go-version: stable
-      - name: Install melange and apko
+      - uses: ./.github/actions/setup-bazel
+      - name: Build Bazel OCI tarballs
         run: |
-          go install chainguard.dev/melange@latest
-          go install chainguard.dev/apko@latest
-          echo "$HOME/go/bin" >> "$GITHUB_PATH"
-      - name: Verify melange + apko on PATH
-        run: |
-          melange version
-          apko version
-      - name: Cache melange/cargo build artifacts
-        uses: actions/cache@v6
-        with:
-          path: .melange-cache
-          key: melange-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            melange-${{ runner.os }}-
-      - name: Build crabka apks + per-image OCI tarballs
-        run: |
-          mkdir -p packages .melange-cache
-          melange keygen
-          # One compile produces every binary; apko then carves out one image
-          # per service from the shared package set.
-          melange build packaging/melange/crabka.yaml \
-            --source-dir . \
-            --signing-key melange.rsa \
-            --arch x86_64 \
-            --runner docker \
-            --cache-dir "$PWD/.melange-cache" \
-            --out-dir packages/
-          for image in crabka-operator crabka-broker crabka-schema-registry; do
-            apko build "packaging/apko/${image}.yaml" \
-              "${image}:e2e" \
-              "${image}.tar" \
-              --arch x86_64 \
-              --repository-append "$PWD/packages" \
-              --keyring-append "$PWD/melange.rsa.pub"
-          done
+          aspect build \
+            //packaging:operator_image_tar \
+            //packaging:broker_image_tar \
+            //packaging:schema_registry_image_tar \
+            --bazel-flag=--config=ci
+          cp bazel-bin/packaging/operator_image_load/tarball.tar crabka-operator.tar
+          cp bazel-bin/packaging/broker_image_load/tarball.tar crabka-broker.tar
+          cp bazel-bin/packaging/schema_registry_image_load/tarball.tar crabka-schema-registry.tar
       - name: Upload image tarballs
         uses: actions/upload-artifact@v7
         with:

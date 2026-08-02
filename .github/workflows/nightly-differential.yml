@@ -40,10 +40,7 @@ jobs:
       PROPTEST_CASES: "256"
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: nightly-differential
+      - uses: ./.github/actions/setup-bazel
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -51,7 +48,7 @@ jobs:
       - name: Build JVM oracle
         run: (cd tools/oracle && ./gradlew installDist --no-daemon)
       - name: Run parameterised differential sweep (release profile)
-        run: cargo test --workspace --test differential_all --release -- --ignored
+        run: aspect test //crates/protocol:differential_all --bazel-flag=--config=ci --bazel-flag=--test_arg=--ignored
       - name: Create issue on failure
         if: failure()
         uses: actions/github-script@v9
@@ -88,12 +85,9 @@ jobs:
       # exhaust the ~14 GB free on the default runner; reclaim the unused
       # preinstalled SDKs like the other Docker-heavy Linux jobs do.
       - uses: ./.github/actions/free-disk-space
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: traces-differential
+      - uses: ./.github/actions/setup-bazel
       - name: Run traces differential-vs-Tempo + Grafana suites (Docker)
-        run: cargo test -p crabka-traces --test tempo_differential -- --ignored --nocapture
+        run: aspect test //crates/traces:tempo_differential --bazel-flag=--config=ci --bazel-flag=--test_arg=--ignored --bazel-flag=--test_arg=--nocapture
       - name: Create issue on failure
         if: ${{ failure() && github.event_name != 'pull_request' }}
         uses: actions/github-script@v9

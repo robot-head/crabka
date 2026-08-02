@@ -1,0 +1,9 @@
+load("//:bazel/rust_package.bzl", "rust_package")
+
+rust_package(
+    name = "observability-demo-app",
+    build_script = True,
+    cargo_name = "observability-demo-app",
+    crate_name = "observability_demo_app",
+    test_compile_data = ["//:observability_demo_test_data"],
+)

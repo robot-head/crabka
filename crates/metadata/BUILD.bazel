@@ -1,20 +1,7 @@
-load("@crates//:defs.bzl", "aliases", "all_crate_deps")
-load("@rules_rust//rust:defs.bzl", "rust_library")
+load("//:bazel/rust_package.bzl", "rust_package")
 
-# Manifest is consumed by crate_universe (see //MODULE.bazel).
-exports_files(["Cargo.toml"])
-
-rust_library(
+rust_package(
     name = "metadata",
-    srcs = glob(["src/**/*.rs"]),
-    aliases = aliases(),
+    cargo_name = "crabka-metadata",
     crate_name = "crabka_metadata",
-    edition = "2024",
-    proc_macro_deps = all_crate_deps(proc_macro = True),
-    visibility = ["//visibility:public"],
-    deps = all_crate_deps(normal = True) + [
-        "//crates/protocol",
-        "//crates/security",
-        "//crates/voters",
-    ],
 )

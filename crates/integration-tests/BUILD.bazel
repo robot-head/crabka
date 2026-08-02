@@ -1,0 +1,8 @@
+load("//:bazel/rust_package.bzl", "rust_package")
+
+rust_package(
+    name = "integration-tests",
+    cargo_name = "crabka-integration-tests",
+    crate_name = "crabka_integration_tests",
+    test_compile_data = ["//crates/broker:test_support"],
+)

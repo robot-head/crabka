@@ -1,0 +1,7 @@
+load("//:bazel/rust_package.bzl", "rust_package")
+
+rust_package(
+    name = "schema-registry",
+    cargo_name = "crabka-schema-registry",
+    crate_name = "crabka_schema_registry",
+)

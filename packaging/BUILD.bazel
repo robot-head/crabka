@@ -1,0 +1,86 @@
+load(":image.bzl", "runtime_image")
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "test_data",
+    srcs = glob(
+        [
+            "**",
+        ],
+        exclude = [
+            "**/BUILD.bazel",
+        ],
+    ) + [
+        "BUILD.bazel",
+        "//packaging/apko:test_data",
+    ],
+)
+
+runtime_image(
+    name = "broker_image",
+    binaries = {
+        "//crates/broker:crabka-broker__bin": "crabka-broker",
+        "//crates/cli:crabka__bin": "crabka",
+    },
+    cmd = ["run"],
+    entrypoint = "/usr/bin/crabka-broker",
+    repository = "crabka-broker",
+)
+
+runtime_image(
+    name = "operator_image",
+    binaries = {"//crates/operator:crabka-operator__bin": "crabka-operator"},
+    cmd = ["run"],
+    entrypoint = "/usr/bin/crabka-operator",
+    repository = "crabka-operator",
+)
+
+runtime_image(
+    name = "schema_registry_image",
+    binaries = {"//crates/schema-registry:crabka-schema-registry__bin": "crabka-schema-registry"},
+    cmd = ["run"],
+    entrypoint = "/usr/bin/crabka-schema-registry",
+    repository = "crabka-schema-registry",
+)
+
+runtime_image(
+    name = "gres_image",
+    binaries = {"//crates/gres:crabka-gres__bin": "crabka-gres"},
+    entrypoint = "/usr/bin/crabka-gres",
+    repository = "crabka-gres",
+)
+
+runtime_image(
+    name = "gres_activator_image",
+    binaries = {"//crates/gres-activator:crabka-gres-activator__bin": "crabka-gres-activator"},
+    entrypoint = "/usr/bin/crabka-gres-activator",
+    repository = "crabka-gres-activator",
+)
+
+runtime_image(
+    name = "bench_driver_image",
+    binaries = {
+        "//crates/bench-driver:crabka-bench-driver__bin": "crabka-bench-driver",
+        "//crates/bench-driver:crabka-bench-report__bin": "crabka-bench-report",
+    },
+    entrypoint = "/usr/bin/crabka-bench-driver",
+    repository = "crabka-bench-driver",
+)
+
+runtime_image(
+    name = "demo_image",
+    binaries = {
+        "//crates/broker:crabka-broker-heap__bin": "crabka-broker",
+        "//crates/cli:crabka__bin": "crabka",
+        "//crates/metrics:crabka-metrics__bin": "crabka-metrics",
+        "//crates/metrics-service:crabka-metrics-service-heap__bin": "crabka-metrics-service",
+        "//crates/observability:crabka-observability__bin": "crabka-observability",
+        "//crates/observability-demo-app:observability-demo-app__bin": "observability-demo-app",
+        "//crates/profiles:crabka-profiles__bin": "crabka-profiles",
+        "//crates/schema-registry:crabka-schema-registry__bin": "crabka-schema-registry",
+        "//crates/traces:crabka-traces__bin": "crabka-traces",
+    },
+    entrypoint = "/bin/sh",
+    repository = "crabka-demo",
+)

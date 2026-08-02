@@ -1,0 +1,8 @@
+load("//:bazel/rust_package.bzl", "rust_package")
+
+rust_package(
+    name = "gres-conformance",
+    cargo_name = "crabka-gres-conformance",
+    compile_data = ["//:Cargo.lock"],
+    crate_name = "crabka_gres_conformance",
+)

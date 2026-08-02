@@ -53,29 +53,19 @@ jobs:
       attestations: write # write chart provenance to GitHub's attestation store
     steps:
       - uses: actions/checkout@v7
-      - name: Install Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          target: wasm32-unknown-unknown
+      - uses: ./.github/actions/setup-bazel
       - name: Generate reference markdown
-        run: cargo run -p crabka-docgen -- all --out website/content/docs/reference
+        run: aspect run //crates/docgen:crabka-docgen__bin -- all --out website/content/docs/reference
       - name: Build rustdoc
-        run: cargo doc --no-deps --workspace
-      - name: Install wasm-bindgen-cli (version-matched to Cargo.lock)
         run: |
-          set -euo pipefail
-          # Keep the CLI in lock-step with the wasm-bindgen crate or the
-          # generated glue will refuse to load ("schema version mismatch").
-          ver="$(cargo metadata --format-version 1 --locked \
-            | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="wasm-bindgen"))')"
-          echo "wasm-bindgen ${ver}"
-          cargo install wasm-bindgen-cli --version "${ver}" --locked
+          targets="$(bazel query 'kind(rust_doc, //...)')"
+          aspect build ${targets} --bazel-flag=--config=ci
       - name: Build the WASM consensus playground
-        run: ./website/build-playground.sh
+        run: aspect playground --task:name=docs-playground
       - name: Stage rustdoc into site
         run: |
           mkdir -p website/static/api/rust
-          cp -r target/doc/* website/static/api/rust/
+          find bazel-bin/crates -type d -name '*.rustdoc' -exec cp -r {}/. website/static/api/rust/ \;
       - name: Stage branding images
         run: |
           mkdir -p website/static/images

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the Creusot toolchain image (melange APK -> apko OCI tar).
-# Mirrors tools/build-image.sh. Load the result with:
+# Load the result with:
 #   docker load < creusot-toolchain.tar
 set -euo pipefail
 PIN="$(cat "$(dirname "$0")/../.creusot-version")"

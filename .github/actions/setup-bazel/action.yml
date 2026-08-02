@@ -1,0 +1,16 @@
+name: Set up Bazel and Aspect
+description: Install Bazel/Aspect and restore the shared Bazel caches.
+runs:
+  using: composite
+  steps:
+    - uses: bazel-contrib/setup-bazel@8cb04a772ab4c1eb984e9c1b493a182e96c5e425 # 0.19.0
+      with:
+        bazelisk-cache: true
+        disk-cache: true
+        repository-cache: |
+          - MODULE.bazel
+          - MODULE.bazel.lock
+          - Cargo.lock
+        external-cache: true
+        cache-save: ${{ github.event_name != 'pull_request' }}
+    - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9

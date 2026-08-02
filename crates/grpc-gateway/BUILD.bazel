@@ -1,0 +1,9 @@
+load("//:bazel/rust_package.bzl", "rust_package")
+
+rust_package(
+    name = "grpc-gateway",
+    build_script = True,
+    cargo_name = "crabka-grpc-gateway",
+    crate_name = "crabka_grpc_gateway",
+    protoc = True,
+)

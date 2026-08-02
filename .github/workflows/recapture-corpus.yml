@@ -11,8 +11,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-bazel
       # Check-only mode replays the committed corpus against freshly-captured
       # bytes; it skips the synthesis pass, so no JVM oracle (and no Java) is
       # needed here — only Docker + the broker image.
@@ -21,6 +20,6 @@ jobs:
       - name: Capture-and-compare (fails on drift)
         env:
           CORPUS_CHECK_ONLY: "1"
-        run: cargo test -p crabka-protocol --test capture_corpus -- --ignored --nocapture
+        run: aspect test //crates/protocol:capture_corpus --bazel-flag=--config=ci --bazel-flag=--test_arg=--ignored --bazel-flag=--test_arg=--nocapture
       - name: Confirm committed corpus still passes the replay gate
-        run: cargo test -p crabka-protocol --test corpus_replay
+        run: aspect test //crates/protocol:corpus_replay --bazel-flag=--config=ci

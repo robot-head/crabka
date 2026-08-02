@@ -7,6 +7,21 @@ targets under //crates/... and //bazel/....
 
 package(default_visibility = ["//visibility:public"])
 
+exports_files([
+    "Cargo.lock",
+    "Cargo.toml",
+])
+
+filegroup(
+    name = "observability_demo_test_data",
+    srcs = glob([
+        ".bazelrc",
+        ".github/workflows/publish-demo-image.yml",
+        "demo/observability/**",
+    ]) + ["//packaging:test_data"],
+    visibility = ["//crates/observability-demo-app:__pkg__"],
+)
+
 # --------------------------------------------------------------------------- #
 # Re-exported client crates.
 # --------------------------------------------------------------------------- #

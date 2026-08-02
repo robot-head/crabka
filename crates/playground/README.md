@@ -13,14 +13,12 @@ backend.
 
 ## Building
 
-The site build (`website/build-playground.sh`, run from CI) compiles this crate
+The site build (`aspect playground`, run from CI) compiles this crate
 to `wasm32-unknown-unknown` and runs `wasm-bindgen --target web`, emitting an ES
 module + `.wasm` into `website/static/playground/`.
 
 ```sh
-rustup target add wasm32-unknown-unknown
-cargo install wasm-bindgen-cli --version <matches Cargo.lock>
-./website/build-playground.sh
+aspect playground
 ```
 
 The JavaScript front-end lives in `website/static/playground/`.

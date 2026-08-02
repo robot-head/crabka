@@ -42,3 +42,7 @@ getrandom = { version = "0.4", features = ["wasm_js"] }
 # routes it through the browser's Web Crypto. (We never generate a v4 UUID — the
 # sim uses `Uuid::nil()` — but the code path must still compile.)
 uuid = { workspace = true, features = ["js"] }
+
+[build-dependencies]
+# Keep the hermetic Bazel wasm-bindgen CLI schema aligned with the library.
+wasm-bindgen-cli.workspace = true

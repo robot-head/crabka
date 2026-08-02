@@ -1,0 +1,7 @@
+load("//:bazel/rust_package.bzl", "rust_package")
+
+rust_package(
+    name = "records-legacy",
+    cargo_name = "crabka-records-legacy",
+    crate_name = "crabka_records_legacy",
+)

@@ -221,7 +221,8 @@ jobs:
               - 'crates/broker/**'
               - 'crates/docgen/**'
               - 'website/content/**'
-              - 'tools/test-doc-examples.sh'
+              - '.aspect/tasks.axl'
+              - 'crates/client-streams/BUILD.bazel'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
@@ -286,9 +287,9 @@ jobs:
               - 'scripts/gres-coldstart.sh'
               - 'scripts/gres-kind-lifecycle.sh'
               - 'scripts/tests/gres-kind-lifecycle-structure.sh'
-              - 'packaging/apko/crabka-gres*.yaml'
+              - 'packaging/BUILD.bazel'
+              - 'packaging/image.bzl'
               - 'packaging/docker/Dockerfile.local-binary'
-              - 'packaging/melange/crabka.yaml'
               - 'charts/crabka-operator/**'
               - 'scripts/gres-range-scaling.sh'
               - 'scripts/tests/gres-range-scaling-ci.sh'
@@ -299,99 +300,13 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.rust == 'true' }}
     timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        toolchain: ["1.97.0"]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/free-disk-space
-        if: matrix.os == 'ubuntu-latest'
-      # Fail fast if any crate's html_root_url drifted from the workspace version
-      # (run: tools/html-root-url.sh --fix). No toolchain needed.
-      - name: html_root_url in sync
-        if: matrix.os == 'ubuntu-latest'
-        run: ./tools/html-root-url.sh
-      - uses: ./.github/actions/free-disk-space
-        if: matrix.os == 'ubuntu-latest'
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ matrix.toolchain }}
-          components: rustfmt, clippy
-      - name: Published crate allowlist
-        if: matrix.os == 'ubuntu-latest'
-        run: ./tools/check-publish-allowlist.sh
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.os }}-rust
-      - uses: taiki-e/install-action@cargo-llvm-cov
-        if: matrix.os == 'ubuntu-latest'
-      - uses: taiki-e/install-action@nextest
-      # rustfmt runs on nightly so `format_code_in_doc_comments` (unstable, set in
-      # rustfmt.toml) formats the code inside rustdoc examples too. Run this once
-      # on Linux: `cargo fmt --all` can exceed Windows' process command-line limit
-      # in this workspace. clippy/tests stay on the matrix toolchain.
-      - run: rustup toolchain install nightly --profile minimal --component rustfmt
-        if: matrix.os == 'ubuntu-latest'
-      - run: cargo +nightly fmt --all -- --check
-        if: matrix.os == 'ubuntu-latest'
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Diskless WAL shipping gates
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          cargo nextest run -p crabka-raft --profile ci --test kraft_model
-          cargo nextest run -p crabka-broker --profile ci --lib diskless
-          cargo nextest run -p crabka-verified --profile ci
-      # nextest cannot run doctests, so run them explicitly (once, on Linux).
-      - name: Doctests
-        if: matrix.os == 'ubuntu-latest'
-        run: cargo test --workspace --doc
-      # The cross-platform matrix runs UNIT tests (--lib --bins) for portability;
-      # the heavy `tests/*.rs` integration tests (in-process broker + streams,
-      # testcontainers) run only in the dedicated Linux integration jobs, where
-      # they aren't slow/flaky. Running them on the slow macOS runner timed out
-      # (e.g. dsl_count_restart_restore_emit_on_update's 30s output wait).
-      - name: Run tests
-        if: matrix.os == 'macos-latest'
-        run: cargo nextest run --workspace --profile ci --lib --bins
-      - name: Run tests
-        if: matrix.os == 'windows-latest'
-        run: cargo nextest run --workspace --profile ci --lib --bins
-      - name: Upload test results to Codecov
-        if: ${{ !cancelled() && matrix.os != 'ubuntu-latest' }}
-        uses: codecov/codecov-action@v7
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          report_type: test_results
-          files: target/nextest/ci/junit.xml
-          disable_search: true
-          flags: rust-${{ matrix.os }}
-          fail_ci_if_error: false
-      - name: Unit test coverage
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          mkdir -p coverage
-          cargo llvm-cov nextest --workspace --profile ci --lib --bins --lcov --output-path coverage/unit.lcov
-      - uses: codecov/codecov-action@v7
-        if: matrix.os == 'ubuntu-latest'
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: coverage/unit.lcov
-          disable_search: true
-          flags: unit
-          fail_ci_if_error: false
-      - name: Upload test results to Codecov
-        if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' }}
-        uses: codecov/codecov-action@v7
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          report_type: test_results
-          files: target/nextest/ci/junit.xml
-          disable_search: true
-          flags: unit
-          fail_ci_if_error: false
+      - uses: ./.github/actions/setup-bazel
+      - name: Build complete workspace
+        run: aspect build --task:name=rust-linux --bazel-flag=--config=ci //...
 
   jvm-differential:
     needs: changes
@@ -400,13 +315,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-bazel
       - uses: ./.github/actions/free-disk-space
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: jvm-differential
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -418,36 +328,13 @@ jobs:
       - name: JVM differential coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov clean --workspace
-          cargo llvm-cov nextest --locked \
-            -p crabka-compression \
-            -p crabka-protocol \
-            --profile ci \
-            --test differential \
-            --test differential_all \
-            --test differential_api_versions \
-            --test differential_describe_groups \
-            --test differential_metadata \
-            --test differential_offset_commit \
-            --test differential_produce \
-            --test differential_records \
-            --test oracle_smoke \
-            --lcov --output-path coverage/jvm-differential.lcov \
-            -- --include-ignored
+          aspect test //crates/compression:differential //crates/protocol:differential_all \
+            --coverage --coverage-report=coverage/jvm-differential.lcov \
+            --bazel-flag=--config=ci --bazel-flag=--test_arg=--include-ignored
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/jvm-differential.lcov
-          disable_search: true
-          flags: jvm-differential
-          fail_ci_if_error: false
-      - name: Upload test results to Codecov
-        if: ${{ !cancelled() }}
-        uses: codecov/codecov-action@v7
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          report_type: test_results
-          files: target/nextest/ci/junit.xml
           disable_search: true
           flags: jvm-differential
           fail_ci_if_error: false
@@ -498,6 +385,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-bazel
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
@@ -507,7 +395,7 @@ jobs:
       - name: Install PostgreSQL client
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
       - name: Verify Gres scaling CI contract
-        run: bash scripts/tests/gres-range-scaling-ci.sh
+        run: aspect gres --task:name=gres-range-scaling-contract --suite range-scaling-ci
       - name: Measure live Gres range scaling
         run: |
           CRABKA_GRES_RANGE_SCALING_MODE=fast \
@@ -515,7 +403,7 @@ jobs:
           CRABKA_GRES_SHARDED_SCALING_FLOOR=2.1 \
           CRABKA_GRES_DECISION_CEILING_MIN_RATIO=0.5 \
           CRABKA_GRES_RANGE_SCALING_KEEP_ARTIFACTS=1 \
-          ./scripts/gres-range-scaling.sh
+          aspect gres --task:name=gres-range-scaling --suite range-scaling
       - name: Verify live scaling gates
         run: |
           python3 - <<'PY'
@@ -560,6 +448,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-bazel
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
@@ -567,7 +456,7 @@ jobs:
         with:
           key: gres-topology-process-nemesis
       - name: Exercise a live Move through CLI, operator, and Gres
-        run: bash scripts/tests/gres-topology-process-nemesis-ci.sh
+        run: aspect gres --task:name=gres-topology-process-nemesis --suite topology-process-nemesis
       - name: Upload topology process evidence
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
@@ -598,6 +487,7 @@ jobs:
           --health-retries 12
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-bazel
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
@@ -609,7 +499,7 @@ jobs:
       - name: Validate live G-8 gate structure
         run: python3 scripts/tests/gres_sharded_conformance_ci.py
       - name: G-8 sharded conformance gate
-        run: ./scripts/gres-sharded-conformance.sh
+        run: aspect gres --task:name=gres-sharded-conformance --suite sharded-conformance
       - name: Upload G-8 sharded conformance artifacts
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
@@ -667,6 +557,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-bazel
       - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -674,26 +565,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: client-core-integration
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
       - name: Client core integration coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov nextest -p crabka-client-core --profile ci --test integration --lcov --output-path coverage/client-core-integration.lcov -- --ignored --nocapture
+          aspect test //crates/client-core:integration --coverage --coverage-report=coverage/client-core-integration.lcov --bazel-flag=--config=ci --bazel-flag=--test_arg=--ignored --bazel-flag=--test_arg=--nocapture
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/client-core-integration.lcov
-          disable_search: true
-          flags: client-core-integration
-          fail_ci_if_error: false
-      - name: Upload test results to Codecov
-        if: ${{ !cancelled() }}
-        uses: codecov/codecov-action@v7
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          report_type: test_results
-          files: target/nextest/ci/junit.xml
           disable_search: true
           flags: client-core-integration
           fail_ci_if_error: false
@@ -707,6 +586,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-bazel
       - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -714,26 +594,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: log-integration
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
       - name: Log integration coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov nextest -p crabka-log --profile ci --test integration --lcov --output-path coverage/log-integration.lcov -- --ignored --nocapture
+          aspect test //crates/log:integration --coverage --coverage-report=coverage/log-integration.lcov --bazel-flag=--config=ci --bazel-flag=--test_arg=--ignored --bazel-flag=--test_arg=--nocapture
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/log-integration.lcov
-          disable_search: true
-          flags: log-integration
-          fail_ci_if_error: false
-      - name: Upload test results to Codecov
-        if: ${{ !cancelled() }}
-        uses: codecov/codecov-action@v7
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          report_type: test_results
-          files: target/nextest/ci/junit.xml
           disable_search: true
           flags: log-integration
           fail_ci_if_error: false
@@ -749,6 +617,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-bazel
       - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -756,26 +625,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: client-consumer-integration
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
       - name: Client consumer integration coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov nextest -p crabka-client-consumer --profile ci --tests --lcov --output-path coverage/client-consumer-integration.lcov -- --nocapture
+          aspect test //crates/client-consumer:all --coverage --coverage-report=coverage/client-consumer-integration.lcov --bazel-flag=--config=ci --bazel-flag=--test_arg=--nocapture
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/client-consumer-integration.lcov
-          disable_search: true
-          flags: client-consumer-integration
-          fail_ci_if_error: false
-      - name: Upload test results to Codecov
-        if: ${{ !cancelled() }}
-        uses: codecov/codecov-action@v7
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          report_type: test_results
-          files: target/nextest/ci/junit.xml
           disable_search: true
           flags: client-consumer-integration
           fail_ci_if_error: false
@@ -792,6 +649,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-bazel
       - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -799,15 +657,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: client-streams-integration
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
       - name: Client streams integration coverage
         run: |
           mkdir -p coverage
           # Includes the Avro/Protobuf/JSON bridge tests + byte-exact Confluent
           # golden tests (schema serdes are always-on; goldens use checked-in
           # bytes, no broker/registry needed).
-          cargo llvm-cov nextest -p crabka-client-streams --profile ci --tests --lcov --output-path coverage/client-streams-integration.lcov -- --nocapture
+          aspect test //crates/client-streams:all --coverage --coverage-report=coverage/client-streams-integration.lcov --bazel-flag=--config=ci --bazel-flag=--test_arg=--nocapture
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -815,19 +671,9 @@ jobs:
           disable_search: true
           flags: client-streams-integration
           fail_ci_if_error: false
-      - name: Upload test results to Codecov
-        if: ${{ !cancelled() }}
-        uses: codecov/codecov-action@v7
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          report_type: test_results
-          files: target/nextest/ci/junit.xml
-          disable_search: true
-          flags: client-streams-integration
-          fail_ci_if_error: false
       - name: Schema-serde unit coverage
         run: |
-          cargo llvm-cov nextest -p crabka-schema-serde --all-features --lib --lcov --output-path coverage/schema-serde-unit.lcov
+          aspect test //crates/schema-serde:schema-serde_lib_test --coverage --coverage-report=coverage/schema-serde-unit.lcov --bazel-flag=--config=ci
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -838,7 +684,7 @@ jobs:
 
   # Build & run every documented client-streams example, then verify the
   # website snippets are in sync with their source (doc-drift guard). See
-  # tools/test-doc-examples.sh.
+  # the Aspect docs task.
   doc-examples:
     needs: changes
     if: ${{ needs.changes.outputs.doc_examples == 'true' }}
@@ -846,6 +692,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-bazel
       - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -854,7 +701,7 @@ jobs:
         with:
           key: doc-examples
       - name: Build & run documented examples + snippet drift guard
-        run: ./tools/test-doc-examples.sh
+        run: aspect docs --task:name=doc-examples
 
   # crabka-grpc-gateway integration: unary Send produce, group consume+commit,
   # and single-owner exactly-once dedup against an in-process Rust broker (no
@@ -868,6 +715,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-bazel
       - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -875,26 +723,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: grpc-gateway-integration
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
       - name: gRPC gateway integration coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov nextest -p crabka-grpc-gateway --profile ci --tests --test schema_codec --lcov --output-path coverage/grpc-gateway-integration.lcov -- --nocapture
+          aspect test //crates/grpc-gateway:all --coverage --coverage-report=coverage/grpc-gateway-integration.lcov --bazel-flag=--config=ci --bazel-flag=--test_arg=--nocapture
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/grpc-gateway-integration.lcov
-          disable_search: true
-          flags: grpc-gateway-integration
-          fail_ci_if_error: false
-      - name: Upload test results to Codecov
-        if: ${{ !cancelled() }}
-        uses: codecov/codecov-action@v7
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          report_type: test_results
-          files: target/nextest/ci/junit.xml
           disable_search: true
           flags: grpc-gateway-integration
           fail_ci_if_error: false
@@ -912,6 +748,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-bazel
       - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -919,26 +756,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: schema-registry-integration
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
       - name: Schema registry integration coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov nextest -p crabka-schema-registry --profile ci --test integration --test rest_conformance --test schemas_record --test compat_conformance --test ha --test security --lcov --output-path coverage/schema-registry-integration.lcov -- --nocapture
+          aspect test //crates/schema-registry:integration //crates/schema-registry:rest_conformance //crates/schema-registry:schemas_record //crates/schema-registry:compat_conformance //crates/schema-registry:ha //crates/schema-registry:security --coverage --coverage-report=coverage/schema-registry-integration.lcov --bazel-flag=--config=ci --bazel-flag=--test_arg=--nocapture
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/schema-registry-integration.lcov
-          disable_search: true
-          flags: schema-registry-integration
-          fail_ci_if_error: false
-      - name: Upload test results to Codecov
-        if: ${{ !cancelled() }}
-        uses: codecov/codecov-action@v7
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          report_type: test_results
-          files: target/nextest/ci/junit.xml
           disable_search: true
           flags: schema-registry-integration
           fail_ci_if_error: false
@@ -958,18 +783,17 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-bazel
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@v2
         with:
           key: traces-conformance
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
       - name: TraceQL conformance gate coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov nextest -p crabka-traces -p crabka-traceql --profile ci --tests --lcov --output-path coverage/traces-conformance.lcov -- --nocapture
+          aspect test //crates/traces:all //crates/traceql:all --coverage --coverage-report=coverage/traces-conformance.lcov --bazel-flag=--config=ci --bazel-flag=--test_arg=--nocapture
       - name: Upload TraceQL conformance report
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
@@ -980,16 +804,6 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/traces-conformance.lcov
-          disable_search: true
-          flags: traces-conformance
-          fail_ci_if_error: false
-      - name: Upload test results to Codecov
-        if: ${{ !cancelled() }}
-        uses: codecov/codecov-action@v7
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          report_type: test_results
-          files: target/nextest/ci/junit.xml
           disable_search: true
           flags: traces-conformance
           fail_ci_if_error: false
@@ -1014,27 +828,21 @@ jobs:
           --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-bazel
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@v2
         with:
           key: gres-conformance
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - name: Configure end-to-end coverage instrumentation
-        run: |
-          cargo llvm-cov show-env --sh > "$RUNNER_TEMP/cargo-llvm-cov-env.sh"
-          echo "BASH_ENV=$RUNNER_TEMP/cargo-llvm-cov-env.sh" >> "$GITHUB_ENV"
-          source "$RUNNER_TEMP/cargo-llvm-cov-env.sh"
-          cargo llvm-cov clean --workspace
       - name: F-0 runtime wiring contract
         run: python3 scripts/tests/gres_f0_runtime_gates.py
       - name: Driver capture safety contract
         run: python3 -m unittest tools/tests/test_gres_wire_recorder.py tools/tests/test_capture_gres_driver_goldens.py
       - name: PostgreSQL compatibility matrix anti-rot check
         run: |
-          ./tools/check-pg-compat-matrix.sh --self-test
-          ./tools/check-pg-compat-matrix.sh
+          aspect gres --task:name=pg-compat-self-test --suite check-pg-compat -- --self-test
+          aspect gres --task:name=pg-compat --suite check-pg-compat
       - name: Install psql 18 (pgdg)
         run: |
           sudo install -d /usr/share/postgresql-common/pgdg
@@ -1043,18 +851,17 @@ jobs:
           sudo apt-get update && sudo apt-get install -y postgresql-client-18
       - name: Install pinned Python PostgreSQL driver
         run: python3 -m pip install --require-hashes --no-deps -r crates/gres-conformance/requirements-driver-smoke.txt
-      - run: cargo build --locked -p crabka-cli -p crabka-broker -p crabka-gres -p crabka-gres-activator -p crabka-gres-conformance
       - name: Captured driver startup replay
-        run: CRABKA_GRES_SKIP_BUILD=1 timeout 30s ./scripts/gres-driver-goldens-gate.sh
-      - run: ./scripts/gres-psql-smoke.sh
+        run: CRABKA_GRES_SKIP_BUILD=1 timeout 30s aspect gres --task:name=gres-driver-goldens --suite driver-goldens
+      - run: aspect gres --task:name=gres-psql --suite psql
       - name: psql introspection transcript
-        run: CRABKA_GRES_SKIP_BUILD=1 ./scripts/gres-psql-introspection-smoke.sh
+        run: CRABKA_GRES_SKIP_BUILD=1 aspect gres --task:name=gres-psql-introspection --suite psql-introspection
       - name: Durable restart smoke
-        run: ./scripts/gres-durable-restart-smoke.sh
+        run: aspect gres --task:name=gres-durable-restart --suite durable-restart
       - name: Substrate WAL smoke
-        run: CRABKA_GRES_SKIP_BUILD=1 ./scripts/gres-substrate-smoke.sh
+        run: CRABKA_GRES_SKIP_BUILD=1 aspect gres --task:name=gres-substrate --suite substrate
       - name: Front-door PgDog e2e gate
-        run: CRABKA_GRES_SKIP_BUILD=1 CRABKA_GRES_E2E_KEEP_ARTIFACTS=1 ./scripts/gres-e2e.sh
+        run: CRABKA_GRES_SKIP_BUILD=1 CRABKA_GRES_E2E_KEEP_ARTIFACTS=1 aspect gres --task:name=gres-e2e --suite e2e
       - name: Cold-start SLO gate
         # This harness builds release images and asserts lifecycle ordering.
         # Coverage instrumentation slows the in-cluster compute enough to
@@ -1068,7 +875,7 @@ jobs:
           chmod +x /tmp/kind
           sudo mv /tmp/kind /usr/local/bin/kind
           CRABKA_GRES_KIND_ARTIFACT_DIR=target/gres-coldstart-artifacts \
-            ./scripts/gres-coldstart.sh
+            aspect gres --task:name=gres-coldstart --suite coldstart
       - name: Conformance harness against the parity baseline
         run: |
           ./target/debug/crabka-gres --listen 127.0.0.1:54333 &
@@ -1168,7 +975,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           mkdir -p coverage
-          cargo llvm-cov report --lcov --output-path coverage/gres-conformance.lcov
+          aspect test //crates/gres-conformance:all --coverage --coverage-report=coverage/gres-conformance.lcov --bazel-flag=--config=ci
       - uses: codecov/codecov-action@v7
         if: ${{ !cancelled() }}
         with:
@@ -1222,47 +1029,25 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-bazel
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@v2
         with:
           key: gres-integration
-      - uses: taiki-e/install-action@nextest
-      - uses: taiki-e/install-action@cargo-llvm-cov
       - name: Gres engine integration coverage
         run: |
-          # Range process tests launch the service as a subprocess; nextest
-          # builds test targets but not cross-package binaries.
-          cargo build --locked -p crabka-gres --bin crabka-gres
-          cargo llvm-cov nextest \
-            -p crabka-pgwire \
-            -p crabka-pgexec \
-            -p crabka-gres-fdw \
-            -p crabka-gres-substrate \
-            -p crabka-gres \
-            -p crabka-gres-ranges \
-            -p crabka-gres-control \
-            -p crabka-gres-conformance \
-            -p crabka-cli \
-            -p crabka-gres-activator \
-            -p crabka-gres-balancer \
-            --features crabka-gres-substrate/checkpoint-test-hooks \
-            --profile ci --tests --lcov --output-path lcov.info
+          aspect test \
+            //crates/pgwire:all //crates/pgexec:all //crates/gres-fdw:all \
+            //crates/gres-substrate:all //crates/gres:all //crates/gres-ranges:all \
+            //crates/gres-control:all //crates/gres-conformance:all //crates/cli:all \
+            //crates/gres-activator:all //crates/gres-balancer:all \
+            --coverage --coverage-report=lcov.info --bazel-flag=--config=ci
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: lcov.info
-          disable_search: true
-          flags: gres-integration
-          fail_ci_if_error: false
-      - name: Upload test results to Codecov
-        if: ${{ !cancelled() }}
-        uses: codecov/codecov-action@v7
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          report_type: test_results
-          files: target/nextest/ci/junit.xml
           disable_search: true
           flags: gres-integration
           fail_ci_if_error: false
@@ -1278,49 +1063,28 @@ jobs:
     if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2]
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/free-disk-space
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: workspace-integration-${{ matrix.shard }}
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
-      - name: Build subprocess dependencies
-        run: cargo build --locked -p crabka-cli --bin crabka -p crabka-gres --bin crabka-gres
-      - name: Workspace integration coverage (shard ${{ matrix.shard }}/2)
+      - uses: ./.github/actions/setup-bazel
+      - name: Workspace integration coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov nextest --locked --workspace --profile ci --tests \
-            --exclude crabka-client-core \
-            --exclude crabka-log \
-            --exclude crabka-broker \
-            --exclude crabka-grpc-gateway \
-            --exclude crabka-admin-ui \
-            -E 'kind(test)' \
-            --partition hash:${{ matrix.shard }}/2 \
-            --lcov --output-path coverage/workspace-integration-${{ matrix.shard }}.lcov
+          mapfile -t targets < <(bazel query '
+            kind(rust_test, //...)
+            except //crates/broker/...
+            except //crates/client-core/...
+            except //crates/log/...
+            except //crates/grpc-gateway/...
+            except //crates/admin-ui/...
+          ')
+          aspect test "${targets[@]}" \
+            --coverage --coverage-report=coverage/workspace-integration.lcov \
+            --bazel-flag=--config=ci
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          files: coverage/workspace-integration-${{ matrix.shard }}.lcov
-          disable_search: true
-          flags: workspace-integration
-          fail_ci_if_error: false
-      - name: Upload test results to Codecov
-        if: ${{ !cancelled() }}
-        uses: codecov/codecov-action@v7
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          report_type: test_results
-          files: target/nextest/ci/junit.xml
+          files: coverage/workspace-integration.lcov
           disable_search: true
           flags: workspace-integration
           fail_ci_if_error: false
@@ -1337,33 +1101,21 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/free-disk-space
+      - uses: ./.github/actions/setup-bazel
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@v2
         with:
           key: admin-ui-integration
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
       - name: Admin UI integration coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov nextest --locked -p crabka-admin-ui --profile ci --tests \
-            --lcov --output-path coverage/admin-ui-integration.lcov
+          aspect test //crates/admin-ui:all --coverage --coverage-report=coverage/admin-ui-integration.lcov --bazel-flag=--config=ci
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/admin-ui-integration.lcov
-          disable_search: true
-          flags: admin-ui-integration
-          fail_ci_if_error: false
-      - name: Upload test results to Codecov
-        if: ${{ !cancelled() }}
-        uses: codecov/codecov-action@v7
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          report_type: test_results
-          files: target/nextest/ci/junit.xml
           disable_search: true
           flags: admin-ui-integration
           fail_ci_if_error: false
@@ -1390,6 +1142,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-bazel
       # llvm-cov profraw + two preloaded Kafka images + the cargo target dir
       # exhaust the ~14 GB free on the default runner; reclaim ~25-30 GB of
       # unused preinstalled SDKs (the shared action leaves the JDK + Docker
@@ -1407,8 +1160,6 @@ jobs:
       # inside containers resolve the same name via `--add-host`). The
       # host itself has no such resolution on Linux runners, so add it.
       - run: echo "127.0.0.1 host.docker.internal" | sudo tee -a /etc/hosts
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
       - name: Preload Docker images
         run: |
           docker pull mirror.gcr.io/confluentinc/cp-kafka:7.4.0
@@ -1419,25 +1170,13 @@ jobs:
       - name: Broker JVM acceptance coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov nextest -p crabka-broker --profile ci \
-            --test jvm_acceptance \
-            --test jvm_consumer_group_next_gen \
-            --run-ignored only \
-            --lcov --output-path coverage/broker-jvm-acceptance.lcov
+          aspect test //crates/broker:jvm_acceptance //crates/broker:jvm_consumer_group_next_gen \
+            --coverage --coverage-report=coverage/broker-jvm-acceptance.lcov \
+            --bazel-flag=--config=ci --bazel-flag=--test_arg=--ignored
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/broker-jvm-acceptance.lcov
-          disable_search: true
-          flags: broker-jvm-acceptance
-          fail_ci_if_error: false
-      - name: Upload test results to Codecov
-        if: ${{ !cancelled() }}
-        uses: codecov/codecov-action@v7
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          report_type: test_results
-          files: target/nextest/ci/junit.xml
           disable_search: true
           flags: broker-jvm-acceptance
           fail_ci_if_error: false
@@ -1462,6 +1201,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-bazel
       # `llvm-cov clean` + two instrumented `--no-report` runs generate a large
       # profraw set on top of the cargo target dir, which exhausted the runner's
       # ~14 GB free disk ("No space left on device", then a SIGBUS in the
@@ -1473,30 +1213,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: broker-integration
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
       - name: Broker + client-admin integration coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov clean --workspace
-          cargo llvm-cov nextest --no-report --profile ci -p crabka-broker --tests
-          cargo llvm-cov nextest --no-report --profile ci -p crabka-client-admin --tests
-          cargo nextest run --profile ci -p crabka-integration-tests --test diskless_jepsen --no-run
-          cargo llvm-cov report --lcov --output-path coverage/broker-integration.lcov
+          aspect test //crates/broker:all //crates/client-admin:all \
+            --coverage --coverage-report=coverage/broker-integration.lcov \
+            --bazel-flag=--config=ci
+          aspect build //crates/integration-tests:diskless_jepsen --bazel-flag=--config=ci
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/broker-integration.lcov
-          disable_search: true
-          flags: broker-integration
-          fail_ci_if_error: false
-      - name: Upload test results to Codecov
-        if: ${{ !cancelled() }}
-        uses: codecov/codecov-action@v7
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          report_type: test_results
-          files: target/nextest/ci/junit.xml
           disable_search: true
           flags: broker-integration
           fail_ci_if_error: false
@@ -1511,56 +1238,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-bazel
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@v2
         with:
           key: operator-integration
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
       - name: Operator reconcile integration coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov nextest -p crabka-operator --profile ci \
-            --test ca_renewal_cronjob \
-            --test rebalance_e2e \
-            --test reconcile_ca \
-            --test reconcile_ca_rotation \
-            --test reconcile_gateway \
-            --test reconcile_gres \
-            --test reconcile_gres_tenant \
-            --test reconcile_inter_broker_mtls \
-            --test reconcile_kafka \
-            --test reconcile_kafka_authorization \
-            --test reconcile_kafkauser_delegation_token \
-            --test reconcile_listener_auth \
-            --test reconcile_listener_gssapi \
-            --test reconcile_listener_ingress \
-            --test reconcile_listener_oauth \
-            --test reconcile_oauth_introspection \
-            --test reconcile_oauth_trust \
-            --test reconcile_pool \
-            --test reconcile_rebalance \
-            --test reconcile_schema_registry \
-            --test reconcile_topic \
-            --test reconcile_user \
-            --test reconcile_user_tls_external \
-            --lcov --output-path coverage/operator-integration.lcov -- --nocapture
+          aspect test //crates/operator:all \
+            --coverage --coverage-report=coverage/operator-integration.lcov \
+            --bazel-flag=--config=ci --bazel-flag=--test_arg=--nocapture
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/operator-integration.lcov
-          disable_search: true
-          flags: operator-integration
-          fail_ci_if_error: false
-      - name: Upload test results to Codecov
-        if: ${{ !cancelled() }}
-        uses: codecov/codecov-action@v7
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          report_type: test_results
-          files: target/nextest/ci/junit.xml
           disable_search: true
           flags: operator-integration
           fail_ci_if_error: false
@@ -1576,15 +1270,15 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-bazel
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@v2
         with:
           key: metrics-conformance
-      - uses: taiki-e/install-action@nextest
       - name: PromQL conformance gate
-        run: cargo nextest run -p crabka-promql --profile ci --test conformance
+        run: aspect test //crates/promql:conformance --bazel-flag=--config=ci
       - name: Upload conformance report
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
@@ -1615,6 +1309,7 @@ jobs:
       # like the other Docker-heavy jobs do (leaves Docker images intact for
       # testcontainers).
       - uses: ./.github/actions/free-disk-space
+      - uses: ./.github/actions/setup-bazel
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
@@ -1626,95 +1321,7 @@ jobs:
       # `--ignored` opts the Docker-gated tests in (they're skipped everywhere
       # else). Only the Prometheus suite runs here; Mimir + Grafana stay nightly.
       - name: Prometheus differential suite (Docker, ignored)
-        run: |
-          cargo test -p crabka-metrics-service \
-            --test diff_prometheus \
-            -- --ignored --nocapture
-
-  # Sharded incremental mutation testing (https://mutants.rs): generate mutants
-  # only for the lines this PR changes (`--in-diff`) and distribute them across
-  # deterministic shards. Run after the baseline Rust matrix passes so
-  # cargo-mutants can skip its own baseline and spend the time budget on mutants.
-  # PR-only: `--in-diff` needs a base branch to diff against, so this is skipped
-  # on push to main (skipped != failure, so the gatekeeper still passes).
-  mutation-scope:
-    needs: changes
-    if: ${{ needs.changes.outputs.rust == 'true' && github.event_name == 'pull_request' }}
-    runs-on: ubuntu-latest
-    outputs:
-      run: ${{ steps.scope.outputs.run }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - id: scope
-        name: Check mutation diff size
-        shell: bash
-        run: |
-          git fetch --no-tags origin "${{ github.base_ref }}"
-          changed_lines=$(git diff --numstat "origin/${{ github.base_ref }}...HEAD" -- '*.rs' \
-            ':(exclude)crates/protocol/generated/**' \
-            | awk '{ added += $1; deleted += $2 } END { print added + deleted }')
-          echo "Changed non-generated Rust lines: ${changed_lines}"
-          if (( changed_lines <= 20000 )); then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "Mutation testing skipped: ${changed_lines} changed Rust lines exceeds the 20000-line CI limit."
-            echo "run=false" >> "$GITHUB_OUTPUT"
-          fi
-
-  cargo-mutants:
-    needs:
-      - changes
-      - rust
-      - mutation-scope
-    if: ${{ needs.mutation-scope.outputs.run == 'true' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 180
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
-    env:
-      # Run nextest under the `ci` profile so the test-group serialization in
-      # .config/nextest.toml applies (the fixed-port broker / schema-registry
-      # binaries must not run concurrently within a single mutant's test run).
-      NEXTEST_PROFILE: ci
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          # Full history so we can diff the PR head against its base branch.
-          fetch-depth: 0
-      # Building every crate + rerunning the mutated crate's nextest suite per
-      # mutant fills the runner's ~14 GB free disk; reclaim the unused
-      # preinstalled SDKs like the other heavy Linux jobs do.
-      - uses: ./.github/actions/free-disk-space
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: cargo-mutants
-      - uses: taiki-e/install-action@v2
-        name: Install cargo-mutants using install-action
-        with:
-          tool: cargo-mutants,nextest
-      - name: Compute PR diff
-        # `base...HEAD` (three-dot) diffs from the merge base, so only this PR's
-        # own changes feed `--in-diff`. fetch-depth: 0 above makes the base
-        # branch's history available locally.
-        run: |
-          git fetch --no-tags origin "${{ github.base_ref }}"
-          git diff "origin/${{ github.base_ref }}...HEAD" | tee git.diff
-      - name: Mutants
-        run: |
-          cargo mutants --no-shuffle -vV --shard ${{ matrix.shard }}/32 --baseline=skip --timeout 300 --in-place --in-diff git.diff
-      - name: Archive mutants.out
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          path: mutants.out
-          name: mutants-shard${{ matrix.shard }}.out
+        run: aspect test //crates/metrics-service:diff_prometheus --bazel-flag=--config=ci --bazel-flag=--test_arg=--ignored --bazel-flag=--test_arg=--nocapture
 
   gatekeeper-ci:
     needs:
@@ -1741,7 +1348,6 @@ jobs:
       - operator-integration
       - metrics-conformance
       - metrics-differential-prometheus
-      - cargo-mutants
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 1

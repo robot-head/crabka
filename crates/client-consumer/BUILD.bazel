@@ -1,5 +1,6 @@
 load("@crates//:defs.bzl", "aliases", "all_crate_deps")
-load("@rules_rust//rust:defs.bzl", "rust_library")
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("//:bazel/rust_package.bzl", "cargo_features", "normal_aliases")
 
 # Manifest is consumed by crate_universe (see //MODULE.bazel).
 exports_files(["Cargo.toml"])
@@ -7,13 +8,10 @@ exports_files(["Cargo.toml"])
 rust_library(
     name = "client-consumer",
     srcs = glob(["src/**/*.rs"]),
-    aliases = aliases(),
+    aliases = normal_aliases(),
+    crate_features = cargo_features(),
     crate_name = "crabka_client_consumer",
     edition = "2024",
-    proc_macro_deps = all_crate_deps(proc_macro = True),
     visibility = ["//visibility:public"],
-    deps = all_crate_deps(normal = True) + [
-        "//crates/client-core",
-        "//crates/protocol",
-    ],
+    deps = all_crate_deps(normal = True),
 )

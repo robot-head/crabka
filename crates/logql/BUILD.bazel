@@ -1,0 +1,7 @@
+load("//:bazel/rust_package.bzl", "rust_package")
+
+rust_package(
+    name = "logql",
+    cargo_name = "crabka-logql",
+    crate_name = "crabka_logql",
+)

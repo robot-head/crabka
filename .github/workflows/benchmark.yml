@@ -31,56 +31,19 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.97.1"
-      # Warms the host-side `crabka-bench-report` aggregation build below.
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: benchmark
+      - uses: ./.github/actions/setup-bazel
       - uses: azure/setup-helm@v5
         with:
           version: v4.2.3
-      - uses: actions/setup-go@v7.0.0
-        with:
-          go-version: stable
       - uses: taiki-e/install-action@v2
         with:
           tool: just
 
-      - name: Install melange + apko
-        run: |
-          go install chainguard.dev/melange@latest
-          go install chainguard.dev/apko@latest
-          echo "$HOME/go/bin" >> "$GITHUB_PATH"
-
-      - name: Cache melange/cargo build artifacts
-        uses: actions/cache@v6
-        with:
-          path: .melange-cache
-          key: melange-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            melange-${{ runner.os }}-
-
       - name: Build crabka-operator + crabka-broker + bench-driver images
         run: |
-          mkdir -p packages .melange-cache
-          melange keygen
-          # One compile produces every binary; apko then carves out one image
-          # per service from the shared package set.
-          melange build packaging/melange/crabka.yaml \
-            --source-dir . --signing-key melange.rsa \
-            --arch x86_64 --runner docker \
-            --cache-dir "$PWD/.melange-cache" --out-dir packages/
-          for spec in crabka-operator:crabka-operator crabka-broker:crabka-broker bench-driver:crabka-bench-driver; do
-            recipe="${spec%%:*}"
-            image="${spec#*:}"
-            apko build "packaging/apko/${recipe}.yaml" \
-              "${image}:e2e" "${image}.tar" \
-              --arch x86_64 \
-              --repository-append "$PWD/packages" \
-              --keyring-append "$PWD/melange.rsa.pub"
-          done
+          aspect run //packaging:operator_image_load --bazel-flag=--config=ci
+          aspect run //packaging:broker_image_load --bazel-flag=--config=ci
+          aspect run //packaging:bench_driver_image_load --bazel-flag=--config=ci
 
       - name: Create kind cluster
         uses: helm/kind-action@v1
@@ -93,10 +56,7 @@ jobs:
         run: |
           set -e
           for image in crabka-operator crabka-broker crabka-bench-driver; do
-            docker load -i "${image}.tar" 2>&1 | tee /tmp/load.log
-            loaded=$(sed -n 's/^Loaded image: //p' /tmp/load.log | head -1)
             want="${image}:e2e"
-            if [ "$loaded" != "$want" ]; then docker tag "$loaded" "$want"; fi
             kind load docker-image "$want" --name crabka-bench
           done
 
@@ -131,16 +91,16 @@ jobs:
           for scenario in $BENCH_SCENARIOS; do
             for stack in crabka kafka; do
               echo "═══ $stack / $scenario / $BENCH_TOPOLOGY ═══"
-              bench/scripts/run-scenario.sh "$stack" "$scenario" "$BENCH_TOPOLOGY" \
+              aspect benchmark --task:name="benchmark-$stack-$scenario" \
+                --stack "$stack" --scenario "$scenario" --topology "$BENCH_TOPOLOGY" \
                 || echo "WARN: $stack/$scenario failed (continuing)"
-              bench/scripts/teardown.sh "$stack"
             done
           done
 
       - name: Aggregate report
         if: always()
         run: |
-          cargo run --release -p crabka-bench-driver --bin crabka-bench-report -- \
+          aspect run //crates/bench-driver:crabka-bench-report__bin -- \
             --input-dir bench/results \
             --out bench/results/SUMMARY.md
           echo "──── SUMMARY ────"

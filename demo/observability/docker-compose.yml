@@ -36,8 +36,8 @@ x-otlp-env: &otlp-env
 # instead, build an apko image from the repo root and docker-load/tag it under
 # the same name:
 #   melange keygen melange.rsa
-#   melange build packaging/melange/crabka-demo.yaml --source-dir . --signing-key melange.rsa --arch x86_64 --runner docker --cache-dir "$PWD/.melange-cache" --out-dir packages/
-#   apko build packaging/apko/crabka-demo.yaml ghcr.io/robot-head/crabka-demo:latest crabka-demo.tar --arch x86_64 --repository-append "$PWD/packages" --keyring-append "$PWD/melange.rsa.pub"
+#   aspect run //packaging:demo_image_load --bazel-flag=--config=ci
+#   docker tag crabka-demo:e2e ghcr.io/robot-head/crabka-demo:latest
 #   docker load < crabka-demo.tar
 # then `docker compose up -d` (Compose uses the local image when present).
 x-crabka-image: &crabka-image

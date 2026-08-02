@@ -1,0 +1,7 @@
+load("//:bazel/rust_package.bzl", "rust_package")
+
+rust_package(
+    name = "test-helpers",
+    cargo_name = "crabka-broker-test-helpers",
+    crate_name = "crabka_broker_test_helpers",
+)

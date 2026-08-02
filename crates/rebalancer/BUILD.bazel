@@ -1,0 +1,9 @@
+load("//:bazel/rust_package.bzl", "rust_package")
+
+rust_package(
+    name = "rebalancer",
+    build_script = True,
+    cargo_name = "crabka-rebalancer",
+    crate_name = "crabka_rebalancer",
+    protoc = True,
+)

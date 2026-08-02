@@ -1,0 +1,8 @@
+load("//:bazel/rust_package.bzl", "rust_package")
+
+rust_package(
+    name = "connect-derive",
+    cargo_name = "crabka-connect-derive",
+    crate_name = "crabka_connect_derive",
+    proc_macro = True,
+)

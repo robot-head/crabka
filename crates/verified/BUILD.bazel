@@ -1,0 +1,8 @@
+load("//:bazel/rust_package.bzl", "rust_package")
+
+rust_package(
+    name = "verified",
+    build_script = True,
+    cargo_name = "crabka-verified",
+    crate_name = "crabka_verified",
+)

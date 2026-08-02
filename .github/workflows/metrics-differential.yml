@@ -41,13 +41,7 @@ jobs:
       # preinstalled SDKs like the other Docker-heavy jobs do (leaves Docker
       # images intact for testcontainers).
       - uses: ./.github/actions/free-disk-space
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: metrics-differential
-      - uses: taiki-e/install-action@nextest
+      - uses: ./.github/actions/setup-bazel
       # The in-process Crabka server binds the host; the Grafana container dials
       # it back via the advertised `host.docker.internal` datasource URL. On
       # Linux runners the host has no such resolution, so add it (same trick the
@@ -63,11 +57,13 @@ jobs:
       # Docker-gated tests in (they're skipped everywhere else).
       - name: Metrics differential + integration suites (Docker, ignored)
         run: |
-          cargo test -p crabka-metrics-service \
-            --test diff_prometheus \
-            --test diff_mimir \
-            --test grafana_integration \
-            -- --ignored --nocapture
+          aspect test \
+            //crates/metrics-service:diff_prometheus \
+            //crates/metrics-service:diff_mimir \
+            //crates/metrics-service:grafana_integration \
+            --bazel-flag=--config=ci \
+            --bazel-flag=--test_arg=--ignored \
+            --bazel-flag=--test_arg=--nocapture
       - name: Create issue on failure
         if: ${{ failure() && github.event_name == 'schedule' }}
         uses: actions/github-script@v9

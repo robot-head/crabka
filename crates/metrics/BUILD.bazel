@@ -1,0 +1,15 @@
+load("//:bazel/rust_package.bzl", "rust_package")
+
+filegroup(
+    name = "test_support",
+    srcs = glob(["tests/support/**"]),
+    visibility = ["//visibility:public"],
+)
+
+rust_package(
+    name = "metrics",
+    build_script = True,
+    cargo_name = "crabka-metrics",
+    crate_name = "crabka_metrics",
+    protoc = True,
+)

@@ -12,7 +12,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let includes = ["proto"];
 
     let mut config = prost_build::Config::new();
-    let protoc_path = protoc_bin_vendored::protoc_bin_path()?;
+    let protoc_path = if let Some(path) = std::env::var_os("PROTOC") {
+        path.into()
+    } else {
+        protoc_bin_vendored::protoc_bin_path()?
+    };
     config.protoc_executable(protoc_path);
 
     config.compile_protos(&protos, &includes)?;
