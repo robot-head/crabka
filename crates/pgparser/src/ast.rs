@@ -931,8 +931,40 @@ pub enum OperatorFamilyMember {
         left_type: Option<ColumnType>,
         right_type: Option<ColumnType>,
         function: RelationRef,
-        argument_types: Vec<ColumnType>,
+        argument_types: Vec<OperatorFamilyFunctionType>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperatorFamilyFunctionType {
+    Builtin(ColumnType),
+    Internal,
+}
+
+impl OperatorFamilyFunctionType {
+    #[must_use]
+    pub fn oid(self) -> u32 {
+        match self {
+            Self::Builtin(ty) => ty.oid(),
+            Self::Internal => 2281,
+        }
+    }
+
+    #[must_use]
+    pub const fn column(self) -> Option<ColumnType> {
+        match self {
+            Self::Builtin(ty) => Some(ty),
+            Self::Internal => None,
+        }
+    }
+
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Builtin(ty) => ty.name(),
+            Self::Internal => "internal",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
