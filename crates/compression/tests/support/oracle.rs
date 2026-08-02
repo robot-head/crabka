@@ -31,9 +31,6 @@ impl Oracle {
             base.join("bin/crabka-oracle")
         };
         assert2::assert!(bin.exists());
-        let java_home = std::env::var("JAVA_HOME").unwrap_or_else(|_| {
-            r"C:\Program Files\Eclipse Adoptium\jdk-17.0.19.10-hotspot".to_string()
-        });
         let mut cmd = if cfg!(windows) {
             Command::new(&bin)
         } else {
@@ -41,11 +38,18 @@ impl Oracle {
             c.arg(&bin);
             c
         };
+        if let Some(java_home) = std::env::var_os("JAVA_HOME") {
+            cmd.env("JAVA_HOME", java_home);
+        } else if cfg!(windows) {
+            cmd.env(
+                "JAVA_HOME",
+                r"C:\Program Files\Eclipse Adoptium\jdk-17.0.19.10-hotspot",
+            );
+        }
         let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
-            .env("JAVA_HOME", java_home)
             .spawn()
             .expect("spawn oracle");
         let stdin = child.stdin.take().unwrap();
