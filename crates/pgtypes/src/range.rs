@@ -20,8 +20,20 @@ pub fn canonicalize(
     }
     let inner = &value[1..value.len() - 1];
     let comma = separator(inner, input)?;
-    let lower = bound(&inner[..comma], subtype, tz, input)?;
-    let upper = bound(&inner[comma + 1..], subtype, tz, input)?;
+    let mut lower = bound(&inner[..comma], subtype, tz, input)?;
+    let mut upper = bound(&inner[comma + 1..], subtype, tz, input)?;
+    let mut lower_inclusive = lower.is_some() && bytes[0] == b'[';
+    let mut upper_inclusive = upper.is_some() && bytes[bytes.len() - 1] == b']';
+    if is_discrete(subtype) {
+        if lower.is_some() && !lower_inclusive {
+            lower = lower.map(increment).transpose()?;
+            lower_inclusive = true;
+        }
+        if upper.is_some() && upper_inclusive {
+            upper = upper.map(increment).transpose()?;
+            upper_inclusive = false;
+        }
+    }
     if let (Some(lower), Some(upper)) = (&lower, &upper) {
         match crate::ops::compare(lower, upper)? {
             Some(Ordering::Greater) => {
@@ -31,25 +43,45 @@ pub fn canonicalize(
                         .into(),
                 });
             }
-            Some(Ordering::Equal) if bytes[0] == b'(' || bytes[bytes.len() - 1] == b')' => {
+            Some(Ordering::Equal) if !lower_inclusive || !upper_inclusive => {
                 return Ok("empty".into());
             }
             _ => {}
         }
     }
-    let left = if lower.is_some() && bytes[0] == b'[' {
-        '['
-    } else {
-        '('
-    };
-    let right = if upper.is_some() && bytes[bytes.len() - 1] == b']' {
-        ']'
-    } else {
-        ')'
-    };
+    let left = if lower_inclusive { '[' } else { '(' };
+    let right = if upper_inclusive { ']' } else { ')' };
     let lower = lower.as_ref().map_or_else(String::new, |v| render(v, tz));
     let upper = upper.as_ref().map_or_else(String::new, |v| render(v, tz));
     Ok(format!("{left}{lower},{upper}{right}"))
+}
+
+fn is_discrete(subtype: ColumnType) -> bool {
+    matches!(
+        subtype,
+        ColumnType::Int4 | ColumnType::Int8 | ColumnType::Date
+    )
+}
+
+fn increment(value: Datum) -> Result<Datum, TypeError> {
+    match value {
+        Datum::Int4(value) => value
+            .checked_add(1)
+            .map(Datum::Int4)
+            .ok_or_else(|| TypeError::out_of_range_for("integer")),
+        Datum::Int8(value) => value
+            .checked_add(1)
+            .map(Datum::Int8)
+            .ok_or_else(|| TypeError::out_of_range_for("bigint")),
+        Datum::Date(value) => value
+            .tomorrow()
+            .map(Datum::Date)
+            .map_err(|_| TypeError::Coded {
+                sqlstate: "22008",
+                message: "date out of range".into(),
+            }),
+        _ => Ok(value),
+    }
 }
 
 fn separator(inner: &str, whole: &str) -> Result<usize, TypeError> {
@@ -161,6 +193,25 @@ mod tests {
         assert_eq!(
             canonicalize("((,z)", ColumnType::Text, &tz),
             Ok("(\"(\",z)".into())
+        );
+    }
+
+    #[test]
+    fn discrete_ranges_use_inclusive_exclusive_canonical_form() {
+        let tz = jiff::tz::TimeZone::UTC;
+        assert_eq!(
+            canonicalize("(1,4]", ColumnType::Int4, &tz),
+            Ok("[2,5)".into())
+        );
+        assert_eq!(
+            canonicalize("(1,2)", ColumnType::Int4, &tz),
+            Ok("empty".into())
+        );
+        assert_eq!(
+            canonicalize("[1,2147483647]", ColumnType::Int4, &tz)
+                .expect_err("inclusive maximum cannot be canonicalized")
+                .sqlstate(),
+            "22003"
         );
     }
 }

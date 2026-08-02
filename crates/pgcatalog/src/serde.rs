@@ -227,6 +227,10 @@ pub(crate) fn write_type(out: &mut Vec<u8>, ty: ColumnType) {
             out.push(type_tag::USER);
             out.extend_from_slice(&named.oid.to_be_bytes());
         }
+        ColumnType::Range(range) => {
+            out.push(type_tag::USER);
+            out.extend_from_slice(&range.oid.to_be_bytes());
+        }
         ColumnType::Domain(domain) => {
             out.push(type_tag::USER);
             out.extend_from_slice(&domain.oid.to_be_bytes());
@@ -307,11 +311,17 @@ pub(crate) fn read_type(cur: &mut &[u8]) -> Result<ColumnType, KvError> {
         type_tag::USER => {
             let raw = take_n(cur, 4)?;
             let oid = u32::from_be_bytes(raw.try_into().expect("4 bytes fit u32"));
-            crabka_pgtypes::usertype::lookup_oid(oid)
-                .ok_or_else(|| {
-                    KvError::CorruptRow(format!("column type oid {oid} is not a registered type"))
-                })?
-                .column_type()
+            if let Some(range) = crabka_pgtypes::ColumnType::builtin_range(oid) {
+                range
+            } else {
+                crabka_pgtypes::usertype::lookup_oid(oid)
+                    .ok_or_else(|| {
+                        KvError::CorruptRow(format!(
+                            "column type oid {oid} is not a registered type"
+                        ))
+                    })?
+                    .column_type()
+            }
         }
         other => {
             return Err(KvError::CorruptRow(format!(
@@ -1845,6 +1855,7 @@ mod tests {
             ColumnType::Uuid,
             ColumnType::Regclass,
             ColumnType::Jsonb,
+            ColumnType::builtin_range(crabka_pgtypes::oids::INT4RANGE).expect("built-in range"),
         ];
 
         // Every element type has an array type, and the length-modified families

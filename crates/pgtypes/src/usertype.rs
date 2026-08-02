@@ -63,6 +63,26 @@ pub struct DomainRef {
     pub base: &'static ColumnType,
 }
 
+/// A range type's identity and bound type.
+#[derive(Debug, Clone, Copy, Eq)]
+pub struct RangeRef {
+    pub oid: u32,
+    pub name: &'static str,
+    pub subtype: &'static ColumnType,
+}
+
+impl PartialEq for RangeRef {
+    fn eq(&self, other: &Self) -> bool {
+        self.oid == other.oid
+    }
+}
+
+impl std::hash::Hash for RangeRef {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.oid.hash(state);
+    }
+}
+
 impl PartialEq for DomainRef {
     fn eq(&self, other: &Self) -> bool {
         self.oid == other.oid
@@ -165,12 +185,10 @@ impl UserType {
         match &self.body {
             UserTypeBody::Composite(_) => ColumnType::Record(Some(self.type_ref())),
             UserTypeBody::Enum(_) => ColumnType::Enum(self.type_ref()),
-            // ponytail: preserve range text through the existing domain storage
-            // path until native bounds/operators require a dedicated datum.
-            UserTypeBody::Range(_) => ColumnType::Domain(DomainRef {
+            UserTypeBody::Range(range) => ColumnType::Range(RangeRef {
                 oid: self.oid,
                 name: intern(&self.name),
-                base: leak_column_type(ColumnType::Text),
+                subtype: leak_column_type(range.subtype),
             }),
             UserTypeBody::Domain(domain) => ColumnType::Domain(DomainRef {
                 oid: self.oid,

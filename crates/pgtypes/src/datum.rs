@@ -7,7 +7,7 @@
 
 use crate::{
     numeric::{NumericValue, Typmod},
-    usertype::{DomainRef, UserTypeRef},
+    usertype::{DomainRef, RangeRef, UserTypeRef},
 };
 
 /// PostgreSQL type OIDs (from pg_type.dat) for the slice's types.
@@ -64,6 +64,18 @@ pub mod oids {
     pub const JSON: u32 = 114;
     /// PostgreSQL `jsonb` — the decomposed binary JSON type.
     pub const JSONB: u32 = 3802;
+    pub const INT4RANGE: u32 = 3904;
+    pub const INT4RANGEARRAY: u32 = 3905;
+    pub const NUMRANGE: u32 = 3906;
+    pub const NUMRANGEARRAY: u32 = 3907;
+    pub const TSRANGE: u32 = 3908;
+    pub const TSRANGEARRAY: u32 = 3909;
+    pub const TSTZRANGE: u32 = 3910;
+    pub const TSTZRANGEARRAY: u32 = 3911;
+    pub const DATERANGE: u32 = 3912;
+    pub const DATERANGEARRAY: u32 = 3913;
+    pub const INT8RANGE: u32 = 3926;
+    pub const INT8RANGEARRAY: u32 = 3927;
     /// `json[]`.
     pub const JSONARRAY: u32 = 199;
     /// `jsonb[]`.
@@ -229,6 +241,7 @@ impl ElemType {
             | ColumnType::Array(_)
             | ColumnType::Record(_)
             | ColumnType::Enum(_)
+            | ColumnType::Range(_)
             | ColumnType::Domain(_) => return None,
         })
     }
@@ -443,6 +456,8 @@ pub enum ColumnType {
     Record(Option<UserTypeRef>),
     /// `CREATE TYPE … AS ENUM (…)`.
     Enum(UserTypeRef),
+    /// A built-in or user-defined range type.
+    Range(RangeRef),
     /// `CREATE DOMAIN … AS base` — a base type plus constraints. Values are the
     /// base type's values; what the domain adds is the constraint check on
     /// assignment and cast, and the type it reports.
@@ -450,6 +465,21 @@ pub enum ColumnType {
 }
 
 impl ColumnType {
+    /// Resolve a built-in PostgreSQL range oid.
+    #[must_use]
+    pub fn builtin_range(oid: u32) -> Option<Self> {
+        let (name, subtype) = match oid {
+            oids::INT4RANGE => ("int4range", &ColumnType::Int4),
+            oids::NUMRANGE => ("numrange", &ColumnType::Numeric(None)),
+            oids::TSRANGE => ("tsrange", &ColumnType::Timestamp),
+            oids::TSTZRANGE => ("tstzrange", &ColumnType::Timestamptz),
+            oids::DATERANGE => ("daterange", &ColumnType::Date),
+            oids::INT8RANGE => ("int8range", &ColumnType::Int8),
+            _ => return None,
+        };
+        Some(ColumnType::Range(RangeRef { oid, name, subtype }))
+    }
+
     /// Resolve a bare SQL type name (no modifier). `numeric`/`decimal` resolve to
     /// the unconstrained form; the parser layers the `(p, s)` modifier on top.
     pub fn from_sql_name(name: &str) -> Option<Self> {
@@ -504,6 +534,12 @@ impl ColumnType {
             // The anonymous composite type. `SELECT ROW(1,2)` has it, and it is
             // the declared parameter type of `json_populate_record(record, …)`.
             "record" => Some(ColumnType::Record(None)),
+            "int4range" => ColumnType::builtin_range(oids::INT4RANGE),
+            "numrange" => ColumnType::builtin_range(oids::NUMRANGE),
+            "tsrange" => ColumnType::builtin_range(oids::TSRANGE),
+            "tstzrange" => ColumnType::builtin_range(oids::TSTZRANGE),
+            "daterange" => ColumnType::builtin_range(oids::DATERANGE),
+            "int8range" => ColumnType::builtin_range(oids::INT8RANGE),
             // A name that is not built in may be a user-defined type; the
             // registry the DDL writes into is what makes `x::my_type` resolve.
             other => crate::usertype::column_type_for_name(other),
@@ -578,6 +614,7 @@ impl ColumnType {
             ColumnType::Array(elem) => elem.array_oid(),
             ColumnType::Record(None) => oids::RECORD,
             ColumnType::Record(Some(named)) | ColumnType::Enum(named) => named.oid,
+            ColumnType::Range(range) => range.oid,
             ColumnType::Domain(domain) => domain.oid,
         }
     }
@@ -612,6 +649,7 @@ impl ColumnType {
             ColumnType::Array(elem) => elem.array_name(),
             ColumnType::Record(None) => "record",
             ColumnType::Record(Some(named)) | ColumnType::Enum(named) => named.name,
+            ColumnType::Range(range) => range.name,
             ColumnType::Domain(domain) => domain.name,
         }
     }
@@ -643,6 +681,7 @@ impl ColumnType {
             ColumnType::Jsonb | ColumnType::Array(_) | ColumnType::Record(_) => -1,
             // `pg_type.typlen` of an enum is 4 (the oid of its pg_enum row).
             ColumnType::Enum(_) => 4,
+            ColumnType::Range(_) => -1,
             // A domain has its base type's storage.
             ColumnType::Domain(domain) => domain.base.type_size(),
         }
@@ -1365,6 +1404,26 @@ mod tests {
         );
         assert_eq!(ColumnType::from_sql_name("widget"), None);
         assert_eq!(ColumnType::from_sql_name("uuid"), Some(ColumnType::Uuid));
+    }
+
+    #[test]
+    fn built_in_ranges_keep_postgres_identity_and_subtype() {
+        for (name, oid, subtype) in [
+            ("int4range", oids::INT4RANGE, ColumnType::Int4),
+            ("numrange", oids::NUMRANGE, ColumnType::Numeric(None)),
+            ("tsrange", oids::TSRANGE, ColumnType::Timestamp),
+            ("tstzrange", oids::TSTZRANGE, ColumnType::Timestamptz),
+            ("daterange", oids::DATERANGE, ColumnType::Date),
+            ("int8range", oids::INT8RANGE, ColumnType::Int8),
+        ] {
+            let Some(ColumnType::Range(range)) = ColumnType::from_sql_name(name) else {
+                panic!("{name} must resolve as a range");
+            };
+            assert_eq!(
+                (range.oid, range.name, *range.subtype),
+                (oid, name, subtype)
+            );
+        }
     }
 
     /// `oid` resolves as a type name (drivers' typeinfo queries cast
