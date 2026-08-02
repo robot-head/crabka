@@ -10,7 +10,7 @@ readonly ITERATIONS="${CRABKA_GRES_COLDSTART_ITERATIONS:-10}"
 readonly P95_CEILING_MS="${CRABKA_GRES_COLDSTART_P95_CEILING_MS:-30000}"
 readonly PGPASSWORD_VALUE="${CRABKA_GRES_KIND_PASSWORD:-g5-secret-password}"
 readonly PGDOG_IMAGE="ghcr.io/pgdogdev/pgdog:0.1.47"
-readonly IMAGE_TAG="g5-e2e"
+readonly IMAGE_TAG="e2e"
 # Safety margin between a wake no-roll observation and the operator-stamped
 # pgdogCredentialGraceUntilUnixMs deadline. The host and the Kind node share a
 # kernel clock, so this only needs to absorb the gap between the kubectl reads
@@ -52,11 +52,10 @@ deadline_wait() {
     done
 }
 
-build_image() {
-    local binary=$1 image=$2
-    timeout 300s docker build --build-context binaries=target/release --build-arg "BINARY=$binary" \
-        -f packaging/docker/Dockerfile.local-binary -t "$image" . \
-        >"$ARTIFACT_DIR/build-${binary}.log" 2>&1
+load_image() {
+    local target=$1 image=$2
+    timeout 900s bazel run --config=ci "//packaging:${target}_image_load" \
+        >"$ARTIFACT_DIR/load-${target}.log" 2>&1
     timeout 120s kind load docker-image "$image" --name "$CLUSTER"
 }
 
@@ -118,7 +117,7 @@ print((time.monotonic_ns() - start) // 1_000_000)
 PY
 }
 
-for command in kind kubectl docker cargo openssl psql python3 timeout; do need "$command"; done
+for command in kind kubectl docker bazel openssl psql python3 timeout; do need "$command"; done
 [[ "$ITERATIONS" =~ ^[1-9][0-9]*$ ]] || fail "iterations must be positive"
 rm -rf "$ARTIFACT_DIR"
 mkdir -p "$ARTIFACT_DIR"
@@ -126,12 +125,10 @@ mkdir -p "$ARTIFACT_DIR"
 timeout 90s kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
 timeout 180s kind create cluster --name "$CLUSTER" --wait 120s
 
-timeout 900s cargo build --locked --release \
-    -p crabka-cli -p crabka-operator -p crabka-broker -p crabka-gres -p crabka-gres-activator
-build_image crabka-operator "crabka-operator:$IMAGE_TAG"
-build_image crabka-broker "crabka-broker:$IMAGE_TAG"
-build_image crabka-gres "crabka-gres:$IMAGE_TAG"
-build_image crabka-gres-activator "crabka-gres-activator:$IMAGE_TAG"
+load_image operator "crabka-operator:$IMAGE_TAG"
+load_image broker "crabka-broker:$IMAGE_TAG"
+load_image gres "crabka-gres:$IMAGE_TAG"
+load_image gres_activator "crabka-gres-activator:$IMAGE_TAG"
 timeout 180s docker pull "$PGDOG_IMAGE"
 # PgDog publishes a multi-platform OCI index that `kind load docker-image`
 # cannot reliably flatten. Let containerd pull the exact pinned digest/tag.
