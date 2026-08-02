@@ -4,6 +4,10 @@ inputs:
   aspect-api-token:
     description: Aspect API token.
     required: true
+  bazelrc:
+    description: Additional Bazel configuration for this job.
+    required: false
+    default: ''
 runs:
   using: composite
   steps:
@@ -21,3 +25,7 @@ runs:
     - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
       with:
         aspect-api-token: ${{ inputs.aspect-api-token }}
+        bazelisk-cache: false
+        disk-cache: false
+        repository-cache: false
+        bazelrc: ${{ inputs.bazelrc }}
