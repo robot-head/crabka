@@ -2608,7 +2608,10 @@ fn json_or_array_operator_result_type(
         }
         _ => {}
     }
-    None
+    let storage = (lt.storage_type(), rt.storage_type());
+    (storage != (lt, rt))
+        .then(|| json_or_array_operator_result_type(op, storage.0, storage.1))
+        .flatten()
 }
 
 fn range_family_compatible(left: ColumnType, right: ColumnType) -> bool {
@@ -4324,5 +4327,44 @@ mod tests {
                 "{sql}"
             );
         }
+    }
+
+    #[test]
+    fn range_operators_resolve_domains_by_their_storage_type() {
+        let base = Box::leak(Box::new(
+            ColumnType::builtin_multirange(crabka_pgtypes::oids::INT4MULTIRANGE)
+                .expect("int4multirange"),
+        ));
+        let domain = ColumnType::Domain(crabka_pgtypes::usertype::DomainRef {
+            oid: 900_001,
+            name: "restrictedmultirange_test",
+            base,
+        });
+        assert_eq!(
+            json_or_array_operator_result_type(BinaryOp::Contains, domain, ColumnType::Int4),
+            Some(ColumnType::Bool)
+        );
+
+        let subtype = Box::leak(Box::new(ColumnType::Domain(
+            crabka_pgtypes::usertype::DomainRef {
+                oid: 900_002,
+                name: "range_subtype_domain_test",
+                base: Box::leak(Box::new(ColumnType::Int4)),
+            },
+        )));
+        let range = crabka_pgtypes::usertype::RangeRef {
+            oid: 900_003,
+            name: "range_over_domain_test",
+            subtype,
+        };
+        let multirange = ColumnType::Multirange(crabka_pgtypes::usertype::MultirangeRef {
+            oid: 900_004,
+            name: "multirange_over_domain_test",
+            range,
+        });
+        assert_eq!(
+            json_or_array_operator_result_type(BinaryOp::Contains, multirange, *subtype),
+            Some(ColumnType::Bool)
+        );
     }
 }
