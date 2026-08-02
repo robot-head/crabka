@@ -3330,6 +3330,7 @@ pub fn drop_table(kv: &dyn Kv, name: &RelationName) -> Result<(), CatalogError> 
 // ── Roles and table privileges ────────────────────────────────────────────────
 
 const ROLE_PREFIX: &[u8] = b"catalog/role/";
+const ROLE_MEMBERSHIP_PREFIX: &[u8] = b"catalog/role_membership/";
 const TABLE_PRIVILEGE_PREFIX: &[u8] = b"catalog/table_privilege/";
 
 /// Create a role or login-capable user metadata row.
@@ -3360,6 +3361,61 @@ pub fn create_role_ops(
         key: role_key(name),
         value: serialize_role(name, can_login),
     }])
+}
+
+/// Build the atomic role row and `IN ROLE` membership records.
+///
+/// # Errors
+///
+/// Returns duplicate/undefined-object or catalog storage errors.
+pub fn create_role_with_memberships_ops(
+    kv: &dyn Kv,
+    name: &str,
+    can_login: bool,
+    member_of: &[String],
+) -> Result<Vec<WriteOp>, CatalogError> {
+    let mut ops = create_role_ops(kv, name, can_login)?;
+    for role in member_of {
+        if !role_exists(kv, role)? {
+            return Err(CatalogError::UndefinedObject(role.clone()));
+        }
+        ops.push(WriteOp::Put {
+            key: role_membership_key(name, role),
+            value: Vec::new(),
+        });
+    }
+    Ok(ops)
+}
+
+/// Whether `member` may assume `role`, including inherited memberships.
+///
+/// # Errors
+///
+/// Returns catalog storage or corruption errors.
+pub fn role_can_set(kv: &dyn Kv, member: &str, role: &str) -> Result<bool, CatalogError> {
+    if member == role || member == BOOTSTRAP_ROLE {
+        return Ok(true);
+    }
+    let memberships = kv.scan_prefix(ROLE_MEMBERSHIP_PREFIX)?;
+    let mut pending = vec![member.to_string()];
+    let mut seen = HashSet::new();
+    while let Some(current) = pending.pop() {
+        if !seen.insert(current.clone()) {
+            continue;
+        }
+        for (key, _) in &memberships {
+            let Some(parts) = key::key_parts(&key[ROLE_MEMBERSHIP_PREFIX.len()..], 2) else {
+                return Err(KvError::CorruptRow("role membership key is incomplete".into()).into());
+            };
+            if parts[0] == current {
+                if parts[1] == role {
+                    return Ok(true);
+                }
+                pending.push(parts[1].to_string());
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// Look up a role by name.
@@ -3441,6 +3497,14 @@ pub fn drop_role_ops(kv: &dyn Kv, name: &str) -> Result<Vec<WriteOp>, CatalogErr
             ops.push(WriteOp::Delete { key });
         }
     }
+    for (key, _) in kv.scan_prefix(ROLE_MEMBERSHIP_PREFIX)? {
+        let Some(parts) = key::key_parts(&key[ROLE_MEMBERSHIP_PREFIX.len()..], 2) else {
+            return Err(KvError::CorruptRow("role membership key is incomplete".into()).into());
+        };
+        if parts.contains(&name) {
+            ops.push(WriteOp::Delete { key });
+        }
+    }
     Ok(ops)
 }
 
@@ -3517,6 +3581,13 @@ fn scan_table_privileges(kv: &dyn Kv) -> Result<Vec<(Vec<u8>, TablePrivilege)>, 
 fn role_key(name: &str) -> Vec<u8> {
     let mut key = ROLE_PREFIX.to_vec();
     key.extend_from_slice(name.as_bytes());
+    key
+}
+
+fn role_membership_key(member: &str, role: &str) -> Vec<u8> {
+    let mut key = ROLE_MEMBERSHIP_PREFIX.to_vec();
+    key::push_key_part(&mut key, member);
+    key::push_key_part(&mut key, role);
     key
 }
 
