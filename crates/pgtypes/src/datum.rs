@@ -41,6 +41,8 @@ pub mod oids {
     pub const FLOAT8: u32 = 701;
     /// PostgreSQL geometric point.
     pub const POINT: u32 = 600;
+    /// PostgreSQL geometric path.
+    pub const PATH: u32 = 602;
     /// SP32: arbitrary-precision `numeric`/`decimal`.
     pub const NUMERIC: u32 = 1700;
     /// SP37: `date` — days since 2000-01-01, stored as i32.
@@ -220,6 +222,7 @@ impl ElemType {
             // array of them would need an element oid the array encoder cannot
             // name, so callers report 0A000 rather than mis-encoding.
             ColumnType::Point
+            | ColumnType::Path
             | ColumnType::Regclass
             | ColumnType::TsVector
             | ColumnType::TsQuery
@@ -399,6 +402,8 @@ pub enum ColumnType {
     Float8,
     /// PostgreSQL `point` (OID 600): two double-precision coordinates.
     Point,
+    /// PostgreSQL `path` (OID 602): an open or closed point sequence.
+    Path,
     /// SP32: PostgreSQL `numeric`/`decimal`. The `Typmod` (precision, scale) is
     /// significant only when storing/casting; OID/name/typlen ignore it.
     Numeric(Option<Typmod>),
@@ -476,6 +481,7 @@ impl ColumnType {
             // parser before it reaches here.
             "float8" | "float" | "double precision" => Some(ColumnType::Float8),
             "point" => Some(ColumnType::Point),
+            "path" => Some(ColumnType::Path),
             "float4" | "real" => Some(ColumnType::Float4),
             // SP32: `numeric`/`decimal` (unconstrained here; typmod added by parser).
             "numeric" | "decimal" => Some(ColumnType::Numeric(None)),
@@ -555,6 +561,7 @@ impl ColumnType {
             ColumnType::Float4 => oids::FLOAT4,
             ColumnType::Float8 => oids::FLOAT8,
             ColumnType::Point => oids::POINT,
+            ColumnType::Path => oids::PATH,
             ColumnType::Numeric(_) => oids::NUMERIC,
             ColumnType::Date => oids::DATE,
             ColumnType::Time => oids::TIME,
@@ -588,6 +595,7 @@ impl ColumnType {
             ColumnType::Float4 => "real",
             ColumnType::Float8 => "double precision",
             ColumnType::Point => "point",
+            ColumnType::Path => "path",
             ColumnType::Numeric(_) => "numeric",
             ColumnType::Date => "date",
             ColumnType::Time => "time without time zone",
@@ -619,6 +627,7 @@ impl ColumnType {
             ColumnType::Float4 => 4,
             ColumnType::Float8 => 8,
             ColumnType::Point => 16,
+            ColumnType::Path => -1,
             ColumnType::Numeric(_) => -1,
             ColumnType::Date => 4,
             ColumnType::Time => 8,
@@ -695,6 +704,8 @@ pub enum Datum {
     Float8(f64),
     /// PostgreSQL geometric point.
     Point(crate::geometry::Point),
+    /// PostgreSQL geometric path.
+    Path(crate::geometry::Path),
     /// SP32: PostgreSQL `numeric` — an arbitrary-precision exact decimal, or one
     /// of the `NaN` / `±Infinity` specials.
     Numeric(NumericValue),
@@ -1046,6 +1057,7 @@ impl PartialEq for Datum {
             (Datum::Float4(a), Datum::Float4(b)) => a == b || (a.is_nan() && b.is_nan()),
             (Datum::Float8(a), Datum::Float8(b)) => a == b || (a.is_nan() && b.is_nan()),
             (Datum::Point(a), Datum::Point(b)) => a == b,
+            (Datum::Path(a), Datum::Path(b)) => a == b,
             // SP32: numeric grouping equality is by VALUE, ignoring scale, so
             // `1.0` and `1.00` group together (`bigdecimal`'s `==` already does
             // this), and — as in PostgreSQL's `numeric_eq` — `NaN` equals `NaN`.
@@ -1117,6 +1129,7 @@ impl std::hash::Hash for Datum {
                 bits.hash(state);
             }
             Datum::Point(point) => point.hash(state),
+            Datum::Path(path) => path.hash(state),
             // SP32: `NumericValue` hashes the scale-normalized form so values
             // that compare equal (`1.0` and `1.00`) hash equally.
             Datum::Numeric(d) => d.hash(state),
@@ -1157,6 +1170,7 @@ impl Datum {
             Datum::Float4(_) => Some(ColumnType::Float4),
             Datum::Float8(_) => Some(ColumnType::Float8),
             Datum::Point(_) => Some(ColumnType::Point),
+            Datum::Path(_) => Some(ColumnType::Path),
             // The runtime value carries no typmod — it is unconstrained `numeric`.
             Datum::Numeric(_) => Some(ColumnType::Numeric(None)),
             Datum::Date(_) => Some(ColumnType::Date),

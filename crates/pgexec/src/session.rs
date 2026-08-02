@@ -9328,6 +9328,7 @@ fn param_column_type(param: &BoundParam) -> Result<Option<ColumnType>, PgError> 
         Some(crabka_pgtypes::oids::FLOAT4) => Ok(Some(ColumnType::Float4)),
         Some(crabka_pgtypes::oids::FLOAT8) => Ok(Some(ColumnType::Float8)),
         Some(crabka_pgtypes::oids::POINT) => Ok(Some(ColumnType::Point)),
+        Some(crabka_pgtypes::oids::PATH) => Ok(Some(ColumnType::Path)),
         Some(crabka_pgtypes::oids::NUMERIC) => Ok(Some(ColumnType::Numeric(None))),
         Some(crabka_pgtypes::oids::BYTEA) => Ok(Some(ColumnType::Bytea)),
         Some(crabka_pgtypes::oids::UUID) => Ok(Some(ColumnType::Uuid)),
@@ -9413,6 +9414,30 @@ fn decode_binary_value(
             Ok(Datum::Point(crabka_pgtypes::Point {
                 x: f64::from_be_bytes(bytes[..8].try_into().expect("8 bytes")),
                 y: f64::from_be_bytes(bytes[8..].try_into().expect("8 bytes")),
+            }))
+        }
+        ColumnType::Path => {
+            let Some((&closed, body)) = value.split_first() else {
+                return Err(malformed_binary_parameter());
+            };
+            if !matches!(closed, 0 | 1) || body.len() < 4 {
+                return Err(malformed_binary_parameter());
+            }
+            let count = usize::try_from(i32::from_be_bytes(body[..4].try_into().expect("4 bytes")))
+                .map_err(|_| malformed_binary_parameter())?;
+            if body.len() != 4 + count.saturating_mul(16) {
+                return Err(malformed_binary_parameter());
+            }
+            let points = body[4..]
+                .chunks_exact(16)
+                .map(|bytes| crabka_pgtypes::Point {
+                    x: f64::from_be_bytes(bytes[..8].try_into().expect("8 bytes")),
+                    y: f64::from_be_bytes(bytes[8..].try_into().expect("8 bytes")),
+                })
+                .collect();
+            Ok(Datum::Path(crabka_pgtypes::Path {
+                closed: closed == 1,
+                points,
             }))
         }
         ColumnType::Numeric(_) => crabka_pgtypes::numeric::from_binary(value)

@@ -24,6 +24,6 @@ pub use datum::{
     RegclassValue, canonicalize_for_key, canonicalize_row_for_key, oids,
 };
 pub use error::TypeError;
-pub use geometry::Point;
+pub use geometry::{Path, Point};
 pub use jsonb::JsonbValue;
 pub use text_search::{Lexeme, Position, QueryTerm, TsQuery, TsVector, Weight};

@@ -3116,9 +3116,11 @@ mod point_type_tests {
         let mut session = engine.connect();
         session
             .simple_query(
-                "CREATE TABLE point_values (p point); \
-                 INSERT INTO point_values VALUES ('(0,0)'), (' ( NaN , Infinity ) '); \
-                 SELECT p FROM point_values",
+                "CREATE TABLE point_values (p point, route path); \
+                 INSERT INTO point_values VALUES \
+                    ('(0,0)', '[(-1,2),(3,4)]'), \
+                    (' ( NaN , Infinity ) ', '((0,0),(1,1))'); \
+                 SELECT p, route FROM point_values",
             )
             .await
             .expect("point values round trip through a table");

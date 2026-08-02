@@ -276,6 +276,7 @@ pub fn cast_in(
         (Datum::Float4(f), Float4) => Ok(Datum::Float4(*f)),
         (Datum::Float8(f), Float8) => Ok(Datum::Float8(*f)),
         (Datum::Point(point), ColumnType::Point) => Ok(Datum::Point(*point)),
+        (Datum::Path(path), ColumnType::Path) => Ok(Datum::Path(path.clone())),
         (Datum::Text(s), Text) => Ok(Datum::Text(s.clone())),
         (Datum::Text(s), ColumnType::Varchar(n)) => {
             crate::string::apply_varchar_typmod(s, n, Coercion::Explicit).map(Datum::Text)
@@ -394,6 +395,7 @@ pub fn cast_in(
         (Datum::Text(s), Float4) => text_to_f32(s),
         (Datum::Text(s), Float8) => text_to_f64(s),
         (Datum::Text(s), ColumnType::Point) => crate::Point::parse(s).map(Datum::Point),
+        (Datum::Text(s), ColumnType::Path) => crate::Path::parse(s).map(Datum::Path),
         // `regclass` → the oid family drops the name and keeps the oid, which is
         // what `regclass::oid`/`::int` yields in PostgreSQL.
         (Datum::Regclass(r), ColumnType::Regclass) => Ok(Datum::Regclass(r.clone())),

@@ -1638,6 +1638,7 @@ fn to_jsonb(d: &Datum, ctx: &EvalCtx) -> Result<JsonbValue, ExecError> {
         // `to_jsonb('pp'::regclass)` is `"pp"`, its output function's text.
         Datum::Text(_)
         | Datum::Point(_)
+        | Datum::Path(_)
         | Datum::Date(_)
         | Datum::Time(_)
         | Datum::Timetz(_)

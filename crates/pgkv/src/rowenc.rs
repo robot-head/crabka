@@ -46,6 +46,8 @@ mod tag {
     pub const TSQUERY: u8 = 21;
     /// Geometric point (`[22][f64 x][f64 y]`). Append-only.
     pub const POINT: u8 = 22;
+    /// Geometric path. Append-only.
+    pub const PATH: u8 = 23;
 }
 
 /// Encode one row using the current storage format.
@@ -100,6 +102,16 @@ fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
                 out.push(tag::POINT);
                 out.extend_from_slice(&point.x.to_be_bytes());
                 out.extend_from_slice(&point.y.to_be_bytes());
+            }
+            Datum::Path(path) => {
+                out.push(tag::PATH);
+                out.push(u8::from(path.closed));
+                let count = u32::try_from(path.points.len()).expect("path exceeds 2^32 points");
+                out.extend_from_slice(&count.to_be_bytes());
+                for point in &path.points {
+                    out.extend_from_slice(&point.x.to_be_bytes());
+                    out.extend_from_slice(&point.y.to_be_bytes());
+                }
             }
             Datum::Numeric(d) => {
                 out.push(tag::NUMERIC);
@@ -323,6 +335,26 @@ fn decode_field(cur: &mut &[u8]) -> Result<Datum, KvError> {
                     .expect("8 bytes fit a point coordinate"),
             );
             Datum::Point(crabka_pgtypes::Point { x, y })
+        }
+        tag::PATH => {
+            let closed = match take_u8(cur)? {
+                0 => false,
+                1 => true,
+                flag => {
+                    return Err(KvError::CorruptRow(format!(
+                        "invalid path closed flag {flag}"
+                    )));
+                }
+            };
+            let count = usize::try_from(u32::from_be_bytes(take_n(cur, 4)?.try_into().expect("4")))
+                .expect("u32 fits usize");
+            let mut points = Vec::with_capacity(count);
+            for _ in 0..count {
+                let x = f64::from_be_bytes(take_n(cur, 8)?.try_into().expect("8"));
+                let y = f64::from_be_bytes(take_n(cur, 8)?.try_into().expect("8"));
+                points.push(crabka_pgtypes::Point { x, y });
+            }
+            Datum::Path(crabka_pgtypes::Path { closed, points })
         }
         tag::BYTEA => {
             let len = take_u32_len(cur)?;
