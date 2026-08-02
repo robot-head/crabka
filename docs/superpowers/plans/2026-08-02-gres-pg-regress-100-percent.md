@@ -13,8 +13,8 @@
 **Files:** Create `scripts/gres-pg-regress.sh`; modify `.github/workflows/ci.yml`; update `crates/gres-conformance/README.md`.
 
 - [ ] Fetch the `REL_18_4` source archive into `target/` and verify a pinned SHA-256 before extracting `src/test/regress`.
-- [ ] Build or locate the matching PostgreSQL 18.4 `pg_regress` and `psql`; do not write a custom transcript comparator.
-- [ ] Start fixed-locale clean PostgreSQL and Gres endpoints, then run PostgreSQL against itself as a harness self-check.
+- [ ] Build the matching PostgreSQL 18.4 `pg_regress`, `psql`, and `src/test/regress/regress` shared library from that verified source; export its directory and platform suffix through `PG_LIBDIR` and `PG_DLSUFFIX` so tests using `:regresslib` load the pinned module.
+- [ ] Start a fixed-locale PostgreSQL oracle from an exact `postgres:18.4` image digest, fail unless `SELECT version()` reports 18.4, start a clean Gres endpoint, then run PostgreSQL against itself as a harness self-check.
 - [ ] Run Gres with the official `--use-existing --dbname=crab` path, retaining `regression.diffs`, per-test output, server logs, and exit status under one artifact directory.
 - [ ] Prove the self-check passes both the serial and parallel schedules before using the runner's Gres result as evidence.
 
@@ -22,14 +22,15 @@
 
 ## Task 2: Establish a monotone progressive gate
 
-**Files:** Create `crates/gres-conformance/pg-regress-known-failures.txt`; modify `scripts/gres-pg-regress.sh` and `.github/workflows/ci.yml`.
+**Files:** Create `crates/gres-conformance/pg-regress-baseline.json`; modify `scripts/gres-pg-regress.sh` and `.github/workflows/ci.yml`.
 
-- [ ] Seed the allowlist from the first clean upstream run, one failing test name per line with no wildcard or reason-free category.
-- [ ] Fail CI when a passing test regresses, an upstream scheduled test disappears, or a known failure starts passing without being removed from the list.
+- [ ] Seed one entry per failing test from the first clean upstream run, recording the test name, mismatched unified-diff hunk/line count, and SHA-256 of that test's diff; do not permit wildcards or reason-free categories.
+- [ ] Fail CI when a passing test regresses, an upstream scheduled test disappears, a known failure starts passing without removal, its mismatch count increases, or its diff fingerprint changes without a reviewed baseline update.
+- [ ] Permit a baseline update only when the owning test's mismatch count decreases or the test is removed; the changed fingerprint and supporting result artifact land in the same review.
 - [ ] Keep the existing per-statement baseline for local root-cause ranking, but label it adopted-corpus parity everywhere.
-- [ ] Publish upstream passed/total and the shrinking failure list in the job summary.
+- [ ] Publish upstream passed/total and the shrinking per-test mismatch baseline in the job summary.
 
-**Gate:** The wrapper distinguishes a new failure, a removed failure, and an unchanged failure set; the checked-in list can only shrink.
+**Gate:** The wrapper distinguishes new, removed, improved, worsened, and same-count-but-different failures; the checked-in mismatch surface can only shrink.
 
 ## Task 3: Remove harness and setup blockers
 
@@ -39,7 +40,7 @@
 - [ ] Match complete wire-visible outcomes needed by `psql`: notices, warnings, diagnostics, command tags, row counts, headings, and COPY state transitions.
 - [ ] Eliminate nondeterministic unordered results rather than weakening comparisons.
 - [ ] Treat every crash, I/O loss, or timeout as a harness failure, never as an SQL mismatch or a match on two dead connections.
-- [ ] Re-run the full serial schedule after each shared fix and remove only newly passing tests from the allowlist.
+- [ ] Re-run the full serial schedule after each shared fix and ratchet only tests whose recorded mismatch surface shrank.
 
 **Gate:** Every remaining failure reproduces as an engine semantic difference; infrastructure failures are zero.
 
@@ -81,7 +82,7 @@ Literal 231 / 231 is incompatible with retaining PostgreSQL-visible exclusions e
 
 ## Task 7: Certify and simplify
 
-- [ ] Empty and delete `pg-regress-known-failures.txt`.
+- [ ] Empty and delete `pg-regress-baseline.json`.
 - [ ] Change the published compatibility headline to the upstream passed/total result.
 - [ ] Keep the hand-written and extended-protocol corpora for focused coverage, but remove the duplicate adopted-corpus headline and any obsolete runner code.
 - [ ] Record the PostgreSQL tag, archive hash, commands, artifacts, and three clean run IDs in a dated evidence document.
