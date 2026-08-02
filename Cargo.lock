@@ -2984,6 +2984,7 @@ dependencies = [
  "crabka-trace-context",
  "crabka-units",
  "derive_more",
+ "futures",
  "opentelemetry",
  "opentelemetry_sdk",
  "proptest",
