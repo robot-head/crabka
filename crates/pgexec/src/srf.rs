@@ -1058,6 +1058,11 @@ fn unnest_columns(name: &str, given: &[ArgType]) -> Result<Vec<ColumnBinding>, E
         .iter()
         .map(|arg| {
             let ty = arg.known().ok_or_else(|| undefined_function(name, given))?;
+            if let ColumnType::Multirange(multirange) = ty
+                && given.len() == 1
+            {
+                return Ok(column("unnest", ColumnType::Range(multirange.range)));
+            }
             let elem = ty
                 .array_element()
                 .ok_or_else(|| undefined_function(name, given))?;
@@ -1071,6 +1076,14 @@ fn unnest_columns(name: &str, given: &[ArgType]) -> Result<Vec<ColumnBinding>, E
 /// as the longest array, shorter arrays padded with NULL. A NULL array behaves
 /// exactly as an empty one.
 fn unnest_rows(vals: &[Datum]) -> Vec<Vec<Datum>> {
+    if let [Datum::Multirange(multirange)] = vals {
+        return multirange
+            .ranges
+            .iter()
+            .cloned()
+            .map(|range| vec![Datum::Range(range)])
+            .collect();
+    }
     let columns: Vec<&[Datum]> = vals
         .iter()
         .map(|v| match v {

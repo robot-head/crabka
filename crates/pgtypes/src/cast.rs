@@ -69,6 +69,7 @@ pub fn cast_allowed(from: ColumnType, to: ColumnType) -> bool {
         // An enum converts with the string family (`enum_in`/`enum_out`) and
         // with itself; nothing else.
         (ColumnType::Enum(_), _) | (_, ColumnType::Enum(_)) => from.is_string() || to.is_string(),
+        (ColumnType::Range(range), ColumnType::Multirange(multirange)) => range == multirange.range,
         // Array → array whenever the element cast is defined (PostgreSQL builds
         // an array coercion from the element coercion). Must precede the string
         // rules so `text[] → int4[]` is judged element-wise, not as a string cast.

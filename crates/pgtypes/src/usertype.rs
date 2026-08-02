@@ -218,6 +218,19 @@ impl UserType {
         }
     }
 
+    /// The automatically-created multirange companion of a range type.
+    #[must_use]
+    pub fn multirange_type(&self) -> Option<ColumnType> {
+        let ColumnType::Range(range) = self.column_type() else {
+            return None;
+        };
+        Some(ColumnType::Multirange(MultirangeRef {
+            oid: self.oid + 3,
+            name: intern(&default_multirange_name(&self.name)),
+            range,
+        }))
+    }
+
     /// `pg_type.typtype`.
     #[must_use]
     pub fn typtype(&self) -> &'static str {
@@ -279,6 +292,7 @@ const OID_STRIDE: u32 = 4;
 #[derive(Default)]
 struct Registry {
     by_lower_name: HashMap<String, u32>,
+    multirange_by_lower_name: HashMap<String, u32>,
     by_oid: HashMap<u32, UserType>,
     next_oid: u32,
 }
@@ -371,6 +385,11 @@ pub fn register(name: &str, body: UserTypeBody) -> UserType {
         body,
     };
     guard.by_lower_name.insert(name.to_ascii_lowercase(), oid);
+    if matches!(ty.body, UserTypeBody::Range(_)) {
+        guard
+            .multirange_by_lower_name
+            .insert(default_multirange_name(name).to_ascii_lowercase(), oid);
+    }
     guard.by_oid.insert(oid, ty.clone());
     // Intern eagerly so `column_type()` never has to take the interner lock
     // while the registry lock is held.
@@ -388,11 +407,23 @@ pub fn register(name: &str, body: UserTypeBody) -> UserType {
 /// happen if another thread panicked while holding it.
 pub fn replace(ty: &UserType) {
     let _ = intern(&ty.name);
+    if matches!(ty.body, UserTypeBody::Range(_)) {
+        let _ = intern(&default_multirange_name(&ty.name));
+    }
     let mut guard = registry().write().expect("user type registry is healthy");
     guard.by_lower_name.retain(|_, oid| *oid != ty.oid);
     guard
+        .multirange_by_lower_name
+        .retain(|_, oid| *oid != ty.oid);
+    guard
         .by_lower_name
         .insert(ty.name.to_ascii_lowercase(), ty.oid);
+    if matches!(ty.body, UserTypeBody::Range(_)) {
+        guard.multirange_by_lower_name.insert(
+            default_multirange_name(&ty.name).to_ascii_lowercase(),
+            ty.oid,
+        );
+    }
     guard.by_oid.insert(ty.oid, ty.clone());
     guard.next_oid = guard.next_oid.max(ty.oid + OID_STRIDE);
 }
@@ -414,7 +445,11 @@ pub fn unregister(name: &str) {
     // Dropping the name is what makes the type unreachable from SQL — a new
     // reference is 42704 and `CREATE TYPE` may reuse the name with a fresh oid.
     let mut guard = registry().write().expect("user type registry is healthy");
-    guard.by_lower_name.remove(&name.to_ascii_lowercase());
+    if let Some(oid) = guard.by_lower_name.remove(&name.to_ascii_lowercase()) {
+        guard
+            .multirange_by_lower_name
+            .retain(|_, found| *found != oid);
+    }
 }
 
 /// The type registered under `name`, matched case-insensitively on the already
@@ -465,7 +500,30 @@ pub fn all() -> Vec<UserType> {
 /// [`ColumnType::from_sql_name`] falls through to this.
 #[must_use]
 pub fn column_type_for_name(name: &str) -> Option<ColumnType> {
-    lookup(name).map(|ty| ty.column_type())
+    if let Some(ty) = lookup(name) {
+        return Some(ty.column_type());
+    }
+    let guard = registry().read().expect("user type registry is healthy");
+    let oid = *guard
+        .multirange_by_lower_name
+        .get(&name.to_ascii_lowercase())?;
+    guard.by_oid.get(&oid)?.multirange_type()
+}
+
+/// Resolve either a user type oid or its derived multirange oid.
+#[must_use]
+pub fn column_type_for_oid(oid: u32) -> Option<ColumnType> {
+    if let Some(ty) = lookup_oid(oid) {
+        return Some(ty.column_type());
+    }
+    lookup_oid(oid.checked_sub(3)?)?.multirange_type()
+}
+
+fn default_multirange_name(range_name: &str) -> String {
+    range_name.strip_suffix("range").map_or_else(
+        || format!("{range_name}_multirange"),
+        |stem| format!("{stem}multirange"),
+    )
 }
 
 /// The `pg_class` oid of the relation backing a composite type
@@ -484,11 +542,34 @@ pub fn user_array_oid(type_oid: u32) -> u32 {
 #[cfg(test)]
 mod tests {
 
-    /// `DROP TYPE` must make the name unresolvable, but it must not make stored
-    /// rows undecodable. A row encodes its column's type oid, so the oid must
-    /// still resolve after the drop. A lost oid makes every later read of that
-    /// data a corrupt-row error, and it wedges the background vacuum on every
-    /// pass.
+    #[test]
+    fn range_registers_derived_multirange_name_and_oid() {
+        use crate::{ColumnType, usertype::RangeBody};
+
+        let range = register(
+            "companion_textrange",
+            UserTypeBody::Range(RangeBody {
+                subtype: ColumnType::Text,
+                collation: Some("C".into()),
+            }),
+        );
+        let Some(ColumnType::Multirange(multirange)) =
+            column_type_for_name("companion_textmultirange")
+        else {
+            panic!("derived multirange is registered");
+        };
+        assert_eq!(multirange.oid, range.oid + 3);
+        assert_eq!(multirange.range.oid, range.oid);
+        assert_eq!(
+            column_type_for_oid(multirange.oid),
+            Some(ColumnType::Multirange(multirange))
+        );
+    }
+
+    /// `DROP TYPE` must make the name unresolvable without making stored rows
+    /// undecodable: a row encodes its column's type oid, so the oid has to keep
+    /// resolving after the drop. Losing it made every later read of that data a
+    /// corrupt-row error and wedged the background vacuum on every pass.
     #[test]
     fn dropping_a_type_frees_the_name_but_keeps_the_oid_decodable() {
         use assert2::assert;

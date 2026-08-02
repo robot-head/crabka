@@ -21635,6 +21635,14 @@ mod tests {
         let values: Vec<Option<String>> = rows_of(r).iter().map(|row| text(&row[0])).collect();
         assert!(values == vec![Some("3".into()), Some("1".into()), Some("2".into())]);
 
+        let r = &run_s(
+            &mut s,
+            "SELECT * FROM unnest(int4multirange(int4range(1, 3), int4range(5, 7)))",
+        )
+        .await[0];
+        let values: Vec<Option<String>> = rows_of(r).iter().map(|row| text(&row[0])).collect();
+        assert!(values == vec![Some("[1,3)".into()), Some("[5,7)".into())]);
+
         // Alias and column alias behave as they do for a derived table.
         let r = &run_s(
             &mut s,

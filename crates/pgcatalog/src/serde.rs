@@ -335,13 +335,9 @@ pub(crate) fn read_type(cur: &mut &[u8]) -> Result<ColumnType, KvError> {
             {
                 builtin
             } else {
-                crabka_pgtypes::usertype::lookup_oid(oid)
-                    .ok_or_else(|| {
-                        KvError::CorruptRow(format!(
-                            "column type oid {oid} is not a registered type"
-                        ))
-                    })?
-                    .column_type()
+                crabka_pgtypes::usertype::column_type_for_oid(oid).ok_or_else(|| {
+                    KvError::CorruptRow(format!("column type oid {oid} is not a registered type"))
+                })?
             }
         }
         other => {

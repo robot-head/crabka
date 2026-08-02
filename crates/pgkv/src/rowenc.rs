@@ -461,7 +461,7 @@ fn decode_field(cur: &mut &[u8]) -> Result<Datum, KvError> {
             let oid = u32::try_from(take_u32_len(cur)?)
                 .map_err(|_| KvError::CorruptRow("range type oid out of range".into()))?;
             let ty = match crabka_pgtypes::ColumnType::builtin_range(oid)
-                .or_else(|| crabka_pgtypes::usertype::lookup_oid(oid).map(|ty| ty.column_type()))
+                .or_else(|| crabka_pgtypes::usertype::column_type_for_oid(oid))
             {
                 Some(crabka_pgtypes::ColumnType::Range(range)) => range,
                 _ => {
@@ -495,6 +495,7 @@ fn decode_field(cur: &mut &[u8]) -> Result<Datum, KvError> {
                 .map_err(|_| KvError::CorruptRow("multirange type oid out of range".into()))?;
             let Some(crabka_pgtypes::ColumnType::Multirange(ty)) =
                 crabka_pgtypes::ColumnType::builtin_multirange(oid)
+                    .or_else(|| crabka_pgtypes::usertype::column_type_for_oid(oid))
             else {
                 return Err(KvError::CorruptRow(format!(
                     "multirange type {oid} is not registered"
