@@ -59,6 +59,7 @@ enum AggFunc {
     BitAnd,
     BitOr,
     BitXor,
+    RangeAgg,
     RangeIntersect,
     /// The single-variable statistical family. `variance` is `var_samp` and
     /// `stddev` is `stddev_samp`, exactly as PostgreSQL aliases them.
@@ -160,6 +161,7 @@ fn aggregate_func(name: &str) -> Option<AggFunc> {
         "bit_and" => Some(AggFunc::BitAnd),
         "bit_or" => Some(AggFunc::BitOr),
         "bit_xor" => Some(AggFunc::BitXor),
+        "range_agg" => Some(AggFunc::RangeAgg),
         "range_intersect_agg" => Some(AggFunc::RangeIntersect),
         "var_pop" => Some(AggFunc::VarPop),
         "var_samp" | "variance" => Some(AggFunc::VarSamp),
@@ -181,7 +183,24 @@ fn aggregate_func(name: &str) -> Option<AggFunc> {
     }
 }
 
-/// Does `e`, or any subexpression of `e`, call a known aggregate function?
+fn multirange_for_range(range: crabka_pgtypes::usertype::RangeRef) -> Option<ColumnType> {
+    use crabka_pgtypes::oids;
+
+    let builtin_oid = match range.oid {
+        oids::INT4RANGE => Some(oids::INT4MULTIRANGE),
+        oids::NUMRANGE => Some(oids::NUMMULTIRANGE),
+        oids::TSRANGE => Some(oids::TSMULTIRANGE),
+        oids::TSTZRANGE => Some(oids::TSTZMULTIRANGE),
+        oids::DATERANGE => Some(oids::DATEMULTIRANGE),
+        oids::INT8RANGE => Some(oids::INT8MULTIRANGE),
+        _ => None,
+    };
+    builtin_oid
+        .and_then(ColumnType::builtin_multirange)
+        .or_else(|| crabka_pgtypes::usertype::column_type_for_oid(range.oid.checked_add(3)?))
+}
+
+/// Does `e` (or any subexpression) call a known aggregate function?
 pub(crate) fn contains_aggregate(e: &Expr) -> bool {
     match e {
         Expr::Func(fc) => {
@@ -350,10 +369,15 @@ pub(crate) fn func_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnTyp
                 other => Err(undefined_for_arg(&fc.name, other)),
             }
         }
-        AggFunc::RangeIntersect => {
+        AggFunc::RangeAgg | AggFunc::RangeIntersect => {
             let arg = single_value_arg(fc)?;
             match crate::eval::infer_type(arg, scope)? {
+                ColumnType::Range(range) if func == AggFunc::RangeAgg => {
+                    multirange_for_range(range)
+                        .ok_or_else(|| undefined_for_arg(&fc.name, ColumnType::Range(range)))
+                }
                 ty @ ColumnType::Range(_) => Ok(ty),
+                ty @ ColumnType::Multirange(_) => Ok(ty),
                 other => Err(undefined_for_arg(&fc.name, other)),
             }
         }
@@ -1424,8 +1448,11 @@ enum AccState {
     BitAgg {
         acc: Option<Datum>,
     },
+    RangeAgg {
+        acc: Option<crabka_pgtypes::MultirangeValue>,
+    },
     RangeIntersect {
-        acc: Option<crabka_pgtypes::RangeValue>,
+        acc: Option<Datum>,
     },
     /// The `float8` single-variable statistical state: PostgreSQL's
     /// Youngs–Cramer `(N, Sx, Sxx)`, where `Sxx` is the running sum of squared
@@ -1623,6 +1650,7 @@ impl AccState {
                 seen: false,
             },
             AggFunc::BitAnd | AggFunc::BitOr | AggFunc::BitXor => AccState::BitAgg { acc: None },
+            AggFunc::RangeAgg => AccState::RangeAgg { acc: None },
             AggFunc::RangeIntersect => AccState::RangeIntersect { acc: None },
             AggFunc::VarPop | AggFunc::VarSamp | AggFunc::StddevPop | AggFunc::StddevSamp => {
                 if matches!(spec.arg_type, Some(ColumnType::Float4 | ColumnType::Float8)) {
@@ -1784,16 +1812,56 @@ impl AccState {
                     Some(cur) => bit_fold(spec.func, &cur, &v)?,
                 });
             }
-            AccState::RangeIntersect { acc } => {
-                let Datum::Range(range) = v else {
-                    return Err(undefined_for_arg(
-                        "range_intersect_agg",
-                        v.column_type().unwrap_or(ColumnType::Text),
-                    ));
+            AccState::RangeAgg { acc } => {
+                let multirange = match v {
+                    Datum::Range(range) => {
+                        let ColumnType::Multirange(ty) = multirange_for_range(range.ty)
+                            .ok_or_else(|| {
+                                undefined_for_arg("range_agg", ColumnType::Range(range.ty))
+                            })?
+                        else {
+                            unreachable!()
+                        };
+                        crabka_pgtypes::multirange::from_ranges(ty, vec![range])?
+                    }
+                    Datum::Multirange(multirange) => multirange,
+                    other => {
+                        return Err(undefined_for_arg(
+                            "range_agg",
+                            other.column_type().unwrap_or(ColumnType::Text),
+                        ));
+                    }
                 };
                 *acc = Some(match acc.take() {
-                    None => range,
-                    Some(cur) => crabka_pgtypes::range::intersection(&cur, &range)?,
+                    None => multirange,
+                    Some(cur) => crabka_pgtypes::multirange::union(&cur, &multirange)?,
+                });
+            }
+            AccState::RangeIntersect { acc } => {
+                *acc = Some(match acc.take() {
+                    None => v,
+                    Some(Datum::Range(cur)) => {
+                        let Datum::Range(range) = v else {
+                            return Err(undefined_for_arg(
+                                "range_intersect_agg",
+                                v.column_type().unwrap_or(ColumnType::Text),
+                            ));
+                        };
+                        Datum::Range(crabka_pgtypes::range::intersection(&cur, &range)?)
+                    }
+                    Some(Datum::Multirange(cur)) => {
+                        let Datum::Multirange(multirange) = v else {
+                            return Err(undefined_for_arg(
+                                "range_intersect_agg",
+                                v.column_type().unwrap_or(ColumnType::Text),
+                            ));
+                        };
+                        Datum::Multirange(crabka_pgtypes::multirange::intersection(
+                            &cur,
+                            &multirange,
+                        )?)
+                    }
+                    Some(_) => unreachable!(),
                 });
             }
             // Youngs–Cramer: `Sxx` accumulates squared deviations, which is why
@@ -1989,9 +2057,8 @@ impl AccState {
                 }
             }
             AccState::BitAgg { acc } => acc.clone().unwrap_or(Datum::Null),
-            AccState::RangeIntersect { acc } => {
-                acc.clone().map(Datum::Range).unwrap_or(Datum::Null)
-            }
+            AccState::RangeAgg { acc } => acc.clone().map(Datum::Multirange).unwrap_or(Datum::Null),
+            AccState::RangeIntersect { acc } => acc.clone().unwrap_or(Datum::Null),
             AccState::VarFloat { n, sxx, .. } => {
                 let (sample, sqrt) = spec
                     .func
@@ -2593,7 +2660,7 @@ mod tests {
     }
 
     #[test]
-    fn range_intersection_aggregate_folds_and_is_null_on_no_rows() {
+    fn range_aggregates_fold_ranges_and_multiranges() {
         let ty = ColumnType::builtin_range(crabka_pgtypes::oids::INT4RANGE).expect("int4range");
         let ColumnType::Range(range_ty) = ty else {
             unreachable!()
@@ -2619,6 +2686,48 @@ mod tests {
             agg_text("SELECT range_intersect_agg(v) FROM t", Some(&t), vec![])
                 .expect("empty aggregate"),
             vec![vec![None]]
+        );
+
+        assert_eq!(
+            agg_text(
+                "SELECT range_agg(v) FROM t",
+                Some(&t),
+                vec![
+                    vec![range("[1,3)")],
+                    vec![range("[3,5)")],
+                    vec![range("[8,9)")]
+                ],
+            )
+            .expect("range aggregate"),
+            vec![vec![Some("{[1,5),[8,9)}".into())]]
+        );
+
+        let multi_ty = ColumnType::builtin_multirange(crabka_pgtypes::oids::INT4MULTIRANGE)
+            .expect("int4multirange");
+        let ColumnType::Multirange(multi_ref) = multi_ty else {
+            unreachable!()
+        };
+        t.columns = vec![Column::new("v", multi_ty)];
+        let multirange = |text| {
+            Datum::Multirange(
+                crabka_pgtypes::multirange::parse(text, multi_ref, &jiff::tz::TimeZone::UTC)
+                    .expect("multirange"),
+            )
+        };
+        assert_eq!(
+            agg_text(
+                "SELECT range_agg(v), range_intersect_agg(v) FROM t",
+                Some(&t),
+                vec![
+                    vec![multirange("{[1,6),[10,12)}")],
+                    vec![multirange("{[4,14)}")],
+                ],
+            )
+            .expect("multirange aggregates"),
+            vec![vec![
+                Some("{[1,14)}".into()),
+                Some("{[4,6),[10,12)}".into()),
+            ]]
         );
     }
 
