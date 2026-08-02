@@ -578,7 +578,7 @@ jobs:
 
   # Real-broker integration smoke test against testcontainers-spawned Kafka.
   client-core-integration:
-    needs: changes
+    needs: [changes, affected]
     if: ${{ needs.changes.outputs.client_core == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -609,7 +609,7 @@ jobs:
   # crabka-log integration: docker cp a JVM-produced partition dir out of
   # a Kafka container and re-read it with crabka-log.
   log-integration:
-    needs: changes
+    needs: [changes, affected]
     if: ${{ needs.changes.outputs.log == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -642,7 +642,7 @@ jobs:
   # `--lib --bins` walk never descends into these `tests/` binaries, so the
   # consumer's close()/coordinator-lifecycle code is only exercised here.
   client-consumer-integration:
-    needs: changes
+    needs: [changes, affected]
     if: ${{ needs.changes.outputs.client_consumer == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -676,7 +676,7 @@ jobs:
   # never descends into these `tests/` binaries, so StreamsMembership::start and
   # the heartbeat-coordinator lifecycle are only exercised here.
   client-streams-integration:
-    needs: changes
+    needs: [changes, affected]
     if: ${{ needs.changes.outputs.client_streams == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -746,7 +746,7 @@ jobs:
   # `tests/` binaries, so the `unit` flag's `--lib --bins` walk never covers it.
   # (The Docker-only `jvm_differential` test is `#[ignore]` and skipped here.)
   grpc-gateway-integration:
-    needs: changes
+    needs: [changes, affected]
     if: ${{ needs.changes.outputs.grpc_gateway == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -781,7 +781,7 @@ jobs:
   # `--lib --bins` walk never descends into `tests/` binaries, so this job
   # provides the only line-level coverage for those paths.
   schema-registry-integration:
-    needs: changes
+    needs: [changes, affected]
     if: ${{ needs.changes.outputs.schema_registry == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -818,7 +818,7 @@ jobs:
   # the only PR-time coverage for the conformance harness. The conformance
   # report is uploaded as an artifact for inspection.
   traces-conformance:
-    needs: changes
+    needs: [changes, affected]
     if: ${{ needs.changes.outputs.traces == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -1104,7 +1104,7 @@ jobs:
   # integration suite on a dedicated runner; the Playwright E2E remains
   # ignored unless explicitly requested with its feature and environment.
   admin-ui-integration:
-    needs: changes
+    needs: [changes, affected]
     if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -1205,7 +1205,7 @@ jobs:
   # in the patch view. Two `--no-report` runs share a profraw set,
   # then a single `report` produces the lcov.
   broker-integration:
-    needs: changes
+    needs: [changes, affected]
     if: ${{ needs.changes.outputs.broker_integration == 'true' }}
     runs-on: ubuntu-latest
     # 30-minute budget: this runs the whole non-ignored broker suite (plus
@@ -1283,7 +1283,7 @@ jobs:
   # Runs on every PR as a gate (a regression flips a `.test` file to failing).
   # The `target/promql-conformance-report.txt` artifact is uploaded for triage.
   metrics-conformance:
-    needs: changes
+    needs: [changes, affected]
     if: ${{ needs.changes.outputs.metrics == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -1319,7 +1319,7 @@ jobs:
   # `cargo test` never touches Docker). Mirrors the metrics-differential nightly
   # job's runner/setup/caching.
   metrics-differential-prometheus:
-    needs: changes
+    needs: [changes, affected]
     if: ${{ needs.changes.outputs.metrics == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
