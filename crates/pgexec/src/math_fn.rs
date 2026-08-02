@@ -4,12 +4,12 @@
 //! pair (`random`, `setseed`), and the full trigonometric / hyperbolic /
 //! logarithmic family.
 //!
-//! Each entry is a pure, deterministic transform over a single row's
-//! already-evaluated Datums, like every other function family in this crate:
-//! `func`, `datetime_fn`, `format_fn`, `json_fn` and `array_fn`.
-//! `random`/`setseed` are the sole exception, and they touch only the
-//! per-thread PRNG [`Prng`] describes. `func::is_scalar` routes these names
-//! here, so the module needs no separate dispatch point in `eval`.
+//! Like every other function family in this crate (`func`, `datetime_fn`,
+//! `format_fn`, `json_fn`, `array_fn`), each entry is a pure, deterministic
+//! transform over a single row's already-evaluated Datums — `random`/`setseed`
+//! being the sole exception, and they touch only the session PRNG described at
+//! [`Prng`]. `func::is_scalar` routes these names here, so the module needs
+//! no separate dispatch point in `eval`.
 //!
 //! The degree-argument trigonometric functions reproduce PostgreSQL's
 //! `sind_q1`/`cosd_q1`/`asind_q1` stitching, so that the exact-answer angles
@@ -401,7 +401,7 @@ fn eval_strict(
     f: MathFunc,
     fc: &FuncCall,
     vals: &[Datum],
-    _ctx: &EvalCtx,
+    ctx: &EvalCtx,
 ) -> Result<Datum, ExecError> {
     match f {
         MathFunc::Gcd | MathFunc::Lcm => {
@@ -450,8 +450,8 @@ fn eval_strict(
         MathFunc::Random => {
             require_arity(fc, vals.is_empty() || vals.len() == 2)?;
             match vals {
-                [] => Ok(Datum::Float8(Prng::with(Prng::next_double))),
-                [lo, hi] => random_range(lo, hi),
+                [] => Ok(Datum::Float8(with_prng(ctx, Prng::next_double))),
+                [lo, hi] => random_range(lo, hi, ctx),
                 _ => Err(undefined_function(&fc.name)),
             }
         }
@@ -464,7 +464,7 @@ fn eval_strict(
                     message: format!("setseed parameter {seed} is out of allowed range [-1,1]"),
                 });
             }
-            Prng::with(|prng| prng.seed_double(seed));
+            with_prng(ctx, |prng| prng.seed_double(seed));
             Ok(Datum::Text(String::new()))
         }
         // The numeric-overloaded logarithm.
@@ -757,18 +757,17 @@ fn clamp_bucket(offset: i64, count: i32) -> i32 {
 /// distribution, the range handling and the "same seed, same sequence" contract
 /// all hold.
 ///
-/// Two documented divergences from PostgreSQL:
+/// One documented divergence from PostgreSQL remains:
 ///
 /// - The *stream* is not PostgreSQL's. Its `pg_prng_seed` mixes the 64-bit seed
 ///   into the two state words with an internal constant that is not part of any
-///   documented interface. So a given `setseed(x)` produces a different sequence
-///   here, which is equally uniform. Nothing observable depends on a specific
-///   draw.
-/// - The state is per-thread rather than per-session, because crabka has no
-///   session-scoped evaluation slot to hang it from. The executor never `await`s
-///   inside a statement, so `setseed(x)` and the `random()` calls of the *same*
-///   statement always share one generator. Across statements the pairing holds
-///   only while the session stays on one runtime worker.
+///   documented interface, so a given `setseed(x)` produces a different (equally
+///   uniform) sequence here. Distribution and session semantics match, but the
+///   seeded sequence remains an upstream regression-suite compatibility gap.
+///
+/// A SQL session owns one locked generator, so `setseed(x)` survives across
+/// statements and executor threads. The thread-local fallback is used only by
+/// planning and unit-test contexts that have no SQL session.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Prng {
     s0: u64,
@@ -850,22 +849,39 @@ impl Prng {
     }
 }
 
-/// A one-off seed for a thread's first `random()`. This function uses the wall
-/// clock and the thread identity, so two workers never start from the same
-/// stream.
-fn entropy_seed() -> u64 {
+/// A one-off seed for a session (or a fallback thread's first `random()`). Uses
+/// the wall clock and process entropy so independent streams do not start from
+/// the same state. The `CRABKA_RANDOM_SEED` override makes integration tests
+/// reproducible.
+pub(crate) fn entropy_seed() -> u64 {
     use std::{
         hash::{BuildHasher, RandomState},
         time::{SystemTime, UNIX_EPOCH},
     };
+    if let Some(seed) = configured_random_seed(std::env::var("CRABKA_RANDOM_SEED").ok().as_deref())
+    {
+        return seed;
+    }
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos() as u64);
     nanos ^ RandomState::new().hash_one(nanos)
 }
 
+fn configured_random_seed(value: Option<&str>) -> Option<u64> {
+    value?.parse().ok()
+}
+
+fn with_prng<R>(ctx: &EvalCtx, body: impl FnOnce(&mut Prng) -> R) -> R {
+    if let Some(random) = &ctx.random {
+        body(&mut random.lock().expect("session random generator"))
+    } else {
+        Prng::with(body)
+    }
+}
+
 /// `random(lo, hi)` over the integer widths and `numeric`.
-fn random_range(lo: &Datum, hi: &Datum) -> Result<Datum, ExecError> {
+fn random_range(lo: &Datum, hi: &Datum, ctx: &EvalCtx) -> Result<Datum, ExecError> {
     let bound_error = || ExecError::FunctionError {
         sqlstate: "22023",
         message: "lower bound must be less than or equal to upper bound".into(),
@@ -876,7 +892,7 @@ fn random_range(lo: &Datum, hi: &Datum) -> Result<Datum, ExecError> {
                 return Err(bound_error());
             }
             let span = i64::from(*b) - i64::from(*a);
-            let offset = Prng::with(|p| p.next_below(span as u64));
+            let offset = with_prng(ctx, |p| p.next_below(span as u64));
             Ok(Datum::Int4((i64::from(*a) + offset as i64) as i32))
         }
         _ if as_i64(lo).is_some() && as_i64(hi).is_some() => {
@@ -885,7 +901,7 @@ fn random_range(lo: &Datum, hi: &Datum) -> Result<Datum, ExecError> {
                 return Err(bound_error());
             }
             let span = (b as u64).wrapping_sub(a as u64);
-            let offset = Prng::with(|p| p.next_below(span));
+            let offset = with_prng(ctx, |p| p.next_below(span));
             Ok(Datum::Int8((a as u64).wrapping_add(offset) as i64))
         }
         _ => {
@@ -893,7 +909,7 @@ fn random_range(lo: &Datum, hi: &Datum) -> Result<Datum, ExecError> {
             if a > b {
                 return Err(bound_error());
             }
-            random_numeric(&a, &b)
+            random_numeric(&a, &b, ctx)
         }
     }
 }
@@ -903,7 +919,7 @@ fn random_range(lo: &Datum, hi: &Datum) -> Result<Datum, ExecError> {
 /// PostgreSQL's base-10000 digit-at-a-time walk. So the *distribution* and the
 /// result scale match, but the seeded *sequence* does not. This is a documented
 /// divergence confined to the numeric overload.
-fn random_numeric(lo: &NumericValue, hi: &NumericValue) -> Result<Datum, ExecError> {
+fn random_numeric(lo: &NumericValue, hi: &NumericValue, ctx: &EvalCtx) -> Result<Datum, ExecError> {
     // PostgreSQL's `random(numeric, numeric)` rejects a special bound outright.
     if lo.is_nan() {
         return Err(domain("22023", "lower bound cannot be NaN"));
@@ -921,7 +937,7 @@ fn random_numeric(lo: &NumericValue, hi: &NumericValue) -> Result<Datum, ExecErr
     let unit = BigDecimal::from(1).with_scale(scale);
     let steps = numeric::to_i64(&numeric::trunc(&NumericValue::from((hi - lo) / &unit), 0))
         .map_err(|_| ExecError::Type(crabka_pgtypes::TypeError::Overflow))?;
-    let offset = Prng::with(|p| p.next_below(steps as u64));
+    let offset = with_prng(ctx, |p| p.next_below(steps as u64));
     let value = lo + BigDecimal::from(offset as i64) * &unit;
     Ok(Datum::Numeric(NumericValue::from(value.with_scale(scale))))
 }

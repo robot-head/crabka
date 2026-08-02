@@ -583,12 +583,12 @@ fn size_pretty(size: &Datum) -> Result<Datum, ExecError> {
     let mut value = int_arg(size)?;
     let limit = 10 * 1024;
     let limit2 = limit * 2 - 1;
-    if value.abs() < limit {
+    if value.unsigned_abs() < limit {
         return Ok(Datum::Text(format!("{value} bytes")));
     }
     for unit in ["kB", "MB", "GB", "TB", "PB"] {
         value >>= if unit == "kB" { 9 } else { 10 };
-        if value.abs() < limit2 || unit == "PB" {
+        if value.unsigned_abs() < limit2 || unit == "PB" {
             // PostgreSQL's `half_rounded`: the extra bit is halved away with
             // ties rounded AWAY from zero, so -20 half-units is -10, not -9.
             let rounded = i64::midpoint(value, if value < 0 { -1 } else { 1 });
@@ -1427,6 +1427,8 @@ mod tests {
             (21_474_836_480, "20 GB"),
             (21_990_232_555_520, "20 TB"),
             (-10_240, "-10 kB"),
+            (i64::MIN, "-8192 PB"),
+            (i64::MAX, "8192 PB"),
         ];
         for (input, expected) in cases {
             let got = size_pretty(&Datum::Int8(input)).expect("size_pretty");

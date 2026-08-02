@@ -276,6 +276,10 @@ jobs:
               - 'crates/gres-substrate/**'
               - 'crates/gres-fdw/**'
               - 'crates/gres-conformance/**'
+              - 'scripts/gres-pg-regress-baseline.py'
+              - 'scripts/gres-pg-regress.sh'
+              - 'scripts/tests/gres-pg-regress-behavior.sh'
+              - 'scripts/tests/test_gres_pg_regress_baseline.py'
               - 'scripts/gres-psql-smoke.sh'
               - 'scripts/gres-psql-introspection-smoke.sh'
               - 'scripts/fixtures/gres-psql-introspection.txt'
@@ -1036,7 +1040,7 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.gres == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 180
     services:
       oracle:
         image: postgres:18
@@ -1070,15 +1074,25 @@ jobs:
         run: |
           ./tools/check-pg-compat-matrix.sh --self-test
           ./tools/check-pg-compat-matrix.sh
-      - name: Install psql 18 (pgdg)
+      - name: Install PostgreSQL 18 client and build tools
         run: |
           sudo install -d /usr/share/postgresql-common/pgdg
           sudo curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc --fail https://www.postgresql.org/media/keys/ACCC4CF8.asc
           echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
-          sudo apt-get update && sudo apt-get install -y postgresql-client-18
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends \
+            bison build-essential bzip2 ca-certificates curl flex perl pkg-config \
+            postgresql-client-18
+      - name: pg_regress runner behavior contract
+        run: |
+          bash scripts/tests/gres-pg-regress-behavior.sh
+          python3 -m unittest scripts/tests/test_gres_pg_regress_baseline.py -v
       - name: Install pinned Python PostgreSQL driver
         run: python3 -m pip install --require-hashes --no-deps -r crates/gres-conformance/requirements-driver-smoke.txt
       - run: cargo build --locked -p crabka-cli -p crabka-broker -p crabka-gres -p crabka-gres-activator -p crabka-gres-conformance
+      - name: PostgreSQL 18.4 upstream pg_regress monotone gate
+        env:
+          GRES_PG_REGRESS_ARTIFACT_DIR: target/gres-pg-regress-ci
+        run: ./scripts/gres-pg-regress.sh gres serial
       - name: Captured driver startup replay
         run: CRABKA_GRES_SKIP_BUILD=1 timeout 30s ./scripts/gres-driver-goldens-gate.sh
       - run: ./scripts/gres-psql-smoke.sh
@@ -1190,7 +1204,7 @@ jobs:
       - name: Publish parity summary
         if: ${{ !cancelled() }}
         run: cat parity.md >> "$GITHUB_STEP_SUMMARY"
-      - name: Publish pg_regress adoption summary
+      - name: Publish adopted pg_regress corpus parity summary
         if: ${{ !cancelled() }}
         run: cat regress-parity.md >> "$GITHUB_STEP_SUMMARY"
       - name: Publish substrate parity summary
@@ -1246,6 +1260,13 @@ jobs:
           name: gres-coldstart-artifacts
           path: target/gres-coldstart-artifacts
           if-no-files-found: warn
+      - name: Upload PostgreSQL pg_regress artifacts
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: gres-pg-regress
+          path: target/gres-pg-regress-ci
+          if-no-files-found: error
 
   # Gres integration coverage: the engine, range/control plane, lifecycle
   # services, and CLI have most behavior behind tests/ targets rather than

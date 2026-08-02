@@ -9,7 +9,7 @@
 )]
 
 use jiff::{
-    Timestamp, ToSpan,
+    Span, Timestamp, ToSpan,
     civil::{Date, DateTime, Time},
     tz::{Offset, TimeZone},
 };
@@ -295,10 +295,11 @@ pub fn date_plus_days(d: Date, days: i64) -> Result<Date, TypeError> {
     if date_is_infinite(d) {
         return Ok(d);
     }
-    d.checked_add(days.days())
-        .map_err(|_| TypeError::DatetimeFieldOverflow {
-            value: days.to_string(),
-        })
+    let overflow = |_| TypeError::DatetimeFieldOverflow {
+        value: days.to_string(),
+    };
+    let span = Span::new().try_days(days).map_err(overflow)?;
+    d.checked_add(span).map_err(overflow)
 }
 
 /// Subtract two dates, returning the number of days between them (a - b).
@@ -350,7 +351,8 @@ pub fn timestamp_plus_interval(ts: DateTime, iv: Interval) -> Result<DateTime, T
     };
     // Apply days (calendar-aware, skips DST ambiguity for civil datetimes).
     let after_days = if iv.days != 0 {
-        after_months.checked_add(iv.days.days()).map_err(overflow)?
+        let days = Span::new().try_days(iv.days).map_err(overflow)?;
+        after_months.checked_add(days).map_err(overflow)?
     } else {
         after_months
     };
@@ -451,9 +453,10 @@ pub fn timestamptz_plus_interval(
     // Apply the calendar (months, then days) to the zoned wall-clock time.
     let zoned = ts.to_zoned(tz.clone());
     let after_cal = if iv.months != 0 || iv.days != 0 {
+        let days = Span::new().try_days(iv.days).map_err(overflow)?;
         zoned
             .checked_add(iv.months.months())
-            .and_then(|z| z.checked_add(iv.days.days()))
+            .and_then(|z| z.checked_add(days))
             .map_err(overflow)?
     } else {
         zoned
@@ -5022,6 +5025,15 @@ mod mutation_tests {
         )
         .expect("ok");
         assert_eq!(timestamp_to_text(got2), "2024-01-04 00:00:00");
+    }
+
+    #[test]
+    fn timestamp_plus_interval_reports_oversized_day_span() {
+        let base = parse_timestamp("2024-01-01 00:00:00").expect("ts");
+        assert!(matches!(
+            timestamp_plus_interval(base, iv(0, 106_000_000, 0)),
+            Err(TypeError::DatetimeFieldOverflow { .. })
+        ));
     }
 
     // -- time_plus_interval ---------------------------------------------

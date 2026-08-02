@@ -47,6 +47,73 @@ reviewable unit.
 
 ## Adopted pg_regress corpus
 
+The authoritative compatibility gate is PostgreSQL 18.4's unmodified, pinned
+`src/test/regress` suite: all 231 tests from the upstream `parallel_schedule`,
+run by upstream `pg_regress`. Install its build prerequisites first:
+
+```sh
+sudo apt-get install build-essential bison flex perl pkg-config bzip2 curl ca-certificates
+```
+
+The cached PostgreSQL build is configured without ICU, readline, or zlib. Prove
+the runner against a fresh PostgreSQL 18.4 temporary instance before measuring
+Gres, then run Gres in either or both schedule modes:
+
+```sh
+./scripts/gres-pg-regress.sh self-check both
+./scripts/gres-pg-regress.sh gres serial
+./scripts/gres-pg-regress.sh gres parallel
+./scripts/gres-pg-regress.sh gres both
+```
+
+Each `gres` command performs both PostgreSQL self-checks first and starts a
+fresh in-memory Gres process for each requested mode. Runs retain their command,
+logs, diffs, and exit status under `target/pg-regress-runs/`; set
+`GRES_PG_REGRESS_ARTIFACT_DIR` to choose a new artifact directory and
+`GRES_PG_REGRESS_CACHE_DIR` to relocate the verified source/build cache. See
+`./scripts/gres-pg-regress.sh --help` for binary, port, timeout, and job-count
+overrides.
+
+The serial Gres test process uses one Tokio worker plus explicit
+backend-process and initial random seeds so progressive diff fingerprints are
+reproducible. Parallel mode uses the runtime's normal worker count. These
+controls do not normalize captured output, and production defaults stay
+randomized. The runner exposes `GRES_PG_REGRESS_TOKIO_WORKERS`,
+`GRES_PG_REGRESS_PROCESS_TOKEN`, and `GRES_PG_REGRESS_RANDOM_SEED` when a
+different diagnostic configuration is needed.
+
+Serial runs are checked against
+[`pg-regress-baseline.json`](pg-regress-baseline.json). The baseline records the
+pinned tag and schedule, every failing test's selected upstream expected file,
+changed-line and hunk counts, and a canonical diff fingerprint. CI fails on a
+new failure, a changed fingerprint, a larger mismatch, or an unreviewed
+improvement. Every run retains `actual-baseline.json` and `summary.md` beside
+the raw outputs.
+
+After a semantic fix, update the baseline only from a complete,
+infrastructure-clean serial artifact. The helper rejects replacements or
+growth and accepts only fewer changed lines or a removed failure:
+
+```sh
+RUN=target/pg-regress-runs/<run>/gres-serial
+python3 scripts/gres-pg-regress-baseline.py update \
+  --postgres-tag REL_18_4 \
+  --schedule target/pg-regress-postgresql-18.4/source/src/test/regress/parallel_schedule \
+  --tap "$RUN/regression.out" --diff "$RUN/regression.diffs" \
+  --source-root target/pg-regress-postgresql-18.4/source \
+  --build-root "$RUN" \
+  --baseline crates/gres-conformance/pg-regress-baseline.json \
+  --actual-output "$RUN/actual-baseline.json" \
+  --summary-output "$RUN/summary.md"
+```
+
+The adopted-corpus score (`9323/14272`) remains useful diagnostic evidence, but
+it is not the compatibility headline. Compatibility is the upstream 231-test
+serial and parallel result. The current baseline-eligible serial run is `6/231`
+with 225 semantic failures and no harness, panic, connection-loss, or postflight
+failure. It passes the progressive serial baseline gate, not the 231/231
+completion gate.
+
 `corpus-regress/` contains PostgreSQL `src/test/regress` SQL files adopted with
 `POSTGRES_TAG=REL_18_4 ../../tools/gres-adopt-regress.sh <name>`. Adopted files
 keep a provenance header and are attributed in the repository `NOTICE`; do not
