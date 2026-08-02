@@ -2893,9 +2893,9 @@ pub(crate) fn pg_proc_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 routine.result,
                 RoutineResult::Type { .. } | RoutineResult::Unspecified
             );
-        let arg_type_oids: Vec<String> = inputs
+        let arg_type_oids: Vec<Datum> = inputs
             .iter()
-            .map(|param| type_oid(&param.ty).to_string())
+            .map(|param| Datum::Int4(type_oid(&param.ty)))
             .collect();
         let all_types: Vec<Datum> = catalog_all_types(&routine);
         let all_modes: Vec<Datum> = catalog_all_modes(&routine);
@@ -2925,7 +2925,14 @@ pub(crate) fn pg_proc_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             Datum::Int2(i16::try_from(inputs.len()).unwrap_or(0)),
             Datum::Int2(i16::try_from(routine.default_count()).unwrap_or(0)),
             Datum::Int4(return_type_oid(&routine)),
-            Datum::Text(arg_type_oids.join(" ")),
+            Datum::OidVector(ArrayValue::with_dims(
+                ElemType::Int4,
+                arg_type_oids,
+                vec![crabka_pgtypes::ArrayDim::new(
+                    0,
+                    i32::try_from(inputs.len()).unwrap_or(i32::MAX),
+                )],
+            )),
             if all_default_modes {
                 Datum::Null
             } else {
@@ -3019,7 +3026,17 @@ pub(crate) fn builtin_pg_proc_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
                 Datum::Int2(short(argument_count)?),
                 Datum::Int2(short(default_count)?),
                 Datum::Int4(int(result_type)?),
-                Datum::Text((*argument_types).to_string()),
+                Datum::OidVector(crabka_pgtypes::ArrayValue::with_dims(
+                    crabka_pgtypes::ElemType::Int4,
+                    argument_types
+                        .split_whitespace()
+                        .map(|value| int(value).map(Datum::Int4))
+                        .collect::<Result<Vec<_>, _>>()?,
+                    vec![crabka_pgtypes::ArrayDim::new(
+                        0,
+                        i32::from(short(argument_count)?),
+                    )],
+                )),
                 Datum::Null,
                 Datum::Null,
                 Datum::Null,
@@ -3065,7 +3082,7 @@ fn catalog_all_modes(routine: &Routine) -> Vec<Datum> {
 /// `pg_type.oid` for every name [`KNOWN_TYPE_NAMES`] accepts, so `pg_proc`
 /// reports the type a routine signature names even when Gres cannot produce a
 /// value of it. Taken from PostgreSQL 18.4's own `pg_type`.
-const TYPE_OIDS: &[(&str, i32)] = &[
+pub(crate) const TYPE_OIDS: &[(&str, i32)] = &[
     ("aclitem", 1033),
     ("any", 2276),
     ("anyarray", 2277),
@@ -3969,8 +3986,10 @@ mod tests {
         )
         .expect("definition");
         let rows = pg_proc_rows(&kv).expect("rows");
-        assert!(rows.len() == 1);
-        let row = &rows[0];
+        let row = rows
+            .iter()
+            .find(|row| row[1] == Datum::Text("pp".into()))
+            .expect("stored routine row");
         assert!(row[1] == Datum::Text("pp".into()));
         assert!(row[9] == Datum::Text("f".into()));
         assert!(row[12] == Datum::Bool(true));
@@ -3978,7 +3997,14 @@ mod tests {
         assert!(row[14] == Datum::Text("i".into()));
         assert!(row[16] == Datum::Int2(2));
         assert!(row[17] == Datum::Int2(1));
-        assert!(row[19] == Datum::Text("23 23".into()));
+        assert!(
+            row[19]
+                == Datum::OidVector(crabka_pgtypes::ArrayValue::with_dims(
+                    crabka_pgtypes::ElemType::Int4,
+                    vec![Datum::Int4(23), Datum::Int4(23)],
+                    vec![crabka_pgtypes::ArrayDim::new(0, 2)],
+                ))
+        );
         assert!(row[25] == Datum::Text("SELECT 1".into()));
     }
 

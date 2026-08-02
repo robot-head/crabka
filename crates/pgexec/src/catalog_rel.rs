@@ -1131,7 +1131,7 @@ fn pg_proc_columns() -> Vec<Column> {
         ("pronargs", Int2),
         ("pronargdefaults", Int2),
         ("prorettype", Int4),
-        ("proargtypes", Text),
+        ("proargtypes", ColumnType::OidVector),
         ("proallargtypes", oids),
         ("proargmodes", ColumnType::Array(ElemType::Text)),
         ("proargnames", texts),

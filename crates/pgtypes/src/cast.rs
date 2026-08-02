@@ -75,6 +75,7 @@ pub fn cast_allowed(from: ColumnType, to: ColumnType) -> bool {
         (ColumnType::Array(a), ColumnType::Array(b)) => {
             cast_allowed(a.column_type(), b.column_type())
         }
+        (ColumnType::OidVector, ColumnType::Array(crate::ElemType::Regtype)) => true,
         // `jsonb` and arrays otherwise interconvert ONLY with the string family
         // (the rule below): PostgreSQL has no jsonb/array ↔ number/bool/temporal
         // cast, and this arm keeps the permissive numeric rules from claiming one.
@@ -91,8 +92,14 @@ pub fn cast_allowed(from: ColumnType, to: ColumnType) -> bool {
         (Bool, Int4) | (Int4, Bool) => true,
         // `regclass` interconverts with the integer oid family; text↔regclass is
         // covered by the string rules below.
-        (Int4 | ColumnType::Int8, ColumnType::Regclass)
-        | (ColumnType::Regclass, Int4 | ColumnType::Int8) => true,
+        (
+            Int4 | ColumnType::Int8,
+            ColumnType::Regclass | ColumnType::Regtype | ColumnType::Regprocedure,
+        )
+        | (
+            ColumnType::Regclass | ColumnType::Regtype | ColumnType::Regprocedure,
+            Int4 | ColumnType::Int8,
+        ) => true,
         _ if from.is_string() || to.is_string() => true,
         // Anything → text (the output function), and text → anything (the input
         // function). Together these also cover text→text (already by identity),
@@ -298,6 +305,7 @@ pub fn cast_in(
         // `cast_allowed` says yes for `T → T` and for anything ↔ the string
         // family, so without them a runtime cast would wrongly report 42846.
         (Datum::Jsonb(j), ColumnType::Jsonb) => Ok(Datum::Jsonb(j.clone())),
+        (Datum::OidVector(vector), ColumnType::OidVector) => Ok(Datum::OidVector(vector.clone())),
         (Datum::TsVector(vector), ColumnType::TsVector) => Ok(Datum::TsVector(vector.clone())),
         (Datum::TsQuery(query), ColumnType::TsQuery) => Ok(Datum::TsQuery(query.clone())),
         // text → jsonb is `jsonb_in` (22P02 on bad JSON).
@@ -318,12 +326,36 @@ pub fn cast_in(
                 elem, elems, raw.dims,
             )))
         }
+        (Datum::Text(s), ColumnType::OidVector) => {
+            let elems = s
+                .split_whitespace()
+                .map(|value| text_to_i32(value))
+                .collect::<Result<Vec<_>, _>>()?;
+            let len = i32::try_from(elems.len()).unwrap_or(i32::MAX);
+            Ok(Datum::OidVector(crate::datum::ArrayValue::with_dims(
+                crate::ElemType::Int4,
+                elems,
+                vec![crate::ArrayDim::new(0, len)],
+            )))
+        }
         // array → array: identity when the element types match, element-wise
         // conversion otherwise (PostgreSQL's array coercion).
         (Datum::Array(a), ColumnType::Array(elem)) => {
             if a.elem == elem {
                 return Ok(Datum::Array(a.clone()));
             }
+            let elems = a
+                .elems
+                .iter()
+                .map(|e| cast(e, elem.column_type(), tz))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Datum::Array(crate::datum::ArrayValue::with_dims(
+                elem,
+                elems,
+                a.dims.clone(),
+            )))
+        }
+        (Datum::OidVector(a), ColumnType::Array(elem)) => {
             let elems = a
                 .elems
                 .iter()
@@ -399,7 +431,10 @@ pub fn cast_in(
         (Datum::Text(s), ColumnType::Path) => crate::Path::parse(s).map(Datum::Path),
         // `regclass` → the oid family drops the name and keeps the oid, which is
         // what `regclass::oid`/`::int` yields in PostgreSQL.
-        (Datum::Regclass(r), ColumnType::Regclass) => Ok(Datum::Regclass(r.clone())),
+        (
+            Datum::Regclass(r),
+            ColumnType::Regclass | ColumnType::Regtype | ColumnType::Regprocedure,
+        ) => Ok(Datum::Regclass(r.clone())),
         (Datum::Regclass(r), Int4) => Ok(Datum::Int4(r.oid)),
         (Datum::Regclass(r), Int8) => Ok(Datum::Int8(i64::from(r.oid))),
         // → `regclass`. The pure cast has no catalog, so it can only produce the
@@ -410,7 +445,21 @@ pub fn cast_in(
         (Datum::Int4(n), ColumnType::Regclass) => {
             Ok(Datum::Regclass(crate::RegclassValue::unresolved(*n)))
         }
+        (Datum::Int4(n), ColumnType::Regtype) => {
+            Ok(Datum::Regclass(crate::RegclassValue::unresolved(*n)))
+        }
+        (Datum::Int4(n), ColumnType::Regprocedure) => {
+            Ok(Datum::Regclass(crate::RegclassValue::unresolved(*n)))
+        }
         (Datum::Int8(n), ColumnType::Regclass) => i4_from_i64(*n).map(|d| match d {
+            Datum::Int4(n) => Datum::Regclass(crate::RegclassValue::unresolved(n)),
+            other => other,
+        }),
+        (Datum::Int8(n), ColumnType::Regtype) => i4_from_i64(*n).map(|d| match d {
+            Datum::Int4(n) => Datum::Regclass(crate::RegclassValue::unresolved(n)),
+            other => other,
+        }),
+        (Datum::Int8(n), ColumnType::Regprocedure) => i4_from_i64(*n).map(|d| match d {
             Datum::Int4(n) => Datum::Regclass(crate::RegclassValue::unresolved(n)),
             other => other,
         }),
@@ -420,6 +469,22 @@ pub fn cast_in(
             .map(|n| Datum::Regclass(crate::RegclassValue::unresolved(n)))
             .map_err(|_| TypeError::InvalidText {
                 type_name: "regclass",
+                value: s.clone(),
+            }),
+        (Datum::Text(s), ColumnType::Regtype) => s
+            .trim()
+            .parse::<i32>()
+            .map(|n| Datum::Regclass(crate::RegclassValue::unresolved(n)))
+            .map_err(|_| TypeError::InvalidText {
+                type_name: "regtype",
+                value: s.clone(),
+            }),
+        (Datum::Text(s), ColumnType::Regprocedure) => s
+            .trim()
+            .parse::<i32>()
+            .map(|n| Datum::Regclass(crate::RegclassValue::unresolved(n)))
+            .map_err(|_| TypeError::InvalidText {
+                type_name: "regprocedure",
                 value: s.clone(),
             }),
         (Datum::Text(s), ColumnType::TsVector) => s.parse().map(Datum::TsVector),

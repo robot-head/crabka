@@ -109,6 +109,7 @@ fn column_hash(value: &Datum, seed: u64) -> Result<Option<u64>, ExecError> {
         Datum::Interval(_) => return Err(unsupported("interval")),
         Datum::Jsonb(_) => return Err(unsupported("jsonb")),
         Datum::Array(_) => return Err(unsupported("array")),
+        Datum::OidVector(_) => return Err(unsupported("oidvector")),
         Datum::Record(_) => return Err(unsupported("record")),
         Datum::Enum(_) => return Err(unsupported("enum")),
         Datum::TsVector(_) => return Err(unsupported("tsvector")),

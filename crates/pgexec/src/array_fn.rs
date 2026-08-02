@@ -846,7 +846,7 @@ pub(crate) fn array_overlap(left: &Datum, right: &Datum) -> Result<Datum, ExecEr
 pub(crate) fn array_subscript(base: &Datum, index: &Datum) -> Result<Datum, ExecError> {
     let array = match base {
         Datum::Null => return Ok(Datum::Null),
-        Datum::Array(a) => a,
+        Datum::Array(a) | Datum::OidVector(a) => a,
         other => {
             return Err(ExecError::TypeMismatch(format!(
                 "cannot subscript type {} because it does not support subscripting",
@@ -972,7 +972,7 @@ impl SubscriptArg {
 pub(crate) fn array_ref(base: &Datum, subscripts: &[SubscriptArg]) -> Result<Datum, ExecError> {
     let array = match base {
         Datum::Null => return Ok(Datum::Null),
-        Datum::Array(a) => a,
+        Datum::Array(a) | Datum::OidVector(a) => a,
         other => {
             return Err(ExecError::TypeMismatch(format!(
                 "cannot subscript type {} because it does not support subscripting",
@@ -1397,7 +1397,7 @@ pub(crate) fn eval_quantified(
 ) -> Result<Datum, ExecError> {
     let array = match array {
         Datum::Null => return Ok(Datum::Null),
-        Datum::Array(a) => a,
+        Datum::Array(a) | Datum::OidVector(a) => a,
         other => return Err(not_an_array(other)),
     };
     let mut saw_null = false;
@@ -1471,7 +1471,7 @@ fn require_arity(fc: &FuncCall, ok: bool) -> Result<(), ExecError> {
 
 fn array_value<'a>(d: &'a Datum, name: &str) -> Result<&'a ArrayValue, ExecError> {
     match d {
-        Datum::Array(a) => Ok(a),
+        Datum::Array(a) | Datum::OidVector(a) => Ok(a),
         _ => Err(undefined_function(name)),
     }
 }
@@ -1481,7 +1481,7 @@ fn array_value<'a>(d: &'a Datum, name: &str) -> Result<&'a ArrayValue, ExecError
 fn array_or_null<'a>(d: &'a Datum, op: &str) -> Result<Option<&'a ArrayValue>, ExecError> {
     match d {
         Datum::Null => Ok(None),
-        Datum::Array(a) => Ok(Some(a)),
+        Datum::Array(a) | Datum::OidVector(a) => Ok(Some(a)),
         other => Err(ExecError::UndefinedFunction(format!(
             "operator does not exist: {} {op} ...",
             type_name(other)
@@ -3095,5 +3095,33 @@ mod tests {
             let error = build_constructor(ElemType::Int4, items).expect_err("ragged");
             assert!(sqlstate(error) == "2202E");
         }
+    }
+
+    #[test]
+    fn oidvector_reuses_zero_based_array_semantics() {
+        let value = Datum::OidVector(ArrayValue::with_dims(
+            ElemType::Int4,
+            vec![Datum::Int4(23), Datum::Int4(25)],
+            vec![crabka_pgtypes::ArrayDim::new(0, 2)],
+        ));
+        assert!(
+            dimension(array_value(&value, "array_length").expect("oidvector"), 1)
+                == Some(crabka_pgtypes::ArrayDim::new(0, 2))
+        );
+        assert!(array_subscript(&value, &Datum::Int4(0)).expect("subscript") == Datum::Int4(23));
+        assert!(
+            eval_quantified(&value, Quantifier::Any, |item| {
+                Ok(Datum::Bool(*item == Datum::Int4(25)))
+            })
+            .expect("any")
+                == Datum::Bool(true)
+        );
+        assert!(
+            crabka_pgtypes::encoding::encode_text(&value, &jiff::tz::TimeZone::UTC) == b"23 25"
+        );
+        assert!(
+            crabka_pgtypes::ops::compare(&value, &value).expect("compare")
+                == Some(std::cmp::Ordering::Equal)
+        );
     }
 }

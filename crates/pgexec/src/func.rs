@@ -1724,7 +1724,7 @@ fn require_int_or_null(arg: &Expr, scope: &Scope) -> Result<(), ExecError> {
 /// PostgreSQL `format_type(oid, typmod)`: the SQL-standard spelling of a type,
 /// with its modifier applied. An unrecognized OID is `-`, matching PostgreSQL's
 /// placeholder for a type that no longer exists.
-fn format_type(oid: i64, typmod: i64) -> String {
+pub(crate) fn format_type(oid: i64, typmod: i64) -> String {
     let Ok(oid) = u32::try_from(oid) else {
         return "-".to_string();
     };

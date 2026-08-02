@@ -158,6 +158,12 @@ mod type_tag {
     pub const POINT: u8 = 24;
     /// `path`. Append-only — no version bump.
     pub const PATH: u8 = 25;
+    /// PostgreSQL `oidvector`. Append-only — no version bump.
+    pub const OIDVECTOR: u8 = 26;
+    /// PostgreSQL `regtype`. Append-only — no version bump.
+    pub const REGTYPE: u8 = 27;
+    /// PostgreSQL `regprocedure`. Append-only — no version bump.
+    pub const REGPROCEDURE: u8 = 28;
 }
 
 /// Append a column's type (tag byte, plus the numeric typmod payload).
@@ -209,6 +215,9 @@ pub(crate) fn write_type(out: &mut Vec<u8>, ty: ColumnType) {
         ColumnType::Bytea => out.push(type_tag::BYTEA),
         ColumnType::Uuid => out.push(type_tag::UUID),
         ColumnType::Regclass => out.push(type_tag::REGCLASS),
+        ColumnType::Regtype => out.push(type_tag::REGTYPE),
+        ColumnType::Regprocedure => out.push(type_tag::REGPROCEDURE),
+        ColumnType::OidVector => out.push(type_tag::OIDVECTOR),
         ColumnType::TsVector => out.push(type_tag::TSVECTOR),
         ColumnType::TsQuery => out.push(type_tag::TSQUERY),
         ColumnType::Jsonb => out.push(type_tag::JSONB),
@@ -312,6 +321,9 @@ pub(crate) fn read_type(cur: &mut &[u8]) -> Result<ColumnType, KvError> {
         type_tag::BYTEA => ColumnType::Bytea,
         type_tag::UUID => ColumnType::Uuid,
         type_tag::REGCLASS => ColumnType::Regclass,
+        type_tag::REGTYPE => ColumnType::Regtype,
+        type_tag::REGPROCEDURE => ColumnType::Regprocedure,
+        type_tag::OIDVECTOR => ColumnType::OidVector,
         type_tag::TSVECTOR => ColumnType::TsVector,
         type_tag::TSQUERY => ColumnType::TsQuery,
         type_tag::JSONB => ColumnType::Jsonb,
@@ -462,6 +474,7 @@ fn write_default_value(out: &mut Vec<u8>, default: &Datum) {
         | Datum::Interval(_)
         | Datum::Record(_)
         | Datum::Enum(_)
+        | Datum::OidVector(_)
         | Datum::Bytea(_) => {
             unreachable!("unsupported defaults are rejected before catalog write")
         }
