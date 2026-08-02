@@ -20,7 +20,7 @@ setsid ./target/debug/crabka-gres --listen 127.0.0.1:54360 >/tmp/gres.log 2>&1 <
 
 Both endpoints started clean. The oracle database was empty and the subject was a fresh in-memory process, preventing stale relations from changing later outcomes.
 
-**Result: 9323 / 14272 statements match (65.3%) across 50 adopted files, up 314 matches from the previous 9009 / 14272 floor. The run had zero engine crashes, statement timeouts, or connection failures.**
+**Result: 9323 / 14272 statements match (65.3%) across 50 adopted files, up 314 matches from the previous 9009 / 14272 floor. The generated report contains zero engine crashes, statement timeouts, or unrecovered connection failures; the current harness retries transient I/O failures without recording a reconnect counter.**
 
 This percentage covers the adopted corpus, not PostgreSQL's complete core regression schedule. PostgreSQL 18.4 schedules 231 core test files; the plan to replace this partial headline with an upstream `pg_regress` gate is in [2026-08-02-gres-pg-regress-100-percent.md](../../../docs/superpowers/plans/2026-08-02-gres-pg-regress-100-percent.md).
 
