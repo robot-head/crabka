@@ -11,6 +11,61 @@ pub struct Point {
     pub y: f64,
 }
 
+/// PostgreSQL `path`: an ordered series of points, either open or closed.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Path {
+    pub closed: bool,
+    pub points: Vec<Point>,
+}
+
+impl Path {
+    /// Parse `path_in`'s bracketed (open) or parenthesized (closed) spelling.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same coordinate errors as [`Point::parse`], or `22P02` for
+    /// malformed delimiters and point lists.
+    pub fn parse(input: &str) -> Result<Self, TypeError> {
+        let value = input.trim();
+        let (closed, inner) = if let Some(inner) = value
+            .strip_prefix('[')
+            .and_then(|inner| inner.strip_suffix(']'))
+        {
+            (false, inner)
+        } else if let Some(inner) = value
+            .strip_prefix('(')
+            .and_then(|inner| inner.strip_suffix(')'))
+        {
+            (true, inner)
+        } else {
+            return Err(invalid_path(input));
+        };
+        let mut points = Vec::new();
+        let mut rest = inner.trim();
+        while !rest.is_empty() {
+            let Some(point_start) = rest.strip_prefix('(') else {
+                return Err(invalid_path(input));
+            };
+            let Some(end) = point_start.find(')') else {
+                return Err(invalid_path(input));
+            };
+            points.push(Point::parse(&point_start[..end])?);
+            rest = point_start[end + 1..].trim_start();
+            if rest.is_empty() {
+                break;
+            }
+            let Some(tail) = rest.strip_prefix(',') else {
+                return Err(invalid_path(input));
+            };
+            rest = tail.trim_start();
+        }
+        if points.is_empty() {
+            return Err(invalid_path(input));
+        }
+        Ok(Self { closed, points })
+    }
+}
+
 impl Point {
     /// Parse `point_in`'s ordinary `(x,y)` or `x,y` spelling.
     ///
@@ -60,6 +115,13 @@ fn invalid(value: &str) -> TypeError {
     }
 }
 
+fn invalid_path(value: &str) -> TypeError {
+    TypeError::InvalidText {
+        type_name: "path",
+        value: value.to_string(),
+    }
+}
+
 impl PartialEq for Point {
     fn eq(&self, other: &Self) -> bool {
         float_eq(self.x, other.x) && float_eq(self.y, other.y)
@@ -105,5 +167,14 @@ mod tests {
         assert!(Point::parse("10,20") == Ok(Point { x: 10.0, y: 20.0 }));
         assert!(Point::parse("(10 20)").unwrap_err().sqlstate() == "22P02");
         assert!(Point::parse("(10,1e500)").unwrap_err().sqlstate() == "22003");
+    }
+
+    #[test]
+    fn path_input_distinguishes_open_and_closed_paths() {
+        let open = Path::parse("[(-1,2),(3,4)]").unwrap();
+        assert!(!open.closed && open.points.len() == 2);
+        let closed = Path::parse("((0,0),(1,1))").unwrap();
+        assert!(closed.closed && closed.points.len() == 2);
+        assert!(Path::parse("[(0,0),]").unwrap_err().sqlstate() == "22P02");
     }
 }

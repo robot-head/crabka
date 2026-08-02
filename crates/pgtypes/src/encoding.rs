@@ -64,6 +64,21 @@ pub fn encode_text_in(d: &Datum, style: OutputStyle<'_>) -> Vec<u8> {
             encode_float8_text(point.y)
         )
         .into_bytes(),
+        Datum::Path(path) => {
+            let mut out = String::from(if path.closed { "(" } else { "[" });
+            for (index, point) in path.points.iter().enumerate() {
+                if index != 0 {
+                    out.push(',');
+                }
+                out.push('(');
+                out.push_str(&encode_float8_text(point.x));
+                out.push(',');
+                out.push_str(&encode_float8_text(point.y));
+                out.push(')');
+            }
+            out.push(if path.closed { ')' } else { ']' });
+            out.into_bytes()
+        }
         // SP32: PostgreSQL `numeric_out` (plain decimal, dscale fractional digits).
         Datum::Numeric(d) => crate::numeric::to_text(d).into_bytes(),
         // SP37: text encodings. `Timestamptz` renders in the supplied session zone.
@@ -210,6 +225,20 @@ pub fn encode_binary(d: &Datum) -> Vec<u8> {
             let mut out = Vec::with_capacity(16);
             out.extend_from_slice(&point.x.to_be_bytes());
             out.extend_from_slice(&point.y.to_be_bytes());
+            out
+        }
+        Datum::Path(path) => {
+            let mut out = Vec::with_capacity(5 + path.points.len() * 16);
+            out.push(u8::from(path.closed));
+            out.extend_from_slice(
+                &i32::try_from(path.points.len())
+                    .expect("path has more than i32::MAX points")
+                    .to_be_bytes(),
+            );
+            for point in &path.points {
+                out.extend_from_slice(&point.x.to_be_bytes());
+                out.extend_from_slice(&point.y.to_be_bytes());
+            }
             out
         }
         // SP32: PostgreSQL `numeric_send` (base-10000 NBASE wire format).
