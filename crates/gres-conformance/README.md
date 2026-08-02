@@ -111,11 +111,11 @@ The adopted-corpus score (`9323/14272`) remains useful diagnostic evidence, but
 it is not the compatibility headline. Compatibility is the upstream 231-test
 serial and parallel result. The checked-in baseline-eligible serial run is
 `6/231` with 225 semantic failures. The latest infrastructure-clean review run
-is `7/231` with 224 semantic failures after `portals_p2` passed; it improves 40
-other tests, but fixture loading and schema GRANT support also enlarge five
-diffs and change eleven equal-sized fingerprints. It therefore records observed conformance
-without replacing the monotone baseline. Neither result satisfies the 231/231
-completion gate.
+is `8/231` with 223 semantic failures after `test_setup` and `portals_p2`
+passed; it improves 84 other tests, but complete fixture loading also enlarges
+14 diffs and changes 19 equal-sized fingerprints. It therefore records observed
+conformance without replacing the monotone baseline. Neither result satisfies
+the 231/231 completion gate.
 
 `corpus-regress/` contains PostgreSQL `src/test/regress` SQL files adopted with
 `POSTGRES_TAG=REL_18_4 ../../tools/gres-adopt-regress.sh <name>`. Adopted files

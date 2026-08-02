@@ -17,7 +17,7 @@ use crabka_pgkv::KvError;
 use crabka_pgtypes::{
     ColumnType, Datum,
     numeric::Typmod,
-    usertype::{CompositeField, DomainBody, DomainCheck, UserType, UserTypeBody},
+    usertype::{CompositeField, DomainBody, DomainCheck, RangeBody, UserType, UserTypeBody},
 };
 
 use crate::{
@@ -1373,6 +1373,17 @@ pub fn serialize_user_type(ty: &UserType) -> Vec<u8> {
                 write_str(&mut out, label);
             }
         }
+        UserTypeBody::Range(range) => {
+            out.push(USER_TYPE_RANGE);
+            write_type(&mut out, range.subtype);
+            match &range.collation {
+                Some(collation) => {
+                    out.push(1);
+                    write_str(&mut out, collation);
+                }
+                None => out.push(0),
+            }
+        }
         UserTypeBody::Domain(domain) => {
             out.push(USER_TYPE_DOMAIN);
             write_type(&mut out, domain.base);
@@ -1430,6 +1441,13 @@ pub fn deserialize_user_type(bytes: &[u8]) -> Result<UserType, KvError> {
             }
             UserTypeBody::Enum(labels)
         }
+        USER_TYPE_RANGE => UserTypeBody::Range(RangeBody {
+            subtype: read_type(&mut cur)?,
+            collation: match take_u8(&mut cur)? {
+                0 => None,
+                _ => Some(read_string(&mut cur)?),
+            },
+        }),
         USER_TYPE_DOMAIN => {
             let base = read_type(&mut cur)?;
             let not_null = take_u8(&mut cur)? != 0;
@@ -1465,6 +1483,7 @@ pub fn deserialize_user_type(bytes: &[u8]) -> Result<UserType, KvError> {
 const USER_TYPE_COMPOSITE: u8 = 1;
 const USER_TYPE_ENUM: u8 = 2;
 const USER_TYPE_DOMAIN: u8 = 3;
+const USER_TYPE_RANGE: u8 = 4;
 
 fn write_count(out: &mut Vec<u8>, count: usize) {
     out.extend_from_slice(
@@ -1965,6 +1984,19 @@ mod tests {
         assert_eq!(m.user, "alice");
         assert_eq!(m.server, "kafka_s");
         assert_eq!(m.options[0], ("token".into(), "secret".into()));
+    }
+
+    #[test]
+    fn roundtrip_range_type_metadata() {
+        let ty = UserType {
+            oid: 300_000,
+            name: "textrange".into(),
+            body: UserTypeBody::Range(RangeBody {
+                subtype: ColumnType::Text,
+                collation: Some("C".into()),
+            }),
+        };
+        assert_eq!(deserialize_user_type(&serialize_user_type(&ty)), Ok(ty));
     }
 
     #[test]

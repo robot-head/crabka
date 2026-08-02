@@ -723,10 +723,12 @@ pub enum CreateTypeDefinition {
     /// `AS ENUM ('a', 'b', …)`: the labels in declaration order, which is the
     /// order `<` uses. The list may be empty.
     Enum(Vec<String>),
-    /// `AS RANGE (SUBTYPE = …, …)`: parsed so the statement is recognised and
-    /// refused with a clear message rather than a syntax error.
-    Range,
-    /// A bare `CREATE TYPE name`: a shell type.
+    /// `AS RANGE (SUBTYPE = …, …)`.
+    Range {
+        subtype: ColumnType,
+        collation: Option<String>,
+    },
+    /// A bare `CREATE TYPE name` — a shell type.
     Shell,
 }
 
@@ -817,6 +819,10 @@ pub enum UtilityStatement {
     Reindex,
     /// `CHECKPOINT`.
     Checkpoint,
+    /// Catalog DDL accepted while physical placement remains chapter-owned.
+    CreateTablespace,
+    /// Operator-class metadata; partition hashing still uses the resolved type.
+    CreateOperatorClass,
     /// `ALTER SYSTEM SET <name> = <value>` / `ALTER SYSTEM RESET { <name> | ALL }`.
     /// `name` is `None` for `RESET ALL`.
     AlterSystem { name: Option<String> },
@@ -1259,12 +1265,10 @@ pub enum NonGoalCommand {
     CreateConversion,
     CreateLanguage,
     CreateOperator,
-    CreateOperatorClass,
     CreateOperatorFamily,
     CreatePublication,
     CreateRule,
     CreateSubscription,
-    CreateTablespace,
     CreateTextSearchParser,
     CreateTextSearchTemplate,
     CreateTransform,
@@ -1305,12 +1309,10 @@ impl NonGoalCommand {
             Self::CreateConversion => "CREATE CONVERSION",
             Self::CreateLanguage => "CREATE LANGUAGE",
             Self::CreateOperator => "CREATE OPERATOR",
-            Self::CreateOperatorClass => "CREATE OPERATOR CLASS",
             Self::CreateOperatorFamily => "CREATE OPERATOR FAMILY",
             Self::CreatePublication => "CREATE PUBLICATION",
             Self::CreateRule => "CREATE RULE",
             Self::CreateSubscription => "CREATE SUBSCRIPTION",
-            Self::CreateTablespace => "CREATE TABLESPACE",
             Self::CreateTextSearchParser => "CREATE TEXT SEARCH PARSER",
             Self::CreateTextSearchTemplate => "CREATE TEXT SEARCH TEMPLATE",
             Self::CreateTransform => "CREATE TRANSFORM",
@@ -1346,7 +1348,6 @@ impl NonGoalCommand {
             | Self::AlterOperatorClass
             | Self::AlterOperatorFamily
             | Self::CreateOperator
-            | Self::CreateOperatorClass
             | Self::CreateOperatorFamily
             | Self::DropOperator
             | Self::DropOperatorClass
@@ -1360,7 +1361,7 @@ impl NonGoalCommand {
             Self::AlterRule | Self::CreateRule | Self::DropRule => {
                 "the legacy rewrite rule system is not supported"
             }
-            Self::AlterTablespace | Self::CreateTablespace | Self::DropTablespace => {
+            Self::AlterTablespace | Self::DropTablespace => {
                 "tablespaces are not part of the chapter storage model"
             }
             Self::AlterTextSearchParser
@@ -1443,10 +1444,6 @@ non_goal_specs!(
         "CREATE OPERATOR === (FUNCTION = int4eq, LEFTARG = integer, RIGHTARG = integer)"
     ),
     (
-        CreateOperatorClass,
-        "CREATE OPERATOR CLASS opc FOR TYPE integer USING btree AS OPERATOR 1 < (integer, integer)"
-    ),
-    (
         CreateOperatorFamily,
         "CREATE OPERATOR FAMILY opf USING btree"
     ),
@@ -1459,7 +1456,6 @@ non_goal_specs!(
         CreateSubscription,
         "CREATE SUBSCRIPTION sub CONNECTION 'host=x' PUBLICATION pub"
     ),
-    (CreateTablespace, "CREATE TABLESPACE ts LOCATION '/tmp/ts'"),
     (
         CreateTextSearchParser,
         "CREATE TEXT SEARCH PARSER p (START = f, GETTOKEN = f, END = f, LEXTYPES = f)"

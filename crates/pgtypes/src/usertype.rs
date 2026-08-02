@@ -112,8 +112,16 @@ pub enum UserTypeBody {
     /// `CREATE TYPE … AS ENUM (…)`: `pg_type.typtype = 'e'`. Labels are held in
     /// `pg_enum.enumsortorder` order, which is the order `<` uses.
     Enum(Vec<String>),
-    /// `CREATE DOMAIN … AS base …`: `pg_type.typtype = 'd'`.
+    /// `CREATE TYPE … AS RANGE` — `pg_type.typtype = 'r'`.
+    Range(RangeBody),
+    /// `CREATE DOMAIN … AS base …` — `pg_type.typtype = 'd'`.
     Domain(DomainBody),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RangeBody {
+    pub subtype: ColumnType,
+    pub collation: Option<String>,
 }
 
 /// A domain's constraints and default.
@@ -157,6 +165,13 @@ impl UserType {
         match &self.body {
             UserTypeBody::Composite(_) => ColumnType::Record(Some(self.type_ref())),
             UserTypeBody::Enum(_) => ColumnType::Enum(self.type_ref()),
+            // ponytail: preserve range text through the existing domain storage
+            // path until native bounds/operators require a dedicated datum.
+            UserTypeBody::Range(_) => ColumnType::Domain(DomainRef {
+                oid: self.oid,
+                name: intern(&self.name),
+                base: leak_column_type(ColumnType::Text),
+            }),
             UserTypeBody::Domain(domain) => ColumnType::Domain(DomainRef {
                 oid: self.oid,
                 name: intern(&self.name),
@@ -171,6 +186,7 @@ impl UserType {
         match &self.body {
             UserTypeBody::Composite(_) => "c",
             UserTypeBody::Enum(_) => "e",
+            UserTypeBody::Range(_) => "r",
             UserTypeBody::Domain(_) => "d",
         }
     }

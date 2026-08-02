@@ -58,6 +58,9 @@ impl Path {
                 return Err(invalid_path(input));
             };
             rest = tail.trim_start();
+            if rest.is_empty() {
+                return Err(invalid_path(input));
+            }
         }
         if points.is_empty() {
             return Err(invalid_path(input));

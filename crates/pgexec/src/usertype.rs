@@ -15,7 +15,7 @@ use crabka_pgparser::ast::{
 };
 use crabka_pgtypes::{
     ColumnType, Datum,
-    usertype::{self, CompositeField, DomainBody, DomainCheck, UserType, UserTypeBody},
+    usertype::{self, CompositeField, DomainBody, DomainCheck, RangeBody, UserType, UserTypeBody},
 };
 use crabka_pgwire::engine::QueryResult;
 
@@ -52,13 +52,10 @@ pub fn create_type(
             UserTypeBody::Composite(composite_fields(fields)?)
         }
         CreateTypeDefinition::Enum(labels) => UserTypeBody::Enum(enum_labels(name, labels)?),
-        CreateTypeDefinition::Range => {
-            return Err(ExecError::Unsupported(
-                "CREATE TYPE … AS RANGE is not supported: range and multirange types are not \
-                 implemented"
-                    .into(),
-            ));
-        }
+        CreateTypeDefinition::Range { subtype, collation } => UserTypeBody::Range(RangeBody {
+            subtype: *subtype,
+            collation: collation.clone(),
+        }),
         CreateTypeDefinition::Shell => {
             return Err(ExecError::Unsupported(
                 "CREATE TYPE without a definition (a shell type) is not supported: shell types \
