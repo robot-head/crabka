@@ -746,6 +746,8 @@ pub struct CompositeFieldDef {
 /// An `ALTER TYPE` action.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AlterTypeAction {
+    /// `ADD ATTRIBUTE name type [COLLATE collation]`.
+    AddAttribute(CompositeFieldDef),
     /// `ADD VALUE [IF NOT EXISTS] 'label' [{BEFORE | AFTER} 'existing']`.
     AddValue {
         label: String,

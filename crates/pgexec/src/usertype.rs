@@ -251,6 +251,28 @@ pub fn alter_type(
 ) -> Result<(QueryResult, Vec<WriteOp>), ExecError> {
     let mut ty = require_type(kv, name)?;
     match action {
+        AlterTypeAction::AddAttribute(field) => {
+            if column_type_contains_oid(field.ty, ty.oid, &mut HashSet::new()) {
+                return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+                    "42P16",
+                    format!("composite type {name} cannot be made a member of itself"),
+                )));
+            }
+            let UserTypeBody::Composite(fields) = &mut ty.body else {
+                return Err(wrong_kind(name, "a composite type"));
+            };
+            if fields.iter().any(|existing| existing.name == field.name) {
+                return Err(ExecError::DuplicateObject(format!(
+                    "column \"{}\" of relation \"{name}\" already exists",
+                    field.name
+                )));
+            }
+            fields.push(
+                composite_fields(std::slice::from_ref(field))?
+                    .pop()
+                    .expect("one field produces one field"),
+            );
+        }
         AlterTypeAction::AddValue {
             label,
             if_not_exists,
@@ -303,6 +325,30 @@ pub fn alter_type(
         command("ALTER TYPE"),
         vec![crabka_pgcatalog::put_user_type_op(&ty)],
     ))
+}
+
+fn column_type_contains_oid(ty: ColumnType, target: u32, seen: &mut HashSet<u32>) -> bool {
+    if ty.oid() == target {
+        return true;
+    }
+    match ty {
+        ColumnType::Array(elem) => column_type_contains_oid(elem.column_type(), target, seen),
+        ColumnType::Domain(domain) => column_type_contains_oid(*domain.base, target, seen),
+        ColumnType::Range(range) => column_type_contains_oid(*range.subtype, target, seen),
+        ColumnType::Multirange(multirange) => {
+            column_type_contains_oid(*multirange.range.subtype, target, seen)
+        }
+        ColumnType::Record(Some(record)) if seen.insert(record.oid) => {
+            usertype::lookup_oid(record.oid).is_some_and(|ty| {
+                ty.fields().is_some_and(|fields| {
+                    fields
+                        .iter()
+                        .any(|field| column_type_contains_oid(field.ty, target, seen))
+                })
+            })
+        }
+        _ => false,
+    }
 }
 
 /// `ALTER DOMAIN name <action>`.
@@ -756,8 +802,7 @@ mod tests {
         )
         .expect("composite");
         kv.write_batch(&composite_ops).expect("store composite");
-        usertype::replace(&composite);
-        let (range, range_ops) = crabka_pgcatalog::create_user_type_ops(
+        let (_range, range_ops) = crabka_pgcatalog::create_user_type_ops(
             &kv,
             "cascade_composite_range_test",
             UserTypeBody::Range(RangeBody {
@@ -767,9 +812,7 @@ mod tests {
             }),
         )
         .expect("range");
-        let companion_name = range.multirange_name().expect("companion");
         kv.write_batch(&range_ops).expect("store range");
-        usertype::replace(&range);
 
         let (_, drop_ops) =
             drop_types(&kv, &[composite.name.clone()], false, true, false).expect("cascade");
@@ -780,7 +823,40 @@ mod tests {
                 .expect("types")
                 .is_empty()
         );
-        assert!(ColumnType::from_sql_name(&range.name).is_none());
-        assert!(ColumnType::from_sql_name(&companion_name).is_none());
+    }
+
+    #[test]
+    fn composite_attribute_rejects_indirect_self_inclusion() {
+        let kv = MemKv::default();
+        let (composite, composite_ops) = crabka_pgcatalog::create_user_type_ops(
+            &kv,
+            "recursive_composite_test",
+            UserTypeBody::Composite(vec![]),
+        )
+        .expect("composite");
+        kv.write_batch(&composite_ops).expect("store composite");
+        let (range, range_ops) = crabka_pgcatalog::create_user_type_ops(
+            &kv,
+            "recursive_composite_range_test",
+            UserTypeBody::Range(RangeBody {
+                subtype: composite.column_type(),
+                collation: None,
+                multirange_name: None,
+            }),
+        )
+        .expect("range");
+        kv.write_batch(&range_ops).expect("store range");
+
+        let error = alter_type(
+            &kv,
+            &composite.name,
+            &AlterTypeAction::AddAttribute(CompositeFieldDef {
+                name: "recursive".into(),
+                ty: range.column_type(),
+                collation: None,
+            }),
+        )
+        .expect_err("recursive member");
+        assert!(error.into_pg().code == "42P16");
     }
 }

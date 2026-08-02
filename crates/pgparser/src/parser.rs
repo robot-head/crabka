@@ -7342,23 +7342,42 @@ impl Parser {
         let name = self.relation_ref()?;
         let pos = self.peek_pos();
         if self.eat_ident_eq("add") {
-            self.expect_ident_eq("value")?;
-            let if_not_exists = self.eat_if_not_exists();
-            let label = self.expect_string_lit()?;
-            let position = if self.eat_ident_eq("before") {
-                Some(EnumValuePosition::Before(self.expect_string_lit()?))
-            } else if self.eat_ident_eq("after") {
-                Some(EnumValuePosition::After(self.expect_string_lit()?))
+            if self.eat_ident_eq("value") {
+                let if_not_exists = self.eat_if_not_exists();
+                let label = self.expect_string_lit()?;
+                let position = if self.eat_ident_eq("before") {
+                    Some(EnumValuePosition::Before(self.expect_string_lit()?))
+                } else if self.eat_ident_eq("after") {
+                    Some(EnumValuePosition::After(self.expect_string_lit()?))
+                } else {
+                    None
+                };
+                return Ok(crate::ast::Statement::AlterType {
+                    name,
+                    action: AlterTypeAction::AddValue {
+                        label,
+                        if_not_exists,
+                        position,
+                    },
+                });
+            }
+            self.expect_ident_eq("attribute")?;
+            let field_name = self.expect_ident()?;
+            let ty = self.parse_type_name()?;
+            let collation = if self.eat_ident_eq("collate") {
+                Some(self.expect_collation_name()?)
             } else {
                 None
             };
+            self.eat_ident_eq("cascade");
+            self.eat_ident_eq("restrict");
             return Ok(crate::ast::Statement::AlterType {
                 name,
-                action: AlterTypeAction::AddValue {
-                    label,
-                    if_not_exists,
-                    position,
-                },
+                action: AlterTypeAction::AddAttribute(crate::ast::CompositeFieldDef {
+                    name: field_name,
+                    ty,
+                    collation,
+                }),
             });
         }
         if self.eat_ident_eq("rename") {
@@ -17386,6 +17405,23 @@ mod q1_statement_completeness_tests {
         for (sql, expected) in cases {
             assert!(sqlstate(sql) == expected, "{sql}");
         }
+    }
+
+    #[test]
+    fn alter_type_add_attribute_preserves_the_field_definition() {
+        let Statement::AlterType { action, .. } =
+            one("ALTER TYPE pair ADD ATTRIBUTE label text COLLATE \"C\" CASCADE")
+        else {
+            panic!("expected ALTER TYPE");
+        };
+        assert!(
+            action
+                == crate::ast::AlterTypeAction::AddAttribute(crate::ast::CompositeFieldDef {
+                    name: "label".into(),
+                    ty: crabka_pgtypes::ColumnType::Text,
+                    collation: Some("C".into()),
+                })
+        );
     }
 }
 
