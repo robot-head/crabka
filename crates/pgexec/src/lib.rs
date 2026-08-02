@@ -41,7 +41,12 @@
 
 mod agg;
 mod array_fn;
+mod builtin_amop;
+mod builtin_amproc;
+mod builtin_opclasses;
 mod builtin_opfamilies;
+mod builtin_operators;
+mod builtin_procs;
 mod catalog_fn;
 mod catalog_rel;
 pub mod clock;

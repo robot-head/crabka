@@ -3599,7 +3599,7 @@ async fn execute_view_dml(
                 sample: None,
             };
             let target_rows =
-                build_from(&read, std::slice::from_ref(&target_expr), None, None)?.rows;
+                build_from(&read, std::slice::from_ref(&target_expr), None, None, None)?.rows;
             let source = DmlSource::build(write_ctx, ctes, &view, qualifier, from)?;
             let targets = resolve_assignments(write_ctx, ctes, &view, assignments)?;
             let spec = ReturningSpec::new(
@@ -3663,7 +3663,7 @@ async fn execute_view_dml(
                 sample: None,
             };
             let target_rows =
-                build_from(&read, std::slice::from_ref(&target_expr), None, None)?.rows;
+                build_from(&read, std::slice::from_ref(&target_expr), None, None, None)?.rows;
             let source = DmlSource::build(write_ctx, ctes, &view, qualifier, using)?;
             let spec = ReturningSpec::new(
                 &view,
@@ -4276,7 +4276,7 @@ impl DmlSource {
             });
         }
         let read = write_ctx.read_ctx(ctes);
-        let rel = build_from(&read, from, None, None)?;
+        let rel = build_from(&read, from, None, None, None)?;
         scope.columns.extend(rel.scope.columns);
         Ok(Self {
             scope,
@@ -4936,7 +4936,7 @@ async fn execute_merge(
                 columns: None,
                 sample: None,
             };
-            build_from(&read, std::slice::from_ref(&te), None, None)?
+            build_from(&read, std::slice::from_ref(&te), None, None, None)?
         }
         MergeSource::Query {
             query,
@@ -8696,6 +8696,7 @@ fn build_from(
     // joins/comma-FROM never see it and keep the full-scan + local-filter path.
     bounds: Option<&ScanBounds>,
     scan_plan: Option<&crate::plan_dist::DistributedScanPlan>,
+    filter: Option<&Expr>,
 ) -> Result<Relation, ExecError> {
     let mut iter = from.iter();
     let first = iter
@@ -8711,6 +8712,7 @@ fn build_from(
             te,
             crabka_pgparser::ast::JoinKind::Cross,
             &crabka_pgparser::ast::JoinConstraint::None,
+            filter,
         )?;
     }
     Ok(acc)
@@ -8727,9 +8729,16 @@ fn append_from_item(
     te: &crabka_pgparser::ast::TableExpr,
     kind: crabka_pgparser::ast::JoinKind,
     constraint: &crabka_pgparser::ast::JoinConstraint,
+    filter: Option<&Expr>,
 ) -> Result<Relation, ExecError> {
     if !is_lateral_item(te, &acc.scope) {
-        let next = build_table_expr(read_ctx, te, None, None)?;
+        let mut acc = acc;
+        let mut next = build_table_expr(read_ctx, te, None, None)?;
+        if matches!(kind, crabka_pgparser::ast::JoinKind::Inner | crabka_pgparser::ast::JoinKind::Cross)
+            && let Some(filter) = filter
+        {
+            push_local_where(&mut acc, &mut next, filter, read_ctx.eval_ctx)?;
+        }
         return join_relations(
             acc,
             next,
@@ -8740,6 +8749,63 @@ fn append_from_item(
         );
     }
     lateral_join(read_ctx, acc, te, kind, constraint)
+}
+
+/// Apply immutable top-level WHERE conjuncts that bind to exactly one join side
+/// before materializing an inner/cross product. The complete WHERE is evaluated
+/// again after FROM, so this optimization cannot weaken filtering.
+fn push_local_where(
+    left: &mut Relation,
+    right: &mut Relation,
+    filter: &Expr,
+    ctx: &crate::clock::EvalCtx,
+) -> Result<(), ExecError> {
+    let mut conjuncts = Vec::new();
+    collect_conjuncts(filter, &mut conjuncts);
+    for conjunct in conjuncts {
+        if !immutable_row_predicate(conjunct) {
+            continue;
+        }
+        let left_only = expr_references_scope(conjunct, &left.scope)
+            && crate::eval::check_predicate_resolves(conjunct, &left.scope).is_ok();
+        let right_only = expr_references_scope(conjunct, &right.scope)
+            && crate::eval::check_predicate_resolves(conjunct, &right.scope).is_ok();
+        match (left_only, right_only) {
+            (true, false) => filter_relation(left, conjunct, ctx)?,
+            (false, true) => filter_relation(right, conjunct, ctx)?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn immutable_row_predicate(expr: &Expr) -> bool {
+    let mut immutable = !crate::agg::contains_aggregate(expr);
+    crate::grouping::visit_expr(expr, &mut |node| {
+        immutable &= !matches!(
+            node,
+            Expr::ScalarSubquery(_)
+                | Expr::Exists(_)
+                | Expr::InSubquery { .. }
+                | Expr::Quantified { .. }
+                | Expr::ArraySubquery(_)
+        ) && !matches!(node, Expr::Func(call) if !is_immutable_function(&call.name));
+    });
+    immutable
+}
+
+fn filter_relation(
+    relation: &mut Relation,
+    predicate: &Expr,
+    ctx: &crate::clock::EvalCtx,
+) -> Result<(), ExecError> {
+    let rows = std::mem::take(&mut relation.rows);
+    for row in rows {
+        if row_matches(Some(predicate), &relation.scope, &row, ctx)? {
+            relation.rows.push(row);
+        }
+    }
+    Ok(())
 }
 
 /// Is this FROM item correlated with the columns already in scope?
@@ -9777,7 +9843,7 @@ fn build_table_expr(
             let l = build_table_expr(read_ctx, left, None, None)?;
             // A lateral right side sees the left side's columns, so it is rebuilt
             // per left row instead of materialized once.
-            append_from_item(read_ctx, l, right, *kind, constraint)
+            append_from_item(read_ctx, l, right, *kind, constraint, None)
         }
         TableExpr::Derived {
             subquery,
@@ -10915,7 +10981,13 @@ pub(crate) fn select_to_relation_with_ctes(
             }
             _ => None,
         };
-        build_from(read_ctx, &s.from, pushed.as_ref(), scan_plan.as_ref())?
+        build_from(
+            read_ctx,
+            &s.from,
+            pushed.as_ref(),
+            scan_plan.as_ref(),
+            s.filter.as_ref(),
+        )?
     };
     let mut kept = Vec::new();
     for row in &relation.rows {

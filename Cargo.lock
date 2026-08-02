@@ -3538,6 +3538,7 @@ dependencies = [
  "tracing-subscriber",
  "unicode-normalization",
  "zerocopy",
+ "zstd",
 ]
 
 [[package]]
