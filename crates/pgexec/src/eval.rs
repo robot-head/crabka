@@ -1407,6 +1407,13 @@ fn apply_range_directional(op: BinaryOp, l: &Datum, r: &Datum) -> Result<bool, E
         BinaryOp::Shl => (true, false, crabka_pgtypes::range::strictly_left as _),
         BinaryOp::Shr => (false, true, crabka_pgtypes::range::strictly_right as _),
         BinaryOp::Adjacent => {
+            if let (Datum::Multirange(multirange), Datum::Range(range))
+            | (Datum::Range(range), Datum::Multirange(multirange)) = (l, r)
+            {
+                return Ok(crabka_pgtypes::multirange::adjacent_range(
+                    multirange, range,
+                )?);
+            }
             let Some(left_first) = range_boundary(l, false) else {
                 return Ok(false);
             };
@@ -4365,6 +4372,26 @@ mod tests {
         assert_eq!(
             json_or_array_operator_result_type(BinaryOp::Contains, multirange, *subtype),
             Some(ColumnType::Bool)
+        );
+    }
+
+    #[test]
+    fn a_range_is_not_adjacent_to_an_internal_multirange_edge() {
+        use assert2::assert;
+
+        assert!(
+            ev(
+                "int4range(20,25) -|- int4multirange(int4range(10,20),int4range(30,40))",
+                None,
+                &[]
+            ) == Datum::Bool(false)
+        );
+        assert!(
+            ev(
+                "int4range(40,50) -|- int4multirange(int4range(10,20),int4range(30,40))",
+                None,
+                &[]
+            ) == Datum::Bool(true)
         );
     }
 }
