@@ -89,6 +89,7 @@ const PG_CATALOG_RELATIONS: &[&str] = &[
     "pg_depend",
     "pg_description",
     "pg_enum",
+    "pg_event_trigger",
     "pg_extension",
     "pg_indexes",
     "pg_inherits",
@@ -137,6 +138,7 @@ static RELATION_NAMES: &[&str] = &[
     "pg_depend",
     "pg_description",
     "pg_enum",
+    "pg_event_trigger",
     "pg_extension",
     "pg_indexes",
     "pg_inherits",
@@ -186,6 +188,7 @@ pub(crate) fn relation_oid(name: &str) -> i32 {
         "pg_depend" => 2608,
         "pg_description" => 2609,
         "pg_enum" => 3501,
+        "pg_event_trigger" => 3466,
         "pg_extension" => 3079,
         "pg_inherits" => 2611,
         "pg_language" => 2612,
@@ -522,16 +525,164 @@ pub(crate) fn rows(
         "pg_collation" => Ok(pg_collation_rows()),
         "pg_constraint" => pg_constraint_rows(kv),
         "pg_database" => Ok(pg_database_rows()),
+        "pg_depend" => pg_depend_rows(kv),
         "pg_description" => pg_description_rows(kv),
+        "pg_event_trigger" => pg_event_trigger_rows(kv),
         "pg_indexes" => pg_indexes_rows(kv),
         "pg_rewrite" => pg_rewrite_rows(kv),
         "pg_sequence" => pg_sequence_rows(kv),
         "pg_stat_activity" => Ok(pg_stat_activity_rows(backend_pid)),
         "pg_tables" => pg_tables_rows(kv),
         "pg_tablespace" => Ok(pg_tablespace_rows()),
+        "pg_trigger" => pg_trigger_rows(kv),
         "pg_views" => pg_views_rows(kv),
         _ => information_schema_rows(kv, name),
     }
+}
+
+fn pg_trigger_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    use crabka_pgcatalog::trigger::{TriggerLevel, TriggerTiming};
+    let mut tables: std::collections::HashMap<_, _> = crabka_pgcatalog::list_tables(kv)?
+        .into_iter()
+        .map(|table| (table.id, table))
+        .collect();
+    for view in crabka_pgcatalog::list_views(kv)? {
+        let table = crate::trigger::relation_trigger_table(kv, &view.name)?;
+        tables.insert(table.id, table);
+    }
+    crabka_pgcatalog::trigger::list_triggers(kv)?
+        .into_iter()
+        .map(|trigger| {
+            let mut ty = match trigger.level {
+                TriggerLevel::Row => 1,
+                TriggerLevel::Statement => 0,
+            };
+            ty |= match trigger.timing {
+                TriggerTiming::Before => 2,
+                TriggerTiming::After => 0,
+                TriggerTiming::InsteadOf => 64,
+            };
+            ty |= i16::from(trigger.events.insert) * 4;
+            ty |= i16::from(trigger.events.delete) * 8;
+            ty |= i16::from(trigger.events.update) * 16;
+            ty |= i16::from(trigger.events.truncate) * 32;
+            let attrs = tables
+                .get(&trigger.table_id)
+                .map_or_else(String::new, |table| {
+                    trigger
+                        .events
+                        .update_columns
+                        .iter()
+                        .filter_map(|name| table.column_index(name).map(|index| index + 1))
+                        .map(|number| number.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                });
+            let mut args = Vec::new();
+            for argument in &trigger.arguments {
+                args.extend_from_slice(argument.as_bytes());
+                args.push(0);
+            }
+            Ok(vec![
+                int(i32::try_from(trigger.oid).unwrap_or(0)),
+                int(i32::try_from(trigger.table_id).unwrap_or(0)),
+                int(i32::try_from(trigger.parent_oid).unwrap_or(0)),
+                text(&trigger.name),
+                int(i32::try_from(trigger.function_oid).unwrap_or(0)),
+                small(ty),
+                text(&trigger.enabled.catalog_code().to_string()),
+                Datum::Bool(trigger.is_internal),
+                int(i32::try_from(trigger.referenced_table_id.unwrap_or(0)).unwrap_or(0)),
+                int(0),
+                int(i32::try_from(trigger.constraint_oid).unwrap_or(0)),
+                Datum::Bool(trigger.deferrable),
+                Datum::Bool(trigger.initially_deferred),
+                small(i16::try_from(trigger.arguments.len()).unwrap_or(i16::MAX)),
+                text(&attrs),
+                Datum::Bytea(args),
+                trigger.when.as_deref().map_or(Datum::Null, text),
+                trigger.old_transition.as_deref().map_or(Datum::Null, text),
+                trigger.new_transition.as_deref().map_or(Datum::Null, text),
+            ])
+        })
+        .collect()
+}
+
+fn pg_depend_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let trigger_class = relation_oid("pg_trigger");
+    let event_trigger_class = relation_oid("pg_event_trigger");
+    let proc_class = relation_oid("pg_proc");
+    let relation_class = relation_oid("pg_class");
+    let mut rows = Vec::new();
+    for trigger in crabka_pgcatalog::trigger::list_triggers(kv)? {
+        let oid = i32::try_from(trigger.oid).unwrap_or(0);
+        rows.push(vec![
+            int(trigger_class),
+            int(oid),
+            int(0),
+            int(proc_class),
+            int(i32::try_from(trigger.function_oid).unwrap_or(0)),
+            int(0),
+            text("n"),
+        ]);
+        rows.push(vec![
+            int(trigger_class),
+            int(oid),
+            int(0),
+            int(relation_class),
+            int(i32::try_from(trigger.table_id).unwrap_or(0)),
+            int(0),
+            text("a"),
+        ]);
+    }
+    for trigger in crabka_pgcatalog::trigger::list_event_triggers(kv)? {
+        rows.push(vec![
+            int(event_trigger_class),
+            int(i32::try_from(trigger.oid).unwrap_or(0)),
+            int(0),
+            int(proc_class),
+            int(i32::try_from(trigger.function_oid).unwrap_or(0)),
+            int(0),
+            text("n"),
+        ]);
+    }
+    Ok(rows)
+}
+
+fn pg_event_trigger_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    use crabka_pgcatalog::trigger::EventTriggerEvent;
+    Ok(crabka_pgcatalog::trigger::list_event_triggers(kv)?
+        .into_iter()
+        .map(|trigger| {
+            let event = match trigger.event {
+                EventTriggerEvent::Login => "login",
+                EventTriggerEvent::DdlCommandStart => "ddl_command_start",
+                EventTriggerEvent::DdlCommandEnd => "ddl_command_end",
+                EventTriggerEvent::SqlDrop => "sql_drop",
+                EventTriggerEvent::TableRewrite => "table_rewrite",
+            };
+            let tags = trigger
+                .filters
+                .iter()
+                .filter(|filter| filter.variable == "tag")
+                .flat_map(|filter| filter.values.iter().cloned())
+                .map(Datum::Text)
+                .collect::<Vec<_>>();
+            vec![
+                int(i32::try_from(trigger.oid).unwrap_or(0)),
+                text(&trigger.name),
+                text(event),
+                int(crate::catalog_fn::BOOTSTRAP_ROLE_OID),
+                int(i32::try_from(trigger.function_oid).unwrap_or(0)),
+                text(&trigger.enabled.catalog_code().to_string()),
+                if tags.is_empty() {
+                    Datum::Null
+                } else {
+                    Datum::Array(crabka_pgtypes::ArrayValue::new(ElemType::Text, tags))
+                },
+            ]
+        })
+        .collect())
 }
 
 // ---------------------------------------------------------------- pg_catalog
@@ -688,6 +839,15 @@ fn pg_catalog_columns_rest(name: &str) -> Vec<Column> {
             ("tgqual", Text),
             ("tgoldtable", Text),
             ("tgnewtable", Text),
+        ]),
+        "pg_event_trigger" => cols(&[
+            ("oid", Int4),
+            ("evtname", Text),
+            ("evtevent", Text),
+            ("evtowner", Int4),
+            ("evtfoid", Int4),
+            ("evtenabled", Text),
+            ("evttags", ColumnType::Array(ElemType::Text)),
         ]),
         "pg_language" => cols(&[
             ("oid", Int4),
@@ -1989,24 +2149,41 @@ fn column_usage_row(
 }
 
 fn information_schema_view_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
-    Ok(crabka_pgcatalog::list_views(kv)?
+    crabka_pgcatalog::list_views(kv)?
         .into_iter()
         .map(|view| {
             let updatable = crate::catalog_fn::view_is_auto_updatable(&view);
             let flag = if updatable { "YES" } else { "NO" };
+            let view_id = crate::catalog_rel::view_oids(kv)?
+                .get(&view.name)
+                .copied()
+                .and_then(|oid| u32::try_from(oid).ok())
+                .unwrap_or(0);
+            let triggers = crabka_pgcatalog::trigger::triggers_for_table(kv, view_id)?;
+            let instead = |matches: fn(&crabka_pgcatalog::trigger::TriggerEvents) -> bool| {
+                if triggers.iter().any(|trigger| {
+                    trigger.timing == crabka_pgcatalog::trigger::TriggerTiming::InsteadOf
+                        && trigger.level == crabka_pgcatalog::trigger::TriggerLevel::Row
+                        && matches(&trigger.events)
+                }) {
+                    "YES"
+                } else {
+                    "NO"
+                }
+            };
             let mut row = relation_identity(&view.name).to_vec();
             row.extend([
                 text(&crate::catalog_fn::view_definition_text(&view, false)),
                 text("NONE"),
                 text(flag),
                 text(flag),
-                text("NO"),
-                text("NO"),
-                text("NO"),
+                text(instead(|events| events.update)),
+                text(instead(|events| events.delete)),
+                text(instead(|events| events.insert)),
             ]);
-            row
+            Ok(row)
         })
-        .collect())
+        .collect()
 }
 
 fn enabled_role_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {

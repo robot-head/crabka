@@ -44,6 +44,7 @@ pub(crate) struct ScalarFunctionRequest {
 pub(crate) enum FunctionRequestKind {
     Scalar,
     Table(Vec<(String, ColumnType)>),
+    Trigger(Box<crate::trigger::TriggerInvocation>),
 }
 
 pub(crate) enum FunctionRequestResult {
@@ -85,6 +86,16 @@ pub(crate) fn with_scalar_runtime<T>(
         let result = f();
         cell.replace(previous);
         result
+    })
+}
+
+pub(crate) fn scalar_runtime_request_sender()
+-> Option<tokio::sync::mpsc::Sender<ScalarFunctionRequest>> {
+    SCALAR_RUNTIME.with(|runtime| {
+        runtime
+            .borrow()
+            .as_ref()
+            .and_then(|runtime| runtime.requests.clone())
     })
 }
 
@@ -608,12 +619,41 @@ pub(crate) fn drop_routines(
     object: RoutineObject,
     if_exists: bool,
     routines: &[RoutineSignature],
-    _cascade: bool,
+    cascade: bool,
 ) -> Result<(QueryResult, Vec<WriteOp>), ExecError> {
     let mut ops = Vec::new();
     for signature in routines {
         match resolve_signature(kv, object, signature) {
-            Ok(routine) => ops.extend(drop_routine_ops(&routine.identity())),
+            Ok(routine) => {
+                let ordinary = crabka_pgcatalog::trigger::list_triggers(kv)?
+                    .into_iter()
+                    .filter(|trigger| trigger.function_oid == routine.oid)
+                    .collect::<Vec<_>>();
+                let event = crabka_pgcatalog::trigger::list_event_triggers(kv)?
+                    .into_iter()
+                    .filter(|trigger| trigger.function_oid == routine.oid)
+                    .collect::<Vec<_>>();
+                if !cascade && (!ordinary.is_empty() || !event.is_empty()) {
+                    return Err(ExecError::DependentObjectsStillExist(format!(
+                        "cannot drop function {} because other objects depend on it",
+                        routine.identity()
+                    )));
+                }
+                if cascade {
+                    for trigger in ordinary {
+                        ops.extend(crabka_pgcatalog::trigger::drop_trigger_ops(
+                            trigger.table_id,
+                            &trigger.name,
+                        ));
+                    }
+                    for trigger in event {
+                        ops.extend(crabka_pgcatalog::trigger::drop_event_trigger_ops(
+                            &trigger.name,
+                        ));
+                    }
+                }
+                ops.extend(drop_routine_ops(&routine.identity()));
+            }
             Err(error) if if_exists && is_undefined(&error) => {}
             Err(error) => return Err(error),
         }

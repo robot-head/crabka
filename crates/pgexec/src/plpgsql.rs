@@ -19,7 +19,7 @@ use crabka_pgparser::ast::{
     PlPgSqlVariableConflict, QueryBody, QueryExpr, RoutineType, SelectItem, SetExpr, Statement,
     TableExpr,
 };
-use crabka_pgtypes::{ArrayValue, ColumnType, Datum, RecordValue};
+use crabka_pgtypes::{ArrayValue, ColumnType, Datum, ElemType, RecordValue};
 use crabka_pgwire::{
     engine::{FieldDescription, QueryResult},
     error::PgError,
@@ -288,6 +288,95 @@ pub(crate) async fn execute_scalar_function(
                 "control reached end of function {} without RETURN",
                 routine.identity()
             ),
+        }),
+        Flow::LoopControl { .. } => Err(ExecError::Syntax(
+            "EXIT or CONTINUE cannot be used outside a loop".into(),
+        )),
+    }
+}
+
+pub(crate) async fn execute_trigger_function(
+    session: &mut SqlSession,
+    routine: &Routine,
+    invocation: crate::trigger::TriggerInvocation,
+) -> Result<Datum, ExecError> {
+    let block = crate::routine::parse_plpgsql_body(routine)?;
+    let mut frame = root_frame();
+    frame.label = Some(routine.name.clone());
+    let record_types: Arc<[ColumnType]> = Arc::from(invocation.column_types);
+    let mut insert = |name: &str, value: Datum, ty: ColumnType, constant: bool| {
+        frame.slots.insert(
+            name.into(),
+            Slot {
+                record_types: matches!(ty, ColumnType::Record(_))
+                    .then(|| Arc::clone(&record_types)),
+                value,
+                ty,
+                constant,
+                not_null: false,
+            },
+        );
+    };
+    insert("new", invocation.new, ColumnType::Record(None), false);
+    insert("old", invocation.old, ColumnType::Record(None), false);
+    for (name, value) in [
+        ("tg_name", Datum::Text(invocation.name)),
+        ("tg_when", Datum::Text(invocation.when)),
+        ("tg_level", Datum::Text(invocation.level)),
+        ("tg_op", Datum::Text(invocation.operation)),
+        ("tg_table_name", Datum::Text(invocation.table_name.clone())),
+        ("tg_relname", Datum::Text(invocation.table_name)),
+        ("tg_table_schema", Datum::Text(invocation.table_schema)),
+    ] {
+        insert(name, value, ColumnType::Text, true);
+    }
+    insert(
+        "tg_relid",
+        Datum::Int4(i32::try_from(invocation.relation_oid).unwrap_or(0)),
+        ColumnType::Int4,
+        true,
+    );
+    insert(
+        "tg_nargs",
+        Datum::Int4(i32::try_from(invocation.arguments.len()).unwrap_or(i32::MAX)),
+        ColumnType::Int4,
+        true,
+    );
+    insert(
+        "tg_argv",
+        Datum::Array(ArrayValue::new(
+            ElemType::Text,
+            invocation.arguments.into_iter().map(Datum::Text).collect(),
+        )),
+        ColumnType::Array(ElemType::Text),
+        true,
+    );
+    if let Some(event) = invocation.event {
+        insert("tg_event", Datum::Text(event), ColumnType::Text, true);
+    }
+    if let Some(tag) = invocation.tag {
+        insert("tg_tag", Datum::Text(tag), ColumnType::Text, true);
+    }
+    let mut interpreter = Interpreter {
+        session,
+        frames: vec![frame],
+        allow_transaction_control: false,
+        savepoint_serial: 0,
+        active_error: None,
+        exception_depth: 0,
+        cursor_declarations: HashMap::new(),
+        last_row_count: 0,
+        output_slot: None,
+        set_results: None,
+        context: format!("PL/pgSQL function {}", routine.identity()),
+        variable_conflict: block.variable_conflict,
+        routine_oid: routine.oid,
+    };
+    match interpreter.exec_block(&block).await? {
+        Flow::Return(value) => Ok(value),
+        Flow::Next => Err(ExecError::FunctionError {
+            sqlstate: "2F005",
+            message: "control reached end of trigger procedure without RETURN".to_string(),
         }),
         Flow::LoopControl { .. } => Err(ExecError::Syntax(
             "EXIT or CONTINUE cannot be used outside a loop".into(),
@@ -3164,11 +3253,12 @@ fn rewrite_statement_with_ctes(
             let mut scope = crate::scope::Scope::single(&target, qualifier);
             if !from.is_empty() {
                 scope.columns.extend(
-                    crate::exec::build_from_schema_with_ctes(
+                    crate::exec::build_from_schema_with_ctes_and_context(
                         binder.catalog(),
                         binder.resolution(),
                         from,
                         &ctes,
+                        Some(&binder.interpreter.session.plpgsql_eval_context()),
                     )?
                     .scope
                     .columns,
@@ -3221,11 +3311,12 @@ fn rewrite_statement_with_ctes(
             let mut scope = crate::scope::Scope::single(&target, qualifier);
             if !using.is_empty() {
                 scope.columns.extend(
-                    crate::exec::build_from_schema_with_ctes(
+                    crate::exec::build_from_schema_with_ctes_and_context(
                         binder.catalog(),
                         binder.resolution(),
                         using,
                         &ctes,
+                        Some(&binder.interpreter.session.plpgsql_eval_context()),
                     )?
                     .scope
                     .columns,
@@ -3271,11 +3362,12 @@ fn rewrite_statement_with_ctes(
                 }
             };
             scope.columns.extend(
-                crate::exec::build_from_schema_with_ctes(
+                crate::exec::build_from_schema_with_ctes_and_context(
                     binder.catalog(),
                     binder.resolution(),
                     std::slice::from_ref(&source_table),
                     &ctes,
+                    Some(&binder.interpreter.session.plpgsql_eval_context()),
                 )?
                 .scope
                 .columns,
@@ -3588,11 +3680,12 @@ impl SqlBinder<'_, '_> {
                 let scope = if select.from.is_empty() {
                     crate::scope::Scope::empty()
                 } else {
-                    crate::exec::build_from_schema_with_ctes(
+                    crate::exec::build_from_schema_with_ctes_and_context(
                         self.catalog(),
                         self.resolution(),
                         &select.from,
                         ctes,
+                        Some(&self.interpreter.session.plpgsql_eval_context()),
                     )?
                     .scope
                 };
@@ -3754,11 +3847,12 @@ impl SqlBinder<'_, '_> {
         let mut outer = crate::scope::Scope::empty();
         for table in tables {
             self.rewrite_table(table, &outer, query_outers, ctes)?;
-            let relation = crate::exec::build_from_schema_with_ctes(
+            let relation = crate::exec::build_from_schema_with_ctes_and_context(
                 self.catalog(),
                 self.resolution(),
                 std::slice::from_ref(table),
                 ctes,
+                Some(&self.interpreter.session.plpgsql_eval_context()),
             )?;
             outer.columns.extend(relation.scope.columns);
         }
@@ -3801,11 +3895,12 @@ impl SqlBinder<'_, '_> {
                 constraint,
             } => {
                 self.rewrite_table(left, outer, query_outers, ctes)?;
-                let left_scope = crate::exec::build_from_schema_with_ctes(
+                let left_scope = crate::exec::build_from_schema_with_ctes_and_context(
                     self.catalog(),
                     self.resolution(),
                     std::slice::from_ref(left.as_ref()),
                     ctes,
+                    Some(&self.interpreter.session.plpgsql_eval_context()),
                 )?
                 .scope;
                 let mut right_outer = outer.clone();
@@ -3818,11 +3913,12 @@ impl SqlBinder<'_, '_> {
                         kind: *kind,
                         constraint: JoinConstraint::None,
                     };
-                    let join_scope = crate::exec::build_from_schema_with_ctes(
+                    let join_scope = crate::exec::build_from_schema_with_ctes_and_context(
                         self.catalog(),
                         self.resolution(),
                         std::slice::from_ref(&join),
                         ctes,
+                        Some(&self.interpreter.session.plpgsql_eval_context()),
                     )?
                     .scope;
                     *expr = self.rewrite_expr_outer(expr, &join_scope, query_outers, ctes)?;

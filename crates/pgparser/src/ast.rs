@@ -75,6 +75,116 @@ impl From<String> for RelationRef {
     }
 }
 
+/// The point at which an ordinary trigger fires relative to its event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriggerTiming {
+    Before,
+    After,
+    InsteadOf,
+}
+
+/// One event named by a `CREATE TRIGGER` statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TriggerEvent {
+    Insert,
+    Update { columns: Vec<String> },
+    Delete,
+    Truncate,
+}
+
+/// Whether an ordinary trigger fires once per affected row or once per statement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriggerLevel {
+    Row,
+    Statement,
+}
+
+/// An `OLD TABLE` or `NEW TABLE` transition relation declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriggerTransition {
+    pub old: bool,
+    pub name: String,
+}
+
+/// `CREATE [OR REPLACE] [CONSTRAINT] TRIGGER`.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateTrigger {
+    pub name: String,
+    pub or_replace: bool,
+    pub constraint: bool,
+    pub timing: TriggerTiming,
+    pub events: Vec<TriggerEvent>,
+    pub table: RelationRef,
+    pub referenced_table: Option<RelationRef>,
+    pub deferrable: bool,
+    pub initially_deferred: bool,
+    pub transitions: Vec<TriggerTransition>,
+    pub level: TriggerLevel,
+    pub when: Option<Expr>,
+    /// Exact source of the `WHEN` condition, without its enclosing parentheses.
+    pub when_source: Option<String>,
+    pub function: String,
+    pub arguments: Vec<String>,
+}
+
+/// The two actions supported by `ALTER TRIGGER` in `PostgreSQL` 18.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterTriggerAction {
+    RenameTo(String),
+    DependsOnExtension { extension: String, dependent: bool },
+}
+
+/// Events supported by `CREATE EVENT TRIGGER` in `PostgreSQL` 18.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventTriggerEvent {
+    Login,
+    DdlCommandStart,
+    DdlCommandEnd,
+    SqlDrop,
+    TableRewrite,
+}
+
+/// A `WHEN variable IN (...)` event-trigger filter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventTriggerFilter {
+    pub variable: String,
+    pub values: Vec<String>,
+}
+
+/// `CREATE EVENT TRIGGER`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateEventTrigger {
+    pub name: String,
+    pub event: EventTriggerEvent,
+    pub filters: Vec<EventTriggerFilter>,
+    pub function: String,
+}
+
+/// Firing modes shared by ordinary and event triggers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriggerEnableMode {
+    Origin,
+    Replica,
+    Always,
+    Disabled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TriggerSelector {
+    Named(String),
+    All,
+    User,
+}
+
+/// Actions supported by `ALTER EVENT TRIGGER` in `PostgreSQL` 18.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterEventTriggerAction {
+    Enable(TriggerEnableMode),
+    OwnerTo(String),
+    RenameTo(String),
+}
+
 #[rustfmt::skip]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
@@ -82,6 +192,28 @@ pub enum Statement {
     /// executed by the Gres architecture. Metadata lives on [`RefusalCommand`]
     /// so parser, session, and compatibility tooling share one contract.
     CompatibilityRefusal(RefusalCommand),
+    CreateTrigger(CreateTrigger),
+    AlterTrigger {
+        name: String,
+        table: RelationRef,
+        action: AlterTriggerAction,
+    },
+    DropTrigger {
+        name: String,
+        table: RelationRef,
+        if_exists: bool,
+        cascade: bool,
+    },
+    CreateEventTrigger(CreateEventTrigger),
+    AlterEventTrigger {
+        name: String,
+        action: AlterEventTriggerAction,
+    },
+    DropEventTrigger {
+        name: String,
+        if_exists: bool,
+        cascade: bool,
+    },
     CreateTable {
         name: RelationRef,
         columns: Vec<ColumnDef>,
@@ -1393,6 +1525,10 @@ pub enum AlterTableAction {
     /// `RESET (param, …)`.
     ResetStorageParameters(Vec<String>),
     OwnerTo(String),
+    SetTriggerMode {
+        selector: TriggerSelector,
+        mode: TriggerEnableMode,
+    },
     /// `ATTACH PARTITION <name> <bound>`.
     AttachPartition {
         partition: RelationRef,

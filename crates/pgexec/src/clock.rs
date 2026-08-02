@@ -60,6 +60,8 @@ pub struct EvalCtx {
     /// 0 outside a SQL session (a planning context or a unit test), where no
     /// backend id was ever assigned.
     pub(crate) backend_pid: i32,
+    /// Nesting level of the ordinary trigger currently executing in this session.
+    pub(crate) trigger_depth: u32,
     pub clock: Arc<dyn Clock>,
     pub(crate) sequence: Option<Arc<SequenceRuntime>>,
     /// The catalog KV on its own, for a context that can read the catalog but
@@ -81,6 +83,34 @@ pub struct EvalCtx {
     /// SQL session (planning contexts, unit tests), where `pg_notify` is an
     /// error rather than a silent no-op.
     pub(crate) notify: Option<Arc<Mutex<crate::session::NotifyPending>>>,
+    pub(crate) transition_relations: Option<Arc<Mutex<HashMap<String, TransitionRelation>>>>,
+    pub(crate) event_trigger: Option<Arc<EventTriggerContext>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TransitionRelation {
+    pub columns: Vec<(String, crabka_pgtypes::ColumnType)>,
+    pub rows: Vec<Vec<crabka_pgtypes::Datum>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct EventTriggerObject {
+    pub class_id: i32,
+    pub object_id: i32,
+    pub object_sub_id: i32,
+    pub object_type: String,
+    pub schema_name: Option<String>,
+    pub object_name: Option<String>,
+    pub identity: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct EventTriggerContext {
+    pub event: crabka_pgcatalog::trigger::EventTriggerEvent,
+    pub tag: String,
+    pub commands: Vec<EventTriggerObject>,
+    pub dropped: Vec<EventTriggerObject>,
+    pub rewrite: Option<(i32, i32)>,
 }
 
 pub(crate) struct SequenceRuntime {
@@ -164,11 +194,14 @@ impl EvalCtx {
             current_user: "public".into(),
             session_user: "public".into(),
             backend_pid: 0,
+            trigger_depth: 0,
             clock: Arc::new(SystemClock),
             sequence: None,
             catalog: None,
             resolution: None,
             notify: None,
+            transition_relations: None,
+            event_trigger: None,
         }
     }
 }

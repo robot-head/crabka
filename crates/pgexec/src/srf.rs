@@ -81,6 +81,8 @@ enum Srf {
     /// `jsonb_path_query(target, path [, vars [, silent]])` → one row per item
     /// the jsonpath produces.
     JsonbPathQuery,
+    EventDdlCommands,
+    EventDroppedObjects,
 }
 
 /// Classify a function name. Unquoted identifiers reach here lowercased, but a
@@ -107,6 +109,8 @@ fn classify(name: &str) -> Option<Srf> {
         "jsonb_array_elements" | "json_array_elements" => Srf::JsonbArrayElements,
         "jsonb_array_elements_text" | "json_array_elements_text" => Srf::JsonbArrayElementsText,
         "jsonb_path_query" | "jsonb_path_query_tz" => Srf::JsonbPathQuery,
+        "pg_event_trigger_ddl_commands" => Srf::EventDdlCommands,
+        "pg_event_trigger_dropped_objects" => Srf::EventDroppedObjects,
         _ => return None,
     })
 }
@@ -181,6 +185,37 @@ pub(crate) fn plan(name: &str, args: &[Expr], scope: &Scope) -> Result<SrfPlan, 
             require_arity(name, &given, (2, 4))?;
             vec![column(&name.to_ascii_lowercase(), ColumnType::Jsonb)]
         }
+        Srf::EventDdlCommands => {
+            require_arity(name, &given, (0, 0))?;
+            vec![
+                column("classid", ColumnType::Int4),
+                column("objid", ColumnType::Int4),
+                column("objsubid", ColumnType::Int4),
+                column("command_tag", ColumnType::Text),
+                column("object_type", ColumnType::Text),
+                column("schema_name", ColumnType::Text),
+                column("object_identity", ColumnType::Text),
+                column("in_extension", ColumnType::Bool),
+                column("command", ColumnType::Text),
+            ]
+        }
+        Srf::EventDroppedObjects => {
+            require_arity(name, &given, (0, 0))?;
+            vec![
+                column("classid", ColumnType::Int4),
+                column("objid", ColumnType::Int4),
+                column("objsubid", ColumnType::Int4),
+                column("original", ColumnType::Bool),
+                column("normal", ColumnType::Bool),
+                column("is_temporary", ColumnType::Bool),
+                column("object_type", ColumnType::Text),
+                column("schema_name", ColumnType::Text),
+                column("object_name", ColumnType::Text),
+                column("object_identity", ColumnType::Text),
+                column("address_names", ColumnType::Array(ElemType::Text)),
+                column("address_args", ColumnType::Array(ElemType::Text)),
+            ]
+        }
     };
     Ok(SrfPlan {
         kind,
@@ -226,6 +261,8 @@ pub(crate) fn rows(
         | Srf::JsonbArrayElements
         | Srf::JsonbArrayElementsText => crate::json_fn::jsonb_srf_rows(json_srf(plan.kind), vals)?,
         Srf::JsonbPathQuery => crate::json_fn::jsonb_path_query_rows(&plan.name, vals)?,
+        Srf::EventDdlCommands => event_ddl_command_rows(ctx)?,
+        Srf::EventDroppedObjects => event_dropped_object_rows(ctx)?,
     };
     ensure_expansion_fits(&produced)?;
     Ok(produced)
@@ -264,6 +301,7 @@ fn param_types(plan: &SrfPlan) -> Vec<Option<ColumnType>> {
             Some(ColumnType::Jsonb),
             Some(ColumnType::Bool),
         ],
+        Srf::EventDdlCommands | Srf::EventDroppedObjects => Vec::new(),
     }
 }
 
@@ -277,6 +315,89 @@ fn json_srf(kind: Srf) -> crate::json_fn::JsonbSrf {
         Srf::JsonbArrayElementsText => JsonbSrf::ArrayElementsText,
         _ => unreachable!("only the jsonb SRFs reach the jsonb dispatch"),
     }
+}
+
+fn event_context<'a>(
+    ctx: &'a EvalCtx,
+    expected: crabka_pgcatalog::trigger::EventTriggerEvent,
+    function: &str,
+) -> Result<&'a crate::clock::EventTriggerContext, ExecError> {
+    ctx.event_trigger
+        .as_deref()
+        .filter(|context| context.event == expected)
+        .ok_or_else(|| ExecError::FunctionError {
+            sqlstate: "39P03",
+            message: format!("{function}() can only be called in the appropriate event trigger"),
+        })
+}
+
+fn event_ddl_command_rows(ctx: &EvalCtx) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let context = event_context(
+        ctx,
+        crabka_pgcatalog::trigger::EventTriggerEvent::DdlCommandEnd,
+        "pg_event_trigger_ddl_commands",
+    )?;
+    Ok(context
+        .commands
+        .iter()
+        .map(|object| {
+            vec![
+                Datum::Int4(object.class_id),
+                Datum::Int4(object.object_id),
+                Datum::Int4(object.object_sub_id),
+                Datum::Text(context.tag.clone()),
+                Datum::Text(object.object_type.clone()),
+                object
+                    .schema_name
+                    .as_ref()
+                    .map_or(Datum::Null, |name| Datum::Text(name.clone())),
+                Datum::Text(object.identity.clone()),
+                Datum::Bool(false),
+                Datum::Null,
+            ]
+        })
+        .collect())
+}
+
+fn event_dropped_object_rows(ctx: &EvalCtx) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let context = event_context(
+        ctx,
+        crabka_pgcatalog::trigger::EventTriggerEvent::SqlDrop,
+        "pg_event_trigger_dropped_objects",
+    )?;
+    Ok(context
+        .dropped
+        .iter()
+        .map(|object| {
+            let names = object
+                .schema_name
+                .iter()
+                .chain(object.object_name.iter())
+                .cloned()
+                .map(Datum::Text)
+                .collect();
+            vec![
+                Datum::Int4(object.class_id),
+                Datum::Int4(object.object_id),
+                Datum::Int4(object.object_sub_id),
+                Datum::Bool(true),
+                Datum::Bool(false),
+                Datum::Bool(false),
+                Datum::Text(object.object_type.clone()),
+                object
+                    .schema_name
+                    .as_ref()
+                    .map_or(Datum::Null, |name| Datum::Text(name.clone())),
+                object
+                    .object_name
+                    .as_ref()
+                    .map_or(Datum::Null, |name| Datum::Text(name.clone())),
+                Datum::Text(object.identity.clone()),
+                Datum::Array(crabka_pgtypes::ArrayValue::new(ElemType::Text, names)),
+                Datum::Array(crabka_pgtypes::ArrayValue::new(ElemType::Text, Vec::new())),
+            ]
+        })
+        .collect())
 }
 
 // ---- FROM position ----
