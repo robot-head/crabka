@@ -153,6 +153,7 @@ pub enum ElemType {
     Varchar(Option<u16>),
     /// `character(n)[]` — each element is blank-padded to `n` on assignment.
     Char(Option<u16>),
+    Range(RangeRef),
 }
 
 impl ElemType {
@@ -202,6 +203,7 @@ impl ElemType {
             ElemType::Float4 => ColumnType::Float4,
             ElemType::Varchar(n) => ColumnType::Varchar(n),
             ElemType::Char(n) => ColumnType::Char(n),
+            ElemType::Range(range) => ColumnType::Range(range),
         }
     }
 
@@ -241,8 +243,14 @@ impl ElemType {
             | ColumnType::Array(_)
             | ColumnType::Record(_)
             | ColumnType::Enum(_)
-            | ColumnType::Range(_)
             | ColumnType::Domain(_) => return None,
+            ColumnType::Range(range) => {
+                let elem = ElemType::Range(range);
+                if elem.array_oid() == 0 {
+                    return None;
+                }
+                elem
+            }
         })
     }
 
@@ -272,6 +280,15 @@ impl ElemType {
             ElemType::Float4 => oids::FLOAT4ARRAY,
             ElemType::Varchar(_) => oids::VARCHARARRAY,
             ElemType::Char(_) => oids::BPCHARARRAY,
+            ElemType::Range(range) => match range.oid {
+                oids::INT4RANGE => oids::INT4RANGEARRAY,
+                oids::NUMRANGE => oids::NUMRANGEARRAY,
+                oids::TSRANGE => oids::TSRANGEARRAY,
+                oids::TSTZRANGE => oids::TSTZRANGEARRAY,
+                oids::DATERANGE => oids::DATERANGEARRAY,
+                oids::INT8RANGE => oids::INT8RANGEARRAY,
+                _ => 0,
+            },
         }
     }
 
@@ -301,6 +318,15 @@ impl ElemType {
             ElemType::Float4 => "real[]",
             ElemType::Varchar(_) => "character varying[]",
             ElemType::Char(_) => "character[]",
+            ElemType::Range(range) => match range.oid {
+                oids::INT4RANGE => "int4range[]",
+                oids::NUMRANGE => "numrange[]",
+                oids::TSRANGE => "tsrange[]",
+                oids::TSTZRANGE => "tstzrange[]",
+                oids::DATERANGE => "daterange[]",
+                oids::INT8RANGE => "int8range[]",
+                _ => "range[]",
+            },
         }
     }
 
@@ -336,6 +362,7 @@ impl ElemType {
             ElemType::Float4 => 15,
             ElemType::Varchar(_) => 16,
             ElemType::Char(_) => 17,
+            ElemType::Range(_) => 18,
         }
     }
 
@@ -349,7 +376,9 @@ impl ElemType {
     /// present-flag and a big-endian `u16` for the length-modified families.
     pub fn write_code(self, out: &mut Vec<u8>) {
         out.push(self.code());
-        if matches!(self, ElemType::Varchar(_) | ElemType::Char(_)) {
+        if let ElemType::Range(range) = self {
+            out.extend_from_slice(&range.oid.to_be_bytes());
+        } else if matches!(self, ElemType::Varchar(_) | ElemType::Char(_)) {
             match self.typmod() {
                 None => out.push(0),
                 Some(n) => {
@@ -365,6 +394,17 @@ impl ElemType {
     pub fn read_code(cursor: &mut &[u8]) -> Option<Self> {
         let (code, rest) = cursor.split_first()?;
         *cursor = rest;
+        if *code == 18 {
+            let (bytes, rest) = cursor.split_at_checked(4)?;
+            *cursor = rest;
+            let oid = u32::from_be_bytes(bytes.try_into().ok()?);
+            return match ColumnType::builtin_range(oid)
+                .or_else(|| crate::usertype::lookup_oid(oid).map(|ty| ty.column_type()))?
+            {
+                ColumnType::Range(range) => Some(ElemType::Range(range)),
+                _ => None,
+            };
+        }
         let base = ElemType::from_code(*code)?;
         if !matches!(base, ElemType::Varchar(_) | ElemType::Char(_)) {
             return Some(base);
@@ -391,6 +431,23 @@ impl ElemType {
     pub fn from_array_oid(oid: u32) -> Option<Self> {
         if oid == oids::JSONARRAY {
             return Some(ElemType::Jsonb);
+        }
+        for range_oid in [
+            oids::INT4RANGE,
+            oids::NUMRANGE,
+            oids::TSRANGE,
+            oids::TSTZRANGE,
+            oids::DATERANGE,
+            oids::INT8RANGE,
+        ] {
+            let range = match ColumnType::builtin_range(range_oid)? {
+                ColumnType::Range(range) => range,
+                _ => unreachable!(),
+            };
+            let elem = ElemType::Range(range);
+            if elem.array_oid() == oid {
+                return Some(elem);
+            }
         }
         ElemType::ALL.into_iter().find(|e| e.array_oid() == oid)
     }

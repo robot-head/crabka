@@ -1440,6 +1440,33 @@ mod tests {
     }
 
     #[test]
+    fn range_array_casts_use_the_range_element_input_function() {
+        let tz = utc();
+        let range = match ColumnType::builtin_range(crate::oids::NUMRANGE).expect("numrange") {
+            ColumnType::Range(range) => range,
+            _ => unreachable!(),
+        };
+        let ty = ColumnType::Array(crate::ElemType::Range(range));
+        let value = cast(
+            &Datum::Text(r#"{"[1.1,1.2)","[12.3,155.5)"}"#.into()),
+            ty,
+            &tz,
+        )
+        .expect("numrange[] input");
+        assert_eq!(
+            crate::encoding::encode_text(&value, &tz),
+            br#"{"[1.1,1.2)","[12.3,155.5)"}"#
+        );
+
+        let mut encoded = Vec::new();
+        crate::ElemType::Range(range).write_code(&mut encoded);
+        assert_eq!(
+            crate::ElemType::read_code(&mut encoded.as_slice()),
+            Some(crate::ElemType::Range(range))
+        );
+    }
+
+    #[test]
     fn jsonb_and_array_cast_matrix_allows_only_string_conversions() {
         use assert2::assert;
 

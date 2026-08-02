@@ -12714,6 +12714,15 @@ fn array_typname(elem: crabka_pgtypes::ElemType) -> &'static str {
         ElemType::Float4 => "_float4",
         ElemType::Varchar(_) => "_varchar",
         ElemType::Char(_) => "_bpchar",
+        ElemType::Range(range) => match range.oid {
+            crabka_pgtypes::oids::INT4RANGE => "_int4range",
+            crabka_pgtypes::oids::NUMRANGE => "_numrange",
+            crabka_pgtypes::oids::TSRANGE => "_tsrange",
+            crabka_pgtypes::oids::TSTZRANGE => "_tstzrange",
+            crabka_pgtypes::oids::DATERANGE => "_daterange",
+            crabka_pgtypes::oids::INT8RANGE => "_int8range",
+            _ => "_range",
+        },
     }
 }
 
