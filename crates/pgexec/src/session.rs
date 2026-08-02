@@ -17895,6 +17895,14 @@ mod session_conformance_tests {
         assert!(
             scalar(
                 &mut session,
+                "SELECT count(*) FROM pg_catalog.pg_description WHERE classoid = 2617",
+            )
+            .await
+                == "799"
+        );
+        assert!(
+            scalar(
+                &mut session,
                 "SELECT count(*) FROM pg_catalog.pg_opclass c, pg_catalog.pg_opfamily f \
                  WHERE c.opcfamily = f.oid AND c.opcname = 'explicit_class' \
                    AND f.opfname = 'explicit_family'",
