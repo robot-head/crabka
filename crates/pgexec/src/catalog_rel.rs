@@ -53,7 +53,7 @@ const INDEX_OID_BASE: i32 = 50_000;
 /// Oid of the single database crabka exposes.
 pub(crate) const DATABASE_OID: i32 = 5;
 /// Oid of the `pg_default` tablespace, as in PostgreSQL.
-const DEFAULT_TABLESPACE_OID: i32 = 1663;
+pub(crate) const DEFAULT_TABLESPACE_OID: i32 = 1663;
 /// Oid of the `btree` access method, as in PostgreSQL.
 pub(crate) const BTREE_AM_OID: i32 = 403;
 pub(crate) const HASH_AM_OID: i32 = 405;
@@ -536,7 +536,7 @@ pub(crate) fn rows(
         "pg_sequence" => pg_sequence_rows(kv),
         "pg_stat_activity" => Ok(pg_stat_activity_rows(backend_pid)),
         "pg_tables" => pg_tables_rows(kv),
-        "pg_tablespace" => Ok(pg_tablespace_rows()),
+        "pg_tablespace" => pg_tablespace_rows(kv),
         "pg_trigger" => pg_trigger_rows(kv),
         "pg_views" => pg_views_rows(kv),
         _ => information_schema_rows(kv, name),
@@ -1261,11 +1261,36 @@ fn pg_database_rows() -> Vec<Vec<Datum>> {
     ]]
 }
 
-fn pg_tablespace_rows() -> Vec<Vec<Datum>> {
-    [(DEFAULT_TABLESPACE_OID, "pg_default"), (1664, "pg_global")]
+fn pg_tablespace_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let role_oids = role_oids(kv)?;
+    let mut rows: Vec<Vec<Datum>> = [(DEFAULT_TABLESPACE_OID, "pg_default"), (1664, "pg_global")]
         .into_iter()
         .map(|(oid, name)| vec![int(oid), text(name), int(10), Datum::Null, Datum::Null])
-        .collect()
+        .collect();
+    rows.extend(crabka_pgcatalog::list_tablespaces(kv)?.into_iter().map(|tablespace| {
+        let options = if tablespace.options.is_empty() {
+            Datum::Null
+        } else {
+            Datum::Array(crabka_pgtypes::ArrayValue::new(
+                ElemType::Text,
+                tablespace
+                    .options
+                    .into_iter()
+                    .map(|(name, value)| Datum::Text(format!("{name}={value}")))
+                    .collect(),
+            ))
+        };
+        vec![
+            int(tablespace.oid as i32),
+            text(&tablespace.name),
+            int(*role_oids
+                .get(&tablespace.owner)
+                .unwrap_or(&crate::catalog_fn::BOOTSTRAP_ROLE_OID)),
+            Datum::Null,
+            options,
+        ]
+    }));
+    Ok(rows)
 }
 
 /// The current backend, as `pg_stat_activity` describes it. crabka has no

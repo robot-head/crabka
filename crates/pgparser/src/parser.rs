@@ -2959,6 +2959,9 @@ impl Parser {
                     Token::Ident(s) if s == "statistics" => {
                         emitted(I::DropStatistics, self.drop_statistics_stmt())
                     }
+                    Token::Ident(s) if s == "tablespace" => {
+                        emitted(I::DropTablespace, self.drop_tablespace())
+                    }
                     Token::Keyword(Keyword::Schema) => emitted(I::DropSchema, self.drop_schema()),
                     Token::Ident(s) if s == "type" => emitted(I::DropType, self.drop_type()),
                     Token::Ident(s) if s == "domain" => emitted(I::DropDomain, self.drop_domain()),
@@ -3069,6 +3072,9 @@ impl Parser {
                 }
                 Token::Ident(s) if s == "statistics" => {
                     emitted(I::AlterStatistics, self.alter_statistics_stmt())
+                }
+                Token::Ident(s) if s == "tablespace" => {
+                    emitted(I::AlterTablespace, self.alter_tablespace())
                 }
                 Token::Ident(s) if s == "type" => emitted(I::AlterType, self.alter_type()),
                 Token::Ident(s) if s == "domain" => emitted(I::AlterDomain, self.alter_domain()),
@@ -7185,17 +7191,93 @@ impl Parser {
     fn create_tablespace(&mut self) -> Result<crate::ast::Statement, ParseError> {
         self.expect(&Token::Keyword(Keyword::Create))?;
         self.expect_ident_eq("tablespace")?;
-        self.expect_object_name()?;
-        if self.eat_ident_eq("owner") {
-            self.expect_object_name()?;
-        }
+        let name = self.expect_object_name()?;
+        let owner = if self.eat_ident_eq("owner") {
+            Some(self.expect_object_name()?)
+        } else {
+            None
+        };
         self.expect_ident_eq("location")?;
-        self.expect_string_lit()?;
+        let location = self.expect_string_lit()?;
+        let mut options = Vec::new();
         if self.eat_keyword(Keyword::With) {
-            self.skip_balanced_parens()?;
+            self.expect(&Token::LParen)?;
+            loop {
+                let option = self.expect_ident()?;
+                self.expect(&Token::Eq)?;
+                let value = self.storage_parameter_value()?;
+                options.push((option, value));
+                if self.eat_comma() {
+                    continue;
+                }
+                break;
+            }
+            self.expect(&Token::RParen)?;
         }
         Ok(crate::ast::Statement::Utility(
-            crate::ast::UtilityStatement::CreateTablespace,
+            crate::ast::UtilityStatement::CreateTablespace {
+                name,
+                owner,
+                location,
+                options,
+            },
+        ))
+    }
+
+    fn drop_tablespace(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.expect(&Token::Keyword(Keyword::Drop))?;
+        self.expect_ident_eq("tablespace")?;
+        let if_exists = self.eat_if_exists()?;
+        let name = self.expect_object_name()?;
+        Ok(crate::ast::Statement::Utility(
+            crate::ast::UtilityStatement::DropTablespace { name, if_exists },
+        ))
+    }
+
+    fn alter_tablespace(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::TablespaceAlterAction;
+
+        self.expect_ident_eq("alter")?;
+        self.expect_ident_eq("tablespace")?;
+        let name = self.expect_object_name()?;
+        let action = if self.eat_keyword(Keyword::Set) {
+            self.expect(&Token::LParen)?;
+            let mut options = Vec::new();
+            loop {
+                let option = self.expect_ident()?;
+                self.expect(&Token::Eq)?;
+                options.push((option, self.storage_parameter_value()?));
+                if !self.eat_comma() {
+                    break;
+                }
+            }
+            self.expect(&Token::RParen)?;
+            TablespaceAlterAction::Set(options)
+        } else if self.eat_ident_eq("reset") {
+            self.expect(&Token::LParen)?;
+            let mut options = Vec::new();
+            loop {
+                options.push(self.expect_ident()?);
+                if !self.eat_comma() {
+                    break;
+                }
+            }
+            self.expect(&Token::RParen)?;
+            TablespaceAlterAction::Reset(options)
+        } else if self.eat_ident_eq("rename") {
+            self.expect_keyword_or_ident(Keyword::To, "to")?;
+            TablespaceAlterAction::RenameTo(self.expect_object_name()?)
+        } else if self.eat_ident_eq("owner") {
+            self.expect_keyword_or_ident(Keyword::To, "to")?;
+            TablespaceAlterAction::OwnerTo(self.expect_object_name()?)
+        } else {
+            return Err(ParseError::new(
+                "expected SET, RESET, RENAME or OWNER",
+                self.peek_pos(),
+            ));
+        };
+        Ok(crate::ast::Statement::Utility(
+            crate::ast::UtilityStatement::AlterTablespace { name, action },
         ))
     }
 
@@ -7332,27 +7414,6 @@ impl Parser {
         }
         self.expect(&Token::RParen)?;
         Ok(labels)
-    }
-
-    /// Consume a parenthesised group without interpreting it, for a production
-    /// that is recognised only so the executor can refuse it as a whole.
-    fn skip_balanced_parens(&mut self) -> Result<(), ParseError> {
-        self.expect(&Token::LParen)?;
-        let mut depth = 1usize;
-        while depth > 0 {
-            match self.bump() {
-                Token::LParen => depth += 1,
-                Token::RParen => depth -= 1,
-                Token::Eof => {
-                    return Err(ParseError::new(
-                        "unterminated parenthesised option list".to_string(),
-                        self.peek_pos(),
-                    ));
-                }
-                _ => {}
-            }
-        }
-        Ok(())
     }
 
     /// `ALTER TYPE name <action>`.
@@ -11469,7 +11530,7 @@ mod tests {
 
         assert!(matches!(
             one("CREATE TABLESPACE regress_tblspace LOCATION ''"),
-            Statement::Utility(UtilityStatement::CreateTablespace)
+            Statement::Utility(UtilityStatement::CreateTablespace { .. })
         ));
         assert!(matches!(
             one(
@@ -16059,7 +16120,7 @@ fn explicit_compatibility_refusals_reject_malformed_neighbors() {
 fn every_non_goal_has_a_bounded_typed_refusal_probe() {
     use crate::ast::{NON_GOAL_REFUSALS, Statement};
 
-    assert_eq!(NON_GOAL_REFUSALS.len(), 38);
+    assert_eq!(NON_GOAL_REFUSALS.len(), 36);
     for spec in NON_GOAL_REFUSALS {
         assert_eq!(
             parse(spec.representative_sql),

@@ -591,6 +591,17 @@ pub struct Schema {
     pub owner: String,
 }
 
+/// A user-created tablespace catalog row. Physical placement remains outside
+/// the KV storage model, but SQL-visible identity and options are durable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tablespace {
+    pub oid: u32,
+    pub name: String,
+    pub owner: String,
+    pub location: String,
+    pub options: Vec<(String, String)>,
+}
+
 /// The bootstrap superuser every object is owned by.
 const BOOTSTRAP_ROLE: &str = "postgres";
 
@@ -671,6 +682,176 @@ pub fn create_temp_schema_op(name: &str) -> WriteOp {
 }
 
 const SCHEMA_PREFIX: &[u8] = b"\0\0\0\0catalog_schema/by-name/";
+const TABLESPACE_PREFIX: &[u8] = b"\0\0\0\0catalog_tablespace/by-name/";
+const NEXT_TABLESPACE_OID_KEY: &[u8] = b"\0\0\0\0meta/next_tablespace_oid";
+const FIRST_USER_TABLESPACE_OID: u32 = 300_000;
+
+fn tablespace_key(name: &str) -> Vec<u8> {
+    let mut key = TABLESPACE_PREFIX.to_vec();
+    key.extend_from_slice(name.as_bytes());
+    key
+}
+
+fn serialize_tablespace(tablespace: &Tablespace) -> Vec<u8> {
+    let mut bytes = U32::new(tablespace.oid).as_bytes().to_vec();
+    for field in [&tablespace.owner, &tablespace.location] {
+        bytes.extend_from_slice(field.as_bytes());
+        bytes.push(0);
+    }
+    for (name, value) in &tablespace.options {
+        bytes.extend_from_slice(name.as_bytes());
+        bytes.push(b'=');
+        bytes.extend_from_slice(value.as_bytes());
+        bytes.push(0);
+    }
+    bytes
+}
+
+fn deserialize_tablespace(name: String, bytes: &[u8]) -> Result<Tablespace, CatalogError> {
+    let (oid, fields) = U32::read_from_prefix(bytes)
+        .map_err(|_| KvError::CorruptRow("tablespace oid is not u32".into()))?;
+    let mut fields = fields.split(|byte| *byte == 0);
+    let owner = fields
+        .next()
+        .ok_or_else(|| KvError::CorruptRow("tablespace owner is missing".into()))?;
+    let location = fields
+        .next()
+        .ok_or_else(|| KvError::CorruptRow("tablespace location is missing".into()))?;
+    let utf8 = |field: &[u8]| {
+        String::from_utf8(field.to_vec())
+            .map_err(|_| CatalogError::Storage(KvError::CorruptRow("non-UTF-8 tablespace row".into())))
+    };
+    let mut options = Vec::new();
+    for field in fields.filter(|field| !field.is_empty()) {
+        let Some(separator) = field.iter().position(|byte| *byte == b'=') else {
+            return Err(KvError::CorruptRow("tablespace option has no value".into()).into());
+        };
+        options.push((utf8(&field[..separator])?, utf8(&field[separator + 1..])?));
+    }
+    Ok(Tablespace {
+        oid: oid.get(),
+        name,
+        owner: utf8(owner)?,
+        location: utf8(location)?,
+        options,
+    })
+}
+
+/// Build the atomic catalog batch for a user-created tablespace.
+///
+/// # Errors
+///
+/// Returns duplicate-object or catalog storage errors.
+pub fn create_tablespace_ops(
+    kv: &dyn Kv,
+    name: &str,
+    owner: &str,
+    location: &str,
+    options: Vec<(String, String)>,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    if matches!(name, "pg_default" | "pg_global") || kv.get(&tablespace_key(name))?.is_some() {
+        return Err(CatalogError::DuplicateObject(name.to_string()));
+    }
+    let oid = match kv.get(NEXT_TABLESPACE_OID_KEY)? {
+        Some(bytes) => U32::read_from_prefix(bytes.as_slice())
+            .map_err(|_| KvError::CorruptRow("next tablespace oid is not u32".into()))?
+            .0
+            .get(),
+        None => FIRST_USER_TABLESPACE_OID,
+    };
+    let tablespace = Tablespace {
+        oid,
+        name: name.to_string(),
+        owner: owner.to_string(),
+        location: location.to_string(),
+        options,
+    };
+    Ok(vec![
+        WriteOp::Put {
+            key: tablespace_key(name),
+            value: serialize_tablespace(&tablespace),
+        },
+        WriteOp::Put {
+            key: NEXT_TABLESPACE_OID_KEY.to_vec(),
+            value: U32::new(oid + 1).as_bytes().to_vec(),
+        },
+    ])
+}
+
+/// List user-created tablespaces in oid order.
+///
+/// # Errors
+///
+/// Returns catalog storage or corruption errors.
+pub fn list_tablespaces(kv: &dyn Kv) -> Result<Vec<Tablespace>, CatalogError> {
+    let mut tablespaces = Vec::new();
+    for (key, value) in kv.scan_prefix(TABLESPACE_PREFIX)? {
+        let name = String::from_utf8(key[TABLESPACE_PREFIX.len()..].to_vec())
+            .map_err(|_| KvError::CorruptRow("non-UTF-8 tablespace name".into()))?;
+        tablespaces.push(deserialize_tablespace(name, &value)?);
+    }
+    tablespaces.sort_by_key(|tablespace| tablespace.oid);
+    Ok(tablespaces)
+}
+
+/// Read a user-created tablespace by name.
+///
+/// # Errors
+///
+/// Returns undefined-object or catalog storage errors.
+pub fn get_tablespace(kv: &dyn Kv, name: &str) -> Result<Tablespace, CatalogError> {
+    let bytes = kv
+        .get(&tablespace_key(name))?
+        .ok_or_else(|| CatalogError::UndefinedObject(name.to_string()))?;
+    deserialize_tablespace(name.to_string(), &bytes)
+}
+
+/// Replace a user-created tablespace, optionally changing its name.
+///
+/// # Errors
+///
+/// Returns undefined/duplicate-object or catalog storage errors.
+pub fn replace_tablespace_ops(
+    kv: &dyn Kv,
+    old_name: &str,
+    tablespace: &Tablespace,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    get_tablespace(kv, old_name)?;
+    if tablespace.name != old_name
+        && (matches!(tablespace.name.as_str(), "pg_default" | "pg_global")
+            || kv.get(&tablespace_key(&tablespace.name))?.is_some())
+    {
+        return Err(CatalogError::DuplicateObject(tablespace.name.clone()));
+    }
+    let mut ops = Vec::new();
+    if tablespace.name != old_name {
+        ops.push(WriteOp::Delete {
+            key: tablespace_key(old_name),
+        });
+    }
+    ops.push(WriteOp::Put {
+        key: tablespace_key(&tablespace.name),
+        value: serialize_tablespace(tablespace),
+    });
+    Ok(ops)
+}
+
+/// Build the catalog batch that drops a user-created tablespace.
+///
+/// # Errors
+///
+/// Returns undefined-object or catalog storage errors. Bootstrap tablespaces
+/// cannot be dropped.
+pub fn drop_tablespace_ops(kv: &dyn Kv, name: &str) -> Result<Vec<WriteOp>, CatalogError> {
+    // ponytail: relation placement is not stored yet; add a dependency scan
+    // here when tables/indexes retain their TABLESPACE clause.
+    if matches!(name, "pg_default" | "pg_global") || kv.get(&tablespace_key(name))?.is_none() {
+        return Err(CatalogError::UndefinedObject(name.to_string()));
+    }
+    Ok(vec![WriteOp::Delete {
+        key: tablespace_key(name),
+    }])
+}
 
 /// Tombstones for dropped [`BOOTSTRAP_SCHEMAS`]. A bootstrap schema is
 /// synthesised rather than stored, so its absence is what has to be recorded;
