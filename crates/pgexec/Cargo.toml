@@ -30,6 +30,7 @@ crabka-pgwire = { version = "0.3.9", path = "../pgwire" }
 # published.
 crabka-trace-context = { version = "0.3.9", path = "../trace-context" }
 bytes = { workspace = true }
+shlex = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "fs"] }
 async-trait = { workspace = true }

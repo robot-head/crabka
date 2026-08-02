@@ -2753,17 +2753,21 @@ impl Engine for RuntimeEngine {
 }
 
 impl Session for RuntimeSession {
+    async fn startup_parameter(
+        &mut self,
+        name: &str,
+        value: &str,
+    ) -> Result<(), crabka_pgwire::error::PgError> {
+        match self {
+            Self::Single(session) => session.startup_parameter(name, value).await,
+            Self::Multi(session) => session.startup_parameter(name, value).await,
+        }
+    }
+
     async fn startup(&mut self) -> Result<(), crabka_pgwire::error::PgError> {
         match self {
             Self::Single(session) => session.startup().await,
             Self::Multi(session) => session.startup().await,
-        }
-    }
-
-    async fn terminate(&mut self) {
-        match self {
-            Self::Single(session) => session.terminate().await,
-            Self::Multi(session) => session.terminate().await,
         }
     }
 
