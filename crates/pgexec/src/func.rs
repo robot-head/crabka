@@ -88,6 +88,7 @@ enum ScalarFunc {
     /// S3: `pg_advisory_unlock_all`.
     AdvisoryUnlockAll,
     CurrentDatabase,
+    GetDatabaseEncoding,
     CurrentSchema,
     CurrentUser,
     SessionUser,
@@ -193,6 +194,7 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "pg_advisory_unlock_shared" => ScalarFunc::AdvisoryUnlock { shared: true },
         "pg_advisory_unlock_all" => ScalarFunc::AdvisoryUnlockAll,
         "current_database" => ScalarFunc::CurrentDatabase,
+        "getdatabaseencoding" => ScalarFunc::GetDatabaseEncoding,
         "current_schema" => ScalarFunc::CurrentSchema,
         "current_user" => ScalarFunc::CurrentUser,
         "session_user" => ScalarFunc::SessionUser,
@@ -547,6 +549,7 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
             Ok(ColumnType::Text)
         }
         ScalarFunc::CurrentDatabase
+        | ScalarFunc::GetDatabaseEncoding
         | ScalarFunc::CurrentSchema
         | ScalarFunc::CurrentUser
         | ScalarFunc::SessionUser
@@ -1163,6 +1166,10 @@ fn eval_eager(
         ScalarFunc::CurrentDatabase => {
             require_arity(fc, vals.is_empty())?;
             Ok(Datum::Text("postgres".into()))
+        }
+        ScalarFunc::GetDatabaseEncoding => {
+            require_arity(fc, vals.is_empty())?;
+            Ok(Datum::Text("UTF8".into()))
         }
         // The schema a `CREATE` with no qualifier lands in — the first
         // `search_path` entry that names an existing schema, and NULL when the
@@ -2292,6 +2299,17 @@ mod tests {
         assert_eq!(ty("nullif(s, 'x')"), ColumnType::Text);
         // `||` is text; one operand text is enough.
         assert_eq!(ty("'id=' || n"), ColumnType::Text);
+    }
+
+    #[test]
+    fn database_encoding_is_utf8() {
+        let expr = pexpr("getdatabaseencoding()").expect("parse");
+        assert_eq!(
+            crate::eval::infer_type(&expr, &Scope::empty()).expect("type"),
+            ColumnType::Text
+        );
+        assert_eq!(ev("getdatabaseencoding()"), Datum::Text("UTF8".into()));
+        assert_eq!(err_code("getdatabaseencoding(1)", None), "42883");
     }
 
     #[test]

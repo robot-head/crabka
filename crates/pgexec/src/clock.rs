@@ -63,6 +63,9 @@ pub struct EvalCtx {
     /// Nesting level of the ordinary trigger currently executing in this session.
     pub(crate) trigger_depth: u32,
     pub clock: Arc<dyn Clock>,
+    /// The session's pseudo-random stream. Cloned statement contexts share the
+    /// same locked generator so `setseed()` survives executor thread changes.
+    pub(crate) random: Option<Arc<Mutex<crate::math_fn::Prng>>>,
     pub(crate) sequence: Option<Arc<SequenceRuntime>>,
     /// The catalog KV on its own, for a context that can read the catalog but
     /// has no sequence machinery — a DDL statement, which must resolve the
@@ -196,6 +199,7 @@ impl EvalCtx {
             backend_pid: 0,
             trigger_depth: 0,
             clock: Arc::new(SystemClock),
+            random: None,
             sequence: None,
             catalog: None,
             resolution: None,

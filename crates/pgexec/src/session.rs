@@ -2413,6 +2413,8 @@ pub struct SqlSession {
     /// `EvalCtx`'s `now`/`stmt_now` and `clock_timestamp()`. `SystemClock` in
     /// production; a `FixedClock` in tests for deterministic temporal evaluation.
     clock: Arc<dyn crate::clock::Clock>,
+    /// PostgreSQL keeps one pseudo-random stream per backend session.
+    random: Arc<Mutex<crate::math_fn::Prng>>,
     /// SP37: the transactional `timezone` GUC. `effective()` feeds the per-statement
     /// `EvalCtx`'s `time_zone`; `SET`/`SHOW`/`RESET timezone` mutate/read it, and
     /// COMMIT/ROLLBACK promote/revert it in lockstep with the transaction outcome.
@@ -2915,6 +2917,9 @@ impl SqlSession {
             global_xid: None,
             lock_wait_cap: None,
             clock,
+            random: Arc::new(Mutex::new(crate::math_fn::Prng::seeded(
+                crate::math_fn::entropy_seed(),
+            ))),
             guc: GucState::default(),
             foreign_scanner,
             range_scanner,
@@ -3114,6 +3119,7 @@ impl SqlSession {
             backend_pid: self.backend_pid,
             trigger_depth: self.trigger_depth,
             clock: Arc::clone(&self.clock),
+            random: Some(Arc::clone(&self.random)),
             // A session reads the catalog through `sequence`, which carries
             // the same handle.
             catalog: None,

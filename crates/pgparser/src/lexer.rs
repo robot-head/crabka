@@ -93,10 +93,13 @@ pub fn lex(sql: &str) -> Result<Vec<(Token, usize)>, ParseError> {
                 if bytes.get(i).is_some_and(|&b| is_ident_cont(b) || b == b'$') {
                     return Err(ParseError::new("trailing junk after parameter", start));
                 }
-                let n: u32 = sql[ds..i]
+                let n: i32 = sql[ds..i]
                     .parse()
-                    .map_err(|_| ParseError::new("parameter number out of range", start))?;
-                out.push((Token::Param(n), start));
+                    .map_err(|_| ParseError::new("parameter number too large", start))?;
+                out.push((
+                    Token::Param(u32::try_from(n).expect("parameter digits are nonnegative")),
+                    start,
+                ));
             }
             // `$$…$$` / `$tag$…$tag$` — dollar quoting. The body is taken verbatim
             // (no escape processing, no `''` doubling), so the token is an ordinary
@@ -843,7 +846,16 @@ mod tests {
 
     #[test]
     fn lexes_parameter_placeholder() {
+        assert_eq!(toks("$0")[0], Token::Param(0));
         assert_eq!(toks("$1")[0], Token::Param(1));
+        assert_eq!(toks("$2147483647")[0], Token::Param(2_147_483_647));
+
+        let error = lex("select $2147483648").expect_err("parameter exceeds signed int32");
+        assert_eq!(error.position, 7);
+        assert_eq!(
+            error.message,
+            "syntax error at position 7: parameter number too large"
+        );
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 **Goal:** Make the unmodified PostgreSQL 18.4 core regression schedule pass against Gres, replacing the partial adopted-corpus percentage with a literal upstream `pg_regress` result.
 
-**Current state:** The adopted 50-file corpus matches 9323 / 14272 statements (65.3%). PostgreSQL 18.4's core schedule contains 231 test files, so the adopted percentage remains a development signal rather than the final compatibility claim.
+**Current state:** The adopted 50-file corpus matches 9323 / 14272 statements (65.3%). PostgreSQL 18.4's core schedule contains 231 test files, so the adopted percentage remains a development signal rather than the final compatibility claim. The first deterministic baseline-eligible upstream serial run passes 6 / 231 tests (`comments`, `infinite_recurse`, `collate.icu.utf8`, `psql_crosstab`, `collate.linux.utf8`, and `collate.windows.win1252`) with 225 semantic failures, 172573 changed diff lines across 4322 hunks, zero worker panics or connection loss, a successful postflight, and a complete 231-test status list. The pinned `REL_18_4` schedule fingerprint is `63419f82d4a5faaf711658608a3b7b6b45ccc5c2a64e1b4e5c111ed9de648118`. The preceding diagnostic exposed and drove fixes for oversized positional-parameter allocation, oversized timestamp/interval panics, `pg_size_pretty(bigint)` overflow, the missing database-encoding identity, and nondeterministic backend-id/random-stream evidence.
 
 **Architecture:** Use PostgreSQL's own `pg_regress`, `psql`, schedule, SQL, data, expected output, and `resultmap` as the authority. Keep `crabka-gres-conformance` as the fast statement-level diagnostic tool while mismatches remain; do not grow it into a second implementation of `pg_regress`.
 
@@ -12,11 +12,11 @@
 
 **Files:** Create `scripts/gres-pg-regress.sh`; modify `.github/workflows/ci.yml`; update `crates/gres-conformance/README.md`.
 
-- [ ] Fetch the `REL_18_4` source archive into `target/` and verify a pinned SHA-256 before extracting `src/test/regress`.
-- [ ] Build the matching PostgreSQL 18.4 `pg_regress`, `psql`, and `src/test/regress/regress` shared library from that verified source; export its directory and platform suffix through `PG_LIBDIR` and `PG_DLSUFFIX` so tests using `:regresslib` load the pinned module.
-- [ ] Start a fixed-locale PostgreSQL oracle from an exact `postgres:18.4` image digest, fail unless `SELECT version()` reports 18.4, start a clean Gres endpoint, then run PostgreSQL against itself as a harness self-check.
-- [ ] Run Gres with the official `--use-existing --dbname=crab` path, retaining `regression.diffs`, per-test output, server logs, and exit status under one artifact directory.
-- [ ] Prove the self-check passes both the serial and parallel schedules before using the runner's Gres result as evidence.
+- [x] Fetch the official PostgreSQL 18.4 release archive into `target/` and verify its pinned SHA-256 before extracting or building it; record the corresponding `REL_18_4` tag as provenance.
+- [x] Build the matching PostgreSQL 18.4 `pg_regress`, `psql`, server binaries, and `src/test/regress/regress` shared library from that one verified source; pass the built library directory through `pg_regress --dlpath` so its `PG_LIBDIR`/`PG_DLSUFFIX` environment points every `:regresslib` reference at the pinned module.
+- [x] Run PostgreSQL against itself in a fixed-locale `pg_regress --temp-instance` built from that source. A containerized oracle is not a valid self-check unless the regression data and shared-library paths are mounted at the exact absolute paths emitted by `pg_regress`.
+- [x] Run Gres with the official `--use-existing --dbname=crab` path, retaining `regression.diffs`, per-test output, server logs, and exit status under one artifact directory.
+- [x] Prove the self-check passes the untouched schedule with `--max-connections=1` and at normal parallelism before using the runner's Gres result as evidence; restart Gres with empty state between those subject modes.
 
 **Gate:** PostgreSQL against itself is 231 / 231; an intentionally changed expected file makes the wrapper fail.
 
@@ -24,11 +24,11 @@
 
 **Files:** Create `crates/gres-conformance/pg-regress-baseline.json`; modify `scripts/gres-pg-regress.sh` and `.github/workflows/ci.yml`.
 
-- [ ] Seed one entry per failing test from the first clean upstream run, recording the test name, mismatched unified-diff hunk/line count, and SHA-256 of that test's diff; do not permit wildcards or reason-free categories.
-- [ ] Fail CI when a passing test regresses, an upstream scheduled test disappears, a known failure starts passing without removal, its mismatch count increases, or its diff fingerprint changes without a reviewed baseline update.
-- [ ] Permit a baseline update only when the owning test's mismatch count decreases or the test is removed; the changed fingerprint and supporting result artifact land in the same review.
-- [ ] Keep the existing per-statement baseline for local root-cause ranking, but label it adopted-corpus parity everywhere.
-- [ ] Publish upstream passed/total and the shrinking per-test mismatch baseline in the job summary.
+- [x] Seed one entry per failing test from the first clean upstream run, recording the test name, mismatched unified-diff hunk/line count, and SHA-256 of that test's diff; do not permit wildcards or reason-free categories.
+- [x] Fail CI when a passing test regresses, an upstream scheduled test disappears, a known failure starts passing without removal, its mismatch count increases, or its diff fingerprint changes without a reviewed baseline update.
+- [x] Permit a baseline update only when the owning test's mismatch count decreases or the test is removed; the changed fingerprint and supporting result artifact land in the same review.
+- [x] Keep the existing per-statement baseline for local root-cause ranking, but label it adopted-corpus parity everywhere.
+- [x] Publish upstream passed/total and the shrinking per-test mismatch baseline in the job summary.
 
 **Gate:** The wrapper distinguishes new, removed, improved, worsened, and same-count-but-different failures; the checked-in mismatch surface can only shrink.
 
@@ -39,7 +39,8 @@
 - [ ] Make `test_setup` and PostgreSQL's shared data files load before dependent tests.
 - [ ] Match complete wire-visible outcomes needed by `psql`: notices, warnings, diagnostics, command tags, row counts, headings, and COPY state transitions.
 - [ ] Eliminate nondeterministic unordered results rather than weakening comparisons.
-- [ ] Treat every crash, I/O loss, or timeout as a harness failure, never as an SQL mismatch or a match on two dead connections.
+- [x] Treat every crash, I/O loss, or timeout as a harness failure, never as an SQL mismatch or a match on two dead connections.
+- [x] Reject positional parameter numbers outside PostgreSQL's signed-32-bit lexer range before allocating parameter-shape vectors; the upstream `numerology` case now returns `42601` rather than consuming unbounded CPU and memory.
 - [ ] Re-run the full serial schedule after each shared fix and ratchet only tests whose recorded mismatch surface shrank.
 
 **Gate:** Every remaining failure reproduces as an engine semantic difference; infrastructure failures are zero.

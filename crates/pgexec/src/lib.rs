@@ -1945,6 +1945,7 @@ impl SqlEngine {
             backend_pid: 0,
             trigger_depth: 0,
             clock: Arc::clone(&self.clock),
+            random: None,
             sequence: Some(Arc::new(crate::clock::SequenceRuntime {
                 kv: Arc::clone(&self.catalog_kv),
                 manager: Arc::clone(&self.seq),

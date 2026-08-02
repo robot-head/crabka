@@ -2,7 +2,7 @@ use assert2::assert;
 use crabka_pgparser::parser::parse_expr_for_test as pexpr;
 use crabka_pgtypes::{ColumnType, Datum};
 
-use super::Prng;
+use super::{Prng, configured_random_seed};
 use crate::{clock::EvalCtx, scope::Scope};
 
 /// Evaluate a FROM-less expression and render it the way the wire would, so a
@@ -314,6 +314,36 @@ fn the_generator_is_reproducible_per_seed() {
         let value = prng.next_double();
         assert!(value >= 0.0 && value < 1.0);
     }
+}
+
+#[test]
+fn setseed_survives_across_statement_contexts() {
+    let mut ctx = EvalCtx::test_default();
+    ctx.random = Some(std::sync::Arc::new(std::sync::Mutex::new(Prng::seeded(9))));
+    let eval = |sql: &str| {
+        crate::eval::eval(
+            &pexpr(sql).expect("parse"),
+            &Scope::empty(),
+            &[],
+            &ctx.clone(),
+        )
+        .expect("eval")
+    };
+
+    eval("setseed(0.5)");
+    let first = [eval("random()"), eval("random()")];
+    eval("setseed(0.5)");
+    let replay = [eval("random()"), eval("random()")];
+    assert!(first == replay);
+}
+
+#[test]
+fn configured_seed_accepts_only_a_u64() {
+    assert!(configured_random_seed(Some("0")) == Some(0));
+    assert!(configured_random_seed(Some("18446744073709551615")) == Some(u64::MAX));
+    assert!(configured_random_seed(Some("-1")).is_none());
+    assert!(configured_random_seed(Some("not-a-number")).is_none());
+    assert!(configured_random_seed(None).is_none());
 }
 
 /// The bounded draw must never leave `[0, range]`, for ranges either side of a
