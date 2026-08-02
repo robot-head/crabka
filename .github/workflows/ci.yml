@@ -341,7 +341,9 @@ jobs:
 
   affected:
     needs: changes
-    timeout-minutes: 60
+    # A build-graph migration can legitimately affect the whole workspace.
+    # Ordinary PRs still build only their bazel-diff closure.
+    timeout-minutes: 90
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
