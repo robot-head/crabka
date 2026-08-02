@@ -908,6 +908,7 @@ fn statement_shape(statement: &Statement) -> &'static str {
         }
         Statement::CreateIndex { .. } => "CreateIndex",
         Statement::DropIndex { .. } => "DropIndex",
+        Statement::AlterIndexTablespace { .. } => "AlterIndexTablespace",
         Statement::DropTable { names, .. }
             if names
                 .first()
@@ -962,7 +963,9 @@ fn statement_shape(statement: &Statement) -> &'static str {
             crabka_pgparser::ast::UtilityStatement::Cluster => "Cluster",
             crabka_pgparser::ast::UtilityStatement::Reindex => "Reindex",
             crabka_pgparser::ast::UtilityStatement::Checkpoint => "Checkpoint",
-            crabka_pgparser::ast::UtilityStatement::CreateTablespace => "CreateTablespace",
+            crabka_pgparser::ast::UtilityStatement::CreateTablespace { .. } => "CreateTablespace",
+            crabka_pgparser::ast::UtilityStatement::DropTablespace { .. } => "DropTablespace",
+            crabka_pgparser::ast::UtilityStatement::AlterTablespace { .. } => "AlterTablespace",
             crabka_pgparser::ast::UtilityStatement::CreateOperatorClass => "CreateOperatorClass",
             crabka_pgparser::ast::UtilityStatement::AlterSystem { .. } => "AlterSystem",
             crabka_pgparser::ast::UtilityStatement::SetConstraints { .. } => "SetConstraints",

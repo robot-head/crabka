@@ -3056,6 +3056,7 @@ impl Parser {
                     self.alter_routine_statement()
                 }
                 Token::Keyword(Keyword::Table) => emitted(I::AlterTable, self.alter_table()),
+                Token::Keyword(Keyword::Index) => emitted(I::AlterIndex, self.alter_index()),
                 Token::Keyword(Keyword::Schema) => emitted(I::AlterSchema, self.alter_schema()),
                 Token::Keyword(Keyword::Server) => emitted(I::AlterServer, self.alter_server()),
                 Token::Keyword(Keyword::User) => {
@@ -3207,6 +3208,18 @@ impl Parser {
             table,
             if_exists,
             actions,
+        })
+    }
+
+    fn alter_index(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.expect_ident_eq("alter")?;
+        self.expect(&Token::Keyword(Keyword::Index))?;
+        let name = self.relation_ref()?;
+        self.expect(&Token::Keyword(Keyword::Set))?;
+        self.expect_ident_eq("tablespace")?;
+        Ok(crate::ast::Statement::AlterIndexTablespace {
+            name,
+            tablespace: self.expect_ident()?,
         })
     }
 
@@ -3377,6 +3390,9 @@ impl Parser {
             if *self.peek() == Token::LParen {
                 let params = self.storage_parameter_list()?;
                 return Ok(AlterTableAction::SetStorageParameters(params));
+            }
+            if self.eat_ident_eq("tablespace") {
+                return Ok(AlterTableAction::SetTablespace(self.expect_ident()?));
             }
             let label = self.consume_unsupported_subcommand("SET");
             return Ok(AlterTableAction::Unsupported(label));
@@ -5371,6 +5387,10 @@ impl Parser {
         } else {
             None
         };
+        let tablespace = self
+            .eat_ident_eq("tablespace")
+            .then(|| self.expect_ident())
+            .transpose()?;
         self.expect(&Token::Keyword(Keyword::As))?;
         let query = self.query_expr()?;
         let with_data = if self.eat_keyword(Keyword::With) {
@@ -5386,6 +5406,7 @@ impl Parser {
             columns,
             query: Box::new(query),
             with_data,
+            tablespace,
         })
     }
 
@@ -5584,11 +5605,10 @@ impl Parser {
             self.expect_ident_eq("oids")?;
         }
         let on_commit = self.on_commit_action()?;
-        // `TABLESPACE name` is accepted and discarded: tablespaces are a
-        // documented non-goal of the chapter storage model.
-        if self.eat_ident_eq("tablespace") {
-            self.expect_ident()?;
-        }
+        let tablespace = self
+            .eat_ident_eq("tablespace")
+            .then(|| self.expect_ident())
+            .transpose()?;
         Ok(Statement::CreateTable {
             name,
             columns,
@@ -5602,6 +5622,7 @@ impl Parser {
             on_commit,
             partition_by,
             partition_of,
+            tablespace,
         })
     }
 
@@ -6487,9 +6508,10 @@ impl Parser {
         if self.eat_keyword(Keyword::With) {
             self.storage_parameter_list()?;
         }
-        if self.eat_ident_eq("tablespace") {
-            self.expect_ident()?;
-        }
+        let tablespace = self
+            .eat_ident_eq("tablespace")
+            .then(|| self.expect_ident())
+            .transpose()?;
         let predicate = if self.eat_keyword(Keyword::Where) {
             let start = self.peek_pos();
             self.expr(0)?;
@@ -6509,6 +6531,7 @@ impl Parser {
             method,
             include,
             predicate,
+            tablespace,
         })
     }
 
@@ -7091,6 +7114,7 @@ impl Parser {
             method: None,
             include: Vec::new(),
             predicate: None,
+            tablespace: None,
         })
     }
 
@@ -8909,6 +8933,7 @@ impl Parser {
                 columns: None,
                 query: Box::new(query),
                 with_data: true,
+                tablespace: None,
             },
             None => crate::ast::Statement::Query(query),
         }
@@ -11953,6 +11978,7 @@ mod tests {
             on_commit: None,
             partition_by: None,
             partition_of: None,
+            tablespace: None,
         }
     }
 
@@ -12085,6 +12111,7 @@ mod tests {
                 method: None,
                 include: Vec::new(),
                 predicate: None,
+                tablespace: None,
             }
         );
         assert_eq!(
@@ -12100,6 +12127,7 @@ mod tests {
                 method: None,
                 include: Vec::new(),
                 predicate: None,
+                tablespace: None,
             }
         );
     }
