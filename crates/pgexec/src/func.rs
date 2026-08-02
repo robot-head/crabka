@@ -633,7 +633,14 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
             require_arity(fc, (1..=3).contains(&n))?;
             Ok(ColumnType::Range(range))
         }
-        ScalarFunc::MultirangeConstructor(multirange) => Ok(ColumnType::Multirange(multirange)),
+        ScalarFunc::MultirangeConstructor(multirange) => {
+            for arg in args {
+                if crate::eval::infer_type(arg, scope)? != ColumnType::Range(multirange.range) {
+                    return Err(no_matching_function());
+                }
+            }
+            Ok(ColumnType::Multirange(multirange))
+        }
         ScalarFunc::GenericMultirangeConstructor => {
             require_arity(fc, n == 1)?;
             let ColumnType::Range(range) = crate::eval::infer_type(&args[0], scope)? else {
@@ -922,15 +929,17 @@ fn eval_eager(
         let ranges = vals
             .iter()
             .map(|value| {
-                crabka_pgtypes::cast::cast(
-                    value,
-                    ColumnType::Range(multirange.range),
-                    &ctx.time_zone,
-                )
-                .and_then(|value| match value {
-                    Datum::Range(range) => Ok(range),
-                    _ => unreachable!(),
-                })
+                let Datum::Range(range) = value else {
+                    return Err(crabka_pgtypes::TypeError::TypeMismatch {
+                        message: "multirange constructor requires ranges".into(),
+                    });
+                };
+                if range.ty != multirange.range {
+                    return Err(crabka_pgtypes::TypeError::TypeMismatch {
+                        message: "multirange component type does not match".into(),
+                    });
+                }
+                Ok(range.clone())
             })
             .collect::<Result<Vec<_>, _>>()?;
         return crabka_pgtypes::multirange::from_ranges(multirange, ranges)
@@ -2656,6 +2665,7 @@ mod tests {
             crabka_pgtypes::usertype::UserTypeBody::Range(crabka_pgtypes::usertype::RangeBody {
                 subtype: ColumnType::Text,
                 collation: None,
+                multirange_name: None,
             }),
         );
         assert_eq!(text("range_constructor_test('a', 'z')"), "[a,z)");

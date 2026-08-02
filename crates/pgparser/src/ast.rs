@@ -725,6 +725,7 @@ pub enum CreateTypeDefinition {
     Range {
         subtype: ColumnType,
         collation: Option<String>,
+        multirange_type_name: Option<RelationRef>,
     },
     /// A bare `CREATE TYPE name` — a shell type.
     Shell,

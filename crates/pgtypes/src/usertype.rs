@@ -162,6 +162,7 @@ pub enum UserTypeBody {
 pub struct RangeBody {
     pub subtype: ColumnType,
     pub collation: Option<String>,
+    pub multirange_name: Option<String>,
 }
 
 /// A domain's constraints and default.
@@ -226,9 +227,23 @@ impl UserType {
         };
         Some(ColumnType::Multirange(MultirangeRef {
             oid: self.oid + 3,
-            name: intern(&default_multirange_name(&self.name)),
+            name: intern(&self.multirange_name()?),
             range,
         }))
+    }
+
+    /// The explicit or automatically-derived companion name.
+    #[must_use]
+    pub fn multirange_name(&self) -> Option<String> {
+        let UserTypeBody::Range(range) = &self.body else {
+            return None;
+        };
+        Some(
+            range
+                .multirange_name
+                .clone()
+                .unwrap_or_else(|| default_multirange_name(&self.name)),
+        )
     }
 
     /// `pg_type.typtype`.
@@ -385,10 +400,10 @@ pub fn register(name: &str, body: UserTypeBody) -> UserType {
         body,
     };
     guard.by_lower_name.insert(name.to_ascii_lowercase(), oid);
-    if matches!(ty.body, UserTypeBody::Range(_)) {
+    if let Some(companion) = ty.multirange_name() {
         guard
             .multirange_by_lower_name
-            .insert(default_multirange_name(name).to_ascii_lowercase(), oid);
+            .insert(companion.to_ascii_lowercase(), oid);
     }
     guard.by_oid.insert(oid, ty.clone());
     // Intern eagerly so `column_type()` never has to take the interner lock
@@ -407,8 +422,8 @@ pub fn register(name: &str, body: UserTypeBody) -> UserType {
 /// happen if another thread panicked while holding it.
 pub fn replace(ty: &UserType) {
     let _ = intern(&ty.name);
-    if matches!(ty.body, UserTypeBody::Range(_)) {
-        let _ = intern(&default_multirange_name(&ty.name));
+    if let Some(companion) = ty.multirange_name() {
+        let _ = intern(&companion);
     }
     let mut guard = registry().write().expect("user type registry is healthy");
     guard.by_lower_name.retain(|_, oid| *oid != ty.oid);
@@ -418,11 +433,10 @@ pub fn replace(ty: &UserType) {
     guard
         .by_lower_name
         .insert(ty.name.to_ascii_lowercase(), ty.oid);
-    if matches!(ty.body, UserTypeBody::Range(_)) {
-        guard.multirange_by_lower_name.insert(
-            default_multirange_name(&ty.name).to_ascii_lowercase(),
-            ty.oid,
-        );
+    if let Some(companion) = ty.multirange_name() {
+        guard
+            .multirange_by_lower_name
+            .insert(companion.to_ascii_lowercase(), ty.oid);
     }
     guard.by_oid.insert(ty.oid, ty.clone());
     guard.next_oid = guard.next_oid.max(ty.oid + OID_STRIDE);
@@ -519,7 +533,7 @@ pub fn column_type_for_oid(oid: u32) -> Option<ColumnType> {
     lookup_oid(oid.checked_sub(3)?)?.multirange_type()
 }
 
-fn default_multirange_name(range_name: &str) -> String {
+pub fn default_multirange_name(range_name: &str) -> String {
     range_name.strip_suffix("range").map_or_else(
         || format!("{range_name}_multirange"),
         |stem| format!("{stem}multirange"),
@@ -551,6 +565,7 @@ mod tests {
             UserTypeBody::Range(RangeBody {
                 subtype: ColumnType::Text,
                 collation: Some("C".into()),
+                multirange_name: None,
             }),
         );
         let Some(ColumnType::Multirange(multirange)) =
