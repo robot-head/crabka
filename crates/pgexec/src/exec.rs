@@ -881,7 +881,10 @@ pub(crate) fn execute_ddl(
             ));
             let index_method = match method.as_deref() {
                 None | Some("btree") => crabka_pgcatalog::IndexMethod::Btree,
+                Some("hash") => crabka_pgcatalog::IndexMethod::Hash,
+                Some("gist") => crabka_pgcatalog::IndexMethod::Gist,
                 Some("gin") => crabka_pgcatalog::IndexMethod::Gin,
+                Some("spgist") => crabka_pgcatalog::IndexMethod::Spgist,
                 Some(method) => {
                     return Err(ExecError::Unsupported(format!(
                         "index access method \"{method}\" is not supported"
@@ -1651,6 +1654,15 @@ fn validate_index_method(
     if method == crabka_pgcatalog::IndexMethod::Btree {
         return Ok(());
     }
+    if method != crabka_pgcatalog::IndexMethod::Gin {
+        if unique {
+            return Err(ExecError::Unsupported(format!(
+                "access method {} does not support unique indexes",
+                index_method_name(method)
+            )));
+        }
+        return Ok(());
+    }
     // ponytail: one stored tsvector column keeps maintenance on the existing
     // row path; add expression/multicolumn GIN only when queries require it.
     if unique {
@@ -1677,6 +1689,16 @@ fn validate_index_method(
         ));
     }
     Ok(())
+}
+
+fn index_method_name(method: crabka_pgcatalog::IndexMethod) -> &'static str {
+    match method {
+        crabka_pgcatalog::IndexMethod::Btree => "btree",
+        crabka_pgcatalog::IndexMethod::Hash => "hash",
+        crabka_pgcatalog::IndexMethod::Gist => "gist",
+        crabka_pgcatalog::IndexMethod::Gin => "gin",
+        crabka_pgcatalog::IndexMethod::Spgist => "spgist",
+    }
 }
 
 fn ensure_default_can_be_persisted(value: &Datum) -> Result<(), ExecError> {
@@ -6585,6 +6607,9 @@ fn index_entries(
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
     if index.method == crabka_pgcatalog::IndexMethod::Btree {
         return indexed_values(table, index, row).map(|values| vec![values]);
+    }
+    if index.method != crabka_pgcatalog::IndexMethod::Gin {
+        return Ok(Vec::new());
     }
     let column = table
         .column_index(&index.columns[0])
@@ -11551,7 +11576,10 @@ fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         row.relnatts = index.columns.len();
         row.relam = match index.method {
             crabka_pgcatalog::IndexMethod::Btree => crate::catalog_rel::BTREE_AM_OID,
+            crabka_pgcatalog::IndexMethod::Hash => crate::catalog_rel::HASH_AM_OID,
+            crabka_pgcatalog::IndexMethod::Gist => crate::catalog_rel::GIST_AM_OID,
             crabka_pgcatalog::IndexMethod::Gin => crate::catalog_rel::GIN_AM_OID,
+            crabka_pgcatalog::IndexMethod::Spgist => crate::catalog_rel::SPGIST_AM_OID,
         };
         row.relpersistence = crabka_pgcatalog::relpersistence_of(&index.table.schema);
         rows.push(row.build()?);
@@ -18105,8 +18133,8 @@ mod tests {
         );
     }
 
-    /// Index options whose semantics the scanner cannot honor are refused
-    /// (`0A000`) rather than built as an index that would return wrong rows.
+    /// Index options whose semantics the scanner cannot honor are refused;
+    /// non-btree access methods remain catalog metadata while scans stay exact.
     #[tokio::test]
     async fn unsupported_index_options_are_refused_not_silently_built() {
         use assert2::assert;
@@ -18119,9 +18147,15 @@ mod tests {
             "CREATE INDEX i ON t (a DESC)",
             "CREATE INDEX i ON t (a NULLS FIRST)",
             "CREATE INDEX i ON t (a) INCLUDE (b)",
-            "CREATE INDEX i ON t USING hash (a)",
         ] {
             assert!(sqlstate_of(&mut session, sql).await == "0A000", "{sql}");
+        }
+        for method in ["hash", "gist", "spgist"] {
+            run_s(
+                &mut session,
+                &format!("CREATE INDEX t_{method}_idx ON t USING {method} (a)"),
+            )
+            .await;
         }
         // The supported spellings still build, including the default name.
         run_s(&mut session, "CREATE INDEX ON t (a)").await;

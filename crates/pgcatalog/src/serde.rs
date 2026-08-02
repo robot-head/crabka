@@ -53,6 +53,9 @@ const INDEX_PLACEMENT_LOCAL: u8 = 0;
 const INDEX_PLACEMENT_GLOBAL: u8 = 1;
 const INDEX_METHOD_BTREE: u8 = 0;
 const INDEX_METHOD_GIN: u8 = 1;
+const INDEX_METHOD_HASH: u8 = 2;
+const INDEX_METHOD_GIST: u8 = 3;
+const INDEX_METHOD_SPGIST: u8 = 4;
 const INDEX_CONSTRAINT_NONE: u8 = 0;
 const INDEX_CONSTRAINT_PRIMARY_KEY: u8 = 1;
 const INDEX_CONSTRAINT_UNIQUE: u8 = 2;
@@ -907,6 +910,9 @@ pub fn serialize_index(index: &Index) -> Vec<u8> {
     out.push(match index.method {
         IndexMethod::Btree => INDEX_METHOD_BTREE,
         IndexMethod::Gin => INDEX_METHOD_GIN,
+        IndexMethod::Hash => INDEX_METHOD_HASH,
+        IndexMethod::Gist => INDEX_METHOD_GIST,
+        IndexMethod::Spgist => INDEX_METHOD_SPGIST,
     });
     out.push(match index.constraint {
         None => INDEX_CONSTRAINT_NONE,
@@ -968,6 +974,9 @@ pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
         match take_u8(&mut cur)? {
             INDEX_METHOD_BTREE => IndexMethod::Btree,
             INDEX_METHOD_GIN => IndexMethod::Gin,
+            INDEX_METHOD_HASH => IndexMethod::Hash,
+            INDEX_METHOD_GIST => IndexMethod::Gist,
+            INDEX_METHOD_SPGIST => IndexMethod::Spgist,
             tag => {
                 return Err(KvError::CorruptRow(format!(
                     "unknown index method tag {tag}"
@@ -2134,21 +2143,29 @@ mod tests {
 
     #[test]
     fn index_record_roundtrips() {
-        let index = Index {
-            id: 7,
-            name: "orders_email_idx".into(),
-            table: RelationName::public("orders"),
-            table_id: 3,
-            columns: vec!["email".into()],
-            unique: true,
-            placement: IndexPlacement::Global,
-            method: IndexMethod::Gin,
-            constraint: None,
-        };
-
-        let bytes = serialize_index(&index);
-
-        assert_eq!(deserialize_index(&bytes).expect("index decode"), index);
+        for method in [
+            IndexMethod::Btree,
+            IndexMethod::Hash,
+            IndexMethod::Gist,
+            IndexMethod::Gin,
+            IndexMethod::Spgist,
+        ] {
+            let index = Index {
+                id: 7,
+                name: "orders_email_idx".into(),
+                table: RelationName::public("orders"),
+                table_id: 3,
+                columns: vec!["email".into()],
+                unique: true,
+                placement: IndexPlacement::Global,
+                method,
+                constraint: None,
+            };
+            assert_eq!(
+                deserialize_index(&serialize_index(&index)).expect("index decode"),
+                index
+            );
+        }
     }
 
     fn foreign_key_fixture() -> ForeignKey {

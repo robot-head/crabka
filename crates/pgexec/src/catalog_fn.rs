@@ -1136,7 +1136,10 @@ pub(crate) fn index_definition(index: &Index, table: &Table) -> String {
         quote_identifier(&table.name.name),
         match index.method {
             crabka_pgcatalog::IndexMethod::Btree => "btree",
+            crabka_pgcatalog::IndexMethod::Hash => "hash",
+            crabka_pgcatalog::IndexMethod::Gist => "gist",
             crabka_pgcatalog::IndexMethod::Gin => "gin",
+            crabka_pgcatalog::IndexMethod::Spgist => "spgist",
         },
         quoted_column_list(&index.columns),
     )
