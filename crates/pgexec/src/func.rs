@@ -609,7 +609,7 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
             Ok(ColumnType::Bool)
         }
         ScalarFunc::RangeConstructor(range) => {
-            require_arity(fc, n == 2 || n == 3)?;
+            require_arity(fc, (1..=3).contains(&n))?;
             Ok(ColumnType::Range(range))
         }
         ScalarFunc::IsEmpty
@@ -1985,7 +1985,11 @@ fn eval_range_constructor(
     vals: &[Datum],
     ctx: &EvalCtx,
 ) -> Result<Datum, ExecError> {
-    require_arity(fc, vals.len() == 2 || vals.len() == 3)?;
+    require_arity(fc, (1..=3).contains(&vals.len()))?;
+    if vals.len() == 1 {
+        return crabka_pgtypes::cast::cast(&vals[0], ColumnType::Range(ty), &ctx.time_zone)
+            .map_err(ExecError::from);
+    }
     if vals.get(2).is_some_and(Datum::is_null) {
         return Ok(Datum::Null);
     }
@@ -2391,6 +2395,7 @@ mod tests {
             .expect("range output is UTF-8")
         };
         assert_eq!(text("int4range(1, 4, '(]')"), "[2,5)");
+        assert_eq!(text("int4range(int4range(1, 4))"), "[1,4)");
         assert_eq!(ev("lower(int4range(1, 4))"), Datum::Int4(1));
         assert_eq!(ev("upper(int4range(1, 4))"), Datum::Int4(4));
         assert_eq!(ev("isempty('empty'::int4range)"), Datum::Bool(true));
