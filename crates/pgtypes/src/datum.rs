@@ -567,6 +567,21 @@ impl ColumnType {
         Some(ColumnType::Multirange(MultirangeRef { oid, name, range }))
     }
 
+    /// Resolve the automatic multirange companion for a built-in or registered range.
+    #[must_use]
+    pub fn multirange_for_range(range: RangeRef) -> Option<Self> {
+        let oid = match range.oid {
+            oids::INT4RANGE => oids::INT4MULTIRANGE,
+            oids::NUMRANGE => oids::NUMMULTIRANGE,
+            oids::TSRANGE => oids::TSMULTIRANGE,
+            oids::TSTZRANGE => oids::TSTZMULTIRANGE,
+            oids::DATERANGE => oids::DATEMULTIRANGE,
+            oids::INT8RANGE => oids::INT8MULTIRANGE,
+            oid => return crate::usertype::column_type_for_oid(oid.checked_add(3)?),
+        };
+        Self::builtin_multirange(oid)
+    }
+
     /// Resolve a bare SQL type name (no modifier). `numeric`/`decimal` resolve to
     /// the unconstrained form; the parser layers the `(p, s)` modifier on top.
     pub fn from_sql_name(name: &str) -> Option<Self> {

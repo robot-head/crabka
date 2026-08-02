@@ -183,23 +183,6 @@ fn aggregate_func(name: &str) -> Option<AggFunc> {
     }
 }
 
-fn multirange_for_range(range: crabka_pgtypes::usertype::RangeRef) -> Option<ColumnType> {
-    use crabka_pgtypes::oids;
-
-    let builtin_oid = match range.oid {
-        oids::INT4RANGE => Some(oids::INT4MULTIRANGE),
-        oids::NUMRANGE => Some(oids::NUMMULTIRANGE),
-        oids::TSRANGE => Some(oids::TSMULTIRANGE),
-        oids::TSTZRANGE => Some(oids::TSTZMULTIRANGE),
-        oids::DATERANGE => Some(oids::DATEMULTIRANGE),
-        oids::INT8RANGE => Some(oids::INT8MULTIRANGE),
-        _ => None,
-    };
-    builtin_oid
-        .and_then(ColumnType::builtin_multirange)
-        .or_else(|| crabka_pgtypes::usertype::column_type_for_oid(range.oid.checked_add(3)?))
-}
-
 /// Does `e` (or any subexpression) call a known aggregate function?
 pub(crate) fn contains_aggregate(e: &Expr) -> bool {
     match e {
@@ -373,7 +356,7 @@ pub(crate) fn func_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnTyp
             let arg = single_value_arg(fc)?;
             match crate::eval::infer_type(arg, scope)? {
                 ColumnType::Range(range) if func == AggFunc::RangeAgg => {
-                    multirange_for_range(range)
+                    ColumnType::multirange_for_range(range)
                         .ok_or_else(|| undefined_for_arg(&fc.name, ColumnType::Range(range)))
                 }
                 ty @ ColumnType::Range(_) => Ok(ty),
@@ -1815,7 +1798,7 @@ impl AccState {
             AccState::RangeAgg { acc } => {
                 let multirange = match v {
                     Datum::Range(range) => {
-                        let ColumnType::Multirange(ty) = multirange_for_range(range.ty)
+                        let ColumnType::Multirange(ty) = ColumnType::multirange_for_range(range.ty)
                             .ok_or_else(|| {
                                 undefined_for_arg("range_agg", ColumnType::Range(range.ty))
                             })?
