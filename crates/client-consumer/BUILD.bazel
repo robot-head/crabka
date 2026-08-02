@@ -1,6 +1,6 @@
 load("@crates//:defs.bzl", "aliases", "all_crate_deps")
 load("@rules_rs//rs:rust_library.bzl", "rust_library")
-load("//:bazel/rust_package.bzl", "cargo_features", "normal_aliases")
+load("//:bazel/rust_package.bzl", "cargo_features", "normal_aliases", "rust_package_tests")
 
 # Manifest is consumed by crate_universe (see //MODULE.bazel).
 exports_files(["Cargo.toml"])
@@ -14,4 +14,9 @@ rust_library(
     edition = "2024",
     visibility = ["//visibility:public"],
     deps = all_crate_deps(normal = True),
+)
+
+rust_package_tests(
+    name = "client-consumer",
+    crate_label = ":client-consumer",
 )

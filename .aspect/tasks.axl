@@ -77,7 +77,7 @@ def _affected(ctx: TaskContext) -> int:
     (code, tests_output) = _output(ctx, "bazel", ["query", "kind(rust_test, %s)" % target_set])
     if code != 0:
         return code
-    (code, builds_output) = _output(ctx, "bazel", ["query", "%s except kind('.*_test rule', %s)" % (target_set, target_set)])
+    (code, builds_output) = _output(ctx, "bazel", ["query", "%s except kind('.*_test rule', %s) except attr(target_compatible_with, '.*wasm32.*', %s)" % (target_set, target_set, target_set)])
     if code != 0:
         return code
 

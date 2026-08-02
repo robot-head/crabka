@@ -217,7 +217,9 @@ def rust_package(
             )
         binary_data = [":" + binary + "__bin" for binary in metadata["binaries"]]
         test_rustc_env = dict(rustc_env)
-        test_rustc_env["CARGO_MANIFEST_DIR"] = "$${pwd}/" + native.package_name()
+        # Tests run from the workspace's runfiles root. Keep this relative so
+        # it does not capture a compilation sandbox that disappears at runtime.
+        test_rustc_env["CARGO_MANIFEST_DIR"] = native.package_name()
         test_rustc_env.update({"CARGO_BIN_EXE_" + binary: "$(rootpath :" + binary + "__bin)" for binary in metadata["binaries"]})
         rust_test(
             name = test_name,

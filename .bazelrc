@@ -10,6 +10,7 @@ common:windows --host_platform=//platforms:local_windows_msvc
 build --incompatible_strict_action_env
 
 test --test_output=errors
+coverage --instrument_test_targets
 
 build:ci --announce_rc
 build:ci --color=yes

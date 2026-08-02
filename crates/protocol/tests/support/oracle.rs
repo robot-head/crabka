@@ -15,12 +15,17 @@ pub struct Oracle {
 
 impl Oracle {
     pub fn spawn() -> Self {
-        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("tools/oracle/build/install/crabka-oracle");
+        let base = std::env::var_os("TEST_SRCDIR")
+            .map(PathBuf::from)
+            .map(|root| root.join("_main/tools/oracle/build/install/crabka-oracle"))
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .join("tools/oracle/build/install/crabka-oracle")
+            });
         // Gradle's `installDist` produces BOTH wrappers on every platform
         // (the POSIX shell script and the .bat). Pick by host OS, not by
         // existence — picking by existence on Linux selects the .bat and
