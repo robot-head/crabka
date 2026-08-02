@@ -115,6 +115,7 @@ enum ScalarFunc {
     RangeAdjacent,
     RangeMinus,
     RangeMerge,
+    MultirangePredicate,
     PgTableIsVisible,
     NextVal,
     CurrVal,
@@ -229,6 +230,15 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "range_adjacent" => ScalarFunc::RangeAdjacent,
         "range_minus" => ScalarFunc::RangeMinus,
         "range_merge" => ScalarFunc::RangeMerge,
+        "range_overlaps_multirange"
+        | "multirange_overlaps_range"
+        | "multirange_overlaps_multirange"
+        | "multirange_contains_elem"
+        | "multirange_contains_range"
+        | "multirange_contains_multirange"
+        | "elem_contained_by_multirange"
+        | "range_contained_by_multirange"
+        | "multirange_contained_by_multirange" => ScalarFunc::MultirangePredicate,
         "pg_table_is_visible" => ScalarFunc::PgTableIsVisible,
         "nextval" => ScalarFunc::NextVal,
         "currval" => ScalarFunc::CurrVal,
@@ -641,7 +651,24 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
             require_arity(fc, n == 2)?;
             Ok(ColumnType::Bool)
         }
+        ScalarFunc::MultirangePredicate => {
+            require_arity(fc, n == 2)?;
+            Ok(ColumnType::Bool)
+        }
         ScalarFunc::RangeMinus | ScalarFunc::RangeMerge => {
+            if matches!(scalar_func(&fc.name), Some(ScalarFunc::RangeMerge))
+                && n == 1
+                && matches!(
+                    crate::eval::infer_type(&args[0], scope)?,
+                    ColumnType::Multirange(_)
+                )
+            {
+                let ColumnType::Multirange(multirange) = crate::eval::infer_type(&args[0], scope)?
+                else {
+                    unreachable!()
+                };
+                return Ok(ColumnType::Range(multirange.range));
+            }
             require_arity(fc, n == 2)?;
             let left = crate::eval::infer_type(&args[0], scope)?;
             let right = crate::eval::infer_type(&args[1], scope)?;
@@ -903,6 +930,21 @@ fn eval_eager(
     if vals.iter().any(Datum::is_null) {
         return Ok(Datum::Null);
     }
+    if let (ScalarFunc::RangeMerge, [Datum::Multirange(multirange)]) = (f, vals) {
+        return Ok(Datum::Range(
+            match (multirange.ranges.first(), multirange.ranges.last()) {
+                (Some(first), Some(last)) => crabka_pgtypes::range::merge(first, last)?,
+                _ => crabka_pgtypes::RangeValue {
+                    ty: multirange.ty.range,
+                    lower: None,
+                    upper: None,
+                    lower_inclusive: false,
+                    upper_inclusive: false,
+                    empty: true,
+                },
+            },
+        ));
+    }
     match f {
         ScalarFunc::Length => {
             require_arity(fc, vals.len() == 1)?;
@@ -986,6 +1028,7 @@ fn eval_eager(
                 _ => unreachable!(),
             })
         }
+        ScalarFunc::MultirangePredicate => eval_multirange_predicate(&fc.name, vals),
         ScalarFunc::Btrim | ScalarFunc::Ltrim | ScalarFunc::Rtrim => {
             require_arity(fc, vals.len() == 1 || vals.len() == 2)?;
             let s = text_arg(&vals[0])?;
@@ -1374,6 +1417,39 @@ fn eval_eager(
         // concat / coalesce / nullif / greatest / least are handled before here.
         _ => unreachable!("non-eager scalar function reached eval_eager"),
     }
+}
+
+fn eval_multirange_predicate(name: &str, vals: &[Datum]) -> Result<Datum, ExecError> {
+    if vals.len() != 2 {
+        return Err(undefined_function(name));
+    }
+    let result = match (name, &vals[0], &vals[1]) {
+        ("range_overlaps_multirange", Datum::Range(range), Datum::Multirange(multirange))
+        | ("multirange_overlaps_range", Datum::Multirange(multirange), Datum::Range(range)) => {
+            crabka_pgtypes::multirange::overlaps_range(multirange, range)?
+        }
+        ("multirange_overlaps_multirange", Datum::Multirange(left), Datum::Multirange(right)) => {
+            crabka_pgtypes::multirange::overlaps(left, right)?
+        }
+        ("multirange_contains_elem", Datum::Multirange(multirange), element)
+        | ("elem_contained_by_multirange", element, Datum::Multirange(multirange)) => {
+            crabka_pgtypes::multirange::contains_element(multirange, element)?
+        }
+        ("multirange_contains_range", Datum::Multirange(multirange), Datum::Range(range))
+        | ("range_contained_by_multirange", Datum::Range(range), Datum::Multirange(multirange)) => {
+            crabka_pgtypes::multirange::contains_range(multirange, range)?
+        }
+        ("multirange_contains_multirange", Datum::Multirange(left), Datum::Multirange(right)) => {
+            crabka_pgtypes::multirange::contains(left, right)?
+        }
+        (
+            "multirange_contained_by_multirange",
+            Datum::Multirange(left),
+            Datum::Multirange(right),
+        ) => crabka_pgtypes::multirange::contains(right, left)?,
+        _ => return Err(type_error(name, &vals[0])),
+    };
+    Ok(Datum::Bool(result))
 }
 
 pub(crate) fn input_error(
@@ -2450,6 +2526,26 @@ mod tests {
                 "int4multirange(int4range(2, 4), int4range(6, 8)) &< int4multirange(int4range(7, 10))"
             ),
             Datum::Bool(true)
+        );
+        assert_eq!(
+            text(
+                "int4multirange(int4range(1, 5), int4range(10, 15)) * int4multirange(int4range(3, 12))"
+            ),
+            "{[3,5),[10,12)}"
+        );
+        assert_eq!(
+            text(
+                "int4multirange(int4range(1, 5), int4range(10, 15)) - int4multirange(int4range(3, 12))"
+            ),
+            "{[1,3),[12,15)}"
+        );
+        assert_eq!(
+            ev("multirange_contains_range(int4multirange(int4range(1, 5)), int4range(2, 4))"),
+            Datum::Bool(true)
+        );
+        assert_eq!(
+            text("range_merge(int4multirange(int4range(1, 5), int4range(10, 15)))"),
+            "[1,15)"
         );
         assert_eq!(ev("lower(int4range(1, 4))"), Datum::Int4(1));
         assert_eq!(ev("upper(int4range(1, 4))"), Datum::Int4(4));
