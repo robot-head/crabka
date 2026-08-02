@@ -104,6 +104,7 @@ enum ScalarFunc {
     PgInputIsValid,
     RangeConstructor(RangeRef),
     MultirangeConstructor(MultirangeRef),
+    GenericMultirangeConstructor,
     IsEmpty,
     LowerInc,
     LowerInf,
@@ -244,6 +245,7 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "currval" => ScalarFunc::CurrVal,
         "setval" => ScalarFunc::SetVal,
         "pg_notify" => ScalarFunc::PgNotify,
+        "multirange" => ScalarFunc::GenericMultirangeConstructor,
         _ => match ColumnType::from_sql_name(name) {
             Some(ColumnType::Range(range)) => ScalarFunc::RangeConstructor(range),
             Some(ColumnType::Multirange(multirange)) => {
@@ -361,11 +363,13 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
         ScalarFunc::Upper | ScalarFunc::Lower => {
             require_arity(fc, n == 1)?;
             let ty = crate::eval::infer_type(&args[0], scope)?;
-            if let ColumnType::Range(range) = ty {
-                Ok(*range.subtype)
-            } else {
-                require_text(&args[0], scope)?;
-                Ok(ColumnType::Text)
+            match ty {
+                ColumnType::Range(range) => Ok(*range.subtype),
+                ColumnType::Multirange(multirange) => Ok(*multirange.range.subtype),
+                _ => {
+                    require_text(&args[0], scope)?;
+                    Ok(ColumnType::Text)
+                }
             }
         }
         ScalarFunc::Btrim | ScalarFunc::Ltrim | ScalarFunc::Rtrim => {
@@ -630,6 +634,13 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
             Ok(ColumnType::Range(range))
         }
         ScalarFunc::MultirangeConstructor(multirange) => Ok(ColumnType::Multirange(multirange)),
+        ScalarFunc::GenericMultirangeConstructor => {
+            require_arity(fc, n == 1)?;
+            let ColumnType::Range(range) = crate::eval::infer_type(&args[0], scope)? else {
+                return Err(no_matching_function());
+            };
+            ColumnType::multirange_for_range(range).ok_or_else(no_matching_function)
+        }
         ScalarFunc::IsEmpty
         | ScalarFunc::LowerInc
         | ScalarFunc::LowerInf
@@ -638,7 +649,7 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
             require_arity(fc, n == 1)?;
             if !matches!(
                 crate::eval::infer_type(&args[0], scope)?,
-                ColumnType::Range(_)
+                ColumnType::Range(_) | ColumnType::Multirange(_)
             ) {
                 return Err(no_matching_function());
             }
@@ -926,6 +937,19 @@ fn eval_eager(
             .map(Datum::Multirange)
             .map_err(ExecError::from);
     }
+    if let ScalarFunc::GenericMultirangeConstructor = f {
+        let [Datum::Range(range)] = vals else {
+            return Err(undefined_function(&fc.name));
+        };
+        let ColumnType::Multirange(ty) = ColumnType::multirange_for_range(range.ty)
+            .ok_or_else(|| undefined_function(&fc.name))?
+        else {
+            unreachable!()
+        };
+        return crabka_pgtypes::multirange::from_ranges(ty, vec![range.clone()])
+            .map(Datum::Multirange)
+            .map_err(ExecError::from);
+    }
     // Strict: a NULL argument short-circuits to NULL.
     if vals.iter().any(Datum::is_null) {
         return Ok(Datum::Null);
@@ -965,6 +989,12 @@ fn eval_eager(
                     .filter(|_| !range.empty)
                     .cloned()
                     .unwrap_or(Datum::Null)),
+                Datum::Multirange(multirange) => Ok(multirange
+                    .ranges
+                    .last()
+                    .and_then(|range| range.upper.as_deref())
+                    .cloned()
+                    .unwrap_or(Datum::Null)),
                 value => Ok(Datum::Text(text_arg(value)?.to_uppercase())),
             }
         }
@@ -977,6 +1007,12 @@ fn eval_eager(
                     .filter(|_| !range.empty)
                     .cloned()
                     .unwrap_or(Datum::Null)),
+                Datum::Multirange(multirange) => Ok(multirange
+                    .ranges
+                    .first()
+                    .and_then(|range| range.lower.as_deref())
+                    .cloned()
+                    .unwrap_or(Datum::Null)),
                 value => Ok(Datum::Text(text_arg(value)?.to_lowercase())),
             }
         }
@@ -986,17 +1022,38 @@ fn eval_eager(
         | ScalarFunc::UpperInc
         | ScalarFunc::UpperInf => {
             require_arity(fc, vals.len() == 1)?;
-            let Datum::Range(range) = &vals[0] else {
-                return Err(type_error(&fc.name, &vals[0]));
+            let value = match &vals[0] {
+                Datum::Range(range) => match f {
+                    ScalarFunc::IsEmpty => range.empty,
+                    ScalarFunc::LowerInc => !range.empty && range.lower_inclusive,
+                    ScalarFunc::LowerInf => !range.empty && range.lower.is_none(),
+                    ScalarFunc::UpperInc => !range.empty && range.upper_inclusive,
+                    ScalarFunc::UpperInf => !range.empty && range.upper.is_none(),
+                    _ => unreachable!(),
+                },
+                Datum::Multirange(multirange) => match f {
+                    ScalarFunc::IsEmpty => multirange.ranges.is_empty(),
+                    ScalarFunc::LowerInc => multirange
+                        .ranges
+                        .first()
+                        .is_some_and(|range| range.lower_inclusive),
+                    ScalarFunc::LowerInf => multirange
+                        .ranges
+                        .first()
+                        .is_some_and(|range| range.lower.is_none()),
+                    ScalarFunc::UpperInc => multirange
+                        .ranges
+                        .last()
+                        .is_some_and(|range| range.upper_inclusive),
+                    ScalarFunc::UpperInf => multirange
+                        .ranges
+                        .last()
+                        .is_some_and(|range| range.upper.is_none()),
+                    _ => unreachable!(),
+                },
+                value => return Err(type_error(&fc.name, value)),
             };
-            Ok(Datum::Bool(match f {
-                ScalarFunc::IsEmpty => range.empty,
-                ScalarFunc::LowerInc => !range.empty && range.lower_inclusive,
-                ScalarFunc::LowerInf => !range.empty && range.lower.is_none(),
-                ScalarFunc::UpperInc => !range.empty && range.upper_inclusive,
-                ScalarFunc::UpperInf => !range.empty && range.upper.is_none(),
-                _ => unreachable!(),
-            }))
+            Ok(Datum::Bool(value))
         }
         ScalarFunc::RangeContains
         | ScalarFunc::RangeContainedBy
@@ -2500,6 +2557,15 @@ mod tests {
         assert_eq!(text("int4range(1, 4, '(]')"), "[2,5)");
         assert_eq!(text("int4range(int4range(1, 4))"), "[1,4)");
         assert_eq!(text("int4multirange()"), "{}");
+        assert_eq!(text("multirange(int4range(1, 4))"), "{[1,4)}");
+        assert_eq!(
+            text("lower(int4multirange(int4range(1, 4), int4range(8, 10)))"),
+            "1"
+        );
+        assert_eq!(
+            text("upper(int4multirange(int4range(1, 4), int4range(8, 10)))"),
+            "10"
+        );
         assert_eq!(text("int4range(1, 4)::int4multirange"), "{[1,4)}");
         assert_eq!(
             text("int4multirange(int4range(5, 8), int4range(1, 5))"),

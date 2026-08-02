@@ -692,7 +692,11 @@ fn bind_scalar_parameters(
         ..Frame::default()
     };
     for (index, (param, value)) in inputs.iter().zip(values).enumerate() {
-        let ty = param.ty.column.unwrap_or(ColumnType::Text);
+        let ty = param
+            .ty
+            .column
+            .or_else(|| value.column_type())
+            .unwrap_or(ColumnType::Text);
         let value = crabka_pgtypes::cast::cast(value, ty, &ctx.time_zone)?;
         let positional = format!("${}", index + 1);
         frame.slots.insert(
@@ -3021,12 +3025,12 @@ fn rewrite_expr_with(
         Expr::Column { table, name } => {
             column(table.as_deref(), name)?.unwrap_or_else(|| expr.clone())
         }
+        Expr::Param(index) => column(None, &format!("${index}"))?.unwrap_or_else(|| expr.clone()),
         Expr::IntLiteral(_)
         | Expr::NumericLiteral(_)
         | Expr::StringLiteral(_)
         | Expr::BoolLiteral(_)
         | Expr::NullLiteral
-        | Expr::Param(_)
         | Expr::Default
         | Expr::Const { .. } => expr.clone(),
         Expr::Unary { op, expr } => Expr::Unary {
@@ -4221,6 +4225,24 @@ mod tests {
             .await
             .expect("OUT function");
         assert!(first_text(&rows[1..]) == "18");
+    }
+
+    #[tokio::test]
+    async fn scalar_function_binds_positional_parameters() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        let rows = session
+            .simple_query(
+                "CREATE FUNCTION pl_multirange(i anyrange) RETURNS anymultirange LANGUAGE plpgsql AS $$
+                 BEGIN
+                   RETURN multirange($1);
+                 END
+                 $$; \
+                 SELECT pl_multirange(int4range(1, 4))",
+            )
+            .await
+            .expect("positional parameter");
+        assert!(first_text(&rows[1..]) == "{[1,4)}");
     }
 
     #[tokio::test]

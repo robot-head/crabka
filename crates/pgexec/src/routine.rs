@@ -542,9 +542,19 @@ fn validate_polymorphic_range_result(
     }
     for (result_name, input_names, detail) in [
         (
+            "anymultirange",
+            ["anyrange", "anymultirange"],
+            "A result of type anymultirange requires at least one input of type anyrange or anymultirange.",
+        ),
+        (
             "anyrange",
             ["anyrange", "anymultirange"],
             "A result of type anyrange requires at least one input of type anyrange or anymultirange.",
+        ),
+        (
+            "anycompatiblemultirange",
+            ["anycompatiblerange", "anycompatiblemultirange"],
+            "A result of type anycompatiblemultirange requires at least one input of type anycompatiblerange or anycompatiblemultirange.",
         ),
         (
             "anycompatiblerange",
@@ -883,7 +893,8 @@ pub(crate) fn resolve_call(
         for (arg, param) in given.iter().zip(params.iter()) {
             let Some(target) = param.ty.column else {
                 if is_polymorphic_type(&param.ty.name) {
-                    is_exact &= !matches!(arg, ArgType::Unknown | ArgType::Opaque);
+                    is_exact &= !matches!(arg, ArgType::Unknown | ArgType::Opaque)
+                        && polymorphic_argument_matches(&param.ty.name, *arg);
                     is_coercible &= polymorphic_argument_matches(&param.ty.name, *arg);
                 } else {
                     // A type Gres does not model can only match an untyped literal.
@@ -964,8 +975,10 @@ fn is_polymorphic_type(name: &str) -> bool {
             | "anyelement"
             | "anynonarray"
             | "anyrange"
+            | "anymultirange"
             | "anycompatible"
             | "anycompatiblearray"
+            | "anycompatiblemultirange"
             | "anycompatiblenonarray"
             | "anycompatiblerange"
     )
@@ -977,6 +990,9 @@ fn polymorphic_argument_matches(name: &str, arg: ArgType) -> bool {
         ArgType::Known(ty) => match name {
             "anyarray" | "anycompatiblearray" => matches!(ty, ColumnType::Array(_)),
             "anyrange" | "anycompatiblerange" => matches!(ty, ColumnType::Range(_)),
+            "anymultirange" | "anycompatiblemultirange" => {
+                matches!(ty, ColumnType::Multirange(_))
+            }
             "anynonarray" | "anycompatiblenonarray" => !matches!(ty, ColumnType::Array(_)),
             "anyelement" | "anycompatible" => true,
             _ => false,
@@ -997,15 +1013,34 @@ fn polymorphic_base_type(name: &str, arg: ArgType) -> Option<ColumnType> {
             ColumnType::Range(range) => Some(*range.subtype),
             _ => None,
         },
+        "anymultirange" | "anycompatiblemultirange" => match ty {
+            ColumnType::Multirange(multirange) => Some(*multirange.range.subtype),
+            _ => None,
+        },
         "anyelement" | "anynonarray" | "anycompatible" | "anycompatiblenonarray" => Some(ty),
+        _ => None,
+    }
+}
+
+fn polymorphic_range_type(name: &str, arg: ArgType) -> Option<crabka_pgtypes::usertype::RangeRef> {
+    let ArgType::Known(ty) = arg else {
+        return None;
+    };
+    match (name, ty) {
+        ("anyrange" | "anycompatiblerange", ColumnType::Range(range)) => Some(range),
+        ("anymultirange" | "anycompatiblemultirange", ColumnType::Multirange(multirange)) => {
+            Some(multirange.range)
+        }
         _ => None,
     }
 }
 
 fn polymorphic_arguments_are_consistent(params: &[&RoutineParam], given: &[ArgType]) -> bool {
     let mut exact = None;
+    let mut exact_range = None;
     let mut compatible = None;
     let mut compatible_range = None;
+    let mut compatible_range_identity = None;
     let mut compatible_inputs = Vec::new();
     for (param, arg) in params.iter().zip(given) {
         let Some(base) = polymorphic_base_type(&param.ty.name, *arg) else {
@@ -1013,7 +1048,12 @@ fn polymorphic_arguments_are_consistent(params: &[&RoutineParam], given: &[ArgTy
         };
         if param.ty.name.starts_with("anycompatible") {
             compatible_inputs.push(base);
-            if param.ty.name == "anycompatiblerange" {
+            if let Some(range) = polymorphic_range_type(&param.ty.name, *arg) {
+                match compatible_range_identity {
+                    None => compatible_range_identity = Some(range),
+                    Some(current) if current == range => {}
+                    Some(_) => return false,
+                }
                 match compatible_range {
                     None => compatible_range = Some(base),
                     Some(current) if current == base => {}
@@ -1027,6 +1067,13 @@ fn polymorphic_arguments_are_consistent(params: &[&RoutineParam], given: &[ArgTy
                 Some(_) => return false,
             };
         } else if param.ty.name.starts_with("any") {
+            if let Some(range) = polymorphic_range_type(&param.ty.name, *arg) {
+                match exact_range {
+                    None => exact_range = Some(range),
+                    Some(current) if current == range => {}
+                    Some(_) => return false,
+                }
+            }
             match exact {
                 None => exact = Some(base),
                 Some(current) if current == base => {}
@@ -1403,7 +1450,7 @@ pub(crate) fn plpgsql_declared_call_type(
         Err(error) => return Err(error),
     };
     validate_plpgsql_scalar(&routine)?;
-    declared_scalar_result_type(&routine)
+    resolved_scalar_result_type(&routine, &given)
         .ok_or_else(|| {
             ExecError::Unsupported(format!(
                 "function {} has no scalar result type",
@@ -1444,7 +1491,7 @@ pub(crate) fn plpgsql_scalar_result_type(
                 )));
             }
             validate_plpgsql_scalar(&routine)?;
-            declared_scalar_result_type(&routine).ok_or_else(|| {
+            resolved_scalar_result_type(&routine, &given).ok_or_else(|| {
                 ExecError::Unsupported(format!(
                     "function {} has no scalar result type",
                     routine.identity()
@@ -1577,7 +1624,7 @@ pub(crate) fn eval_plpgsql_scalar_with(
             } else {
                 crate::plpgsql::eval_scalar_function(&routine, &values, ctx)?
             };
-            match declared_scalar_result_type(&routine) {
+            match resolved_scalar_result_type(&routine, &given) {
                 Some(ty) => {
                     crabka_pgtypes::cast::cast(&value, ty, &ctx.time_zone).map_err(ExecError::from)
                 }
@@ -1722,10 +1769,11 @@ fn unsafe_to_duplicate(arg: &Expr) -> bool {
         Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => unsafe_to_duplicate(expr),
         Expr::Binary { left, right, .. } => unsafe_to_duplicate(left) || unsafe_to_duplicate(right),
         Expr::Func(call)
-            if matches!(
-                call.name.to_ascii_lowercase().as_str(),
-                "int4range" | "numrange" | "tsrange" | "tstzrange" | "daterange" | "int8range"
-            ) =>
+            if call.name.eq_ignore_ascii_case("multirange")
+                || matches!(
+                    ColumnType::from_sql_name(&call.name),
+                    Some(ColumnType::Range(_) | ColumnType::Multirange(_))
+                ) =>
         {
             match &call.args {
                 FuncArgs::Exprs(args) => args.iter().any(unsafe_to_duplicate),
@@ -2102,7 +2150,7 @@ pub(crate) fn inline_scalar_call(
         None => Expr::ScalarSubquery(Box::new(substitute_in_query(&binding, &query)?)),
     };
     binding.reject_repeated_volatile_args()?;
-    let inlined = match declared_scalar_result_type(&routine) {
+    let inlined = match resolved_scalar_result_type(&routine, given) {
         Some(ty) => Expr::Cast {
             expr: Box::new(inlined),
             ty,
@@ -2171,6 +2219,66 @@ pub(crate) fn declared_scalar_result_type(routine: &Routine) -> Option<ColumnTyp
             .output_params()
             .next()
             .and_then(|param| param.ty.column),
+        _ => None,
+    }
+}
+
+fn resolved_scalar_result_type(routine: &Routine, given: &[ArgType]) -> Option<ColumnType> {
+    declared_scalar_result_type(routine).or_else(|| {
+        let name = match &routine.result {
+            RoutineResult::Type { ty, setof: false } => &ty.name,
+            RoutineResult::Unspecified if routine.output_params().count() == 1 => {
+                &routine.output_params().next()?.ty.name
+            }
+            _ => return None,
+        };
+        resolved_polymorphic_type(routine, given, name)
+    })
+}
+
+fn resolved_polymorphic_type(
+    routine: &Routine,
+    given: &[ArgType],
+    result_name: &str,
+) -> Option<ColumnType> {
+    let inputs = routine.input_params().zip(given);
+    let mut base = None;
+    let mut range = None;
+    let mut array = None;
+    let mut multirange = None;
+    for (param, arg) in inputs {
+        let Some(candidate) = polymorphic_base_type(&param.ty.name, *arg) else {
+            continue;
+        };
+        base = match base {
+            None => Some(candidate),
+            Some(current) if result_name.starts_with("anycompatible") => {
+                if implicitly_coercible(current, candidate) {
+                    Some(candidate)
+                } else {
+                    Some(current)
+                }
+            }
+            current => current,
+        };
+        let ArgType::Known(ty) = arg else { continue };
+        match ty {
+            ColumnType::Array(_) => array = Some(*ty),
+            ColumnType::Range(found) => range = Some(*found),
+            ColumnType::Multirange(found) => {
+                range = Some(found.range);
+                multirange = Some(*found);
+            }
+            _ => {}
+        }
+    }
+    match result_name {
+        "anyelement" | "anynonarray" | "anycompatible" | "anycompatiblenonarray" => base,
+        "anyarray" | "anycompatiblearray" => array.or_else(|| ColumnType::array_of(base?)),
+        "anyrange" | "anycompatiblerange" => range.map(ColumnType::Range),
+        "anymultirange" | "anycompatiblemultirange" => multirange
+            .map(ColumnType::Multirange)
+            .or_else(|| ColumnType::multirange_for_range(range?)),
         _ => None,
     }
 }
@@ -3278,6 +3386,21 @@ mod tests {
             "CREATE FUNCTION compatible_poly(a anycompatiblearray, r anycompatiblerange) RETURNS anycompatible AS 'SELECT 1' LANGUAGE sql",
         )
         .expect("compatible polymorphic function");
+        define(
+            &kv,
+            "CREATE FUNCTION multirange_poly(a anyarray, r anymultirange) RETURNS anyelement AS 'SELECT 1' LANGUAGE sql",
+        )
+        .expect("multirange polymorphic function");
+        define(
+            &kv,
+            "CREATE FUNCTION range_overload(r anyrange) RETURNS anyelement AS 'SELECT 1' LANGUAGE sql",
+        )
+        .expect("range overload");
+        define(
+            &kv,
+            "CREATE FUNCTION range_overload(r anymultirange) RETURNS anyelement AS 'SELECT 1' LANGUAGE sql",
+        )
+        .expect("multirange overload");
         let int4range =
             ColumnType::builtin_range(crabka_pgtypes::oids::INT4RANGE).expect("int4range");
         let numrange = ColumnType::builtin_range(crabka_pgtypes::oids::NUMRANGE).expect("numrange");
@@ -3289,6 +3412,31 @@ mod tests {
                 .is_some()
         );
         assert!(resolve_call(&kv, "exact_poly", &[ints, ArgType::Known(numrange)]).is_err());
+        let int4multirange = ColumnType::builtin_multirange(crabka_pgtypes::oids::INT4MULTIRANGE)
+            .expect("int4multirange");
+        let nummultirange = ColumnType::builtin_multirange(crabka_pgtypes::oids::NUMMULTIRANGE)
+            .expect("nummultirange");
+        assert!(
+            resolve_call(
+                &kv,
+                "multirange_poly",
+                &[ints, ArgType::Known(int4multirange)]
+            )
+            .expect("matching multirange subtype")
+            .is_some()
+        );
+        assert!(
+            resolve_call(
+                &kv,
+                "multirange_poly",
+                &[ints, ArgType::Known(nummultirange)]
+            )
+            .is_err()
+        );
+        let selected = resolve_call(&kv, "range_overload", &[ArgType::Known(int4multirange)])
+            .expect("unambiguous multirange overload")
+            .expect("multirange overload");
+        assert!(selected.input_type_names() == vec!["anymultirange".to_string()]);
         assert!(
             resolve_call(&kv, "compatible_poly", &[ints, ArgType::Known(numrange)])
                 .expect("integer promotes to numeric")
@@ -3321,6 +3469,12 @@ mod tests {
                     "A result of type anyrange requires at least one input of type anyrange or anymultirange."
                 )
         );
+        let error = define(
+            &kv,
+            "CREATE FUNCTION invalid_multi(a anyelement) RETURNS anymultirange AS 'SELECT 1' LANGUAGE sql",
+        )
+        .expect_err("multirange result lacks range input");
+        assert!(sqlstate(&error) == "42P13");
     }
 
     #[test]
