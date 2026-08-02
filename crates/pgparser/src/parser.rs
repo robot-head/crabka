@@ -2962,6 +2962,18 @@ impl Parser {
                     Token::Ident(s) if s == "tablespace" => {
                         emitted(I::DropTablespace, self.drop_tablespace())
                     }
+                    Token::Ident(s)
+                        if s == "operator"
+                            && matches!(self.peek3(), Token::Ident(t) if t == "class") =>
+                    {
+                        emitted(I::DropOperatorClass, self.drop_operator_object())
+                    }
+                    Token::Ident(s)
+                        if s == "operator"
+                            && matches!(self.peek3(), Token::Ident(t) if t == "family") =>
+                    {
+                        emitted(I::DropOperatorFamily, self.drop_operator_object())
+                    }
                     Token::Keyword(Keyword::Schema) => emitted(I::DropSchema, self.drop_schema()),
                     Token::Ident(s) if s == "type" => emitted(I::DropType, self.drop_type()),
                     Token::Ident(s) if s == "domain" => emitted(I::DropDomain, self.drop_domain()),
@@ -3076,6 +3088,18 @@ impl Parser {
                 }
                 Token::Ident(s) if s == "tablespace" => {
                     emitted(I::AlterTablespace, self.alter_tablespace())
+                }
+                Token::Ident(s)
+                    if s == "operator"
+                        && matches!(self.peek3(), Token::Ident(t) if t == "class") =>
+                {
+                    emitted(I::AlterOperatorClass, self.alter_operator_object())
+                }
+                Token::Ident(s)
+                    if s == "operator"
+                        && matches!(self.peek3(), Token::Ident(t) if t == "family") =>
+                {
+                    emitted(I::AlterOperatorFamily, self.alter_operator_object())
                 }
                 Token::Ident(s) if s == "type" => emitted(I::AlterType, self.alter_type()),
                 Token::Ident(s) if s == "domain" => emitted(I::AlterDomain, self.alter_domain()),
@@ -7365,6 +7389,77 @@ impl Parser {
             crate::ast::UtilityStatement::CreateOperatorFamily {
                 name,
                 method: self.expect_object_name()?,
+            },
+        ))
+    }
+
+    fn alter_operator_object(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::{OperatorObjectAlterAction, OperatorObjectKind, UtilityStatement};
+
+        self.expect_ident_eq("alter")?;
+        self.expect_ident_eq("operator")?;
+        let kind = if self.eat_ident_eq("class") {
+            OperatorObjectKind::Class
+        } else {
+            self.expect_ident_eq("family")?;
+            OperatorObjectKind::Family
+        };
+        let name = self.relation_ref()?;
+        self.expect_keyword_or_ident(Keyword::Using, "using")?;
+        let method = self.expect_object_name()?;
+        let action = if self.eat_ident_eq("rename") {
+            self.expect_keyword_or_ident(Keyword::To, "to")?;
+            OperatorObjectAlterAction::RenameTo(self.expect_object_name()?)
+        } else if self.eat_ident_eq("owner") {
+            self.expect_keyword_or_ident(Keyword::To, "to")?;
+            OperatorObjectAlterAction::OwnerTo(self.expect_object_name()?)
+        } else if self.eat_keyword(Keyword::Set) {
+            self.expect_keyword_or_ident(Keyword::Schema, "schema")?;
+            OperatorObjectAlterAction::SetSchema(self.expect_object_name()?)
+        } else {
+            return Err(ParseError::new(
+                "expected RENAME, OWNER or SET SCHEMA",
+                self.peek_pos(),
+            ));
+        };
+        Ok(crate::ast::Statement::Utility(
+            UtilityStatement::AlterOperatorObject {
+                kind,
+                name,
+                method,
+                action,
+            },
+        ))
+    }
+
+    fn drop_operator_object(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::{OperatorObjectKind, UtilityStatement};
+
+        self.expect(&Token::Keyword(Keyword::Drop))?;
+        self.expect_ident_eq("operator")?;
+        let kind = if self.eat_ident_eq("class") {
+            OperatorObjectKind::Class
+        } else {
+            self.expect_ident_eq("family")?;
+            OperatorObjectKind::Family
+        };
+        let if_exists = self.eat_if_exists()?;
+        let name = self.relation_ref()?;
+        self.expect_keyword_or_ident(Keyword::Using, "using")?;
+        let method = self.expect_object_name()?;
+        let cascade = if self.eat_ident_eq("cascade") {
+            true
+        } else {
+            self.eat_ident_eq("restrict");
+            false
+        };
+        Ok(crate::ast::Statement::Utility(
+            UtilityStatement::DropOperatorObject {
+                kind,
+                name,
+                method,
+                if_exists,
+                cascade,
             },
         ))
     }

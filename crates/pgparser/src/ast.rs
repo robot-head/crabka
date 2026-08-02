@@ -854,6 +854,19 @@ pub enum UtilityStatement {
         family: Option<RelationRef>,
         key_type: Option<ColumnType>,
     },
+    AlterOperatorObject {
+        kind: OperatorObjectKind,
+        name: RelationRef,
+        method: String,
+        action: OperatorObjectAlterAction,
+    },
+    DropOperatorObject {
+        kind: OperatorObjectKind,
+        name: RelationRef,
+        method: String,
+        if_exists: bool,
+        cascade: bool,
+    },
     /// `ALTER SYSTEM SET <name> = <value>` / `ALTER SYSTEM RESET { <name> | ALL }`.
     /// `name` is `None` for `RESET ALL`.
     AlterSystem { name: Option<String> },
@@ -886,6 +899,19 @@ pub enum TablespaceAlterAction {
     Reset(Vec<String>),
     RenameTo(String),
     OwnerTo(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperatorObjectKind {
+    Class,
+    Family,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OperatorObjectAlterAction {
+    RenameTo(String),
+    OwnerTo(String),
+    SetSchema(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1442,14 +1468,6 @@ non_goal_specs!(
         AlterOperator,
         "ALTER OPERATOR +(integer, integer) OWNER TO postgres"
     ),
-    (
-        AlterOperatorClass,
-        "ALTER OPERATOR CLASS opc USING btree RENAME TO opc2"
-    ),
-    (
-        AlterOperatorFamily,
-        "ALTER OPERATOR FAMILY opf USING btree RENAME TO opf2"
-    ),
     (AlterPublication, "ALTER PUBLICATION pub ADD TABLE t"),
     (AlterRule, "ALTER RULE r ON t RENAME TO r2"),
     (AlterSubscription, "ALTER SUBSCRIPTION sub DISABLE"),
@@ -1499,8 +1517,6 @@ non_goal_specs!(
     (DropConversion, "DROP CONVERSION conv"),
     (DropLanguage, "DROP LANGUAGE lang"),
     (DropOperator, "DROP OPERATOR +(integer, integer)"),
-    (DropOperatorClass, "DROP OPERATOR CLASS opc USING btree"),
-    (DropOperatorFamily, "DROP OPERATOR FAMILY opf USING btree"),
     (DropPublication, "DROP PUBLICATION pub"),
     (DropRule, "DROP RULE r ON t"),
     (DropSubscription, "DROP SUBSCRIPTION sub"),

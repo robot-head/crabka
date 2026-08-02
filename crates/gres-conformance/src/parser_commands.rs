@@ -589,6 +589,18 @@ const COMMAND_PROBES: &[CommandProbe] = &[
         refusal: None,
     },
     CommandProbe {
+        command: "ALTER TABLESPACE",
+        sql: "ALTER TABLESPACE parser_commands_space RENAME TO parser_commands_space2",
+        expected_statement: "AlterTablespace",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "DROP TABLESPACE",
+        sql: "DROP TABLESPACE IF EXISTS parser_commands_space",
+        expected_statement: "DropTablespace",
+        refusal: None,
+    },
+    CommandProbe {
         command: "CREATE OPERATOR CLASS",
         sql: "CREATE OPERATOR CLASS parser_commands_ops FOR TYPE uuid USING hash AS STORAGE uuid",
         expected_statement: "CreateOperatorClass",
@@ -598,6 +610,30 @@ const COMMAND_PROBES: &[CommandProbe] = &[
         command: "CREATE OPERATOR FAMILY",
         sql: "CREATE OPERATOR FAMILY parser_commands_family USING hash",
         expected_statement: "CreateOperatorFamily",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "ALTER OPERATOR CLASS",
+        sql: "ALTER OPERATOR CLASS parser_commands_ops USING hash RENAME TO parser_commands_ops2",
+        expected_statement: "AlterOperatorObject",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "ALTER OPERATOR FAMILY",
+        sql: "ALTER OPERATOR FAMILY parser_commands_family USING hash RENAME TO parser_commands_family2",
+        expected_statement: "AlterOperatorObject",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "DROP OPERATOR CLASS",
+        sql: "DROP OPERATOR CLASS IF EXISTS parser_commands_ops USING hash",
+        expected_statement: "DropOperatorObject",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "DROP OPERATOR FAMILY",
+        sql: "DROP OPERATOR FAMILY IF EXISTS parser_commands_family USING hash",
+        expected_statement: "DropOperatorObject",
         refusal: None,
     },
     CommandProbe {
@@ -978,8 +1014,18 @@ fn statement_shape(statement: &Statement) -> &'static str {
             crabka_pgparser::ast::UtilityStatement::CreateTablespace { .. } => "CreateTablespace",
             crabka_pgparser::ast::UtilityStatement::DropTablespace { .. } => "DropTablespace",
             crabka_pgparser::ast::UtilityStatement::AlterTablespace { .. } => "AlterTablespace",
-            crabka_pgparser::ast::UtilityStatement::CreateOperatorClass { .. } => "CreateOperatorClass",
-            crabka_pgparser::ast::UtilityStatement::CreateOperatorFamily { .. } => "CreateOperatorFamily",
+            crabka_pgparser::ast::UtilityStatement::CreateOperatorClass { .. } => {
+                "CreateOperatorClass"
+            }
+            crabka_pgparser::ast::UtilityStatement::CreateOperatorFamily { .. } => {
+                "CreateOperatorFamily"
+            }
+            crabka_pgparser::ast::UtilityStatement::AlterOperatorObject { .. } => {
+                "AlterOperatorObject"
+            }
+            crabka_pgparser::ast::UtilityStatement::DropOperatorObject { .. } => {
+                "DropOperatorObject"
+            }
             crabka_pgparser::ast::UtilityStatement::AlterSystem { .. } => "AlterSystem",
             crabka_pgparser::ast::UtilityStatement::SetConstraints { .. } => "SetConstraints",
             crabka_pgparser::ast::UtilityStatement::SetSessionAuthorization { .. } => {
@@ -1093,7 +1139,7 @@ mod tests {
 
         assert!(json["format_version"] == PARSER_COMMAND_REPORT_FORMAT_VERSION);
         assert!(json["commands"][0] == "ABORT");
-        assert!(json["probes"].as_array().map(Vec::len) == Some(155));
+        assert!(json["probes"].as_array().map(Vec::len) == Some(156));
         let refusal = json["probes"]
             .as_array()
             .expect("probe array")
