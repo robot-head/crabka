@@ -635,6 +635,38 @@ pub struct OperatorClass {
     pub key_type_oid: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OperatorFamilyMember {
+    Operator {
+        number: u16,
+        operator: String,
+        left_type_oid: u32,
+        right_type_oid: u32,
+        order_family_oid: u32,
+    },
+    Function {
+        number: u16,
+        function: String,
+        left_type_oid: u32,
+        right_type_oid: u32,
+        argument_type_oids: Vec<u32>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OperatorFamilyMemberKey {
+    Operator {
+        number: u16,
+        left_type_oid: u32,
+        right_type_oid: u32,
+    },
+    Function {
+        number: u16,
+        left_type_oid: u32,
+        right_type_oid: u32,
+    },
+}
+
 /// The bootstrap superuser every object is owned by.
 const BOOTSTRAP_ROLE: &str = "postgres";
 
@@ -732,6 +764,8 @@ const NEXT_TABLESPACE_OID_KEY: &[u8] = b"\0\0\0\0meta/next_tablespace_oid";
 const FIRST_USER_TABLESPACE_OID: u32 = 300_000;
 const OPERATOR_FAMILY_PREFIX: &[u8] = b"\0\0\0\0catalog_operator_family/";
 const OPERATOR_CLASS_PREFIX: &[u8] = b"\0\0\0\0catalog_operator_class/";
+const OPERATOR_FAMILY_OPERATOR_PREFIX: &[u8] = b"\0\0\0\0catalog_operator_family_operator/";
+const OPERATOR_FAMILY_FUNCTION_PREFIX: &[u8] = b"\0\0\0\0catalog_operator_family_function/";
 const NEXT_OPERATOR_OBJECT_OID_KEY: &[u8] = b"\0\0\0\0meta/next_operator_object_oid";
 const FIRST_USER_OPERATOR_OBJECT_OID: u32 = 310_000;
 
@@ -1018,6 +1052,173 @@ pub fn get_operator_family(
     })
 }
 
+fn operator_family_member_key(family_oid: u32, member: OperatorFamilyMemberKey) -> Vec<u8> {
+    let (prefix, number, left_type_oid, right_type_oid) = match member {
+        OperatorFamilyMemberKey::Operator {
+            number,
+            left_type_oid,
+            right_type_oid,
+        } => (
+            OPERATOR_FAMILY_OPERATOR_PREFIX,
+            number,
+            left_type_oid,
+            right_type_oid,
+        ),
+        OperatorFamilyMemberKey::Function {
+            number,
+            left_type_oid,
+            right_type_oid,
+        } => (
+            OPERATOR_FAMILY_FUNCTION_PREFIX,
+            number,
+            left_type_oid,
+            right_type_oid,
+        ),
+    };
+    let mut key = prefix.to_vec();
+    for part in [
+        family_oid.to_string(),
+        number.to_string(),
+        left_type_oid.to_string(),
+        right_type_oid.to_string(),
+    ] {
+        key::push_key_part(&mut key, &part);
+    }
+    key
+}
+
+fn operator_family_member_identity(member: &OperatorFamilyMember) -> OperatorFamilyMemberKey {
+    match member {
+        OperatorFamilyMember::Operator {
+            number,
+            left_type_oid,
+            right_type_oid,
+            ..
+        } => OperatorFamilyMemberKey::Operator {
+            number: *number,
+            left_type_oid: *left_type_oid,
+            right_type_oid: *right_type_oid,
+        },
+        OperatorFamilyMember::Function {
+            number,
+            left_type_oid,
+            right_type_oid,
+            ..
+        } => OperatorFamilyMemberKey::Function {
+            number: *number,
+            left_type_oid: *left_type_oid,
+            right_type_oid: *right_type_oid,
+        },
+    }
+}
+
+/// Whether an operator or support-function slot exists in a family.
+pub fn operator_family_member_exists(
+    kv: &dyn Kv,
+    family_oid: u32,
+    member: OperatorFamilyMemberKey,
+) -> Result<bool, CatalogError> {
+    Ok(kv
+        .get(&operator_family_member_key(family_oid, member))?
+        .is_some())
+}
+
+/// Add durable operator and support-function members to one family atomically.
+///
+/// # Errors
+///
+/// Returns duplicate-object, undefined-family, catalog storage, or corruption errors.
+pub fn add_operator_family_members_ops(
+    kv: &dyn Kv,
+    family: &OperatorFamily,
+    members: &[OperatorFamilyMember],
+) -> Result<Vec<WriteOp>, CatalogError> {
+    get_operator_family(kv, &family.name, &family.method)?;
+    let mut identities = HashSet::new();
+    let mut ops = Vec::with_capacity(members.len());
+    for member in members {
+        let identity = operator_family_member_identity(member);
+        let key = operator_family_member_key(family.oid, identity);
+        if !identities.insert(identity) || kv.get(&key)?.is_some() {
+            return Err(CatalogError::DuplicateObject(format!(
+                "operator family member {identity:?}"
+            )));
+        }
+        let value = match member {
+            OperatorFamilyMember::Operator {
+                operator,
+                order_family_oid,
+                ..
+            } => {
+                let mut value = operator.as_bytes().to_vec();
+                value.push(0);
+                value.extend_from_slice(U32::new(*order_family_oid).as_bytes());
+                value
+            }
+            OperatorFamilyMember::Function {
+                function,
+                argument_type_oids,
+                ..
+            } => {
+                let mut value = function.as_bytes().to_vec();
+                value.push(0);
+                for oid in argument_type_oids {
+                    value.extend_from_slice(U32::new(*oid).as_bytes());
+                }
+                value
+            }
+        };
+        ops.push(WriteOp::Put { key, value });
+    }
+    Ok(ops)
+}
+
+/// Drop existing family members atomically.
+///
+/// # Errors
+///
+/// Returns undefined-object, catalog storage, or corruption errors.
+pub fn drop_operator_family_members_ops(
+    kv: &dyn Kv,
+    family: &OperatorFamily,
+    members: &[OperatorFamilyMemberKey],
+) -> Result<Vec<WriteOp>, CatalogError> {
+    get_operator_family(kv, &family.name, &family.method)?;
+    let mut identities = HashSet::new();
+    let mut ops = Vec::with_capacity(members.len());
+    for member in members {
+        let key = operator_family_member_key(family.oid, *member);
+        if !identities.insert(*member) || kv.get(&key)?.is_none() {
+            return Err(CatalogError::UndefinedObject(format!(
+                "operator family member {member:?}"
+            )));
+        }
+        ops.push(WriteOp::Delete { key });
+    }
+    Ok(ops)
+}
+
+fn drop_operator_family_member_ops(
+    kv: &dyn Kv,
+    family_oid: u32,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    let mut ops = Vec::new();
+    let family_oid = family_oid.to_string();
+    for prefix in [
+        OPERATOR_FAMILY_OPERATOR_PREFIX,
+        OPERATOR_FAMILY_FUNCTION_PREFIX,
+    ] {
+        for (key, _) in kv.scan_prefix(prefix)? {
+            let parts = key::key_parts(&key[prefix.len()..], 4)
+                .ok_or_else(|| KvError::CorruptRow("operator family member key is incomplete".into()))?;
+            if parts[0] == family_oid {
+                ops.push(WriteOp::Delete { key });
+            }
+        }
+    }
+    Ok(ops)
+}
+
 /// Resolve one user-defined operator class.
 ///
 /// # Errors
@@ -1140,6 +1341,7 @@ pub fn drop_operator_family_ops(
             key: operator_object_key(OPERATOR_CLASS_PREFIX, &class.method, &class.name),
         })
         .collect::<Vec<_>>();
+    ops.extend(drop_operator_family_member_ops(kv, family.oid)?);
     ops.push(WriteOp::Delete {
         key: operator_object_key(OPERATOR_FAMILY_PREFIX, method, name),
     });
@@ -1596,6 +1798,13 @@ pub fn drop_schema_ops(
     let mut ops = vec![WriteOp::Delete {
         key: schema_key(name),
     }];
+    let mut privilege_prefix = SCHEMA_PRIVILEGE_PREFIX.to_vec();
+    key::push_key_part(&mut privilege_prefix, name);
+    ops.extend(
+        kv.scan_prefix(&privilege_prefix)?
+            .into_iter()
+            .map(|(key, _)| WriteOp::Delete { key }),
+    );
     if bootstrap_schema_owner(name).is_some() {
         ops.push(WriteOp::Put {
             key: dropped_schema_key(name),
@@ -3388,6 +3597,7 @@ pub fn drop_table(kv: &dyn Kv, name: &RelationName) -> Result<(), CatalogError> 
 const ROLE_PREFIX: &[u8] = b"catalog/role/";
 const ROLE_MEMBERSHIP_PREFIX: &[u8] = b"catalog/role_membership/";
 const TABLE_PRIVILEGE_PREFIX: &[u8] = b"catalog/table_privilege/";
+const SCHEMA_PRIVILEGE_PREFIX: &[u8] = b"catalog/schema_privilege/";
 
 /// Create a role or login-capable user metadata row.
 ///
@@ -3553,6 +3763,14 @@ pub fn drop_role_ops(kv: &dyn Kv, name: &str) -> Result<Vec<WriteOp>, CatalogErr
             ops.push(WriteOp::Delete { key });
         }
     }
+    for (key, _) in kv.scan_prefix(SCHEMA_PRIVILEGE_PREFIX)? {
+        let Some(parts) = key::key_parts(&key[SCHEMA_PRIVILEGE_PREFIX.len()..], 3) else {
+            return Err(KvError::CorruptRow("schema privilege key is incomplete".into()).into());
+        };
+        if parts[1] == name {
+            ops.push(WriteOp::Delete { key });
+        }
+    }
     for (key, _) in kv.scan_prefix(ROLE_MEMBERSHIP_PREFIX)? {
         let Some(parts) = key::key_parts(&key[ROLE_MEMBERSHIP_PREFIX.len()..], 2) else {
             return Err(KvError::CorruptRow("role membership key is incomplete".into()).into());
@@ -3627,6 +3845,100 @@ pub fn list_table_privileges(kv: &dyn Kv) -> Result<Vec<TablePrivilege>, Catalog
     })
 }
 
+/// Build write ops for schema privilege grants.
+pub fn grant_schema_privileges_ops(
+    kv: &dyn Kv,
+    schemas: &[String],
+    grantees: &[String],
+    privileges: &[String],
+) -> Result<Vec<WriteOp>, CatalogError> {
+    schema_privilege_ops(kv, schemas, grantees, privileges, true)
+}
+
+/// Build write ops for schema privilege revocations.
+pub fn revoke_schema_privileges_ops(
+    kv: &dyn Kv,
+    schemas: &[String],
+    grantees: &[String],
+    privileges: &[String],
+) -> Result<Vec<WriteOp>, CatalogError> {
+    schema_privilege_ops(kv, schemas, grantees, privileges, false)
+}
+
+fn schema_privilege_ops(
+    kv: &dyn Kv,
+    schemas: &[String],
+    grantees: &[String],
+    privileges: &[String],
+    grant: bool,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    let mut ops = Vec::new();
+    for schema in schemas {
+        if !schema_exists(kv, schema)? {
+            return Err(CatalogError::UndefinedSchema(schema.clone()));
+        }
+        for grantee in grantees {
+            let _ = get_role(kv, grantee)?;
+            for privilege in expand_schema_privileges(privileges) {
+                let key = schema_privilege_key(schema, grantee, privilege);
+                ops.push(if grant {
+                    WriteOp::Put { key, value: Vec::new() }
+                } else {
+                    WriteOp::Delete { key }
+                });
+            }
+        }
+    }
+    Ok(ops)
+}
+
+fn expand_schema_privileges(privileges: &[String]) -> Vec<&str> {
+    privileges
+        .iter()
+        .flat_map(|privilege| {
+            if privilege.eq_ignore_ascii_case("all") {
+                vec!["CREATE", "USAGE"]
+            } else {
+                vec![privilege.as_str()]
+            }
+        })
+        .collect()
+}
+
+/// Whether a role has a schema privilege through ownership, PUBLIC, or role membership.
+pub fn has_schema_privilege(
+    kv: &dyn Kv,
+    schema: &str,
+    role: &str,
+    privilege: &str,
+) -> Result<bool, CatalogError> {
+    let owner = list_schemas(kv)?
+        .into_iter()
+        .find(|item| item.name == schema)
+        .ok_or_else(|| CatalogError::UndefinedSchema(schema.to_string()))?
+        .owner;
+    if role == BOOTSTRAP_ROLE || role_can_set(kv, role, &owner)? {
+        return Ok(true);
+    }
+    let privilege = privilege.to_ascii_uppercase();
+    if kv
+        .get(&schema_privilege_key(schema, "public", &privilege))?
+        .is_some()
+    {
+        return Ok(true);
+    }
+    for candidate in list_roles(kv)? {
+        if role_can_set(kv, role, &candidate.name)?
+            && kv
+                .get(&schema_privilege_key(schema, &candidate.name, &privilege))?
+                .is_some()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn scan_table_privileges(kv: &dyn Kv) -> Result<Vec<(Vec<u8>, TablePrivilege)>, CatalogError> {
     kv.scan_prefix(TABLE_PRIVILEGE_PREFIX)?
         .into_iter()
@@ -3650,6 +3962,14 @@ fn role_membership_key(member: &str, role: &str) -> Vec<u8> {
 fn table_privilege_key(table: &RelationName, grantee: &str, privilege: &str) -> Vec<u8> {
     let mut key = TABLE_PRIVILEGE_PREFIX.to_vec();
     for part in [&table.schema, &table.name, grantee, privilege] {
+        key::push_key_part(&mut key, part);
+    }
+    key
+}
+
+fn schema_privilege_key(schema: &str, grantee: &str, privilege: &str) -> Vec<u8> {
+    let mut key = SCHEMA_PRIVILEGE_PREFIX.to_vec();
+    for part in [schema, grantee, privilege] {
         key::push_key_part(&mut key, part);
     }
     key

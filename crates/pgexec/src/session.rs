@@ -51,6 +51,8 @@ use crate::{
 
 /// In-flight transaction context.
 pub(crate) struct TxnCtx {
+    /// Effective role at transaction start, restored by every abort path.
+    pub(crate) role_at_start: String,
     /// Assigned lazily at the first write (None for a read-only transaction).
     pub(crate) xid: Option<u64>,
     /// The visibility snapshot: re-taken per statement under READ COMMITTED,
@@ -2629,6 +2631,8 @@ struct SqlCursor {
 /// S1: one open savepoint level.
 struct SavepointFrame {
     name: String,
+    /// Effective role at `SAVEPOINT`, restored by `ROLLBACK TO`.
+    role: String,
     /// The session configuration as of `SAVEPOINT`, restored by `ROLLBACK TO`.
     guc: GucState,
     /// The `SET CONSTRAINTS` overrides as of `SAVEPOINT`, restored by
@@ -4050,6 +4054,7 @@ impl SqlSession {
             .map_or_else(HashMap::new, |xid| self.lockmgr.held_locks(xid));
         self.savepoints.push(SavepointFrame {
             name: name.to_string(),
+            role: self.current_role.clone(),
             guc: self.guc.clone(),
             deferral,
             undo: BTreeMap::new(),
@@ -4199,17 +4204,19 @@ impl SqlSession {
             .restore_transaction_hold_count(self.session_lock_id, advisory_lock_count);
 
         self.savepoints.truncate(index + 1);
-        let (guc, deferral, notify_pending, restore_failed) = {
+        let (role, guc, deferral, notify_pending, restore_failed) = {
             let frame = &mut self.savepoints[index];
             frame.undo.clear();
             frame.catalog_undo.clear();
             (
+                frame.role.clone(),
                 frame.guc.clone(),
                 frame.deferral.clone(),
                 frame.notify_pending.clone(),
                 frame.failed,
             )
         };
+        self.current_role = role;
         self.guc = guc;
         self.deferred_constraints().restore_modes(deferral);
         *self.pending_notify() = notify_pending;
@@ -5012,7 +5019,27 @@ impl SqlSession {
                 .map_err(|_| operator_object_missing(*kind, &name.name, &method))?;
                 let superuser = self.current_role == self.authenticated_user
                     || self.current_role == "postgres";
-                if owner != self.current_role
+                let member_action = matches!(
+                    action,
+                    OperatorObjectAlterAction::AddMembers(_)
+                        | OperatorObjectAlterAction::DropMembers(_)
+                );
+                if member_action
+                    && !superuser
+                    && !crabka_pgcatalog::has_schema_privilege(
+                        &*self.catalog_kv,
+                        &old_name.schema,
+                        &self.current_role,
+                        "CREATE",
+                    )?
+                {
+                    return Err(ExecError::Remote(PgError::error(
+                        "42501",
+                        format!("permission denied for schema {}", old_name.schema),
+                    )));
+                }
+                if !member_action
+                    && owner != self.current_role
                     && !superuser
                     && !crabka_pgcatalog::role_can_set(
                         &*self.catalog_kv,
@@ -5021,6 +5048,239 @@ impl SqlSession {
                     )?
                 {
                     return Err(operator_object_not_owner(*kind, &name.name));
+                }
+                if let OperatorObjectAlterAction::AddMembers(members) = action {
+                    if !superuser {
+                        return Err(ExecError::Remote(PgError::error(
+                            "42501",
+                            "must be superuser to alter an operator family",
+                        )));
+                    }
+                    let family = crabka_pgcatalog::get_operator_family(
+                        &*self.catalog_kv,
+                        &old_name,
+                        &method,
+                    )?;
+                    let mut catalog_members = Vec::with_capacity(members.len());
+                    let mut identities = std::collections::HashSet::new();
+                    for member in members {
+                        let catalog_member = match member {
+                            crabka_pgparser::ast::OperatorFamilyMember::Operator {
+                                number,
+                                operator,
+                                left_type,
+                                right_type,
+                                order_family,
+                            } => {
+                                let maximum = if method == "btree" { 5 } else { u16::MAX };
+                                if *number == 0 || *number > maximum {
+                                    return Err(ExecError::Remote(PgError::error(
+                                        "22023",
+                                        format!(
+                                            "invalid operator number {number}, must be between 1 and {maximum}"
+                                        ),
+                                    )));
+                                }
+                                if order_family.is_some() && method == "btree" {
+                                    return Err(ExecError::Remote(PgError::error(
+                                        "0A000",
+                                        "access method \"btree\" does not support ordering operators",
+                                    )));
+                                }
+                                crabka_pgcatalog::OperatorFamilyMember::Operator {
+                                    number: *number,
+                                    operator: operator.clone(),
+                                    left_type_oid: left_type.oid(),
+                                    right_type_oid: right_type.oid(),
+                                    // Built-in ordering families are synthesized catalog rows;
+                                    // zero is their existing unresolved oid sentinel.
+                                    order_family_oid: 0,
+                                }
+                            }
+                            crabka_pgparser::ast::OperatorFamilyMember::Function {
+                                number,
+                                left_type,
+                                right_type,
+                                function,
+                                argument_types,
+                            } => {
+                                let maximum = match method.as_str() {
+                                    "btree" => 6,
+                                    "hash" => 2,
+                                    _ => u16::MAX,
+                                };
+                                if *number == 0 || *number > maximum {
+                                    return Err(ExecError::Remote(PgError::error(
+                                        "22023",
+                                        format!(
+                                            "invalid function number {number}, must be between 1 and {maximum}"
+                                        ),
+                                    )));
+                                }
+                                if method == "gist"
+                                    && left_type.is_none()
+                                    && argument_types.len() >= 2
+                                    && argument_types[0] != argument_types[1]
+                                {
+                                    return Err(ExecError::Remote(PgError::error(
+                                        "22023",
+                                        "associated data types must be specified for index support function",
+                                    )));
+                                }
+                                if method == "btree" && *number == 1 && argument_types.len() != 2 {
+                                    return Err(ExecError::Remote(PgError::error(
+                                        "42P17",
+                                        "ordering comparison functions must have two arguments",
+                                    )));
+                                }
+                                if method == "hash" && *number == 1 && argument_types.len() != 1 {
+                                    return Err(ExecError::Remote(PgError::error(
+                                        "42P17",
+                                        "hash function 1 must have one argument",
+                                    )));
+                                }
+                                let left = left_type
+                                    .as_ref()
+                                    .or_else(|| argument_types.first())
+                                    .ok_or_else(|| {
+                                        ExecError::Remote(PgError::error(
+                                            "42601",
+                                            "support function must have an associated data type",
+                                        ))
+                                    })?;
+                                let right = right_type
+                                    .as_ref()
+                                    .or_else(|| argument_types.get(1))
+                                    .unwrap_or(left);
+                                if method == "btree"
+                                    && matches!(*number, 4 | 6)
+                                    && left != right
+                                {
+                                    let message = if *number == 4 {
+                                        "ordering equal image functions must not be cross-type"
+                                    } else {
+                                        "btree skip support functions must not be cross-type"
+                                    };
+                                    return Err(ExecError::Remote(PgError::error("42P17", message)));
+                                }
+                                let named = crabka_pgcatalog::routine::routines_named(
+                                    &*self.catalog_kv,
+                                    &function.name,
+                                )?;
+                                if matches!((method.as_str(), *number), ("btree", 1) | ("hash", 1))
+                                    && named.iter().any(|routine| {
+                                        routine
+                                            .input_params()
+                                            .map(|param| param.ty.column)
+                                            .eq(argument_types.iter().copied().map(Some))
+                                    })
+                                    && !named.iter().any(|routine| {
+                                        routine
+                                            .input_params()
+                                            .map(|param| param.ty.column)
+                                            .eq(argument_types.iter().copied().map(Some))
+                                            && crate::routine::declared_scalar_result_type(routine)
+                                                == Some(crabka_pgtypes::ColumnType::Int4)
+                                    })
+                                {
+                                    let message = if method == "btree" {
+                                        "ordering comparison functions must return integer"
+                                    } else {
+                                        "hash function 1 must return integer"
+                                    };
+                                    return Err(ExecError::Remote(PgError::error("42P17", message)));
+                                }
+                                crabka_pgcatalog::OperatorFamilyMember::Function {
+                                    number: *number,
+                                    function: function.to_string(),
+                                    left_type_oid: left.oid(),
+                                    right_type_oid: right.oid(),
+                                    argument_type_oids: argument_types
+                                        .iter()
+                                        .map(|ty| ty.clone().oid())
+                                        .collect(),
+                                }
+                            }
+                        };
+                        let identity = operator_family_member_identity(&catalog_member);
+                        if !identities.insert(identity) {
+                            return Err(operator_family_member_repeated(identity));
+                        }
+                        if crabka_pgcatalog::operator_family_member_exists(
+                            &*self.catalog_kv,
+                            family.oid,
+                            identity,
+                        )? {
+                            return Err(operator_family_member_duplicate(
+                                identity,
+                                &family.name.name,
+                            ));
+                        }
+                        catalog_members.push(catalog_member);
+                    }
+                    let ops = crabka_pgcatalog::add_operator_family_members_ops(
+                        &*self.catalog_kv,
+                        &family,
+                        &catalog_members,
+                    )?;
+                    self.commit_catalog(ops).await?;
+                    return Ok(QueryResult::Command {
+                        tag: "ALTER OPERATOR FAMILY".into(),
+                    });
+                }
+                if let OperatorObjectAlterAction::DropMembers(members) = action {
+                    if !superuser {
+                        return Err(ExecError::Remote(PgError::error(
+                            "42501",
+                            "must be superuser to alter an operator family",
+                        )));
+                    }
+                    let family = crabka_pgcatalog::get_operator_family(
+                        &*self.catalog_kv,
+                        &old_name,
+                        &method,
+                    )?;
+                    let members = members
+                        .iter()
+                        .map(|member| match member {
+                            crabka_pgparser::ast::OperatorFamilyMemberKey::Operator {
+                                number,
+                                left_type,
+                                right_type,
+                            } => crabka_pgcatalog::OperatorFamilyMemberKey::Operator {
+                                number: *number,
+                                left_type_oid: left_type.oid(),
+                                right_type_oid: right_type.oid(),
+                            },
+                            crabka_pgparser::ast::OperatorFamilyMemberKey::Function {
+                                number,
+                                left_type,
+                                right_type,
+                            } => crabka_pgcatalog::OperatorFamilyMemberKey::Function {
+                                number: *number,
+                                left_type_oid: left_type.oid(),
+                                right_type_oid: right_type.oid(),
+                            },
+                        })
+                        .collect::<Vec<_>>();
+                    for member in &members {
+                        if !crabka_pgcatalog::operator_family_member_exists(
+                            &*self.catalog_kv,
+                            family.oid,
+                            *member,
+                        )? {
+                            return Err(operator_family_member_missing(*member, &family.name.name));
+                        }
+                    }
+                    let ops = crabka_pgcatalog::drop_operator_family_members_ops(
+                        &*self.catalog_kv,
+                        &family,
+                        &members,
+                    )?;
+                    self.commit_catalog(ops).await?;
+                    return Ok(QueryResult::Command {
+                        tag: "ALTER OPERATOR FAMILY".into(),
+                    });
                 }
                 let target_name = match action {
                     OperatorObjectAlterAction::RenameTo(new_name) => {
@@ -5036,6 +5296,8 @@ impl SqlSession {
                         crabka_pgcatalog::RelationName::new(schema, old_name.name.clone())
                     }
                     OperatorObjectAlterAction::OwnerTo(_) => old_name.clone(),
+                    OperatorObjectAlterAction::AddMembers(_)
+                    | OperatorObjectAlterAction::DropMembers(_) => unreachable!(),
                 };
                 let new_owner = match action {
                     OperatorObjectAlterAction::OwnerTo(owner) => {
@@ -6060,6 +6322,7 @@ impl SqlSession {
             None => None,
         };
         self.state = TxnState::InTransaction(TxnCtx {
+            role_at_start: self.current_role.clone(),
             xid: None,
             snapshot,
             _snapshot_pin: snapshot_pin,
@@ -6129,6 +6392,7 @@ impl SqlSession {
             TxnState::InTransaction(ctx) => self.commit_open_block(ctx).await,
             // COMMIT of a failed transaction behaves as a ROLLBACK.
             TxnState::Failed(ctx) => {
+                self.current_role.clone_from(&ctx.role_at_start);
                 self.abort_current_global().await?;
                 self.abort_ctx(ctx).await?;
                 // SP37: a failed block discards every staged GUC override.
@@ -6157,9 +6421,11 @@ impl SqlSession {
     /// the queue, and the unsent [`PreparedPublish`] releases its reservations
     /// as it falls.
     async fn commit_open_block(&mut self, ctx: TxnCtx) -> Result<QueryResult, ExecError> {
+        let role_at_start = ctx.role_at_start.clone();
         let mut reserved = match self.reserve_pending_notifications() {
             Ok(reserved) => reserved,
             Err(e) => {
+                self.current_role.clone_from(&role_at_start);
                 // Nothing is durable yet, so this is an ordinary failed COMMIT:
                 // abort the block and leave no trace of it.
                 let _ = self.abort_current_global().await;
@@ -6173,6 +6439,7 @@ impl SqlSession {
         // commit drained it, a failed one abandoned it.
         self.discard_deferred_constraints();
         if outcome.is_err() {
+            self.current_role = role_at_start;
             self.undo_reserved_notifications(std::mem::take(&mut reserved));
         }
         outcome
@@ -6302,6 +6569,7 @@ impl SqlSession {
         self.finish_transaction_scoped_state(false);
         match std::mem::replace(&mut self.state, TxnState::Idle) {
             TxnState::InTransaction(ctx) | TxnState::Failed(ctx) => {
+                self.current_role.clone_from(&ctx.role_at_start);
                 self.abort_current_global().await?;
                 self.abort_ctx(ctx).await?;
             }
@@ -8726,6 +8994,13 @@ impl SqlSession {
     /// `commit_release`/`abort_release` uses it, because the coordinator
     /// recorded the decision once, globally.
     fn finish_current_txn(&mut self, keep_holdable: bool) {
+        if !keep_holdable
+            && let TxnState::InTransaction(ctx)
+                | TxnState::Failed(ctx)
+                | TxnState::Prepared(ctx) = &self.state
+        {
+            self.current_role.clone_from(&ctx.role_at_start);
+        }
         let implicit_xid = self.implicit_xid.take();
         if let Some(xid) = self.local_xid().or(implicit_xid) {
             self.procarray.finish(xid);
@@ -11094,6 +11369,105 @@ fn operator_access_method_missing(method: &str) -> ExecError {
     ))
 }
 
+fn operator_family_member_identity(
+    member: &crabka_pgcatalog::OperatorFamilyMember,
+) -> crabka_pgcatalog::OperatorFamilyMemberKey {
+    match member {
+        crabka_pgcatalog::OperatorFamilyMember::Operator {
+            number,
+            left_type_oid,
+            right_type_oid,
+            ..
+        } => crabka_pgcatalog::OperatorFamilyMemberKey::Operator {
+            number: *number,
+            left_type_oid: *left_type_oid,
+            right_type_oid: *right_type_oid,
+        },
+        crabka_pgcatalog::OperatorFamilyMember::Function {
+            number,
+            left_type_oid,
+            right_type_oid,
+            ..
+        } => crabka_pgcatalog::OperatorFamilyMemberKey::Function {
+            number: *number,
+            left_type_oid: *left_type_oid,
+            right_type_oid: *right_type_oid,
+        },
+    }
+}
+
+fn operator_family_member_parts(
+    member: crabka_pgcatalog::OperatorFamilyMemberKey,
+) -> (&'static str, u16, String) {
+    let (kind, number, left, right) = match member {
+        crabka_pgcatalog::OperatorFamilyMemberKey::Operator {
+            number,
+            left_type_oid,
+            right_type_oid,
+        } => ("operator", number, left_type_oid, right_type_oid),
+        crabka_pgcatalog::OperatorFamilyMemberKey::Function {
+            number,
+            left_type_oid,
+            right_type_oid,
+        } => ("function", number, left_type_oid, right_type_oid),
+    };
+    (
+        kind,
+        number,
+        format!(
+            "({},{})",
+            operator_family_type_name(left),
+            operator_family_type_name(right)
+        ),
+    )
+}
+
+fn operator_family_type_name(oid: u32) -> String {
+    use crabka_pgtypes::ColumnType;
+    [
+        ColumnType::Int2,
+        ColumnType::Int4,
+        ColumnType::Int8,
+        ColumnType::Bool,
+        ColumnType::Text,
+    ]
+    .into_iter()
+    .find(|ty| ty.oid() == oid)
+    .map_or_else(|| oid.to_string(), |ty| ty.name().to_string())
+}
+
+fn operator_family_member_repeated(
+    member: crabka_pgcatalog::OperatorFamilyMemberKey,
+) -> ExecError {
+    let (kind, number, types) = operator_family_member_parts(member);
+    ExecError::Remote(PgError::error(
+        "42710",
+        format!("{kind} number {number} for {types} appears more than once"),
+    ))
+}
+
+fn operator_family_member_duplicate(
+    member: crabka_pgcatalog::OperatorFamilyMemberKey,
+    family: &str,
+) -> ExecError {
+    let (kind, number, types) = operator_family_member_parts(member);
+    ExecError::Remote(PgError::error(
+        "42710",
+        format!("{kind} {number}{types} already exists in operator family \"{family}\""),
+    ))
+}
+
+fn operator_family_member_missing(
+    member: crabka_pgcatalog::OperatorFamilyMemberKey,
+    family: &str,
+) -> ExecError {
+    let (kind, number, types) = operator_family_member_parts(member);
+    ExecError::Remote(PgError::error(
+        "42704",
+        format!("{kind} {number}{types} does not exist in operator family \"{family}\""),
+    ))
+}
+
 fn resolve_operator_object_name(
     kv: &dyn crabka_pgkv::Kv,
     scope: &crate::relname::ResolutionScope,
@@ -12129,6 +12503,24 @@ mod tests {
             )
             .await
             .expect("schema privilege syntax and targets");
+        assert!(
+            crabka_pgcatalog::has_schema_privilege(
+                &*session.catalog_kv,
+                "app",
+                "reader",
+                "CREATE",
+            )
+            .expect("read schema grant")
+        );
+        assert!(
+            !crabka_pgcatalog::has_schema_privilege(
+                &*session.catalog_kv,
+                "app",
+                "reader",
+                "USAGE",
+            )
+            .expect("read schema revoke")
+        );
 
         let missing_schema = session
             .simple_query("GRANT USAGE ON SCHEMA missing TO reader")
@@ -16956,6 +17348,13 @@ mod session_conformance_tests {
             .await
             .expect("return to member");
         assert!(scalar(&mut session, "SELECT current_user").await == "member_role");
+        session
+            .simple_query("BEGIN; SET ROLE parent_role")
+            .await
+            .expect("set role inside transaction");
+        assert!(state(&mut session, "SELECT 1 / 0").await == "22012");
+        session.simple_query("ROLLBACK").await.expect("rollback role");
+        assert!(scalar(&mut session, "SELECT current_user").await == "member_role");
         assert!(state(&mut session, "SET ROLE unrelated_role").await == "42501");
     }
 
@@ -17424,6 +17823,88 @@ mod session_conformance_tests {
             )
             .await
                 == "1"
+        );
+        session
+            .simple_query("RESET SESSION AUTHORIZATION")
+            .await
+            .expect("return to bootstrap role");
+        session
+            .simple_query("CREATE OPERATOR FAMILY member_family USING btree")
+            .await
+            .expect("create member family");
+        let repeated = session
+            .simple_query(
+                "ALTER OPERATOR FAMILY member_family USING btree ADD \
+                 OPERATOR 1 < (int4, int4), OPERATOR 1 < (int4, int4)",
+            )
+            .await
+            .expect_err("duplicate in statement");
+        assert!(
+            repeated.message == "operator number 1 for (integer,integer) appears more than once"
+        );
+        session
+            .simple_query(
+                "ALTER OPERATOR FAMILY member_family USING btree ADD \
+                 OPERATOR 1 < (int4, int2), FUNCTION 1 btint42cmp(int4, int2)",
+            )
+            .await
+            .expect("add family members");
+        let duplicate = session
+            .simple_query(
+                "ALTER OPERATOR FAMILY member_family USING btree ADD OPERATOR 1 < (int4, int2)",
+            )
+            .await
+            .expect_err("existing member");
+        assert!(
+            duplicate.message
+                == "operator 1(integer,smallint) already exists in operator family \"member_family\""
+        );
+        session
+            .simple_query(
+                "ALTER OPERATOR FAMILY member_family USING btree DROP \
+                 OPERATOR 1 (int4, int2), FUNCTION 1 (int4, int2)",
+            )
+            .await
+            .expect("drop family members");
+        let missing = session
+            .simple_query(
+                "ALTER OPERATOR FAMILY member_family USING btree DROP FUNCTION 1 (int4, int2)",
+            )
+            .await
+            .expect_err("missing member");
+        assert!(
+            missing.message
+                == "function 1(integer,smallint) does not exist in operator family \"member_family\""
+        );
+        session
+            .simple_query(
+                "CREATE FUNCTION bad_btree(int4, int2) RETURNS int8 \
+                 AS 'SELECT NULL::int8' LANGUAGE SQL",
+            )
+            .await
+            .expect("create validation routine");
+        let bad_result = session
+            .simple_query(
+                "ALTER OPERATOR FAMILY member_family USING btree ADD \
+                 FUNCTION 1 bad_btree(int4, int2)",
+            )
+            .await
+            .expect_err("wrong btree result");
+        assert!(bad_result.message == "ordering comparison functions must return integer");
+        session
+            .simple_query(
+                "ALTER OPERATOR FAMILY member_family USING btree ADD OPERATOR 1 < (int4, int2); \
+                 DROP OPERATOR FAMILY member_family USING btree",
+            )
+            .await
+            .expect("re-add member and drop family");
+        assert!(
+            state(
+                &mut session,
+                "ALTER OPERATOR FAMILY implicit_class USING btree ADD OPERATOR 6 < (int4, int4)",
+            )
+            .await
+                == "22023"
         );
         assert!(
             state(

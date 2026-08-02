@@ -915,6 +915,40 @@ pub enum OperatorObjectAlterAction {
     RenameTo(String),
     OwnerTo(String),
     SetSchema(String),
+    AddMembers(Vec<OperatorFamilyMember>),
+    DropMembers(Vec<OperatorFamilyMemberKey>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OperatorFamilyMember {
+    Operator {
+        number: u16,
+        operator: String,
+        left_type: ColumnType,
+        right_type: ColumnType,
+        order_family: Option<RelationRef>,
+    },
+    Function {
+        number: u16,
+        left_type: Option<ColumnType>,
+        right_type: Option<ColumnType>,
+        function: RelationRef,
+        argument_types: Vec<ColumnType>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OperatorFamilyMemberKey {
+    Operator {
+        number: u16,
+        left_type: ColumnType,
+        right_type: ColumnType,
+    },
+    Function {
+        number: u16,
+        left_type: ColumnType,
+        right_type: ColumnType,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
