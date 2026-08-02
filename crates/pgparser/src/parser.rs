@@ -5408,9 +5408,7 @@ impl Parser {
     fn table_query_body(&mut self) -> Result<crate::ast::SelectStmt, ParseError> {
         use crate::ast::{SelectItem, SelectStmt, TableExpr};
         self.expect(&Token::Keyword(Keyword::Table))?;
-        // `TABLE ONLY t` / `TABLE t *` select the same rows here: inheritance is
-        // not implemented, so a table never has descendants to include or omit.
-        self.eat_ident_eq("only");
+        let only = self.eat_ident_eq("only");
         let name = self.relation_ref()?;
         if *self.peek() == Token::Star {
             self.bump();
@@ -5419,6 +5417,7 @@ impl Parser {
             projection: vec![SelectItem::Wildcard],
             from: vec![TableExpr::Table {
                 name,
+                only,
                 alias: None,
                 columns: None,
                 sample: None,
@@ -9380,6 +9379,7 @@ impl Parser {
         if self.peek_ident_eq("rows") && *self.peek2() == Token::Keyword(Keyword::From) {
             return self.rows_from(lateral);
         }
+        let only = self.eat_ident_eq("only");
         let name = self.relation_ref()?;
         // `ident (` in FROM position is a set-returning function call
         // (`unnest(tags) AS u(tag)`), never a table. A qualified call keeps its
@@ -9406,6 +9406,7 @@ impl Parser {
         let sample = self.opt_tablesample()?;
         Ok(TableExpr::Table {
             name,
+            only,
             alias,
             columns,
             sample,
@@ -17178,6 +17179,7 @@ mod q1_statement_completeness_tests {
             select.from
                 == vec![TableExpr::Table {
                     name: "t".into(),
+                    only: false,
                     alias: None,
                     columns: None,
                     sample: None,

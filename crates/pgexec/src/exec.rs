@@ -398,13 +398,6 @@ pub(crate) fn execute_ddl(
             if (partition_by.is_some() || partition_of.is_some()) && *sharded {
                 return Err(crate::partition::reject_sharded_partitioned());
             }
-            if !inherits.is_empty() {
-                return Err(ExecError::Unsupported(
-                    "CREATE TABLE … INHERITS is not supported: the storage model has no \
-                     inheritance hierarchy"
-                        .into(),
-                ));
-            }
             let disposition = if *temporary {
                 SchemaDisposition::TemporaryCreation
             } else {
@@ -425,6 +418,12 @@ pub(crate) fn execute_ddl(
                 return Ok((command("CREATE TABLE"), Vec::new()));
             }
             let ddl_ctx = crate::clock::EvalCtx::for_ddl(resolution, fctx.catalog);
+            let inheritance_parents = inherits
+                .iter()
+                .map(|parent| {
+                    resolve_relation(kv, resolution, parent, SchemaDisposition::Reference)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             // A partition declares no columns of its own: it inherits the
             // parent's list, along with the parent's CHECK constraints, and may
             // only add qualifiers to what it inherits.
@@ -433,9 +432,18 @@ pub(crate) fn execute_ddl(
                     Some(spec) => {
                         partition_definition(kv, name, spec, constraints, like, &ddl_ctx)?
                     }
-                    None => {
+                    None if inheritance_parents.is_empty() => {
                         create_table_definition(kv, name, columns, constraints, like, &ddl_ctx)?
                     }
+                    None => inherited_table_definition(
+                        kv,
+                        name,
+                        &inheritance_parents,
+                        columns,
+                        constraints,
+                        like,
+                        &ddl_ctx,
+                    )?,
                 };
             // `fk::resolve_foreign_key` refuses a sharded relation itself, but
             // `Table` carries no partition flag, so this is the only place that
@@ -534,6 +542,9 @@ pub(crate) fn execute_ddl(
                 ops.extend(crate::trigger::clone_new_partition_triggers(
                     kv, &parent, &table,
                 )?);
+            }
+            if !inheritance_parents.is_empty() {
+                ops.extend(crate::inheritance::attach_ops(name, &inheritance_parents));
             }
             if temporary {
                 ops.splice(..0, ensure_schema_ops(kv, &name.schema)?);
@@ -3356,6 +3367,7 @@ async fn execute_view_dml(
             let read = write_ctx.read_ctx(ctes);
             let target_expr = crabka_pgparser::ast::TableExpr::Table {
                 name: reference.clone(),
+                only: true,
                 alias: alias.clone(),
                 columns: None,
                 sample: None,
@@ -3419,6 +3431,7 @@ async fn execute_view_dml(
             let read = write_ctx.read_ctx(ctes);
             let target_expr = crabka_pgparser::ast::TableExpr::Table {
                 name: reference.clone(),
+                only: true,
                 alias: alias.clone(),
                 columns: None,
                 sample: None,
@@ -4689,6 +4702,7 @@ async fn execute_merge(
         MergeSource::Table { name, alias } => {
             let te = crabka_pgparser::ast::TableExpr::Table {
                 name: name.clone(),
+                only: false,
                 alias: alias.clone(),
                 columns: None,
                 sample: None,
@@ -5652,6 +5666,27 @@ pub(crate) fn ddl_requires_unique_local_serialization(stmt: &Statement) -> bool 
         } => create_table_has_unique_constraint(columns, constraints),
         _ => false,
     }
+}
+
+pub(crate) fn inheritance_merge_notices(
+    kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
+    stmt: &Statement,
+) -> Result<Vec<String>, ExecError> {
+    let Statement::CreateTable { inherits, .. } = stmt else {
+        return Ok(Vec::new());
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut notices = Vec::new();
+    for parent in inherits {
+        let name = resolve_relation(kv, resolution, parent, SchemaDisposition::Reference)?;
+        for column in crabka_pgcatalog::get_table(kv, &name)?.columns {
+            if !seen.insert(column.name.clone()) && !notices.contains(&column.name) {
+                notices.push(column.name);
+            }
+        }
+    }
+    Ok(notices)
 }
 
 fn create_table_has_unique_constraint(
@@ -9008,6 +9043,48 @@ fn partitioned_scan(
             read_ctx,
             &crabka_pgparser::ast::TableExpr::Table {
                 name: crabka_pgparser::ast::RelationRef::qualified(&leaf.schema, &leaf.name),
+                only: true,
+                alias: None,
+                columns: None,
+                sample: None,
+            },
+            None,
+            None,
+        )?;
+        rows.extend(relation.rows.into_iter().map(|row| {
+            ordinals
+                .iter()
+                .map(|ordinal| row.get(*ordinal).cloned().unwrap_or(Datum::Null))
+                .collect::<Vec<_>>()
+        }));
+    }
+    Ok(Relation { scope, rows })
+}
+
+/// Read a table and all inheritance descendants as rows shaped like the parent.
+fn inherited_scan(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    parent: &Table,
+    qualifier: &str,
+) -> Result<Relation, ExecError> {
+    let scope = Scope::single(parent, qualifier);
+    let mut relations = vec![parent.name.clone()];
+    relations.extend(crate::inheritance::descendants(
+        read_ctx.catalog_kv,
+        &parent.name,
+    )?);
+    let mut rows = Vec::new();
+    for relation_name in relations {
+        let table = crabka_pgcatalog::get_table(read_ctx.catalog_kv, &relation_name)?;
+        let ordinals = column_mapping(parent, &table)?;
+        let relation = build_table_expr(
+            read_ctx,
+            &crabka_pgparser::ast::TableExpr::Table {
+                name: crabka_pgparser::ast::RelationRef::qualified(
+                    &relation_name.schema,
+                    &relation_name.name,
+                ),
+                only: true,
                 alias: None,
                 columns: None,
                 sample: None,
@@ -9089,6 +9166,7 @@ fn build_table_expr(
     match te {
         TableExpr::Table {
             name,
+            only,
             alias,
             columns,
             sample,
@@ -9102,6 +9180,7 @@ fn build_table_expr(
                     read_ctx,
                     &TableExpr::Table {
                         name: name.clone(),
+                        only: *only,
                         alias: alias.clone(),
                         columns: None,
                         sample: sample.clone(),
@@ -9117,6 +9196,7 @@ fn build_table_expr(
                     read_ctx,
                     &TableExpr::Table {
                         name: name.clone(),
+                        only: *only,
                         alias: alias.clone(),
                         columns: columns.clone(),
                         sample: None,
@@ -9180,6 +9260,9 @@ fn build_table_expr(
             }
             let t = crabka_pgcatalog::get_table(catalog_kv, name)?;
             let qualifier = alias.as_deref().unwrap_or(&t.name.name);
+            if !*only && !crate::inheritance::children_of(catalog_kv, &t.name)?.is_empty() {
+                return inherited_scan(read_ctx, &t, qualifier);
+            }
             // A partitioned parent owns no rows: reading it is an append over
             // its leaves. Doing this before every other scan path is what keeps
             // a partitioned relation from silently answering empty.
@@ -9460,12 +9543,14 @@ fn try_distributed_inner_equi_join(
             alias: left_alias,
             columns: None,
             sample: None,
+            ..
         },
         TableExpr::Table {
             name: right_name,
             alias: right_alias,
             columns: None,
             sample: None,
+            ..
         },
     ) = (left_expr, right_expr)
     else {
@@ -10039,6 +10124,7 @@ fn single_local_base_table(
             alias,
             columns: None,
             sample: None,
+            ..
         },
     ] = s.from.as_slice()
     else {
@@ -10091,6 +10177,7 @@ fn single_sharded_base_table(
             alias,
             columns: None,
             sample: None,
+            ..
         },
     ] = s.from.as_slice()
     else {
@@ -10397,6 +10484,7 @@ pub(crate) fn select_to_relation_with_ctes(
                     alias,
                     columns: None,
                     sample: None,
+                    ..
                 },
             ] if (name.schema.is_none() && ctes.lookup(&name.name).is_none())
                 && scan_plan_table(catalog_kv, resolution, name)?.is_some() =>
@@ -10528,6 +10616,7 @@ fn build_table_expr_schema_with_ctes(
                     resolution,
                     &TableExpr::Table {
                         name: name.clone(),
+                        only: false,
                         alias: alias.clone(),
                         columns: None,
                         sample: None,
@@ -11147,16 +11236,19 @@ fn virtual_catalog_rows(
 fn pg_inherits_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut rows = Vec::new();
     for table in crabka_pgcatalog::list_tables(catalog_kv)? {
-        let Some((parent, _)) = crate::partition::parent_of(catalog_kv, &table.name)? else {
-            continue;
-        };
-        let parent = crabka_pgcatalog::get_table(catalog_kv, &parent)?;
-        rows.push(vec![
-            int(oid_i32(table.id)?),
-            int(oid_i32(parent.id)?),
-            int(1),
-            Datum::Bool(false),
-        ]);
+        let mut parents = crate::inheritance::parents_of(catalog_kv, &table.name)?;
+        if let Some((parent, _)) = crate::partition::parent_of(catalog_kv, &table.name)? {
+            parents.push(parent);
+        }
+        for (index, parent) in parents.into_iter().enumerate() {
+            let parent = crabka_pgcatalog::get_table(catalog_kv, &parent)?;
+            rows.push(vec![
+                int(oid_i32(table.id)?),
+                int(oid_i32(parent.id)?),
+                int(i32::try_from(index + 1).unwrap_or(i32::MAX)),
+                Datum::Bool(false),
+            ]);
+        }
     }
     Ok(rows)
 }
@@ -12787,6 +12879,7 @@ pub(crate) async fn execute_read_locking(
                 alias,
                 columns: None,
                 sample: None,
+                ..
             },
         ] if name.schema.is_none() && read_ctx.ctes.lookup(&name.name).is_none() => {
             let table = crabka_pgcatalog::get_table(
@@ -13889,6 +13982,54 @@ type TableDefinition = (
     Vec<crabka_pgcatalog::NewIndex>,
     Vec<PendingForeignKey>,
 );
+
+/// Build an inherited table by prepending each distinct parent column and
+/// carrying inherited checks into the child's own catalog schema.
+fn inherited_table_definition(
+    kv: &dyn Kv,
+    name: &crabka_pgcatalog::RelationName,
+    parents: &[crabka_pgcatalog::RelationName],
+    columns: &[crabka_pgparser::ast::ColumnDef],
+    constraints: &[crabka_pgparser::ast::TableConstraint],
+    like: &[crabka_pgparser::ast::LikeClause],
+    ctx: &crate::clock::EvalCtx,
+) -> Result<TableDefinition, ExecError> {
+    let (local_columns, mut checks, sequences, indexes, foreign_keys) =
+        create_table_definition(kv, name, columns, constraints, like, ctx)?;
+    let mut merged = Vec::<Column>::new();
+    let mut inherited_checks = Vec::new();
+    for parent_name in parents {
+        let parent = crabka_pgcatalog::get_table(kv, parent_name)?;
+        for column in parent.columns {
+            if let Some(existing) = merged.iter_mut().find(|item| item.name == column.name) {
+                if existing.ty != column.ty {
+                    return Err(ExecError::InvalidTableDefinition(format!(
+                        "inherited column \"{}\" has a type conflict",
+                        column.name
+                    )));
+                }
+                existing.not_null |= column.not_null;
+                if existing.default.is_none() {
+                    existing.default = column.default;
+                }
+            } else {
+                merged.push(column);
+            }
+        }
+        inherited_checks.extend(parent.checks);
+    }
+    for column in local_columns {
+        if merged.iter().any(|item| item.name == column.name) {
+            return Err(ExecError::InvalidTableDefinition(format!(
+                "column \"{}\" specified more than once",
+                column.name
+            )));
+        }
+        merged.push(column);
+    }
+    inherited_checks.append(&mut checks);
+    Ok((merged, inherited_checks, sequences, indexes, foreign_keys))
+}
 
 /// Build the definition of a `CREATE TABLE … PARTITION OF parent`.
 ///
