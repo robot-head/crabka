@@ -161,10 +161,14 @@ def rust_package(
             visibility = ["//visibility:public"],
         )
 
+        lib_test_rustc_env = dict(rustc_env)
+        lib_test_rustc_env["CARGO_MANIFEST_DIR"] = native.package_name()
         rust_test(
             name = name + "_lib_test",
             crate = ":" + name,
+            data = data,
             deps = all_crate_deps(normal_dev = True),
+            rustc_env = lib_test_rustc_env,
         )
 
         rust_doc(

@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 # Cancel superseded PR runs; let pushes to main run to completion.
 concurrency:

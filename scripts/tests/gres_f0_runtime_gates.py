@@ -134,10 +134,10 @@ assert "python3 -m unittest tools/tests/test_gres_wire_recorder.py tools/tests/t
 front_door = workflow_step("Front-door PgDog e2e gate")
 assert "--skip-pgdog" not in front_door and "CRABKA_GRES_E2E_KEEP_ARTIFACTS=1" in front_door
 driver_goldens = workflow_step("Captured driver startup replay")
-assert "timeout 30s ./scripts/gres-driver-goldens-gate.sh" in driver_goldens
+assert "timeout 30s aspect gres --task:name=gres-driver-goldens --suite driver-goldens" in driver_goldens
 
 workflow = source(".github/workflows/ci.yml")
-gres_filter = re.search(r"^\s{12}gres:\n(?P<body>.*?)(?=^\s{2}rust:)", workflow, re.MULTILINE | re.DOTALL)
+gres_filter = re.search(r"^\s{12}gres:\n(?P<body>.*?)(?=^\s{2}affected:)", workflow, re.MULTILINE | re.DOTALL)
 assert gres_filter, "missing Gres changed-files filter"
 for path in (
     "tools/capture-gres-driver-goldens.py",

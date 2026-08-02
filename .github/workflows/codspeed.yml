@@ -40,6 +40,8 @@ jobs:
     name: Run benchmarks
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      CODSPEED_CARGO_WORKSPACE_ROOT: ${{ github.workspace }}
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-bazel

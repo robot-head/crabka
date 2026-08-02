@@ -1,5 +1,11 @@
 load("//:bazel/rust_package.bzl", "rust_package")
 
+filegroup(
+    name = "test_fixtures",
+    srcs = glob(["tests/fixtures/**"]),
+    visibility = ["//visibility:public"],
+)
+
 rust_package(
     name = "pgwire",
     cargo_name = "crabka-pgwire",
