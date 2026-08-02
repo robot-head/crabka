@@ -7,6 +7,8 @@
 //! path here writes both, and [`hydrate`] restores the registry from the catalog
 //! when a session opens so a restart or a second node still resolves the names.
 
+use std::collections::HashSet;
+
 use crabka_pgkv::{Kv, WriteOp};
 use crabka_pgparser::ast::{
     AlterDomainAction, AlterTypeAction, CompositeFieldDef, CreateTypeDefinition, DomainConstraint,
@@ -471,6 +473,17 @@ pub fn drop_types(
                 format!("\"{name}\" is a domain\nHINT:  Use DROP DOMAIN to remove a domain."),
             )));
         }
+        let dependents = dependent_user_types(kv, ty.oid)?;
+        if !cascade && let Some(dependent) = dependents.first() {
+            return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+                "2BP01",
+                format!(
+                    "cannot drop type {name} because other objects depend on it\nDETAIL:  \
+                     type {} depends on type {name}",
+                    dependent.name
+                ),
+            )));
+        }
         if !cascade && let Some(user) = column_using_type(kv, &ty)? {
             return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
                 "2BP01",
@@ -479,6 +492,10 @@ pub fn drop_types(
                      column {user} depends on type {name}"
                 ),
             )));
+        }
+        for dependent in dependents.into_iter().rev() {
+            usertype::unregister(&dependent.name);
+            ops.extend(crabka_pgcatalog::drop_user_type_ops(&dependent.name));
         }
         usertype::unregister(name);
         ops.extend(crabka_pgcatalog::drop_user_type_ops(name));
@@ -489,6 +506,34 @@ pub fn drop_types(
         },
         ops,
     ))
+}
+
+fn dependent_user_types(kv: &dyn Kv, root_oid: u32) -> Result<Vec<UserType>, ExecError> {
+    let types = crabka_pgcatalog::list_user_types(kv)?;
+    let mut dropped = HashSet::from([root_oid]);
+    let mut dependents = Vec::new();
+    loop {
+        let Some(dependent) = types
+            .iter()
+            .find(|ty| !dropped.contains(&ty.oid) && user_type_references_any(ty, &dropped))
+        else {
+            break;
+        };
+        dropped.insert(dependent.oid);
+        dependents.push(dependent.clone());
+    }
+    Ok(dependents)
+}
+
+fn user_type_references_any(ty: &UserType, oids: &HashSet<u32>) -> bool {
+    match &ty.body {
+        UserTypeBody::Composite(fields) => {
+            fields.iter().any(|field| oids.contains(&field.ty.oid()))
+        }
+        UserTypeBody::Range(range) => oids.contains(&range.subtype.oid()),
+        UserTypeBody::Domain(domain) => oids.contains(&domain.base.oid()),
+        UserTypeBody::Enum(_) => false,
+    }
 }
 
 /// `table.column` of the first table column declared with `ty`, if any.
@@ -693,5 +738,46 @@ mod tests {
         )
         .expect_err("builtin companion collision");
         assert!(error.into_pg().code == "42710");
+    }
+
+    #[test]
+    fn drop_composite_cascade_removes_dependent_range() {
+        let kv = MemKv::default();
+        let (composite, composite_ops) = crabka_pgcatalog::create_user_type_ops(
+            &kv,
+            "cascade_composite_test",
+            UserTypeBody::Composite(vec![CompositeField {
+                name: "value".into(),
+                ty: ColumnType::Int4,
+            }]),
+        )
+        .expect("composite");
+        kv.write_batch(&composite_ops).expect("store composite");
+        usertype::replace(&composite);
+        let (range, range_ops) = crabka_pgcatalog::create_user_type_ops(
+            &kv,
+            "cascade_composite_range_test",
+            UserTypeBody::Range(RangeBody {
+                subtype: composite.column_type(),
+                collation: None,
+                multirange_name: None,
+            }),
+        )
+        .expect("range");
+        let companion_name = range.multirange_name().expect("companion");
+        kv.write_batch(&range_ops).expect("store range");
+        usertype::replace(&range);
+
+        let (_, drop_ops) =
+            drop_types(&kv, &[composite.name.clone()], false, true, false).expect("cascade");
+        kv.write_batch(&drop_ops).expect("drop types");
+
+        assert!(
+            crabka_pgcatalog::list_user_types(&kv)
+                .expect("types")
+                .is_empty()
+        );
+        assert!(ColumnType::from_sql_name(&range.name).is_none());
+        assert!(ColumnType::from_sql_name(&companion_name).is_none());
     }
 }
