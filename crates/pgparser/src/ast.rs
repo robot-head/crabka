@@ -842,8 +842,18 @@ pub enum UtilityStatement {
         name: String,
         action: TablespaceAlterAction,
     },
-    /// Operator-class metadata; partition hashing still uses the resolved type.
-    CreateOperatorClass,
+    CreateOperatorFamily {
+        name: RelationRef,
+        method: String,
+    },
+    CreateOperatorClass {
+        name: RelationRef,
+        default: bool,
+        input_type: ColumnType,
+        method: String,
+        family: Option<RelationRef>,
+        key_type: Option<ColumnType>,
+    },
     /// `ALTER SYSTEM SET <name> = <value>` / `ALTER SYSTEM RESET { <name> | ALL }`.
     /// `name` is `None` for `RESET ALL`.
     AlterSystem { name: Option<String> },
@@ -1463,10 +1473,6 @@ non_goal_specs!(
     (
         CreateOperator,
         "CREATE OPERATOR === (FUNCTION = int4eq, LEFTARG = integer, RIGHTARG = integer)"
-    ),
-    (
-        CreateOperatorFamily,
-        "CREATE OPERATOR FAMILY opf USING btree"
     ),
     (CreatePublication, "CREATE PUBLICATION pub"),
     (

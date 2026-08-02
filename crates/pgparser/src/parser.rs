@@ -4191,6 +4191,12 @@ impl Parser {
             {
                 emitted(I::CreateOperatorClass, self.create_operator_class())
             }
+            Token::Ident(s)
+                if s == "operator"
+                    && matches!(self.peek_n(self.create_object_keyword_offset() + 1), Token::Ident(next) if next == "family") =>
+            {
+                emitted(I::CreateOperatorFamily, self.create_operator_family())
+            }
             Token::Ident(s) if s == "tablespace" => {
                 emitted(I::CreateTablespace, self.create_tablespace())
             }
@@ -7309,23 +7315,26 @@ impl Parser {
         self.expect(&Token::Keyword(Keyword::Create))?;
         self.expect_ident_eq("operator")?;
         self.expect_ident_eq("class")?;
-        self.relation_ref()?;
+        let name = self.relation_ref()?;
+        let default = self.eat_ident_eq("default");
         self.expect_keyword_or_ident(Keyword::For, "for")?;
-        self.eat_ident_eq("default");
         self.expect_ident_eq("type")?;
-        self.parse_type_name()?;
+        let input_type = self.parse_type_name()?;
         self.expect_keyword_or_ident(Keyword::Using, "using")?;
-        self.expect_object_name()?;
-        if self.eat_ident_eq("family") {
-            self.relation_ref()?;
-        }
+        let method = self.expect_object_name()?;
+        let family = self.eat_ident_eq("family").then(|| self.relation_ref()).transpose()?;
         self.expect_keyword_or_ident(Keyword::As, "as")?;
         // Each member is already validated when its referenced operator or
         // support function is used. Keep the DDL boundary strict (non-empty,
         // comma-separated) without duplicating those parsers here.
         let mut member_tokens = 0usize;
+        let mut key_type = None;
         while !matches!(self.peek(), Token::Semicolon | Token::Eof) {
-            self.bump();
+            if self.eat_ident_eq("storage") {
+                key_type = Some(self.parse_type_name()?);
+            } else {
+                self.bump();
+            }
             member_tokens += 1;
         }
         if member_tokens == 0 {
@@ -7335,7 +7344,28 @@ impl Parser {
             ));
         }
         Ok(crate::ast::Statement::Utility(
-            crate::ast::UtilityStatement::CreateOperatorClass,
+            crate::ast::UtilityStatement::CreateOperatorClass {
+                name,
+                default,
+                input_type,
+                method,
+                family,
+                key_type,
+            },
+        ))
+    }
+
+    fn create_operator_family(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.expect(&Token::Keyword(Keyword::Create))?;
+        self.expect_ident_eq("operator")?;
+        self.expect_ident_eq("family")?;
+        let name = self.relation_ref()?;
+        self.expect_keyword_or_ident(Keyword::Using, "using")?;
+        Ok(crate::ast::Statement::Utility(
+            crate::ast::UtilityStatement::CreateOperatorFamily {
+                name,
+                method: self.expect_object_name()?,
+            },
         ))
     }
 
@@ -11573,7 +11603,7 @@ mod tests {
             one(
                 "CREATE OPERATOR CLASS opc FOR TYPE int4 USING hash AS OPERATOR 1 =, FUNCTION 2 f(int4, int8)"
             ),
-            Statement::Utility(UtilityStatement::CreateOperatorClass)
+            Statement::Utility(UtilityStatement::CreateOperatorClass { .. })
         ));
         assert!(matches!(
             one("CREATE TYPE textrange AS RANGE (SUBTYPE = text, COLLATION = \"C\")"),

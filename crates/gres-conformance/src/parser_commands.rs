@@ -211,6 +211,12 @@ const COMMAND_PROBES: &[CommandProbe] = &[
         refusal: None,
     },
     CommandProbe {
+        command: "ALTER INDEX",
+        sql: "ALTER INDEX parser_commands_idx SET TABLESPACE pg_default",
+        expected_statement: "AlterIndexTablespace",
+        refusal: None,
+    },
+    CommandProbe {
         command: "COMMENT",
         sql: "COMMENT ON TABLE parser_commands_probe IS 'probe comment'",
         expected_statement: "Comment",
@@ -586,6 +592,12 @@ const COMMAND_PROBES: &[CommandProbe] = &[
         command: "CREATE OPERATOR CLASS",
         sql: "CREATE OPERATOR CLASS parser_commands_ops FOR TYPE uuid USING hash AS STORAGE uuid",
         expected_statement: "CreateOperatorClass",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "CREATE OPERATOR FAMILY",
+        sql: "CREATE OPERATOR FAMILY parser_commands_family USING hash",
+        expected_statement: "CreateOperatorFamily",
         refusal: None,
     },
     CommandProbe {
@@ -966,7 +978,8 @@ fn statement_shape(statement: &Statement) -> &'static str {
             crabka_pgparser::ast::UtilityStatement::CreateTablespace { .. } => "CreateTablespace",
             crabka_pgparser::ast::UtilityStatement::DropTablespace { .. } => "DropTablespace",
             crabka_pgparser::ast::UtilityStatement::AlterTablespace { .. } => "AlterTablespace",
-            crabka_pgparser::ast::UtilityStatement::CreateOperatorClass => "CreateOperatorClass",
+            crabka_pgparser::ast::UtilityStatement::CreateOperatorClass { .. } => "CreateOperatorClass",
+            crabka_pgparser::ast::UtilityStatement::CreateOperatorFamily { .. } => "CreateOperatorFamily",
             crabka_pgparser::ast::UtilityStatement::AlterSystem { .. } => "AlterSystem",
             crabka_pgparser::ast::UtilityStatement::SetConstraints { .. } => "SetConstraints",
             crabka_pgparser::ast::UtilityStatement::SetSessionAuthorization { .. } => {
@@ -1042,7 +1055,7 @@ mod tests {
 
         assert!(report.format_version == PARSER_COMMAND_REPORT_FORMAT_VERSION);
         assert!(
-            report.commands.len() == 155,
+            report.commands.len() == 156,
             "all resolved command rows need probes"
         );
         assert!(report.commands.windows(2).all(|pair| pair[0] < pair[1]));
