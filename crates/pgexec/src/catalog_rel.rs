@@ -1441,6 +1441,7 @@ fn pg_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         let contype = match kind {
             IndexConstraint::PrimaryKey => "p",
             IndexConstraint::Unique => "u",
+            IndexConstraint::Exclusion(_) => "x",
         };
         rows.push(constraint_row(ConstraintRow {
             oid: index_constraint_oid(index.id)?,
@@ -1972,6 +1973,7 @@ fn table_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         let constraint_type = match kind {
             IndexConstraint::PrimaryKey => "PRIMARY KEY",
             IndexConstraint::Unique => "UNIQUE",
+            IndexConstraint::Exclusion(_) => "EXCLUDE",
         };
         rows.push(table_constraint_row(
             &index.name,

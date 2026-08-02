@@ -220,10 +220,17 @@ pub enum IndexMethod {
 }
 
 /// Constraint backed by an automatically-created index.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndexConstraint {
     PrimaryKey,
     Unique,
+    Exclusion(Vec<ExclusionOperator>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExclusionOperator {
+    Equal,
+    Overlaps,
 }
 
 /// Secondary-index catalog definition.
@@ -1867,7 +1874,7 @@ pub fn create_constraint_index_ops(
         unique: new_index.unique,
         placement: new_index.placement,
         method: new_index.method,
-        constraint: new_index.constraint,
+        constraint: new_index.constraint.clone(),
     };
     let value = serialize_index(&index);
     let ops = vec![
@@ -1964,7 +1971,7 @@ pub fn create_indexes_on_table_ops(
             unique: new_index.unique,
             placement: new_index.placement,
             method: new_index.method,
-            constraint: new_index.constraint,
+            constraint: new_index.constraint.clone(),
         };
         let value = serialize_index(&index);
         ops.push(WriteOp::Put {

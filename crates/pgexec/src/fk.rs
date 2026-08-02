@@ -447,10 +447,10 @@ fn select_referenced_index<'a>(
                     == wanted
         })
     };
-    let rank = |index: &Index| match index.constraint {
+    let rank = |index: &Index| match &index.constraint {
         Some(IndexConstraint::PrimaryKey) => 0,
         Some(IndexConstraint::Unique) => 1,
-        None => 2,
+        Some(IndexConstraint::Exclusion(_)) | None => 2,
     };
     matches()
         .min_by(|left, right| {

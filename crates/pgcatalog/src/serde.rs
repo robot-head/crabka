@@ -21,8 +21,8 @@ use crabka_pgtypes::{
 };
 
 use crate::{
-    CheckConstraint, Column, ColumnDefault, ForeignDataWrapper, ForeignKey, ForeignServer,
-    ForeignTableMeta, HashSharding, IdentityKind, Index, IndexConstraint, IndexMethod,
+    CheckConstraint, Column, ColumnDefault, ExclusionOperator, ForeignDataWrapper, ForeignKey,
+    ForeignServer, ForeignTableMeta, HashSharding, IdentityKind, Index, IndexConstraint, IndexMethod,
     IndexPlacement, MatchType, ReferentialAction, Sequence, ShardingStrategy, TableOptions,
     UserMapping, View,
 };
@@ -47,7 +47,7 @@ const TABLE_OPTION_SHARDED: u8 = 0b0000_0001;
 const SHARDING_VERSION: u8 = 1;
 const SHARDING_NONE: u8 = 0;
 const SHARDING_HASH: u8 = 1;
-const INDEX_VERSION: u8 = 3;
+const INDEX_VERSION: u8 = 4;
 const SEQUENCE_VERSION: u8 = 1;
 const INDEX_PLACEMENT_LOCAL: u8 = 0;
 const INDEX_PLACEMENT_GLOBAL: u8 = 1;
@@ -59,6 +59,9 @@ const INDEX_METHOD_SPGIST: u8 = 4;
 const INDEX_CONSTRAINT_NONE: u8 = 0;
 const INDEX_CONSTRAINT_PRIMARY_KEY: u8 = 1;
 const INDEX_CONSTRAINT_UNIQUE: u8 = 2;
+const INDEX_CONSTRAINT_EXCLUSION: u8 = 3;
+const EXCLUSION_OPERATOR_EQUAL: u8 = 0;
+const EXCLUSION_OPERATOR_OVERLAPS: u8 = 1;
 const FOREIGN_KEY_VERSION: u8 = 1;
 const REFERENTIAL_ACTION_NO_ACTION: u8 = 0;
 const REFERENTIAL_ACTION_RESTRICT: u8 = 1;
@@ -931,11 +934,25 @@ pub fn serialize_index(index: &Index) -> Vec<u8> {
         IndexMethod::Gist => INDEX_METHOD_GIST,
         IndexMethod::Spgist => INDEX_METHOD_SPGIST,
     });
-    out.push(match index.constraint {
+    out.push(match &index.constraint {
         None => INDEX_CONSTRAINT_NONE,
         Some(IndexConstraint::PrimaryKey) => INDEX_CONSTRAINT_PRIMARY_KEY,
         Some(IndexConstraint::Unique) => INDEX_CONSTRAINT_UNIQUE,
+        Some(IndexConstraint::Exclusion(_)) => INDEX_CONSTRAINT_EXCLUSION,
     });
+    if let Some(IndexConstraint::Exclusion(operators)) = &index.constraint {
+        out.extend_from_slice(
+            &u32::try_from(operators.len())
+                .expect("exclusion operator count must fit in u32")
+                .to_be_bytes(),
+        );
+        for operator in operators {
+            out.push(match operator {
+                ExclusionOperator::Equal => EXCLUSION_OPERATOR_EQUAL,
+                ExclusionOperator::Overlaps => EXCLUSION_OPERATOR_OVERLAPS,
+            });
+        }
+    }
     out.extend_from_slice(
         &u32::try_from(index.columns.len())
             .expect("index column count must fit in u32")
@@ -960,7 +977,7 @@ pub fn serialize_index(index: &Index) -> Vec<u8> {
 pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
     let mut cur = bytes;
     let version = take_u8(&mut cur)?;
-    if !matches!(version, 2 | INDEX_VERSION) {
+    if !(2..=INDEX_VERSION).contains(&version) {
         return Err(KvError::CorruptRow(format!(
             "unknown index version {version}"
         )));
@@ -1007,6 +1024,25 @@ pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
         INDEX_CONSTRAINT_NONE => None,
         INDEX_CONSTRAINT_PRIMARY_KEY => Some(IndexConstraint::PrimaryKey),
         INDEX_CONSTRAINT_UNIQUE => Some(IndexConstraint::Unique),
+        INDEX_CONSTRAINT_EXCLUSION if version >= 4 => {
+            let count = usize::try_from(u32::from_be_bytes(
+                take_n(&mut cur, 4)?.try_into().expect("4"),
+            ))
+            .expect("u32 fits in usize on supported targets");
+            let mut operators = Vec::with_capacity(count.min(16));
+            for _ in 0..count {
+                operators.push(match take_u8(&mut cur)? {
+                    EXCLUSION_OPERATOR_EQUAL => ExclusionOperator::Equal,
+                    EXCLUSION_OPERATOR_OVERLAPS => ExclusionOperator::Overlaps,
+                    tag => {
+                        return Err(KvError::CorruptRow(format!(
+                            "unknown exclusion operator tag {tag}"
+                        )));
+                    }
+                });
+            }
+            Some(IndexConstraint::Exclusion(operators))
+        }
         tag => {
             return Err(KvError::CorruptRow(format!(
                 "unknown index constraint tag {tag}"
@@ -1025,6 +1061,13 @@ pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
     let mut columns = Vec::with_capacity(column_count.min(16));
     for _ in 0..column_count {
         columns.push(read_string(&mut cur)?);
+    }
+    if let Some(IndexConstraint::Exclusion(operators)) = &constraint
+        && operators.len() != columns.len()
+    {
+        return Err(KvError::CorruptRow(
+            "exclusion operator count does not match index column count".into(),
+        ));
     }
     Ok(Index {
         id,
@@ -2201,6 +2244,25 @@ mod tests {
                 index
             );
         }
+
+        let exclusion = Index {
+            id: 8,
+            name: "booking_room_during_excl".into(),
+            table: RelationName::public("booking"),
+            table_id: 4,
+            columns: vec!["room".into(), "during".into()],
+            unique: false,
+            placement: IndexPlacement::Local,
+            method: IndexMethod::Gist,
+            constraint: Some(IndexConstraint::Exclusion(vec![
+                ExclusionOperator::Equal,
+                ExclusionOperator::Overlaps,
+            ])),
+        };
+        assert_eq!(
+            deserialize_index(&serialize_index(&exclusion)).expect("exclusion index decode"),
+            exclusion
+        );
     }
 
     fn foreign_key_fixture() -> ForeignKey {

@@ -1998,6 +1998,16 @@ pub enum TableConstraintKind {
         columns: Vec<String>,
         references: ForeignKeyRef,
     },
+    Exclude {
+        method: String,
+        elements: Vec<ExclusionElement>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExclusionElement {
+    pub column: String,
+    pub operator: BinaryOp,
 }
 
 /// `PostgreSQL`'s four row-lock strengths, ordered weakest to strongest so a

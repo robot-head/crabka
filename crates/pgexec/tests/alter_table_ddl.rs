@@ -61,6 +61,52 @@ fn text_row(values: &[&str]) -> Vec<Option<String>> {
     values.iter().map(|v| Some((*v).to_string())).collect()
 }
 
+#[tokio::test]
+async fn gist_exclusion_constraints_reject_conflicting_ranges() {
+    let (_engine, mut s) = engine_with(&[
+        "CREATE TABLE test_range_excl (room int4range, speaker int4range, during tstzrange, \
+         EXCLUDE USING gist (room WITH =, during WITH &&), \
+         EXCLUDE USING gist (speaker WITH =, during WITH &&))",
+        "INSERT INTO test_range_excl VALUES \
+         ('[123,124)', '[1,2)', '[2010-01-02 10:00,2010-01-02 11:00)'), \
+         ('[123,124)', '[2,3)', '[2010-01-02 11:00,2010-01-02 12:00)')",
+        "SET datestyle = 'Postgres, MDY'",
+    ])
+    .await;
+
+    assert!(
+        err_code(
+            &mut s,
+            "INSERT INTO test_range_excl VALUES \
+             ('[123,124)', '[3,4)', '[2010-01-02 10:10,2010-01-02 11:00)')",
+        )
+        .await
+            == "23P01"
+    );
+    let error = s
+        .simple_query(
+            "INSERT INTO test_range_excl VALUES \
+             ('[123,124)', '[3,4)', '[2010-01-02 10:10,2010-01-02 11:00)')",
+        )
+        .await
+        .expect_err("expected exclusion violation");
+    assert!(
+        error
+            .diagnostics
+            .and_then(|diagnostics| diagnostics.detail)
+            .is_some_and(|detail| detail.contains("Sat Jan 02 10:10:00 2010"))
+    );
+    assert!(
+        err_code(
+            &mut s,
+            "INSERT INTO test_range_excl VALUES \
+             ('[124,125)', '[1,2)', '[2010-01-02 10:10,2010-01-02 11:00)')",
+        )
+        .await
+            == "23P01"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // ADD COLUMN with a constraint, over a table that already has rows.
 
