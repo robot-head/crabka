@@ -1741,8 +1741,10 @@ fn parse_client_encoding(value: &str, _: Option<&GucValue>) -> Result<GucValue, 
 
 fn parse_bool(value: &str, _: Option<&GucValue>) -> Result<GucValue, ExecError> {
     match value.to_ascii_lowercase().as_str() {
-        "on" | "true" | "yes" | "1" => Ok(GucValue::Bool(true)),
-        "off" | "false" | "no" | "0" => Ok(GucValue::Bool(false)),
+        "on" | "t" | "tr" | "tru" | "true" | "y" | "ye" | "yes" | "1" => Ok(GucValue::Bool(true)),
+        "of" | "off" | "f" | "fa" | "fal" | "fals" | "false" | "n" | "no" | "0" => {
+            Ok(GucValue::Bool(false))
+        }
         _ => Err(ExecError::InvalidParameterValue(value.to_string())),
     }
 }
@@ -8883,9 +8885,13 @@ fn binary_param_type(
         },
         // Containment and overlap are same-type operators (jsonb @> jsonb,
         // int[] && int[]), so a parameter adopts its sibling's type.
-        BinaryOp::Contains | BinaryOp::ContainedBy | BinaryOp::Overlaps | BinaryOp::Phrase => {
-            infer_param_context_type(other, scope)
-        }
+        BinaryOp::Contains
+        | BinaryOp::ContainedBy
+        | BinaryOp::Overlaps
+        | BinaryOp::DoesNotExtendRight
+        | BinaryOp::DoesNotExtendLeft
+        | BinaryOp::Adjacent
+        | BinaryOp::Phrase => infer_param_context_type(other, scope),
         // `?` tests one key; `?|`/`?&` and the `#>`/`#>>` path operators take a
         // text[] on the right. A parameter on the LEFT of one of these is
         // meaningless (the left operand is always jsonb), so the asymmetry the
@@ -15604,6 +15610,8 @@ mod session_conformance_tests {
             ),
             ("SET extra_float_digits = 3", "SHOW extra_float_digits", "3"),
             ("SET geqo_effort = 10", "SHOW geqo_effort", "10"),
+            ("SET enable_seqscan = t", "SHOW enable_seqscan", "on"),
+            ("SET enable_seqscan = f", "SHOW enable_seqscan", "off"),
             // A `real` parameter with a unit renders through the unit table
             // exactly as an integer one does.
             (

@@ -801,6 +801,9 @@ impl Parser {
                 Token::JsonPathExists => (BinaryOp::JsonPathExists, 7, 8),
                 Token::JsonPathMatch => (BinaryOp::JsonPathMatch, 7, 8),
                 Token::Overlaps => (BinaryOp::Overlaps, 7, 8),
+                Token::DoesNotExtendRight => (BinaryOp::DoesNotExtendRight, 7, 8),
+                Token::DoesNotExtendLeft => (BinaryOp::DoesNotExtendLeft, 7, 8),
+                Token::Adjacent => (BinaryOp::Adjacent, 7, 8),
                 Token::Phrase => (BinaryOp::Phrase, 7, 8),
                 // The regex-match and bitwise operators are "any other operator"
                 // in PostgreSQL's precedence table — the same level as `||` and
@@ -10898,6 +10901,9 @@ fn operator_spelling(token: &Token) -> Option<&'static str> {
         Token::Overlaps => "&&",
         Token::Amp => "&",
         Token::Pipe => "|",
+        Token::DoesNotExtendRight => "&<",
+        Token::DoesNotExtendLeft => "&>",
+        Token::Adjacent => "-|-",
         Token::Hash => "#",
         Token::Shl => "<<",
         Token::Shr => ">>",

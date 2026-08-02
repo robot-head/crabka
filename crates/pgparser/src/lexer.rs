@@ -598,6 +598,7 @@ fn punctuation(bytes: &[u8], i: usize) -> Option<(Token, usize)> {
     let next_two_are = |first: u8, second: u8| next_is(first) && bytes.get(i + 2) == Some(&second);
     let comment_at = |at: usize| bytes.get(at) == Some(&b'*');
     Some(match bytes[i] {
+        b'-' if next_two_are(b'|', b'-') => (Token::Adjacent, 3),
         b'-' if next_two_are(b'>', b'>') => (Token::JsonGetText, 3),
         b'-' if next_is(b'>') => (Token::JsonGet, 2),
         b'#' if next_two_are(b'>', b'>') => (Token::JsonGetPathText, 3),
@@ -610,6 +611,8 @@ fn punctuation(bytes: &[u8], i: usize) -> Option<(Token, usize)> {
         b'?' if next_is(b'&') => (Token::KeyExistsAll, 2),
         b'?' => (Token::KeyExists, 1),
         b'&' if next_is(b'&') => (Token::Overlaps, 2),
+        b'&' if next_is(b'<') => (Token::DoesNotExtendRight, 2),
+        b'&' if next_is(b'>') => (Token::DoesNotExtendLeft, 2),
         b'<' if next_two_are(b'-', b'>') => (Token::Phrase, 3),
         b'!' if next_is(b'!') => (Token::TsNot, 2),
         b'!' if next_two_are(b'~', b'*') => (Token::NotTildeCi, 3),
