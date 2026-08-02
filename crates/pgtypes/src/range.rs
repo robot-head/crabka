@@ -389,11 +389,11 @@ pub fn canonicalize(
     let mut lower_inclusive = lower.is_some() && bytes[0] == b'[';
     let mut upper_inclusive = upper.is_some() && bytes[bytes.len() - 1] == b']';
     if is_discrete(subtype) {
-        if lower.is_some() && !lower_inclusive {
+        if lower.as_ref().is_some_and(is_finite) && !lower_inclusive {
             lower = lower.map(increment).transpose()?;
             lower_inclusive = true;
         }
-        if upper.is_some() && upper_inclusive {
+        if upper.as_ref().is_some_and(is_finite) && upper_inclusive {
             upper = upper.map(increment).transpose()?;
             upper_inclusive = false;
         }
@@ -425,6 +425,10 @@ fn is_discrete(subtype: ColumnType) -> bool {
         subtype,
         ColumnType::Int4 | ColumnType::Int8 | ColumnType::Date
     )
+}
+
+fn is_finite(value: &Datum) -> bool {
+    !matches!(value, Datum::Date(date) if crate::datetime::date_is_infinite(*date))
 }
 
 fn increment(value: Datum) -> Result<Datum, TypeError> {
@@ -635,6 +639,19 @@ mod tests {
                 .expect_err("inclusive maximum cannot be canonicalized")
                 .sqlstate(),
             "22003"
+        );
+    }
+
+    #[test]
+    fn discrete_date_ranges_do_not_increment_infinity() {
+        let tz = jiff::tz::TimeZone::UTC;
+        assert_eq!(
+            canonicalize("(-infinity,2000-01-01)", ColumnType::Date, &tz),
+            Ok("(-infinity,2000-01-01)".into())
+        );
+        assert_eq!(
+            canonicalize("[2000-01-01,infinity]", ColumnType::Date, &tz),
+            Ok("[2000-01-01,infinity]".into())
         );
     }
 }

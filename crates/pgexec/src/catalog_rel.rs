@@ -56,7 +56,10 @@ pub(crate) const DATABASE_OID: i32 = 5;
 const DEFAULT_TABLESPACE_OID: i32 = 1663;
 /// Oid of the `btree` access method, as in PostgreSQL.
 pub(crate) const BTREE_AM_OID: i32 = 403;
+pub(crate) const HASH_AM_OID: i32 = 405;
+pub(crate) const GIST_AM_OID: i32 = 783;
 pub(crate) const GIN_AM_OID: i32 = 2742;
+pub(crate) const SPGIST_AM_OID: i32 = 4000;
 /// Oid of the `default` collation, as in PostgreSQL.
 pub(crate) const DEFAULT_COLLATION_OID: i32 = 100;
 
@@ -1105,10 +1108,10 @@ fn pg_stat_activity_columns() -> Vec<Column> {
 fn pg_am_rows() -> Vec<Vec<Datum>> {
     [
         (BTREE_AM_OID, "btree", "i"),
-        (405, "hash", "i"),
-        (783, "gist", "i"),
+        (HASH_AM_OID, "hash", "i"),
+        (GIST_AM_OID, "gist", "i"),
         (GIN_AM_OID, "gin", "i"),
-        (4000, "spgist", "i"),
+        (SPGIST_AM_OID, "spgist", "i"),
         (3580, "brin", "i"),
         (2, "heap", "t"),
     ]

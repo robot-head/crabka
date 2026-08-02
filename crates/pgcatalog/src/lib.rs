@@ -209,7 +209,10 @@ pub enum IndexPlacement {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexMethod {
     Btree,
+    Hash,
+    Gist,
     Gin,
+    Spgist,
 }
 
 /// Constraint backed by an automatically-created index.
