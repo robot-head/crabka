@@ -496,6 +496,8 @@ pub enum CatalogError {
     DependentObjectsStillExist(String),
     #[error("tablespace \"{0}\" is not empty")]
     TablespaceNotEmpty(String),
+    #[error("cannot drop operator family \"{0}\" because other objects depend on it")]
+    OperatorFamilyNotEmpty(String),
     /// A relation already carries a constraint of this name. Constraint names
     /// are per-relation, so `PostgreSQL` reports the relation beside the name.
     /// It reports 42710, not the 42P07 that an index name collision gets.
@@ -573,6 +575,7 @@ impl CatalogError {
             | CatalogError::UndefinedConstraint(_) => "42704",
             CatalogError::DependentObjectsStillExist(_)
             | CatalogError::TablespaceNotEmpty(_)
+            | CatalogError::OperatorFamilyNotEmpty(_)
             | CatalogError::SystemSchemaDrop(_)
             | CatalogError::SchemaNotEmpty(_) => "2BP01",
             CatalogError::InvalidSequence(_) => "22023",
@@ -991,6 +994,156 @@ pub fn list_operator_classes(kv: &dyn Kv) -> Result<Vec<OperatorClass>, CatalogE
     }
     out.sort_by_key(|class| class.oid);
     Ok(out)
+}
+
+/// Resolve one user-defined operator family.
+///
+/// # Errors
+///
+/// Returns undefined-object, catalog storage, or corruption errors.
+pub fn get_operator_family(
+    kv: &dyn Kv,
+    name: &RelationName,
+    method: &str,
+) -> Result<OperatorFamily, CatalogError> {
+    let bytes = kv
+        .get(&operator_object_key(OPERATOR_FAMILY_PREFIX, method, name))?
+        .ok_or_else(|| CatalogError::UndefinedObject(name.name.clone()))?;
+    let (oid, owner, _) = read_operator_object(&bytes)?;
+    Ok(OperatorFamily {
+        oid,
+        name: name.clone(),
+        method: method.to_string(),
+        owner,
+    })
+}
+
+/// Resolve one user-defined operator class.
+///
+/// # Errors
+///
+/// Returns undefined-object, catalog storage, or corruption errors.
+pub fn get_operator_class(
+    kv: &dyn Kv,
+    name: &RelationName,
+    method: &str,
+) -> Result<OperatorClass, CatalogError> {
+    list_operator_classes(kv)?
+        .into_iter()
+        .find(|class| class.method == method && class.name == *name)
+        .ok_or_else(|| CatalogError::UndefinedObject(name.name.clone()))
+}
+
+/// Replace a user-defined operator family, preserving its oid.
+///
+/// # Errors
+///
+/// Returns undefined/duplicate-object, catalog storage, or corruption errors.
+pub fn replace_operator_family_ops(
+    kv: &dyn Kv,
+    old_name: &RelationName,
+    family: &OperatorFamily,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    get_operator_family(kv, old_name, &family.method)?;
+    let old_key = operator_object_key(OPERATOR_FAMILY_PREFIX, &family.method, old_name);
+    let new_key = operator_object_key(OPERATOR_FAMILY_PREFIX, &family.method, &family.name);
+    if old_key != new_key && kv.get(&new_key)?.is_some() {
+        return Err(CatalogError::DuplicateObject(family.name.name.clone()));
+    }
+    let mut ops = if old_key == new_key {
+        Vec::new()
+    } else {
+        vec![WriteOp::Delete { key: old_key }]
+    };
+    ops.push(WriteOp::Put {
+        key: new_key,
+        value: operator_object_bytes(family.oid, &family.owner, &[]),
+    });
+    Ok(ops)
+}
+
+/// Replace a user-defined operator class, preserving its oid and family link.
+///
+/// # Errors
+///
+/// Returns undefined/duplicate-object, catalog storage, or corruption errors.
+pub fn replace_operator_class_ops(
+    kv: &dyn Kv,
+    old_name: &RelationName,
+    class: &OperatorClass,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    get_operator_class(kv, old_name, &class.method)?;
+    let old_key = operator_object_key(OPERATOR_CLASS_PREFIX, &class.method, old_name);
+    let new_key = operator_object_key(OPERATOR_CLASS_PREFIX, &class.method, &class.name);
+    if old_key != new_key && kv.get(&new_key)?.is_some() {
+        return Err(CatalogError::DuplicateObject(class.name.name.clone()));
+    }
+    let mut ops = if old_key == new_key {
+        Vec::new()
+    } else {
+        vec![WriteOp::Delete { key: old_key }]
+    };
+    ops.push(WriteOp::Put {
+        key: new_key,
+        value: operator_object_bytes(
+            class.oid,
+            &class.owner,
+            &[
+                class.family_oid,
+                class.input_type_oid,
+                u32::from(class.default),
+                class.key_type_oid,
+            ],
+        ),
+    });
+    Ok(ops)
+}
+
+/// Drop one user-defined operator class.
+///
+/// # Errors
+///
+/// Returns undefined-object, catalog storage, or corruption errors.
+pub fn drop_operator_class_ops(
+    kv: &dyn Kv,
+    name: &RelationName,
+    method: &str,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    get_operator_class(kv, name, method)?;
+    Ok(vec![WriteOp::Delete {
+        key: operator_object_key(OPERATOR_CLASS_PREFIX, method, name),
+    }])
+}
+
+/// Drop one user-defined operator family and optionally its dependent classes.
+///
+/// # Errors
+///
+/// Returns undefined/dependent-object, catalog storage, or corruption errors.
+pub fn drop_operator_family_ops(
+    kv: &dyn Kv,
+    name: &RelationName,
+    method: &str,
+    cascade: bool,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    let family = get_operator_family(kv, name, method)?;
+    let classes: Vec<_> = list_operator_classes(kv)?
+        .into_iter()
+        .filter(|class| class.family_oid == family.oid)
+        .collect();
+    if !cascade && !classes.is_empty() {
+        return Err(CatalogError::OperatorFamilyNotEmpty(name.name.clone()));
+    }
+    let mut ops = classes
+        .into_iter()
+        .map(|class| WriteOp::Delete {
+            key: operator_object_key(OPERATOR_CLASS_PREFIX, &class.method, &class.name),
+        })
+        .collect::<Vec<_>>();
+    ops.push(WriteOp::Delete {
+        key: operator_object_key(OPERATOR_FAMILY_PREFIX, method, name),
+    });
+    Ok(ops)
 }
 
 fn serialize_tablespace(tablespace: &Tablespace) -> Vec<u8> {

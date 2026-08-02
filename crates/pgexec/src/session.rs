@@ -2120,7 +2120,11 @@ fn statement_has_effects(stmt: &Statement) -> bool {
             UtilityStatement::TextSearch(_)
             | UtilityStatement::CreateTablespace { .. }
             | UtilityStatement::DropTablespace { .. }
-            | UtilityStatement::AlterTablespace { .. },
+            | UtilityStatement::AlterTablespace { .. }
+            | UtilityStatement::CreateOperatorFamily { .. }
+            | UtilityStatement::CreateOperatorClass { .. }
+            | UtilityStatement::AlterOperatorObject { .. }
+            | UtilityStatement::DropOperatorObject { .. },
         ) => true,
         Statement::Query(_)
         | Statement::Begin { .. }
@@ -2162,7 +2166,11 @@ fn establishes_transaction_activity(stmt: &Statement) -> bool {
             UtilityStatement::TextSearch(_)
             | UtilityStatement::CreateTablespace { .. }
             | UtilityStatement::DropTablespace { .. }
-            | UtilityStatement::AlterTablespace { .. },
+            | UtilityStatement::AlterTablespace { .. }
+            | UtilityStatement::CreateOperatorFamily { .. }
+            | UtilityStatement::CreateOperatorClass { .. }
+            | UtilityStatement::AlterOperatorObject { .. }
+            | UtilityStatement::DropOperatorObject { .. },
         ) => true,
         Statement::Query(_)
         | Statement::Insert { .. }
@@ -4961,6 +4969,181 @@ impl SqlSession {
                 self.commit_catalog(ops).await?;
                 Ok(QueryResult::Command {
                     tag: "CREATE OPERATOR CLASS".into(),
+                })
+            }
+            UtilityStatement::AlterOperatorObject {
+                kind,
+                name,
+                method,
+                action,
+            } => {
+                use crabka_pgparser::ast::{OperatorObjectAlterAction, OperatorObjectKind};
+
+                let method = method.to_ascii_lowercase();
+                if crate::catalog_rel::access_method_oid(&method).is_none() {
+                    return Err(operator_access_method_missing(&method));
+                }
+                let _catalog_guard = Arc::clone(&self.catalog_lock).lock_owned().await;
+                let old_name = resolve_operator_object_name(
+                    &*self.catalog_kv,
+                    &self.resolution_scope(),
+                    name,
+                    &method,
+                    *kind,
+                )?;
+                let owner = match kind {
+                    OperatorObjectKind::Class => {
+                        crabka_pgcatalog::get_operator_class(&*self.catalog_kv, &old_name, &method)
+                            .map(|object| object.owner)
+                    }
+                    OperatorObjectKind::Family => {
+                        crabka_pgcatalog::get_operator_family(&*self.catalog_kv, &old_name, &method)
+                            .map(|object| object.owner)
+                    }
+                }
+                .map_err(|_| operator_object_missing(*kind, &name.name, &method))?;
+                if owner != self.current_role && self.current_role != "postgres" {
+                    return Err(operator_object_not_owner(*kind, &name.name));
+                }
+                let target_name = match action {
+                    OperatorObjectAlterAction::RenameTo(new_name) => {
+                        crabka_pgcatalog::RelationName::new(old_name.schema.clone(), new_name)
+                    }
+                    OperatorObjectAlterAction::SetSchema(schema) => {
+                        if !crabka_pgcatalog::schema_exists(&*self.catalog_kv, schema)? {
+                            return Err(crabka_pgcatalog::CatalogError::UndefinedSchema(
+                                schema.clone(),
+                            )
+                            .into());
+                        }
+                        crabka_pgcatalog::RelationName::new(schema, old_name.name.clone())
+                    }
+                    OperatorObjectAlterAction::OwnerTo(_) => old_name.clone(),
+                };
+                let new_owner = match action {
+                    OperatorObjectAlterAction::OwnerTo(owner) => {
+                        let owner = if matches!(owner.as_str(), "current_user" | "user") {
+                            &self.current_role
+                        } else {
+                            owner
+                        };
+                        if !crabka_pgcatalog::role_exists(&*self.catalog_kv, owner)? {
+                            return Err(crabka_pgcatalog::CatalogError::UndefinedObject(
+                                owner.clone(),
+                            )
+                            .into());
+                        }
+                        owner.clone()
+                    }
+                    _ => owner,
+                };
+                let ops = match kind {
+                    OperatorObjectKind::Class => {
+                        let mut object = crabka_pgcatalog::get_operator_class(
+                            &*self.catalog_kv,
+                            &old_name,
+                            &method,
+                        )?;
+                        object.name = target_name.clone();
+                        object.owner = new_owner;
+                        crabka_pgcatalog::replace_operator_class_ops(
+                            &*self.catalog_kv,
+                            &old_name,
+                            &object,
+                        )
+                    }
+                    OperatorObjectKind::Family => {
+                        let mut object = crabka_pgcatalog::get_operator_family(
+                            &*self.catalog_kv,
+                            &old_name,
+                            &method,
+                        )?;
+                        object.name = target_name.clone();
+                        object.owner = new_owner;
+                        crabka_pgcatalog::replace_operator_family_ops(
+                            &*self.catalog_kv,
+                            &old_name,
+                            &object,
+                        )
+                    }
+                }
+                .map_err(|error| match error {
+                    crabka_pgcatalog::CatalogError::DuplicateObject(_) => {
+                        operator_object_duplicate(
+                            *kind,
+                            &target_name.name,
+                            &method,
+                            &target_name.schema,
+                        )
+                    }
+                    other => other.into(),
+                })?;
+                self.commit_catalog(ops).await?;
+                Ok(QueryResult::Command {
+                    tag: match kind {
+                        OperatorObjectKind::Class => "ALTER OPERATOR CLASS",
+                        OperatorObjectKind::Family => "ALTER OPERATOR FAMILY",
+                    }
+                    .into(),
+                })
+            }
+            UtilityStatement::DropOperatorObject {
+                kind,
+                name,
+                method,
+                if_exists,
+                cascade,
+            } => {
+                use crabka_pgparser::ast::OperatorObjectKind;
+
+                let method = method.to_ascii_lowercase();
+                if crate::catalog_rel::access_method_oid(&method).is_none() {
+                    return Err(operator_access_method_missing(&method));
+                }
+                let _catalog_guard = Arc::clone(&self.catalog_lock).lock_owned().await;
+                let resolved = resolve_operator_object_name(
+                    &*self.catalog_kv,
+                    &self.resolution_scope(),
+                    name,
+                    &method,
+                    *kind,
+                )?;
+                let result = match kind {
+                    OperatorObjectKind::Class => crabka_pgcatalog::drop_operator_class_ops(
+                        &*self.catalog_kv,
+                        &resolved,
+                        &method,
+                    ),
+                    OperatorObjectKind::Family => crabka_pgcatalog::drop_operator_family_ops(
+                        &*self.catalog_kv,
+                        &resolved,
+                        &method,
+                        *cascade,
+                    ),
+                };
+                match result {
+                    Ok(ops) => self.commit_catalog(ops).await?,
+                    Err(crabka_pgcatalog::CatalogError::UndefinedObject(_)) if *if_exists => {
+                        let kind = match kind {
+                            OperatorObjectKind::Class => "class",
+                            OperatorObjectKind::Family => "family",
+                        };
+                        self.plpgsql_notice(crabka_pgwire::error::PgError::notice(format!(
+                            "operator {kind} \"{}\" does not exist for access method \"{method}\", skipping",
+                            name.name
+                        )))?;
+                    }
+                    Err(crabka_pgcatalog::CatalogError::UndefinedObject(_)) => {
+                        return Err(operator_object_missing(*kind, &name.name, &method));
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+                Ok(QueryResult::Command {
+                    tag: match kind {
+                        OperatorObjectKind::Class => "DROP OPERATOR CLASS",
+                        OperatorObjectKind::Family => "DROP OPERATOR FAMILY",
+                    }
+                    .into(),
                 })
             }
             UtilityStatement::AlterSystem { name } => {
@@ -10823,6 +11006,99 @@ fn tablespace_duplicate(name: &str) -> ExecError {
     ExecError::Remote(crabka_pgwire::error::PgError::error(
         "42710",
         format!("tablespace \"{name}\" already exists"),
+    ))
+}
+
+fn operator_object_missing(
+    kind: crabka_pgparser::ast::OperatorObjectKind,
+    name: &str,
+    method: &str,
+) -> ExecError {
+    let kind = match kind {
+        crabka_pgparser::ast::OperatorObjectKind::Class => "class",
+        crabka_pgparser::ast::OperatorObjectKind::Family => "family",
+    };
+    ExecError::Remote(crabka_pgwire::error::PgError::error(
+        "42704",
+        format!("operator {kind} \"{name}\" does not exist for access method \"{method}\""),
+    ))
+}
+
+fn operator_object_duplicate(
+    kind: crabka_pgparser::ast::OperatorObjectKind,
+    name: &str,
+    method: &str,
+    schema: &str,
+) -> ExecError {
+    let kind = match kind {
+        crabka_pgparser::ast::OperatorObjectKind::Class => "class",
+        crabka_pgparser::ast::OperatorObjectKind::Family => "family",
+    };
+    ExecError::Remote(crabka_pgwire::error::PgError::error(
+        "42710",
+        format!(
+            "operator {kind} \"{name}\" for access method \"{method}\" already exists in schema \"{schema}\""
+        ),
+    ))
+}
+
+fn operator_object_not_owner(
+    kind: crabka_pgparser::ast::OperatorObjectKind,
+    name: &str,
+) -> ExecError {
+    let kind = match kind {
+        crabka_pgparser::ast::OperatorObjectKind::Class => "class",
+        crabka_pgparser::ast::OperatorObjectKind::Family => "family",
+    };
+    ExecError::Remote(crabka_pgwire::error::PgError::error(
+        "42501",
+        format!("must be owner of operator {kind} {name}"),
+    ))
+}
+
+fn operator_access_method_missing(method: &str) -> ExecError {
+    ExecError::Remote(crabka_pgwire::error::PgError::error(
+        "42704",
+        format!("access method \"{method}\" does not exist"),
+    ))
+}
+
+fn resolve_operator_object_name(
+    kv: &dyn crabka_pgkv::Kv,
+    scope: &crate::relname::ResolutionScope,
+    reference: &crabka_pgparser::ast::RelationRef,
+    method: &str,
+    kind: crabka_pgparser::ast::OperatorObjectKind,
+) -> Result<crabka_pgcatalog::RelationName, ExecError> {
+    if let Some(schema) = &reference.schema {
+        return Ok(crabka_pgcatalog::RelationName::new(
+            schema,
+            reference.name.clone(),
+        ));
+    }
+    let objects = match kind {
+        crabka_pgparser::ast::OperatorObjectKind::Class => {
+            crabka_pgcatalog::list_operator_classes(kv)?
+                .into_iter()
+                .map(|object| (object.name, object.method))
+                .collect::<Vec<_>>()
+        }
+        crabka_pgparser::ast::OperatorObjectKind::Family => {
+            crabka_pgcatalog::list_operator_families(kv)?
+                .into_iter()
+                .map(|object| (object.name, object.method))
+                .collect::<Vec<_>>()
+        }
+    };
+    for schema in scope.visible_schemas(kv)? {
+        if let Some((name, _)) = objects.iter().find(|(name, object_method)| {
+            name.schema == schema && name.name == reference.name && object_method == method
+        }) {
+            return Ok(name.clone());
+        }
+    }
+    Ok(crabka_pgcatalog::RelationName::public(
+        reference.name.clone(),
     ))
 }
 
@@ -16984,6 +17260,23 @@ mod session_conformance_tests {
     async fn operator_classes_and_families_are_catalog_visible() {
         let engine = SqlEngine::new();
         let mut session = engine.connect();
+        let mut notices = session.take_notices().expect("notice receiver");
+        session
+            .simple_query("DROP OPERATOR CLASS IF EXISTS missing_class USING btree")
+            .await
+            .expect("missing class is skipped");
+        assert!(
+            notices.try_recv().expect("skip notice").message
+                == "operator class \"missing_class\" does not exist for access method \"btree\", skipping"
+        );
+        assert!(
+            state(
+                &mut session,
+                "DROP OPERATOR CLASS missing_class USING no_such_am",
+            )
+            .await
+                == "42704"
+        );
         session
             .simple_query("CREATE OPERATOR FAMILY explicit_family USING hash")
             .await
@@ -17028,6 +17321,63 @@ mod session_conformance_tests {
             )
             .await
                 == "1"
+        );
+        session
+            .simple_query("CREATE SCHEMA operator_archive")
+            .await
+            .expect("create destination schema");
+        session
+            .simple_query("CREATE ROLE operator_owner")
+            .await
+            .expect("create owner");
+        for sql in [
+            "ALTER OPERATOR FAMILY explicit_family USING hash RENAME TO renamed_family",
+            "ALTER OPERATOR CLASS explicit_class USING hash RENAME TO renamed_class",
+            "ALTER OPERATOR FAMILY renamed_family USING hash SET SCHEMA operator_archive",
+            "ALTER OPERATOR CLASS renamed_class USING hash SET SCHEMA operator_archive",
+            "ALTER OPERATOR FAMILY operator_archive.renamed_family USING hash OWNER TO operator_owner",
+            "ALTER OPERATOR CLASS operator_archive.renamed_class USING hash OWNER TO operator_owner",
+        ] {
+            session.simple_query(sql).await.expect(sql);
+        }
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT count(*) FROM pg_catalog.pg_opclass c, pg_catalog.pg_opfamily f \
+                 WHERE c.opcfamily = f.oid AND c.opcname = 'renamed_class' \
+                   AND f.opfname = 'renamed_family'",
+            )
+            .await
+                == "1"
+        );
+        assert!(
+            state(
+                &mut session,
+                "DROP OPERATOR FAMILY operator_archive.renamed_family USING hash",
+            )
+            .await
+                == "2BP01"
+        );
+        session
+            .simple_query("DROP OPERATOR CLASS operator_archive.renamed_class USING hash")
+            .await
+            .expect("drop class");
+        session
+            .simple_query("DROP OPERATOR FAMILY operator_archive.renamed_family USING hash")
+            .await
+            .expect("drop family");
+        session
+            .simple_query("DROP OPERATOR FAMILY implicit_class USING btree CASCADE")
+            .await
+            .expect("cascade implicit family");
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT count(*) FROM pg_catalog.pg_opclass \
+                 WHERE opcname IN ('renamed_class', 'implicit_class')",
+            )
+            .await
+                == "0"
         );
     }
 
