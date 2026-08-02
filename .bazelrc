@@ -6,9 +6,11 @@ common --enable_bzlmod
 common --enable_platform_specific_config
 common:windows --host_platform=//platforms:local_windows_msvc
 
-# The hermetic LLVM toolchain intentionally supplies --unwindlib=none while
-# linking host tools; silence clang's compile-only unused-argument warning.
-build:linux --@rules_rust//rust/settings:extra_exec_rustc_flag=-Clink-arg=-Wno-unused-command-line-argument
+# The hermetic LLVM toolchain intentionally supplies --unwindlib=none. Clang
+# reports that toolchain-owned argument through rustc's linker_messages lint;
+# silence it for both host tools and target binaries without changing the link.
+build:linux --@rules_rust//rust/settings:extra_exec_rustc_flag=-Alinker-messages
+build:linux --@rules_rust//rust/settings:extra_rustc_flag=-Alinker-messages
 
 # Keep the action environment hermetic so build-script outputs are reproducible.
 build --incompatible_strict_action_env
