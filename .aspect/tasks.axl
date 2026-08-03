@@ -40,6 +40,7 @@ _AFFECTED_GLOBAL_INPUTS = [
 
 _BAZEL_DIFF_SHA256 = "69ab1fd00f0ba0f15bb36ded659a58040b41957f712461aa46d98b7e58869aa3"
 _BAZEL_DIFF_URL = "https://github.com/Tinder/bazel-diff/releases/download/v27.0.0/bazel-diff_deploy.jar"
+_DISK_CACHE_MARKER = ".crabka-snapshot-v1"
 
 _PR_MANUAL_TESTS = [
     "//crates/broker:jvm_acceptance",
@@ -417,6 +418,110 @@ affected = task(
         "shards": args.int(default = 1, description = "Number of test shards."),
         "starting_hashes": args.string(default = "", description = "Starting bazel-diff hashes."),
         "workspace": args.string(default = ".", description = "Workspace to hash."),
+    },
+)
+
+def _prune_disk_cache(ctx, cache_dir, max_size):
+    entries = []
+    total_size = 0
+    for kind in ["ac", "cas"]:
+        directory = cache_dir + "/" + kind
+        if _run(ctx, "test", ["-d", directory]) != 0:
+            continue
+        (code, output) = _output(ctx, "find", [
+            directory,
+            "-type", "f",
+            "-printf", "%T@|%s|%p\n",
+        ])
+        if code != 0:
+            return code
+        for line in output.split("\n"):
+            if not line:
+                continue
+            fields = line.split("|")
+            if len(fields) != 3:
+                print("Unexpected disk-cache entry from find: %s" % line)
+                return 1
+            size = int(fields[1])
+            entries.append((fields[0], fields[2], size))
+            total_size += size
+
+    if total_size <= max_size:
+        return 0
+
+    remaining_size = total_size
+    delete_paths = []
+    for (_, path, size) in sorted(entries):
+        if remaining_size <= max_size:
+            break
+        delete_paths.append(path)
+        remaining_size -= size
+    for offset in range(0, len(delete_paths), 1000):
+        code = _run(ctx, "rm", ["-f", "--"] + delete_paths[offset:offset + 1000])
+        if code != 0:
+            return code
+    print("Pruned Bazel disk cache from %d to %d bytes." % (total_size, remaining_size))
+    return 0
+
+def _affected_cache(ctx: TaskContext) -> int:
+    if ctx.args.mode not in ["pack", "restore"]:
+        print("mode must be pack or restore")
+        return 2
+    if not ctx.args.archive or not ctx.args.cache_dir:
+        print("--archive and --cache-dir are required")
+        return 2
+
+    marker = ctx.args.cache_dir + "/" + _DISK_CACHE_MARKER
+    if ctx.args.mode == "pack":
+        if not ctx.args.snapshot:
+            print("--snapshot is required in pack mode")
+            return 2
+        if _run(ctx, "test", ["-d", ctx.args.cache_dir]) != 0:
+            print("Bazel disk cache not found at %s" % ctx.args.cache_dir)
+            return 1
+        code = _prune_disk_cache(ctx, ctx.args.cache_dir, ctx.args.max_size_mib * 1048576)
+        if code != 0:
+            return code
+        had_marker = _run(ctx, "test", ["-f", marker]) == 0
+        previous_marker = ctx.std.fs.read_to_string(marker) if had_marker else ""
+        ctx.std.fs.write(marker, ctx.args.snapshot + "\n")
+        code = _run(ctx, "tar", [
+            "--create",
+            "--file", ctx.args.archive,
+            "--use-compress-program=zstd -1 -T0",
+            "--directory", ctx.args.cache_dir,
+            ".",
+        ])
+        if code != 0:
+            if had_marker:
+                ctx.std.fs.write(marker, previous_marker)
+            else:
+                _run(ctx, "rm", ["-f", "--", marker])
+        return code
+
+    ctx.std.fs.create_dir_all(ctx.args.cache_dir)
+    code = _run(ctx, "tar", [
+        "--extract",
+        "--file", ctx.args.archive,
+        "--use-compress-program=zstd -1 -T0",
+        "--no-same-owner",
+        "--directory", ctx.args.cache_dir,
+    ])
+    if code == 0 and _run(ctx, "test", ["-f", marker]) != 0:
+        print("Restored Bazel disk cache has no completion marker")
+        code = 1
+    cleanup = _run(ctx, "rm", ["-f", "--", ctx.args.archive])
+    return code if code != 0 else cleanup
+
+affected_cache = task(
+    implementation = _affected_cache,
+    summary = "Pack or restore a completed affected Bazel disk cache.",
+    args = {
+        "archive": args.string(default = "", description = "Compressed cache archive."),
+        "cache_dir": args.string(default = "", description = "Bazel disk-cache directory."),
+        "max_size_mib": args.int(default = 10240, description = "Maximum unpacked cache size in MiB."),
+        "mode": args.string(default = "", description = "Pack or restore the disk cache."),
+        "snapshot": args.string(default = "", description = "Completed run and attempt identifier."),
     },
 )
 

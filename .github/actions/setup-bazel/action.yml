@@ -20,6 +20,14 @@ inputs:
     description: Generated external-repository cache namespace; defaults to disk-cache.
     required: false
     default: ""
+  disk-cache-artifact-restore:
+    description: Restore mode for the scoped artifact; require-current, if-empty, or false.
+    required: false
+    default: require-current
+outputs:
+  disk-cache-populated:
+    description: Whether the disk cache contains any reusable entries.
+    value: ${{ steps.disk-cache-final.outputs.populated }}
 runs:
   using: composite
   steps:
@@ -65,3 +73,59 @@ runs:
         bazelisk-cache: false
         disk-cache: false
         repository-cache: false
+    - name: Inspect the primary disk-cache snapshot
+      id: disk-cache-state
+      if: ${{ inputs.disk-cache != 'false' }}
+      shell: bash
+      run: |
+        marker="$HOME/.cache/bazel-disk/.crabka-snapshot-v1"
+        exact_hit=false
+        if [[ -f "$marker" ]]; then
+          IFS= read -r snapshot < "$marker"
+          if [[ "$snapshot" == "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" ]]; then
+            exact_hit=true
+          fi
+        fi
+        populated=false
+        if [[ -n "$(find "$HOME/.cache/bazel-disk" -type f -print -quit 2>/dev/null)" ]]; then
+          populated=true
+        fi
+        {
+          echo "exact-hit=$exact_hit"
+          echo "populated=$populated"
+        } >> "$GITHUB_OUTPUT"
+    - name: Find the completed cache for this affected scope
+      id: disk-cache-artifact
+      if: >-
+        ${{ inputs.disk-cache == 'affected' &&
+            env.AFFECTED_ARTIFACT_SCOPE != '' &&
+            ((inputs.disk-cache-artifact-restore == 'require-current' &&
+              steps.disk-cache-state.outputs.exact-hit != 'true') ||
+             (inputs.disk-cache-artifact-restore == 'if-empty' &&
+              steps.disk-cache-state.outputs.populated != 'true')) }}
+      continue-on-error: true
+      uses: ./.github/actions/restore-run-artifact
+      with:
+        artifact-name: affected-bazel-disk-v1-${{ env.AFFECTED_ARTIFACT_SCOPE }}.tar.zst
+        download-path: ${{ runner.temp }}
+        expected-file: affected-bazel-disk-v1-${{ env.AFFECTED_ARTIFACT_SCOPE }}.tar.zst
+        producer-branch: ${{ env.AFFECTED_ARTIFACT_BRANCH }}
+        producer-repository-id: ${{ env.AFFECTED_ARTIFACT_REPOSITORY_ID }}
+        skip-decompress: true
+    - name: Restore the completed cache for this affected scope
+      if: ${{ steps.disk-cache-artifact.outputs.restored == 'true' }}
+      shell: bash
+      run: >-
+        aspect affected-cache --mode restore
+        --archive "$RUNNER_TEMP/affected-bazel-disk-v1-${AFFECTED_ARTIFACT_SCOPE}.tar.zst"
+        --cache-dir "$HOME/.cache/bazel-disk"
+    - name: Inspect the final disk cache
+      id: disk-cache-final
+      if: ${{ inputs.disk-cache != 'false' }}
+      shell: bash
+      run: |
+        populated=false
+        if [[ -n "$(find "$HOME/.cache/bazel-disk" -type f -print -quit 2>/dev/null)" ]]; then
+          populated=true
+        fi
+        echo "populated=$populated" >> "$GITHUB_OUTPUT"

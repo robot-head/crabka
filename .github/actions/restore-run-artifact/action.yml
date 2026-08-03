@@ -1,0 +1,105 @@
+name: Restore a durable run artifact
+description: Restore the newest unexpired artifact produced by the same branch and repository.
+inputs:
+  artifact-name:
+    description: Exact artifact name.
+    required: true
+  download-path:
+    description: Directory where the artifact is downloaded.
+    required: true
+  expected-file:
+    description: File expected below download-path after restoration.
+    required: false
+    default: ""
+  producer-branch:
+    description: Head branch allowed to have produced the artifact.
+    required: true
+  producer-repository-id:
+    description: Head repository ID allowed to have produced the artifact.
+    required: true
+  skip-decompress:
+    description: Preserve a directly uploaded file instead of extracting it.
+    required: false
+    default: "false"
+outputs:
+  restored:
+    description: Whether an artifact was found and restored.
+    value: ${{ steps.result.outputs.restored }}
+runs:
+  using: composite
+  steps:
+    - name: Find the newest trusted producer
+      id: find
+      shell: bash
+      env:
+        ARTIFACT_NAME: ${{ inputs.artifact-name }}
+        GH_TOKEN: ${{ github.token }}
+        PRODUCER_BRANCH: ${{ inputs.producer-branch }}
+        PRODUCER_REPOSITORY_ID: ${{ inputs.producer-repository-id }}
+      run: |
+        set -euo pipefail
+        echo 'found=false' >> "$GITHUB_OUTPUT"
+        if [[ -z "$GH_TOKEN" ]] || ! command -v gh >/dev/null; then
+          echo '::notice::Durable artifact lookup is unavailable; continuing with the primary cache.'
+          exit 0
+        fi
+
+        if ! artifacts="$(gh api --method GET \
+          "repos/$GITHUB_REPOSITORY/actions/artifacts" \
+          -f "name=$ARTIFACT_NAME" \
+          -f per_page=100)"; then
+          echo '::notice::Durable artifact lookup failed; continuing with the primary cache.'
+          exit 0
+        fi
+
+        artifact="$(jq -r \
+          --arg branch "$PRODUCER_BRANCH" \
+          --arg repository_id "$PRODUCER_REPOSITORY_ID" '
+            [
+              .artifacts[]
+              | select(.expired == false)
+              | select((.workflow_run.head_branch // "") == $branch)
+              | select((.workflow_run.head_repository_id | tostring) == $repository_id)
+            ]
+            | sort_by(.created_at)
+            | (last // empty)
+            | [.id, .workflow_run.id]
+            | @tsv
+          ' <<< "$artifacts")"
+        if [[ -z "$artifact" ]]; then
+          echo "No durable artifact named $ARTIFACT_NAME is available."
+          exit 0
+        fi
+
+        IFS=$'\t' read -r artifact_id run_id <<< "$artifact"
+        echo "artifact-id=$artifact_id" >> "$GITHUB_OUTPUT"
+        echo "run-id=$run_id" >> "$GITHUB_OUTPUT"
+        echo 'found=true' >> "$GITHUB_OUTPUT"
+
+    - name: Download the immutable artifact
+      if: ${{ steps.find.outputs.found == 'true' }}
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      with:
+        artifact-ids: ${{ steps.find.outputs.artifact-id }}
+        path: ${{ inputs.download-path }}
+        github-token: ${{ github.token }}
+        repository: ${{ github.repository }}
+        run-id: ${{ steps.find.outputs.run-id }}
+        skip-decompress: ${{ inputs.skip-decompress }}
+
+    - name: Report the restoration result
+      id: result
+      shell: bash
+      env:
+        DOWNLOAD_PATH: ${{ inputs.download-path }}
+        EXPECTED_FILE: ${{ inputs.expected-file }}
+        FOUND: ${{ steps.find.outputs.found }}
+      run: |
+        restored=false
+        if [[ "$FOUND" == true ]]; then
+          if [[ -n "$EXPECTED_FILE" ]]; then
+            test -f "$DOWNLOAD_PATH/$EXPECTED_FILE"
+          fi
+          restored=true
+        fi
+        echo "restored=$restored" >> "$GITHUB_OUTPUT"

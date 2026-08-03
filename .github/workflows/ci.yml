@@ -5,6 +5,7 @@ on:
     branches: [main]
 
 permissions:
+  actions: read
   contents: read
   id-token: write
 
@@ -22,6 +23,12 @@ concurrency:
 env:
   # Bump when bazel-diff, its flags, or the global seed algorithm changes.
   AFFECTED_HASH_SCHEMA: v1-bazel-diff-27.0.0-seed1
+  # Durable artifacts are isolated by PR and producer repository. Only a
+  # protected-main artifact is eligible as a cross-run fallback.
+  AFFECTED_ARTIFACT_SCOPE: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'main' }}
+  AFFECTED_ARTIFACT_BRANCH: ${{ github.head_ref || github.ref_name }}
+  AFFECTED_ARTIFACT_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id || github.repository_id }}
+  AFFECTED_TRUSTED_BRANCH: ${{ github.event.repository.default_branch }}
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
   # actions/checkout initializes an empty repository before fetching.
@@ -376,6 +383,7 @@ jobs:
       test_shards: ${{ steps.suites.outputs.test_shards }}
       traces: ${{ steps.suites.outputs.traces }}
     permissions:
+      actions: read
       checks: write
       contents: read
       id-token: write
@@ -388,8 +396,33 @@ jobs:
         with:
           path: .aspect/affected-hashes-${{ github.event.pull_request.base.sha || github.event.before }}.json
           key: affected-hashes-${{ env.AFFECTED_HASH_SCHEMA }}-${{ github.event.pull_request.base.sha || github.event.before }}
-      - uses: actions/checkout@v7
+      - id: base-hash-current-artifact
         if: ${{ steps.base-hash-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        uses: ./.github/actions/restore-run-artifact
+        with:
+          artifact-name: affected-hashes-${{ env.AFFECTED_HASH_SCHEMA }}-${{ env.AFFECTED_ARTIFACT_SCOPE }}-${{ github.event.pull_request.base.sha || github.event.before }}.json
+          download-path: .aspect
+          expected-file: affected-hashes-${{ github.event.pull_request.base.sha || github.event.before }}.json
+          producer-branch: ${{ env.AFFECTED_ARTIFACT_BRANCH }}
+          producer-repository-id: ${{ env.AFFECTED_ARTIFACT_REPOSITORY_ID }}
+      - id: base-hash-trusted-artifact
+        if: >-
+          ${{ steps.base-hash-cache.outputs.cache-hit != 'true' &&
+              steps.base-hash-current-artifact.outputs.restored != 'true' }}
+        continue-on-error: true
+        uses: ./.github/actions/restore-run-artifact
+        with:
+          artifact-name: affected-hashes-${{ env.AFFECTED_HASH_SCHEMA }}-main-${{ github.event.pull_request.base.sha || github.event.before }}.json
+          download-path: .aspect
+          expected-file: affected-hashes-${{ github.event.pull_request.base.sha || github.event.before }}.json
+          producer-branch: ${{ env.AFFECTED_TRUSTED_BRANCH }}
+          producer-repository-id: ${{ github.repository_id }}
+      - uses: actions/checkout@v7
+        if: >-
+          ${{ steps.base-hash-cache.outputs.cache-hit != 'true' &&
+              steps.base-hash-current-artifact.outputs.restored != 'true' &&
+              steps.base-hash-trusted-artifact.outputs.restored != 'true' }}
         with:
           ref: ${{ github.event.pull_request.base.sha || github.event.before }}
           path: .aspect/base-workspace
@@ -398,6 +431,16 @@ jobs:
         with:
           path: .aspect/affected-hashes-${{ github.sha }}.json
           key: affected-hashes-${{ env.AFFECTED_HASH_SCHEMA }}-${{ github.sha }}
+      - id: head-hash-current-artifact
+        if: ${{ steps.head-hash-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        uses: ./.github/actions/restore-run-artifact
+        with:
+          artifact-name: affected-hashes-${{ env.AFFECTED_HASH_SCHEMA }}-${{ env.AFFECTED_ARTIFACT_SCOPE }}-${{ github.sha }}.json
+          download-path: .aspect
+          expected-file: affected-hashes-${{ github.sha }}.json
+          producer-branch: ${{ env.AFFECTED_ARTIFACT_BRANCH }}
+          producer-repository-id: ${{ env.AFFECTED_ARTIFACT_REPOSITORY_ID }}
       - uses: actions/cache@v5
         with:
           path: .aspect/cache/bazel-diff-v27.0.0.jar
@@ -413,7 +456,10 @@ jobs:
           disk-cache: false
           external-cache: planner
       - name: Hash base build graph
-        if: ${{ steps.base-hash-cache.outputs.cache-hit != 'true' }}
+        if: >-
+          ${{ steps.base-hash-cache.outputs.cache-hit != 'true' &&
+              steps.base-hash-current-artifact.outputs.restored != 'true' &&
+              steps.base-hash-trusted-artifact.outputs.restored != 'true' }}
         run: >-
           aspect affected --mode hash
           --workspace "${{ github.workspace }}/.aspect/base-workspace"
@@ -423,8 +469,22 @@ jobs:
         with:
           path: .aspect/affected-hashes-${{ github.event.pull_request.base.sha || github.event.before }}.json
           key: affected-hashes-${{ env.AFFECTED_HASH_SCHEMA }}-${{ github.event.pull_request.base.sha || github.event.before }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: >-
+          ${{ steps.base-hash-cache.outputs.cache-hit != 'true' &&
+              steps.base-hash-current-artifact.outputs.restored != 'true' &&
+              steps.base-hash-trusted-artifact.outputs.restored != 'true' }}
+        continue-on-error: true
+        with:
+          name: affected-hashes-${{ env.AFFECTED_HASH_SCHEMA }}-${{ env.AFFECTED_ARTIFACT_SCOPE }}-${{ github.event.pull_request.base.sha || github.event.before }}.json
+          path: .aspect/affected-hashes-${{ github.event.pull_request.base.sha || github.event.before }}.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: ${{ github.event_name == 'push' && 30 || 1 }}
       - name: Hash head build graph
-        if: ${{ steps.head-hash-cache.outputs.cache-hit != 'true' }}
+        if: >-
+          ${{ steps.head-hash-cache.outputs.cache-hit != 'true' &&
+              steps.head-hash-current-artifact.outputs.restored != 'true' }}
         run: >-
           aspect affected --mode hash
           --workspace "${{ github.workspace }}"
@@ -434,6 +494,17 @@ jobs:
         with:
           path: .aspect/affected-hashes-${{ github.sha }}.json
           key: affected-hashes-${{ env.AFFECTED_HASH_SCHEMA }}-${{ github.sha }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: >-
+          ${{ steps.head-hash-cache.outputs.cache-hit != 'true' &&
+              steps.head-hash-current-artifact.outputs.restored != 'true' }}
+        continue-on-error: true
+        with:
+          name: affected-hashes-${{ env.AFFECTED_HASH_SCHEMA }}-${{ env.AFFECTED_ARTIFACT_SCOPE }}-${{ github.sha }}.json
+          path: .aspect/affected-hashes-${{ github.sha }}.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: ${{ github.event_name == 'push' && 30 || 1 }}
       - name: Plan affected targets
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -466,7 +537,7 @@ jobs:
             3) echo 'test_shards=[0,1,2]' >> "$GITHUB_OUTPUT" ;;
             4) echo 'test_shards=[0,1,2,3]' >> "$GITHUB_OUTPUT" ;;
           esac
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: affected-plan
           path: .aspect/affected-plan
@@ -486,15 +557,63 @@ jobs:
           name: affected-plan
           path: .aspect/affected-plan
       - uses: ./.github/actions/free-disk-space
-      - uses: ./.github/actions/setup-bazel
+        if: ${{ needs.affected-plan.outputs.affected_work == 'true' }}
+      - id: bazel
+        if: ${{ needs.affected-plan.outputs.affected_work == 'true' }}
+        uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
           # The warmer is the sole writer for this run's immutable `affected`
           # disk-cache snapshot. Its consumers only restore that snapshot.
           cache-save: true
           disk-cache: affected
+          disk-cache-artifact-restore: if-empty
+      - id: trusted-disk-cache
+        if: >-
+          ${{ needs.affected-plan.outputs.affected_work == 'true' &&
+              steps.bazel.outputs.disk-cache-populated != 'true' }}
+        continue-on-error: true
+        uses: ./.github/actions/restore-run-artifact
+        with:
+          artifact-name: affected-bazel-disk-v1-main.tar.zst
+          download-path: ${{ runner.temp }}
+          expected-file: affected-bazel-disk-v1-main.tar.zst
+          producer-branch: ${{ env.AFFECTED_TRUSTED_BRANCH }}
+          producer-repository-id: ${{ github.repository_id }}
+          skip-decompress: true
+      - name: Restore the trusted main disk-cache fallback
+        if: >-
+          ${{ needs.affected-plan.outputs.affected_work == 'true' &&
+              steps.trusted-disk-cache.outputs.restored == 'true' }}
+        run: >-
+          aspect affected-cache --mode restore
+          --archive "$RUNNER_TEMP/affected-bazel-disk-v1-main.tar.zst"
+          --cache-dir "$HOME/.cache/bazel-disk"
       - name: Build affected dependencies
+        if: ${{ needs.affected-plan.outputs.affected_work == 'true' }}
         run: aspect affected --mode warm
+      - name: Pack the completed affected cache
+        id: pack-disk-cache
+        if: ${{ needs.affected-plan.outputs.affected_work == 'true' }}
+        continue-on-error: true
+        env:
+          CACHE_ARTIFACT: affected-bazel-disk-v1-${{ env.AFFECTED_ARTIFACT_SCOPE }}.tar.zst
+        run: >-
+          aspect affected-cache --mode pack
+          --archive "$RUNNER_TEMP/$CACHE_ARTIFACT"
+          --cache-dir "$HOME/.cache/bazel-disk"
+          --snapshot "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: >-
+          ${{ needs.affected-plan.outputs.affected_work == 'true' &&
+              steps.pack-disk-cache.outcome == 'success' }}
+        continue-on-error: true
+        with:
+          path: ${{ runner.temp }}/affected-bazel-disk-v1-${{ env.AFFECTED_ARTIFACT_SCOPE }}.tar.zst
+          archive: false
+          if-no-files-found: error
+          overwrite: true
+          retention-days: ${{ github.event_name == 'push' && 7 || 1 }}
 
   affected-test:
     needs: [affected-plan, affected-build]
@@ -502,6 +621,7 @@ jobs:
     timeout-minutes: 30
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       checks: write
       contents: read
       id-token: write
