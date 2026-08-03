@@ -1,4 +1,8 @@
 // Generated from PostgreSQL REL_18_4 catalog data.
+#[allow(
+    clippy::type_complexity,
+    reason = "generated PostgreSQL catalog rows preserve the source tuple shape"
+)]
 pub(crate) const BUILTIN_OPERATORS: &[(
     i32,
     &str,

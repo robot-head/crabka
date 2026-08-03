@@ -1047,6 +1047,26 @@ pub(crate) fn apply_binary_of(
     ctx: &EvalCtx,
 ) -> Result<Datum, ExecError> {
     reject_jsonpath_comparison(op, left, right, scope)?;
+    // These overloaded strict operators must still be resolved before value-
+    // time NULL handling. Keep the runtime fast paths from accepting an invalid
+    // typed pair such as `int4range @> NULL::text` in a predicate that did not
+    // go through projection type inference.
+    if matches!(
+        op,
+        BinaryOp::Contains
+            | BinaryOp::ContainedBy
+            | BinaryOp::Overlaps
+            | BinaryOp::DoesNotExtendRight
+            | BinaryOp::DoesNotExtendLeft
+            | BinaryOp::Adjacent
+            | BinaryOp::Shl
+            | BinaryOp::Shr
+            | BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+    ) {
+        infer_binary_type(op, left, right, scope)?;
+    }
     let (lc, rc) = coerce_untyped_literal_operands(op, left, right, l, r, ctx)?;
     let (l, r) = (lc.as_ref().unwrap_or(l), rc.as_ref().unwrap_or(r));
     if op == BinaryOp::Concat {
@@ -1072,7 +1092,7 @@ fn coerce_untyped_literal_operands(
     // Only a jsonb counterpart resolves a bare literal; an array must not, so
     // that `ARRAY['a'] || 'b'` still appends an element (PostgreSQL's
     // `anyarray || anyelement`).
-    let target = |other: &Datum, unknown_is_left: bool| -> Option<ColumnType> {
+    let target = |other: &Datum| -> Option<ColumnType> {
         // A comparison against a date/time value resolves the literal to that
         // type, which is how `f1 < '05:06:07'` works on a `time` column.
         if matches!(
@@ -1097,7 +1117,12 @@ fn coerce_untyped_literal_operands(
         // An array counterpart resolves the literal to that array type for the
         // array-only operators and the comparisons — but NOT for `||`, where
         // `ARRAY['a'] || 'b'` must stay `anyarray || anyelement`.
-        if let Datum::Array(a) = other {
+        let array_type = match other {
+            Datum::Array(array) => Some(array.column_type()),
+            Datum::OidVector(_) => Some(ColumnType::OidVector),
+            _ => None,
+        };
+        if let Some(array_type) = array_type {
             return match op {
                 BinaryOp::Contains
                 | BinaryOp::ContainedBy
@@ -1107,13 +1132,16 @@ fn coerce_untyped_literal_operands(
                 | BinaryOp::Lt
                 | BinaryOp::Le
                 | BinaryOp::Gt
-                | BinaryOp::Ge => Some(a.column_type()),
+                | BinaryOp::Ge => Some(array_type),
                 _ => None,
             };
         }
         if let Datum::Range(range) = other {
             return match op {
-                BinaryOp::Add
+                BinaryOp::Contains
+                | BinaryOp::ContainedBy
+                | BinaryOp::Overlaps
+                | BinaryOp::Add
                 | BinaryOp::Sub
                 | BinaryOp::Mul
                 | BinaryOp::Shl
@@ -1131,16 +1159,13 @@ fn coerce_untyped_literal_operands(
             };
         }
         if let Datum::Multirange(multirange) = other {
-            if matches!(
-                (op, unknown_is_left),
-                (BinaryOp::Contains, false) | (BinaryOp::ContainedBy, true)
-            ) {
-                return Some(*multirange.ty.range.subtype);
-            }
             return match op {
                 BinaryOp::Contains
                 | BinaryOp::ContainedBy
                 | BinaryOp::Overlaps
+                | BinaryOp::Add
+                | BinaryOp::Sub
+                | BinaryOp::Mul
                 | BinaryOp::Shl
                 | BinaryOp::Shr
                 | BinaryOp::DoesNotExtendRight
@@ -1185,20 +1210,16 @@ fn coerce_untyped_literal_operands(
             _ => None,
         }
     };
-    let convert = |e: &Expr,
-                   v: &Datum,
-                   other: &Datum,
-                   unknown_is_left: bool|
-     -> Result<Option<Datum>, ExecError> {
+    let convert = |e: &Expr, v: &Datum, other: &Datum| -> Result<Option<Datum>, ExecError> {
         if !matches!(e, Expr::StringLiteral(_)) || !matches!(v, Datum::Text(_)) {
             return Ok(None);
         }
-        match target(other, unknown_is_left) {
+        match target(other) {
             Some(ty) => Ok(Some(cast_value(v, ty, &ctx.time_zone)?)),
             None => Ok(None),
         }
     };
-    Ok((convert(left, l, r, true)?, convert(right, r, l, false)?))
+    Ok((convert(left, l, r)?, convert(right, r, l)?))
 }
 
 /// Apply a binary operator to two already-evaluated operands. Shared by scalar
@@ -1317,6 +1338,7 @@ pub(crate) fn apply_binary(
                 Box::new(right.clone()),
             )))
         }
+        BinaryOp::Overlaps if l.is_null() || r.is_null() => Ok(Datum::Null),
         BinaryOp::Overlaps => match (l, r) {
             (Datum::Range(range), Datum::Multirange(multirange))
             | (Datum::Multirange(multirange), Datum::Range(range)) => Ok(Datum::Bool(
@@ -1386,10 +1408,13 @@ pub(crate) fn apply_binary(
     }
 }
 
-/// `@>` / `<@`: the operand values pick the jsonb or the array family (the
-/// static types already agreed at plan time). Both families are strict, so two
-/// SQL NULLs need no family at all.
+/// `@>` / `<@`: the operand values pick the jsonb, array, range, or text-search
+/// family (the static types already agreed at plan time). Every family is
+/// strict, so a SQL NULL operand produces SQL NULL before runtime dispatch.
 fn apply_containment(op: BinaryOp, l: &Datum, r: &Datum) -> Result<Datum, ExecError> {
+    if l.is_null() || r.is_null() {
+        return Ok(Datum::Null);
+    }
     let contains = op == BinaryOp::Contains;
     if let (Datum::Range(left), Datum::Range(right)) = (l, r) {
         return Ok(Datum::Bool(if contains {
@@ -1474,14 +1499,11 @@ fn apply_containment(op: BinaryOp, l: &Datum, r: &Datum) -> Result<Datum, ExecEr
 }
 
 fn apply_range_directional(op: BinaryOp, l: &Datum, r: &Datum) -> Result<bool, ExecError> {
-    let (left_last, right_last, relation): (
-        bool,
-        bool,
-        fn(
-            &crabka_pgtypes::RangeValue,
-            &crabka_pgtypes::RangeValue,
-        ) -> Result<bool, crabka_pgtypes::TypeError>,
-    ) = match op {
+    type RangeRelation = fn(
+        &crabka_pgtypes::RangeValue,
+        &crabka_pgtypes::RangeValue,
+    ) -> Result<bool, crabka_pgtypes::TypeError>;
+    let (left_last, right_last, relation): (bool, bool, RangeRelation) = match op {
         BinaryOp::DoesNotExtendRight => (
             true,
             true,
@@ -1644,6 +1666,16 @@ fn adopt_json_operand_types(
         op,
         BinaryOp::Contains | BinaryOp::ContainedBy | BinaryOp::Overlaps
     ) {
+        // A bare NULL is PostgreSQL's `unknown`, so the other operand selects
+        // the containment family before strict evaluation returns NULL. Typed
+        // NULLs deliberately do not adopt: their declared type participates in
+        // operator lookup and can make the pair invalid.
+        if matches!(left, Expr::NullLiteral) {
+            return (rt, rt);
+        }
+        if matches!(right, Expr::NullLiteral) {
+            return (lt, lt);
+        }
         if matches!(right, Expr::StringLiteral(_)) && lt.array_element().is_some() {
             return (lt, lt);
         }
@@ -1656,23 +1688,15 @@ fn adopt_json_operand_types(
         if matches!(left, Expr::StringLiteral(_)) && matches!(rt, ColumnType::Range(_)) {
             return (rt, rt);
         }
-        if let ColumnType::Multirange(multirange) = lt
+        if let ColumnType::Multirange(_) = lt
             && matches!(right, Expr::StringLiteral(_))
         {
-            return if op == BinaryOp::Contains {
-                (lt, *multirange.range.subtype)
-            } else {
-                (lt, lt)
-            };
+            return (lt, lt);
         }
-        if let ColumnType::Multirange(multirange) = rt
+        if let ColumnType::Multirange(_) = rt
             && matches!(left, Expr::StringLiteral(_))
         {
-            return if op == BinaryOp::ContainedBy {
-                (*multirange.range.subtype, rt)
-            } else {
-                (rt, rt)
-            };
+            return (rt, rt);
         }
     }
     if !matches!(right, Expr::StringLiteral(_)) || lt != ColumnType::Jsonb {
@@ -2053,6 +2077,13 @@ fn undefined_operator(op: &str, lt: ColumnType, rt: ColumnType) -> ExecError {
         lt.name(),
         rt.name()
     ))
+}
+
+fn ambiguous_operator(op: &str) -> ExecError {
+    ExecError::FunctionError {
+        sqlstate: "42725",
+        message: format!("operator is not unique: unknown {op} unknown"),
+    }
 }
 
 fn jsonpath_has_no_operator_class(ty: ColumnType) -> bool {
@@ -2560,6 +2591,9 @@ fn infer_binary_type(
     reject_jsonpath_comparison(op, left, right, scope)?;
     match op {
         BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div => {
+            if is_unknown_literal(left) && is_unknown_literal(right) {
+                return Err(ambiguous_operator(op_spelling(op)));
+            }
             let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
             if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul) {
                 match (lt, rt) {
@@ -2569,6 +2603,8 @@ fn infer_binary_type(
                     }
                     (ColumnType::Range(_), _) if is_unknown_literal(right) => return Ok(lt),
                     (_, ColumnType::Range(_)) if is_unknown_literal(left) => return Ok(rt),
+                    (ColumnType::Multirange(_), _) if is_unknown_literal(right) => return Ok(lt),
+                    (_, ColumnType::Multirange(_)) if is_unknown_literal(left) => return Ok(rt),
                     _ => {}
                 }
             }
@@ -2632,6 +2668,9 @@ fn infer_binary_type(
                 .ok_or_else(|| undefined_operator("@@", lt, rt))
         }
         BinaryOp::Overlaps => {
+            if is_unknown_literal(left) && is_unknown_literal(right) {
+                return Err(ambiguous_operator(op_spelling(op)));
+            }
             let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
             let (alt, art) = adopt_json_operand_types(op, left, right, lt, rt);
             if alt == ColumnType::TsQuery && art == ColumnType::TsQuery {
@@ -2652,6 +2691,12 @@ fn infer_binary_type(
         | BinaryOp::KeyExistsAny
         | BinaryOp::KeyExistsAll
         | BinaryOp::JsonPathExists => {
+            if matches!(op, BinaryOp::Contains | BinaryOp::ContainedBy)
+                && is_unknown_literal(left)
+                && is_unknown_literal(right)
+            {
+                return Err(ambiguous_operator(op_spelling(op)));
+            }
             let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
             let (alt, art) = adopt_json_operand_types(op, left, right, lt, rt);
             if matches!(op, BinaryOp::Contains | BinaryOp::ContainedBy)
@@ -2667,6 +2712,9 @@ fn infer_binary_type(
         // operand; a shift keeps the LEFT operand's width (its count is an
         // ordinary integer, not part of the result type).
         BinaryOp::DoesNotExtendRight | BinaryOp::DoesNotExtendLeft | BinaryOp::Adjacent => {
+            if is_unknown_literal(left) && is_unknown_literal(right) {
+                return Err(ambiguous_operator(op_spelling(op)));
+            }
             let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
             if range_family_compatible(lt, rt)
                 || matches!(lt, ColumnType::Range(_) | ColumnType::Multirange(_))
@@ -2680,6 +2728,9 @@ fn infer_binary_type(
             }
         }
         BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor | BinaryOp::Shl | BinaryOp::Shr => {
+            if is_unknown_literal(left) && is_unknown_literal(right) {
+                return Err(ambiguous_operator(op_spelling(op)));
+            }
             let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
             if matches!(op, BinaryOp::Shl | BinaryOp::Shr)
                 && (range_family_compatible(lt, rt)
@@ -2841,10 +2892,15 @@ fn json_or_array_operator_result_type(
     if matches!(
         op,
         BinaryOp::Contains | BinaryOp::ContainedBy | BinaryOp::Overlaps
-    ) && let (Some(le), Some(re)) = (lt.array_element(), rt.array_element())
-        && le == re
-    {
-        return Some(ColumnType::Bool);
+    ) {
+        let same_array_family = match (lt, rt) {
+            (ColumnType::Array(left), ColumnType::Array(right)) => left == right,
+            (ColumnType::OidVector, ColumnType::OidVector) => true,
+            _ => false,
+        };
+        if same_array_family {
+            return Some(ColumnType::Bool);
+        }
     }
     match (op, lt, rt) {
         (

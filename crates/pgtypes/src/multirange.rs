@@ -1,5 +1,11 @@
 use crate::{Datum, MultirangeValue, RangeValue, TypeError, usertype::MultirangeRef};
 
+/// Parses and canonicalizes a multirange literal.
+///
+/// # Errors
+///
+/// Returns an error if the literal or one of its component ranges is malformed,
+/// or if the component bounds cannot be normalized.
 pub fn parse(
     input: &str,
     ty: MultirangeRef,
@@ -19,6 +25,12 @@ pub fn parse(
     normalize(ty, ranges)
 }
 
+/// Builds and canonicalizes a multirange from component ranges.
+///
+/// # Errors
+///
+/// Returns an error if a component has the wrong range type or its bounds
+/// cannot be normalized.
 pub fn from_ranges(
     ty: MultirangeRef,
     ranges: Vec<RangeValue>,
@@ -66,6 +78,12 @@ pub fn to_text(value: &MultirangeValue, mut encode: impl FnMut(&Datum) -> String
     )
 }
 
+/// Tests whether a multirange contains a range.
+///
+/// # Errors
+///
+/// Returns an error if the range and multirange types differ or their bounds
+/// cannot be compared.
 pub fn contains_range(multirange: &MultirangeValue, range: &RangeValue) -> Result<bool, TypeError> {
     same_type(multirange, range)?;
     if range.empty {
@@ -79,6 +97,12 @@ pub fn contains_range(multirange: &MultirangeValue, range: &RangeValue) -> Resul
     Ok(false)
 }
 
+/// Tests whether a multirange contains an element.
+///
+/// # Errors
+///
+/// Returns an error if the element cannot be compared with the component range
+/// subtype.
 pub fn contains_element(multirange: &MultirangeValue, element: &Datum) -> Result<bool, TypeError> {
     for component in &multirange.ranges {
         if crate::range::contains_element(component, element)? {
@@ -88,6 +112,12 @@ pub fn contains_element(multirange: &MultirangeValue, element: &Datum) -> Result
     Ok(false)
 }
 
+/// Tests whether a range contains every component of a multirange.
+///
+/// # Errors
+///
+/// Returns an error if the range and multirange types differ or their bounds
+/// cannot be compared.
 pub fn range_contains(range: &RangeValue, multirange: &MultirangeValue) -> Result<bool, TypeError> {
     same_type(multirange, range)?;
     for component in &multirange.ranges {
@@ -98,6 +128,12 @@ pub fn range_contains(range: &RangeValue, multirange: &MultirangeValue) -> Resul
     Ok(true)
 }
 
+/// Tests whether one multirange contains another.
+///
+/// # Errors
+///
+/// Returns an error if the multirange types differ or their bounds cannot be
+/// compared.
 pub fn contains(outer: &MultirangeValue, inner: &MultirangeValue) -> Result<bool, TypeError> {
     if outer.ty != inner.ty {
         return Err(TypeError::TypeMismatch {
@@ -112,6 +148,12 @@ pub fn contains(outer: &MultirangeValue, inner: &MultirangeValue) -> Result<bool
     Ok(true)
 }
 
+/// Tests whether two multiranges overlap.
+///
+/// # Errors
+///
+/// Returns an error if the multirange types differ or their bounds cannot be
+/// compared.
 pub fn overlaps(a: &MultirangeValue, b: &MultirangeValue) -> Result<bool, TypeError> {
     if a.ty != b.ty {
         return Err(TypeError::TypeMismatch {
@@ -126,6 +168,12 @@ pub fn overlaps(a: &MultirangeValue, b: &MultirangeValue) -> Result<bool, TypeEr
     Ok(false)
 }
 
+/// Tests whether a multirange overlaps a range.
+///
+/// # Errors
+///
+/// Returns an error if the range and multirange types differ or their bounds
+/// cannot be compared.
 pub fn overlaps_range(multirange: &MultirangeValue, range: &RangeValue) -> Result<bool, TypeError> {
     same_type(multirange, range)?;
     for component in &multirange.ranges {
@@ -136,11 +184,23 @@ pub fn overlaps_range(multirange: &MultirangeValue, range: &RangeValue) -> Resul
     Ok(false)
 }
 
+/// Returns the union of two multiranges.
+///
+/// # Errors
+///
+/// Returns an error if the multirange types differ or their component ranges
+/// cannot be normalized.
 pub fn union(a: &MultirangeValue, b: &MultirangeValue) -> Result<MultirangeValue, TypeError> {
     same_multirange_type(a, b)?;
     from_ranges(a.ty, a.ranges.iter().chain(&b.ranges).cloned().collect())
 }
 
+/// Returns the intersection of two multiranges.
+///
+/// # Errors
+///
+/// Returns an error if the multirange types differ or their component bounds
+/// cannot be compared or normalized.
 pub fn intersection(
     a: &MultirangeValue,
     b: &MultirangeValue,
@@ -158,6 +218,12 @@ pub fn intersection(
     from_ranges(a.ty, ranges)
 }
 
+/// Subtracts one multirange from another.
+///
+/// # Errors
+///
+/// Returns an error if the multirange types differ or their component bounds
+/// cannot be compared or normalized.
 pub fn difference(a: &MultirangeValue, b: &MultirangeValue) -> Result<MultirangeValue, TypeError> {
     same_multirange_type(a, b)?;
     let mut ranges = a.ranges.clone();
@@ -203,6 +269,12 @@ pub fn difference(a: &MultirangeValue, b: &MultirangeValue) -> Result<Multirange
     from_ranges(a.ty, ranges)
 }
 
+/// Applies a range relation to the first or last multirange component.
+///
+/// # Errors
+///
+/// Returns an error if the range and multirange types differ or `relation`
+/// returns an error.
 pub fn range_relation(
     range: &RangeValue,
     multirange: &MultirangeValue,
@@ -218,6 +290,12 @@ pub fn range_relation(
     component.map_or(Ok(false), |component| relation(range, component))
 }
 
+/// Tests whether a range is adjacent to the outside edge of a multirange.
+///
+/// # Errors
+///
+/// Returns an error if the range and multirange types differ or their bounds
+/// cannot be compared.
 pub fn adjacent_range(multirange: &MultirangeValue, range: &RangeValue) -> Result<bool, TypeError> {
     same_type(multirange, range)?;
     let before = match multirange.ranges.first() {

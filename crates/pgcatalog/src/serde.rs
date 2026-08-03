@@ -159,14 +159,37 @@ mod type_tag {
     pub const POINT: u8 = 24;
     /// `path`. Append-only — no version bump.
     pub const PATH: u8 = 25;
-    /// PostgreSQL `oidvector`. Append-only — no version bump.
+    /// `PostgreSQL` `oidvector`. Append-only — no version bump.
     pub const OIDVECTOR: u8 = 26;
-    /// PostgreSQL `regtype`. Append-only — no version bump.
+    /// `PostgreSQL` `regtype`. Append-only — no version bump.
     pub const REGTYPE: u8 = 27;
-    /// PostgreSQL `regprocedure`. Append-only — no version bump.
+    /// `PostgreSQL` `regprocedure`. Append-only — no version bump.
     pub const REGPROCEDURE: u8 = 28;
-    /// PostgreSQL `jsonpath`. Append-only — no version bump.
+    /// `PostgreSQL` `jsonpath`. Append-only — no version bump.
     pub const JSONPATH: u8 = 29;
+}
+
+#[derive(Debug)]
+pub(crate) enum UserTypeDecodeError {
+    Corrupt(KvError),
+    UnresolvedUserType(u32),
+}
+
+impl UserTypeDecodeError {
+    pub(crate) fn into_kv_error(self) -> KvError {
+        match self {
+            Self::Corrupt(error) => error,
+            Self::UnresolvedUserType(oid) => {
+                KvError::CorruptRow(format!("column type oid {oid} is not a registered type"))
+            }
+        }
+    }
+}
+
+impl From<KvError> for UserTypeDecodeError {
+    fn from(error: KvError) -> Self {
+        Self::Corrupt(error)
+    }
 }
 
 /// Append a column's type (tag byte, plus the numeric typmod payload).
@@ -263,6 +286,14 @@ pub(crate) fn write_type(out: &mut Vec<u8>, ty: ColumnType) {
 
 /// Read a column's type, consuming the tag (and the numeric typmod payload).
 pub(crate) fn read_type(cur: &mut &[u8]) -> Result<ColumnType, KvError> {
+    read_type_with(cur, &crabka_pgtypes::usertype::column_type_for_oid)
+        .map_err(UserTypeDecodeError::into_kv_error)
+}
+
+fn read_type_with(
+    cur: &mut &[u8],
+    resolve_user_type: &dyn Fn(u32) -> Option<ColumnType>,
+) -> Result<ColumnType, UserTypeDecodeError> {
     Ok(match take_u8(cur)? {
         type_tag::BOOL => ColumnType::Bool,
         type_tag::INT2 => ColumnType::Int2,
@@ -288,35 +319,35 @@ pub(crate) fn read_type(cur: &mut &[u8]) -> Result<ColumnType, KvError> {
         type_tag::TIME => {
             let reserved = take_u8(cur)?;
             if reserved != 0 {
-                return Err(KvError::CorruptRow("unsupported datetime precision".into()));
+                return Err(KvError::CorruptRow("unsupported datetime precision".into()).into());
             }
             ColumnType::Time
         }
         type_tag::TIMETZ => {
             let reserved = take_u8(cur)?;
             if reserved != 0 {
-                return Err(KvError::CorruptRow("unsupported datetime precision".into()));
+                return Err(KvError::CorruptRow("unsupported datetime precision".into()).into());
             }
             ColumnType::Timetz
         }
         type_tag::TIMESTAMP => {
             let reserved = take_u8(cur)?;
             if reserved != 0 {
-                return Err(KvError::CorruptRow("unsupported datetime precision".into()));
+                return Err(KvError::CorruptRow("unsupported datetime precision".into()).into());
             }
             ColumnType::Timestamp
         }
         type_tag::TIMESTAMPTZ => {
             let reserved = take_u8(cur)?;
             if reserved != 0 {
-                return Err(KvError::CorruptRow("unsupported datetime precision".into()));
+                return Err(KvError::CorruptRow("unsupported datetime precision".into()).into());
             }
             ColumnType::Timestamptz
         }
         type_tag::INTERVAL => {
             let reserved = take_u8(cur)?;
             if reserved != 0 {
-                return Err(KvError::CorruptRow("unsupported datetime precision".into()));
+                return Err(KvError::CorruptRow("unsupported datetime precision".into()).into());
             }
             ColumnType::Interval
         }
@@ -330,11 +361,7 @@ pub(crate) fn read_type(cur: &mut &[u8]) -> Result<ColumnType, KvError> {
         type_tag::TSQUERY => ColumnType::TsQuery,
         type_tag::JSONB => ColumnType::Jsonb,
         type_tag::JSONPATH => ColumnType::JsonPath,
-        type_tag::ARRAY => {
-            let elem = crabka_pgtypes::ElemType::read_code(cur)
-                .ok_or_else(|| KvError::CorruptRow("unknown array element type encoding".into()))?;
-            ColumnType::Array(elem)
-        }
+        type_tag::ARRAY => ColumnType::Array(read_elem_type_with(cur, resolve_user_type)?),
         type_tag::USER => {
             let raw = take_n(cur, 4)?;
             let oid = u32::from_be_bytes(raw.try_into().expect("4 bytes fit u32"));
@@ -345,17 +372,49 @@ pub(crate) fn read_type(cur: &mut &[u8]) -> Result<ColumnType, KvError> {
             {
                 builtin
             } else {
-                crabka_pgtypes::usertype::column_type_for_oid(oid).ok_or_else(|| {
-                    KvError::CorruptRow(format!("column type oid {oid} is not a registered type"))
-                })?
+                resolve_user_type(oid).ok_or(UserTypeDecodeError::UnresolvedUserType(oid))?
             }
         }
         other => {
-            return Err(KvError::CorruptRow(format!(
-                "unknown column type tag {other}"
-            )));
+            return Err(KvError::CorruptRow(format!("unknown column type tag {other}")).into());
         }
     })
+}
+
+fn read_elem_type_with(
+    cur: &mut &[u8],
+    resolve_user_type: &dyn Fn(u32) -> Option<ColumnType>,
+) -> Result<crabka_pgtypes::ElemType, UserTypeDecodeError> {
+    let Some(code) = cur.first().copied() else {
+        return Err(KvError::CorruptRow("unknown array element type encoding".into()).into());
+    };
+    if !matches!(code, 18 | 19) {
+        return crabka_pgtypes::ElemType::read_code(cur).ok_or_else(|| {
+            KvError::CorruptRow("unknown array element type encoding".into()).into()
+        });
+    }
+
+    let _ = take_u8(cur)?;
+    let oid = u32::from_be_bytes(
+        take_n(cur, 4)?
+            .try_into()
+            .expect("4 bytes fit user array element oid"),
+    );
+    let ty = if code == 18 {
+        ColumnType::builtin_range(oid).or_else(|| resolve_user_type(oid))
+    } else {
+        ColumnType::builtin_multirange(oid).or_else(|| resolve_user_type(oid))
+    }
+    .ok_or(UserTypeDecodeError::UnresolvedUserType(oid))?;
+    match (code, ty) {
+        (18, ColumnType::Range(range)) => Ok(crabka_pgtypes::ElemType::Range(range)),
+        (19, ColumnType::Multirange(multirange)) => {
+            Ok(crabka_pgtypes::ElemType::Multirange(multirange))
+        }
+        _ => Err(
+            KvError::CorruptRow(format!("array element oid {oid} has the wrong type kind")).into(),
+        ),
+    }
 }
 
 fn write_optional_u16_type(out: &mut Vec<u8>, tag: u8, value: Option<u16>) {
@@ -1445,14 +1504,15 @@ pub fn deserialize_fdw(bytes: &[u8]) -> Result<ForeignDataWrapper, KvError> {
 
 // ── User-defined types ────────────────────────────────────────────────────────
 
-/// Serialize a user-defined type: `oid`, name, a kind byte, then the kind's own
-/// payload (a composite's fields, an enum's labels, a domain's base type,
-/// nullability, default and checks).
+/// Serialize a user-defined type: `oid`, its legacy flattened lookup name, a
+/// kind byte, the kind's payload, then a versioned structured identity trailer.
+/// Keeping the legacy name first lets an older binary read a new record, while
+/// the trailer preserves identifiers containing dots without reconstruction.
 #[must_use]
 pub fn serialize_user_type(ty: &UserType) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&ty.oid.to_be_bytes());
-    write_str(&mut out, &ty.name);
+    write_str(&mut out, &ty.qualified_name());
     match &ty.body {
         UserTypeBody::Composite(fields) => {
             out.push(USER_TYPE_COMPOSITE);
@@ -1479,12 +1539,19 @@ pub fn serialize_user_type(ty: &UserType) -> Vec<u8> {
                 }
                 None => out.push(0),
             }
-            match &range.multirange_name {
-                Some(name) => {
+            match (&range.multirange_schema, &range.multirange_name) {
+                (Some(schema), Some(name)) => {
                     out.push(1);
-                    write_str(&mut out, name);
+                    write_str(
+                        &mut out,
+                        &if schema == crabka_pgtypes::usertype::USER_TYPE_DEFAULT_SCHEMA {
+                            name.clone()
+                        } else {
+                            format!("{schema}.{name}")
+                        },
+                    );
                 }
-                None => out.push(0),
+                _ => out.push(0),
             }
         }
         UserTypeBody::Domain(domain) => {
@@ -1505,6 +1572,21 @@ pub fn serialize_user_type(ty: &UserType) -> Vec<u8> {
             }
         }
     }
+    out.push(USER_TYPE_IDENTITY_V2);
+    write_str(&mut out, &ty.schema);
+    write_str(&mut out, &ty.name);
+    match &ty.body {
+        UserTypeBody::Range(RangeBody {
+            multirange_schema: Some(schema),
+            multirange_name: Some(name),
+            ..
+        }) => {
+            out.push(1);
+            write_str(&mut out, schema);
+            write_str(&mut out, name);
+        }
+        _ => out.push(0),
+    }
     out
 }
 
@@ -1520,10 +1602,18 @@ pub fn serialize_user_type(ty: &UserType) -> Vec<u8> {
 /// which cannot happen: `take_n` either yields exactly that many bytes or
 /// returns the corruption error above.
 pub fn deserialize_user_type(bytes: &[u8]) -> Result<UserType, KvError> {
+    deserialize_user_type_with(bytes, &crabka_pgtypes::usertype::column_type_for_oid)
+        .map_err(UserTypeDecodeError::into_kv_error)
+}
+
+pub(crate) fn deserialize_user_type_with(
+    bytes: &[u8],
+    resolve_user_type: &dyn Fn(u32) -> Option<ColumnType>,
+) -> Result<UserType, UserTypeDecodeError> {
     let mut cur = bytes;
     let oid = u32::from_be_bytes(take_n(&mut cur, 4)?.try_into().expect("4 bytes fit u32"));
-    let name = read_string(&mut cur)?;
-    let body = match take_u8(&mut cur)? {
+    let legacy_name = read_string(&mut cur)?;
+    let mut body = match take_u8(&mut cur)? {
         USER_TYPE_COMPOSITE => {
             let count = read_count(&mut cur)?;
             let mut fields = Vec::with_capacity(count.min(1024));
@@ -1531,7 +1621,7 @@ pub fn deserialize_user_type(bytes: &[u8]) -> Result<UserType, KvError> {
                 let field_name = read_string(&mut cur)?;
                 fields.push(CompositeField {
                     name: field_name,
-                    ty: read_type(&mut cur)?,
+                    ty: read_type_with(&mut cur, resolve_user_type)?,
                 });
             }
             UserTypeBody::Composite(fields)
@@ -1545,7 +1635,7 @@ pub fn deserialize_user_type(bytes: &[u8]) -> Result<UserType, KvError> {
             UserTypeBody::Enum(labels)
         }
         USER_TYPE_RANGE => {
-            let subtype = read_type(&mut cur)?;
+            let subtype = read_type_with(&mut cur, resolve_user_type)?;
             let collation = match take_u8(&mut cur)? {
                 0 => None,
                 _ => Some(read_string(&mut cur)?),
@@ -1558,11 +1648,12 @@ pub fn deserialize_user_type(bytes: &[u8]) -> Result<UserType, KvError> {
             UserTypeBody::Range(RangeBody {
                 subtype,
                 collation,
+                multirange_schema: None,
                 multirange_name,
             })
         }
         USER_TYPE_DOMAIN => {
-            let base = read_type(&mut cur)?;
+            let base = read_type_with(&mut cur, resolve_user_type)?;
             let not_null = take_u8(&mut cur)? != 0;
             let default = match take_u8(&mut cur)? {
                 0 => None,
@@ -1585,18 +1676,102 @@ pub fn deserialize_user_type(bytes: &[u8]) -> Result<UserType, KvError> {
             })
         }
         other => {
-            return Err(KvError::CorruptRow(format!(
-                "unknown user type kind {other}"
-            )));
+            return Err(KvError::CorruptRow(format!("unknown user type kind {other}")).into());
         }
     };
-    Ok(UserType { oid, name, body })
+    let (schema, name, structured_companion) = if cur.is_empty() {
+        let (schema, name) = legacy_user_type_identity(&legacy_name);
+        (schema, name, None)
+    } else {
+        let version = take_u8(&mut cur)?;
+        match version {
+            USER_TYPE_IDENTITY_V1 | USER_TYPE_IDENTITY_V2 => {}
+            version => {
+                return Err(KvError::CorruptRow(format!(
+                    "unknown user type identity version {version}"
+                ))
+                .into());
+            }
+        }
+        let schema = read_string(&mut cur)?;
+        let name = read_string(&mut cur)?;
+        let companion = if version == USER_TYPE_IDENTITY_V2 {
+            match take_u8(&mut cur)? {
+                0 => None,
+                1 => Some((read_string(&mut cur)?, read_string(&mut cur)?)),
+                flag => {
+                    return Err(KvError::CorruptRow(format!(
+                        "unknown user type companion flag {flag}"
+                    ))
+                    .into());
+                }
+            }
+        } else {
+            None
+        };
+        if !cur.is_empty() {
+            return Err(
+                KvError::CorruptRow("trailing bytes after user type identity".into()).into(),
+            );
+        }
+        (schema, name, companion)
+    };
+    if let UserTypeBody::Range(range) = &mut body {
+        if let Some((schema, name)) = structured_companion {
+            range.multirange_schema = Some(schema);
+            range.multirange_name = Some(name);
+        } else if let Some(legacy_companion) = range.multirange_name.take() {
+            let (schema, name) = legacy_user_type_identity(&legacy_companion);
+            range.multirange_schema = Some(schema);
+            range.multirange_name = Some(name);
+        } else {
+            // Records written before CREATE materialized PostgreSQL's derived
+            // companion identity used the old suffix-replacement algorithm at
+            // lookup time. Freeze that historical identity during migration so
+            // upgrading does not silently rename an existing companion.
+            range.multirange_schema = Some(schema.clone());
+            range.multirange_name = Some(legacy_default_multirange_name(&name));
+        }
+    }
+    Ok(UserType {
+        oid,
+        schema,
+        name,
+        body,
+    })
+}
+
+/// Decode records written before structured type identities were appended.
+/// Such records could not distinguish a dotted identifier from qualification.
+/// The permanent migration policy is the historical last-dot split: it keeps
+/// every unambiguous old identity stable, while inherently ambiguous quoted-dot
+/// records must be recreated or renamed by an operator. New records never rely
+/// on this lossy representation.
+fn legacy_user_type_identity(name: &str) -> (String, String) {
+    name.rsplit_once('.').map_or_else(
+        || {
+            (
+                crabka_pgtypes::usertype::USER_TYPE_DEFAULT_SCHEMA.to_string(),
+                name.to_string(),
+            )
+        },
+        |(schema, name)| (schema.to_string(), name.to_string()),
+    )
+}
+
+fn legacy_default_multirange_name(range_name: &str) -> String {
+    range_name.strip_suffix("range").map_or_else(
+        || format!("{range_name}_multirange"),
+        |stem| format!("{stem}multirange"),
+    )
 }
 
 const USER_TYPE_COMPOSITE: u8 = 1;
 const USER_TYPE_ENUM: u8 = 2;
 const USER_TYPE_DOMAIN: u8 = 3;
 const USER_TYPE_RANGE: u8 = 4;
+const USER_TYPE_IDENTITY_V1: u8 = 1;
+const USER_TYPE_IDENTITY_V2: u8 = 2;
 
 fn write_count(out: &mut Vec<u8>, count: usize) {
     out.extend_from_slice(
@@ -1940,11 +2115,11 @@ mod tests {
                 ColumnType::Array(elem),
             ));
         }
-        let range =
-            match ColumnType::builtin_range(crabka_pgtypes::oids::INT8RANGE).expect("int8range") {
-                ColumnType::Range(range) => range,
-                _ => unreachable!(),
-            };
+        let ColumnType::Range(range) =
+            ColumnType::builtin_range(crabka_pgtypes::oids::INT8RANGE).expect("int8range")
+        else {
+            unreachable!()
+        };
         columns.push(Column::new(
             "ranges",
             ColumnType::Array(ElemType::Range(range)),
@@ -2133,14 +2308,61 @@ mod tests {
     fn roundtrip_range_type_metadata() {
         let ty = UserType {
             oid: 300_000,
+            schema: "catalog_types".into(),
             name: "textrange".into(),
             body: UserTypeBody::Range(RangeBody {
                 subtype: ColumnType::Text,
                 collation: Some("C".into()),
+                multirange_schema: Some("multirange_schema".into()),
                 multirange_name: Some("multirange_of_text".into()),
             }),
         };
         assert_eq!(deserialize_user_type(&serialize_user_type(&ty)), Ok(ty));
+    }
+
+    #[test]
+    fn user_type_identity_roundtrips_dotted_identifiers() {
+        let ty = UserType {
+            oid: 300_004,
+            schema: "schema.with.dot".into(),
+            name: "type.with.dot".into(),
+            body: UserTypeBody::Composite(Vec::new()),
+        };
+        assert_eq!(deserialize_user_type(&serialize_user_type(&ty)), Ok(ty));
+    }
+
+    #[test]
+    fn user_type_legacy_records_still_decode() {
+        let mut bytes = 300_008u32.to_be_bytes().to_vec();
+        write_str(&mut bytes, "catalog_types.legacy_pair");
+        bytes.push(USER_TYPE_COMPOSITE);
+        write_count(&mut bytes, 0);
+
+        let ty = deserialize_user_type(&bytes).expect("legacy user type decodes");
+        assert_eq!(ty.schema, "catalog_types");
+        assert_eq!(ty.name, "legacy_pair");
+        assert_eq!(ty.body, UserTypeBody::Composite(Vec::new()));
+    }
+
+    #[test]
+    fn legacy_ranges_keep_their_pre_upgrade_companion_names() {
+        for (oid, range_name, companion_name) in [
+            (300_012, "textrange", "textmultirange"),
+            (300_016, "textrange1", "textrange1_multirange"),
+        ] {
+            let mut bytes = u32::to_be_bytes(oid).to_vec();
+            write_str(&mut bytes, range_name);
+            bytes.push(USER_TYPE_RANGE);
+            write_type(&mut bytes, ColumnType::Text);
+            bytes.push(0); // no collation
+            bytes.push(0); // default companion was derived by the old binary
+
+            let ty = deserialize_user_type(&bytes).expect("legacy range decodes");
+            assert_eq!(
+                ty.multirange_identity(),
+                Some(("public".into(), companion_name.into()))
+            );
+        }
     }
 
     #[test]

@@ -168,6 +168,59 @@ async fn event_triggers_fire_in_order_with_tag_filters() {
 }
 
 #[tokio::test]
+async fn event_trigger_can_fall_through_without_return() {
+    let engine = SqlEngine::new();
+    exec(&engine, "CREATE TABLE ddl_audit (tag text)").await;
+    exec(
+        &engine,
+        "CREATE FUNCTION audit_ddl_fallthrough() RETURNS event_trigger LANGUAGE plpgsql AS $$
+         BEGIN INSERT INTO ddl_audit VALUES (TG_TAG); END $$",
+    )
+    .await;
+    exec(
+        &engine,
+        "CREATE EVENT TRIGGER audit_ddl_fallthrough ON ddl_command_end
+         WHEN TAG IN ('CREATE TABLE') EXECUTE FUNCTION audit_ddl_fallthrough()",
+    )
+    .await;
+
+    exec(&engine, "CREATE TABLE event_target (id int)").await;
+    assert_eq!(
+        scalar(&engine, "SELECT tag FROM ddl_audit").await,
+        "CREATE TABLE"
+    );
+}
+
+#[tokio::test]
+async fn ordinary_trigger_fallthrough_still_requires_return() {
+    let engine = SqlEngine::new();
+    exec(&engine, "CREATE TABLE items (id int)").await;
+    exec(
+        &engine,
+        "CREATE FUNCTION missing_trigger_return() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN NEW.id := NEW.id + 1; END $$",
+    )
+    .await;
+    exec(
+        &engine,
+        "CREATE TRIGGER missing_return BEFORE INSERT ON items FOR EACH ROW
+         EXECUTE FUNCTION missing_trigger_return()",
+    )
+    .await;
+
+    let error = engine
+        .connect()
+        .simple_query("INSERT INTO items VALUES (1)")
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "2F005");
+    assert_eq!(
+        error.message,
+        "control reached end of trigger procedure without RETURN"
+    );
+}
+
+#[tokio::test]
 async fn table_rewrite_event_triggers_fire_for_type_rewrites() {
     let engine = SqlEngine::new();
     exec(
@@ -247,6 +300,208 @@ async fn ddl_command_end_failure_rolls_back_the_ddl_target() {
         .await,
         "0"
     );
+}
+
+#[tokio::test]
+async fn rejected_type_ddl_keeps_the_runtime_registry_at_the_durable_catalog() {
+    let engine = SqlEngine::new();
+    for sql in [
+        "CREATE TYPE registry_reject_alter AS ENUM ('old')",
+        "CREATE TYPE registry_reject_drop AS ENUM ('kept')",
+        "CREATE TYPE registry_builder_survivor AS ENUM ('kept')",
+    ] {
+        exec(&engine, sql).await;
+    }
+    exec(
+        &engine,
+        "CREATE FUNCTION reject_type_ddl() RETURNS event_trigger LANGUAGE plpgsql AS $$
+         BEGIN RAISE EXCEPTION 'rejected type ddl'; END $$",
+    )
+    .await;
+    exec(
+        &engine,
+        "CREATE EVENT TRIGGER reject_type_ddl ON ddl_command_end
+         WHEN TAG IN ('CREATE TYPE', 'ALTER TYPE', 'DROP TYPE')
+         EXECUTE FUNCTION reject_type_ddl()",
+    )
+    .await;
+
+    let error = engine
+        .connect()
+        .simple_query("CREATE TYPE registry_reject_create AS ENUM ('stale')")
+        .await
+        .unwrap_err();
+    assert!(error.message.contains("rejected type ddl"));
+    assert_eq!(
+        scalar(
+            &engine,
+            "SELECT count(*) FROM pg_type WHERE typname = 'registry_reject_create'",
+        )
+        .await,
+        "0"
+    );
+    assert_eq!(
+        engine
+            .connect()
+            .simple_query("SELECT 'stale'::registry_reject_create")
+            .await
+            .unwrap_err()
+            .code,
+        "42704"
+    );
+
+    let error = engine
+        .connect()
+        .simple_query("ALTER TYPE registry_reject_alter ADD VALUE 'stale'")
+        .await
+        .unwrap_err();
+    assert!(error.message.contains("rejected type ddl"));
+    assert_eq!(
+        scalar(
+            &engine,
+            "SELECT count(*) FROM pg_enum e JOIN pg_type t ON t.oid = e.enumtypid
+             WHERE t.typname = 'registry_reject_alter' AND e.enumlabel = 'stale'",
+        )
+        .await,
+        "0"
+    );
+    assert_eq!(
+        engine
+            .connect()
+            .simple_query("SELECT 'stale'::registry_reject_alter")
+            .await
+            .unwrap_err()
+            .code,
+        "22P02"
+    );
+
+    let error = engine
+        .connect()
+        .simple_query("DROP TYPE registry_reject_drop")
+        .await
+        .unwrap_err();
+    assert!(error.message.contains("rejected type ddl"));
+    assert_eq!(
+        scalar(
+            &engine,
+            "SELECT count(*) FROM pg_type WHERE typname = 'registry_reject_drop'",
+        )
+        .await,
+        "1"
+    );
+    assert_eq!(
+        scalar(&engine, "SELECT 'kept'::registry_reject_drop::text").await,
+        "kept"
+    );
+
+    let error = engine
+        .connect()
+        .simple_query("DROP TYPE registry_builder_survivor, registry_builder_missing")
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "42704");
+    assert_eq!(
+        scalar(&engine, "SELECT 'kept'::registry_builder_survivor::text",).await,
+        "kept"
+    );
+
+    exec(&engine, "DROP EVENT TRIGGER reject_type_ddl").await;
+    exec(
+        &engine,
+        "DROP TYPE registry_reject_alter, registry_reject_drop, registry_builder_survivor",
+    )
+    .await;
+
+    exec(
+        &engine,
+        "CREATE FUNCTION alter_created_type() RETURNS event_trigger LANGUAGE plpgsql AS $$
+         BEGIN ALTER TYPE registry_nested_success ADD VALUE 'new'; END $$",
+    )
+    .await;
+    exec(
+        &engine,
+        "CREATE EVENT TRIGGER alter_created_type ON ddl_command_end
+         WHEN TAG IN ('CREATE TYPE') EXECUTE FUNCTION alter_created_type()",
+    )
+    .await;
+    let mut same_session = engine.connect();
+    exec_session(
+        &mut same_session,
+        "CREATE TYPE registry_nested_success AS ENUM ('old')",
+    )
+    .await;
+    assert_eq!(
+        scalar_session(
+            &mut same_session,
+            "SELECT 'new'::registry_nested_success::text",
+        )
+        .await,
+        "new"
+    );
+    assert_eq!(
+        scalar(&engine, "SELECT 'new'::registry_nested_success::text").await,
+        "new"
+    );
+    exec(&engine, "DROP EVENT TRIGGER alter_created_type").await;
+    exec(&engine, "DROP FUNCTION alter_created_type()").await;
+    exec(&engine, "DROP TYPE registry_nested_success").await;
+
+    exec(
+        &engine,
+        "CREATE FUNCTION alter_created_type_then_reject() RETURNS event_trigger LANGUAGE plpgsql AS $$
+         BEGIN
+           ALTER TYPE registry_nested_failure ADD VALUE 'new';
+           RAISE EXCEPTION 'rejected after nested type ddl';
+         END $$",
+    )
+    .await;
+    exec(
+        &engine,
+        "CREATE EVENT TRIGGER alter_created_type_then_reject ON ddl_command_end
+         WHEN TAG IN ('CREATE TYPE') EXECUTE FUNCTION alter_created_type_then_reject()",
+    )
+    .await;
+    let mut rejected_session = engine.connect();
+    let error = rejected_session
+        .simple_query("CREATE TYPE registry_nested_failure AS ENUM ('old')")
+        .await
+        .unwrap_err();
+    assert!(error.message.contains("rejected after nested type ddl"));
+    assert_eq!(
+        scalar_session(
+            &mut rejected_session,
+            "SELECT count(*) FROM pg_type WHERE typname = 'registry_nested_failure'",
+        )
+        .await,
+        "0"
+    );
+    assert_eq!(
+        rejected_session
+            .simple_query("SELECT 'new'::registry_nested_failure")
+            .await
+            .unwrap_err()
+            .code,
+        "42704"
+    );
+    let mut fresh_session = engine.connect();
+    assert_eq!(
+        scalar_session(
+            &mut fresh_session,
+            "SELECT count(*) FROM pg_type WHERE typname = 'registry_nested_failure'",
+        )
+        .await,
+        "0"
+    );
+    assert_eq!(
+        fresh_session
+            .simple_query("SELECT 'new'::registry_nested_failure")
+            .await
+            .unwrap_err()
+            .code,
+        "42704"
+    );
+    exec(&engine, "DROP EVENT TRIGGER alter_created_type_then_reject").await;
+    exec(&engine, "DROP FUNCTION alter_created_type_then_reject()").await;
 }
 
 #[tokio::test]

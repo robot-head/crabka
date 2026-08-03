@@ -19,8 +19,8 @@ pub enum TypeError {
     },
     #[error("{message}")]
     TypeMismatch { message: String },
-    #[error("value too long for type character varying")]
-    StringDataRightTruncation,
+    #[error("value too long for type {type_name}")]
+    StringDataRightTruncation { type_name: String },
     /// SP28: a `LIKE`/`ILIKE` pattern ending in a lone escape `\` (22025).
     #[error("LIKE pattern must not end with escape character")]
     InvalidEscape,
@@ -98,7 +98,7 @@ impl TypeError {
             TypeError::DivisionByZero => "22012",
             TypeError::InvalidText { .. } => "22P02",
             TypeError::TypeMismatch { .. } => "42804",
-            TypeError::StringDataRightTruncation => "22001",
+            TypeError::StringDataRightTruncation { .. } => "22001",
             TypeError::InvalidEscape | TypeError::InvalidEscapeString => "22025",
             TypeError::CannotCast { .. } => "42846",
             TypeError::Domain { sqlstate, .. } => sqlstate,
@@ -200,7 +200,13 @@ mod tests {
             .sqlstate(),
             "42804"
         );
-        assert_eq!(TypeError::StringDataRightTruncation.sqlstate(), "22001");
+        assert_eq!(
+            TypeError::StringDataRightTruncation {
+                type_name: "character varying(3)".into(),
+            }
+            .sqlstate(),
+            "22001"
+        );
         assert_eq!(TypeError::InvalidEscape.sqlstate(), "22025");
         assert_eq!(
             TypeError::CannotCast {

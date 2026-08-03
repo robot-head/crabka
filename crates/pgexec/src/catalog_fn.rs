@@ -2076,45 +2076,53 @@ mod tests {
             .expect("write index entry");
 
         let scope = crate::relname::ResolutionScope::default();
-        let ordinary_oid = crate::catalog_rel::index_relation_oid(ordinary_id).expect("index oid");
-        let expression_oid =
+        let ordinary_relation_oid =
+            crate::catalog_rel::index_relation_oid(ordinary_id).expect("index oid");
+        let expression_relation_oid =
             crate::catalog_rel::index_relation_oid(expression_id).expect("expression index oid");
-        let table_oid = i32::try_from(table_id).expect("table oid");
+        let table_relation_oid = i32::try_from(table_id).expect("table oid");
         assert!(
-            relation_size(&catalog, &data, &scope, &Datum::Int4(ordinary_oid))
+            relation_size(&catalog, &data, &scope, &Datum::Int4(ordinary_relation_oid),)
                 .expect("ordinary size")
                 == Datum::Int8(expected)
         );
         assert!(
-            relation_size(&catalog, &data, &scope, &Datum::Int4(expression_oid))
-                .expect("expression size")
+            relation_size(
+                &catalog,
+                &data,
+                &scope,
+                &Datum::Int4(expression_relation_oid),
+            )
+            .expect("expression size")
                 == Datum::Int8(0)
         );
         assert!(
-            relation_size(&catalog, &data, &scope, &Datum::Int4(table_oid),).expect("table size")
+            relation_size(&catalog, &data, &scope, &Datum::Int4(table_relation_oid),)
+                .expect("table size")
                 == Datum::Int8(0)
         );
         assert!(
-            table_size(&catalog, &data, &scope, &Datum::Int4(ordinary_oid))
+            table_size(&catalog, &data, &scope, &Datum::Int4(ordinary_relation_oid),)
                 .expect("index table size")
                 == Datum::Int8(expected)
         );
         assert!(
-            indexes_size(&catalog, &data, &scope, &Datum::Int4(table_oid)).expect("indexes size")
+            indexes_size(&catalog, &data, &scope, &Datum::Int4(table_relation_oid))
+                .expect("indexes size")
                 == Datum::Int8(expected)
         );
         assert!(
-            indexes_size(&catalog, &data, &scope, &Datum::Int4(ordinary_oid))
+            indexes_size(&catalog, &data, &scope, &Datum::Int4(ordinary_relation_oid),)
                 .expect("index indexes size")
                 == Datum::Int8(0)
         );
         assert!(
-            total_relation_size(&catalog, &data, &scope, &Datum::Int4(table_oid))
+            total_relation_size(&catalog, &data, &scope, &Datum::Int4(table_relation_oid),)
                 .expect("table total size")
                 == Datum::Int8(expected)
         );
         assert!(
-            total_relation_size(&catalog, &data, &scope, &Datum::Int4(ordinary_oid))
+            total_relation_size(&catalog, &data, &scope, &Datum::Int4(ordinary_relation_oid),)
                 .expect("index total size")
                 == Datum::Int8(expected)
         );
@@ -2123,7 +2131,10 @@ mod tests {
                 &catalog,
                 &data,
                 &scope,
-                &[Datum::Int4(ordinary_oid), Datum::Text("fsm".into())],
+                &[
+                    Datum::Int4(ordinary_relation_oid),
+                    Datum::Text("fsm".into()),
+                ],
             )
             .expect("index fsm size")
                 == Datum::Int8(0)
@@ -2133,7 +2144,7 @@ mod tests {
                 &catalog,
                 &data,
                 &scope,
-                &[Datum::Int4(ordinary_oid), Datum::Null],
+                &[Datum::Int4(ordinary_relation_oid), Datum::Null],
             )
             .expect("null fork")
                 == Datum::Null
@@ -2142,7 +2153,10 @@ mod tests {
             &catalog,
             &data,
             &scope,
-            &[Datum::Int4(ordinary_oid), Datum::Text("toast".into())],
+            &[
+                Datum::Int4(ordinary_relation_oid),
+                Datum::Text("toast".into()),
+            ],
         )
         .expect_err("invalid fork")
         .into_pg();

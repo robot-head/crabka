@@ -2928,9 +2928,9 @@ impl SqlSession {
         // registry (it holds no catalog handle), so the registry has to be
         // populated from the durable catalog before this session parses
         // anything — otherwise a type created before a restart, or on another
-        // node, would read as 42704. A failed read leaves the registry as it is:
-        // the type names simply do not resolve, which is the same outcome as an
-        // absent type and never a wrong answer.
+        // node, would read as 42704. Hydration validates the complete catalog
+        // before publishing any definitions; a failed read is logged and
+        // leaves the existing process registry unchanged.
         if let Err(error) = crate::usertype::hydrate(catalog_kv.as_ref()) {
             tracing::warn!(?error, "could not load user-defined types from the catalog");
         }
@@ -3025,6 +3025,11 @@ impl SqlSession {
             user: self.current_role.clone(),
             backend_id: self.backend_pid,
         }
+    }
+
+    fn type_search_schemas(&self) -> Result<Vec<String>, ExecError> {
+        self.resolution_scope()
+            .visible_schemas(self.catalog_kv.as_ref())
     }
 
     fn register_worker(&mut self) -> (usize, WorkerCancel, WorkerFinished) {
@@ -4132,12 +4137,13 @@ impl SqlSession {
             }
         }
         let user_type_prefix = crabka_pgkv::key::user_type_prefix();
-        let restored_user_types = catalog_undo
-            .keys()
-            .filter_map(|key| key.strip_prefix(user_type_prefix.as_slice()))
-            .filter_map(|name| std::str::from_utf8(name).ok())
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
+        let restores_user_types = catalog_undo.keys().any(|key| {
+            crabka_pgkv::key::user_type_key_parts(key).is_some()
+                || key.starts_with(user_type_prefix.as_slice())
+        });
+        let user_types_before = restores_user_types
+            .then(|| crabka_pgcatalog::list_user_types(&*self.catalog_kv))
+            .transpose()?;
         let catalog_undo_ops = catalog_undo
             .into_iter()
             .map(|(key, value)| match value {
@@ -4152,11 +4158,9 @@ impl SqlSession {
                 self.catalog_kv.write_batch(&catalog_undo_ops)?;
             }
         }
-        for name in restored_user_types {
-            match crabka_pgcatalog::get_user_type(self.catalog_kv.as_ref(), &name)? {
-                Some(ty) => crabka_pgtypes::usertype::replace(&ty),
-                None => crabka_pgtypes::usertype::unregister(&name),
-            }
+        if let Some(before) = user_types_before {
+            let after = crabka_pgcatalog::list_user_types(&*self.catalog_kv)?;
+            crabka_pgtypes::usertype::publish_catalog_delta(&before, &after);
         }
 
         let (row_locks, table_lock_count, advisory_lock_count) = {
@@ -5672,11 +5676,14 @@ impl SqlSession {
     /// parse fails. `PostgreSQL` aborts the block on a syntax error exactly as
     /// it does on any other error, so the parse cannot sit outside that rule.
     fn parse_for_session(&mut self, sql: &str) -> Result<Vec<Statement>, PgError> {
-        match crabka_pgparser::parse(sql) {
+        let parsed = self.type_search_schemas().and_then(|schemas| {
+            crabka_pgparser::parse_with_type_schemas(sql, &schemas).map_err(ExecError::from)
+        });
+        match parsed {
             Ok(statements) => Ok(statements),
             Err(error) => {
                 self.mark_transaction_failed();
-                Err(ExecError::from(error).into_pg())
+                Err(error.into_pg())
             }
         }
     }
@@ -5922,7 +5929,7 @@ impl SqlSession {
             {
                 self.run_write(stmt).await
             }
-            Statement::Query(_) => self.run_select(stmt).await,
+            Statement::Query(_) => Box::pin(self.run_select(stmt)).await,
             // SP37: GUC control. These are NOT exempt from the failed-txn guard
             // above (only COMMIT/ROLLBACK are), so a SET in an aborted block is
             // rejected — matching PostgreSQL.
@@ -6752,11 +6759,11 @@ impl SqlSession {
                                 ),
                             ),
                             crate::routine::FunctionRequestKind::Scalar => {
-                                crate::plpgsql::execute_scalar_function(
+                                Box::pin(crate::plpgsql::execute_scalar_function(
                                     self,
                                     &request.routine,
                                     &request.values,
-                                )
+                                ))
                                 .await
                                 .map(crate::routine::FunctionRequestResult::Scalar)
                             }
@@ -6767,22 +6774,22 @@ impl SqlSession {
                                 ),
                             ),
                             crate::routine::FunctionRequestKind::Table(columns) => {
-                                crate::plpgsql::execute_table_function(
+                                Box::pin(crate::plpgsql::execute_table_function(
                                     self,
                                     &request.routine,
                                     &request.values,
                                     columns,
-                                )
+                                ))
                                 .await
                                 .map(crate::routine::FunctionRequestResult::Table)
                             }
                             crate::routine::FunctionRequestKind::Trigger(invocation) => {
                                 self.trigger_depth = self.trigger_depth.saturating_add(1);
-                                let result = crate::plpgsql::execute_trigger_function(
+                                let result = Box::pin(crate::plpgsql::execute_trigger_function(
                                     self,
                                     &request.routine,
                                     *invocation,
-                                )
+                                ))
                                 .await;
                                 self.trigger_depth = self.trigger_depth.saturating_sub(1);
                                 result.map(crate::routine::FunctionRequestResult::Scalar)
@@ -7165,6 +7172,21 @@ impl SqlSession {
         Ok(())
     }
 
+    /// Commit a catalog-only cleanup that may remove user types, then publish
+    /// exactly that durable delta. These cleanups do not pass through
+    /// `run_ddl` (`DISCARD TEMP`, session teardown, and stale temp-schema
+    /// reclamation), so they need the same post-commit registry boundary here.
+    async fn commit_catalog_with_user_type_sync(
+        &self,
+        ops: Vec<crabka_pgkv::WriteOp>,
+    ) -> Result<(), ExecError> {
+        let before = crabka_pgcatalog::list_user_types(&*self.catalog_kv)?;
+        self.commit_catalog(ops).await?;
+        let after = crabka_pgcatalog::list_user_types(&*self.catalog_kv)?;
+        crabka_pgtypes::usertype::publish_catalog_delta(&before, &after);
+        Ok(())
+    }
+
     /// Make this session's temporary namespace exist and be its own, once.
     ///
     /// Backend ids are reused, and a backend that died without dropping its
@@ -7197,7 +7219,7 @@ impl SqlSession {
             Vec::new()
         };
         ops.push(crabka_pgcatalog::create_temp_schema_op(&schema));
-        self.commit_catalog(ops).await?;
+        self.commit_catalog_with_user_type_sync(ops).await?;
         self.temp_namespace_claim = Some(claim);
         self.temp_schema_ready = true;
         Ok(())
@@ -7252,7 +7274,7 @@ impl SqlSession {
         };
         let result = if unshared {
             let ops = crate::exec::drop_schema_contents_ops(&*self.catalog_kv, &schema)?;
-            self.commit_catalog(ops).await
+            self.commit_catalog_with_user_type_sync(ops).await
         } else {
             tracing::warn!(
                 schema,
@@ -7445,8 +7467,40 @@ impl SqlSession {
         Ok(())
     }
 
+    async fn restore_catalog_snapshot(
+        &self,
+        before: &BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    ) -> Result<(), ExecError> {
+        let undo = before
+            .iter()
+            .map(|(key, value)| match value {
+                Some(value) => WriteOp::Put {
+                    key: key.clone(),
+                    value: value.clone(),
+                },
+                None => WriteOp::Delete { key: key.clone() },
+            })
+            .collect::<Vec<_>>();
+        if Arc::ptr_eq(&self.kv, &self.catalog_kv) {
+            self.committer.commit(undo).await
+        } else {
+            self.catalog_kv.write_batch(&undo)?;
+            Ok(())
+        }
+    }
+
     async fn run_ddl(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
         let fires_event_triggers = !crate::trigger::event_trigger_ddl_is_excluded(stmt);
+        let publishes_user_types = matches!(
+            stmt,
+            Statement::CreateType { .. }
+                | Statement::AlterType { .. }
+                | Statement::DropType { .. }
+                | Statement::CreateDomain { .. }
+                | Statement::AlterDomain { .. }
+                | Statement::DropDomain { .. }
+                | Statement::DropSchema { .. }
+        );
         let event_tag = crate::trigger::event_command_tag(stmt);
         let drop_event_context = if fires_event_triggers && crate::trigger::is_drop_ddl(stmt) {
             Some(crate::trigger::event_trigger_context(
@@ -7508,11 +7562,25 @@ impl SqlSession {
                     table,
                     crate::relname::SchemaDisposition::Reference,
                 )?;
-                let id = crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &relation)?.id;
-                Ok::<_, ExecError>((relation, id))
+                let table = match crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &relation) {
+                    Ok(table) => Some(table.id),
+                    Err(error @ crabka_pgcatalog::CatalogError::UndefinedTable(_))
+                        if matches!(stmt, Statement::AlterTable { .. }) =>
+                    {
+                        match crabka_pgcatalog::get_view(self.catalog_kv.as_ref(), &relation) {
+                            Ok(_) => None,
+                            Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => {
+                                return Err(error.into());
+                            }
+                            Err(error) => return Err(error.into()),
+                        }
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                Ok::<_, ExecError>((relation, table))
             })
             .transpose()?;
-        let _unique_guard = if let Some((_, table)) = &unique_target {
+        let _unique_guard = if let Some((_, Some(table))) = &unique_target {
             let owner = self.lock_owner;
             self.unique_index_gates
                 .acquire_key_as(
@@ -7544,11 +7612,23 @@ impl SqlSession {
             None
         };
         let _g = self.catalog_lock.lock().await;
-        if let Some((relation, table)) = &unique_target
+        if let Some((relation, Some(table))) = &unique_target
             && crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), relation)?.id != *table
         {
             return Err(ExecError::SerializationFailure);
         }
+        if let Some((relation, None)) = &unique_target {
+            match crabka_pgcatalog::get_view(self.catalog_kv.as_ref(), relation) {
+                Ok(_) => {}
+                Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => {
+                    return Err(ExecError::SerializationFailure);
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let user_types_before = publishes_user_types
+            .then(|| crabka_pgcatalog::list_user_types(&*self.catalog_kv))
+            .transpose()?;
         let resolution = self.resolution_scope();
         // SP40: IMPORT FOREIGN SCHEMA needs the registered scanner + current user
         // to discover foreign tables; the rest of DDL ignores the ForeignCtx.
@@ -7597,6 +7677,32 @@ impl SqlSession {
         } else {
             self.catalog_kv.write_batch(&ops)?;
         }
+        let committed_user_types = if user_types_before.is_some() {
+            match crabka_pgcatalog::list_user_types(&*self.catalog_kv) {
+                Ok(types) => Some(types),
+                Err(error) => {
+                    self.restore_catalog_snapshot(&catalog_before).await?;
+                    return Err(error.into());
+                }
+            }
+        } else {
+            None
+        };
+        let changed_user_type_oids = user_types_before
+            .as_ref()
+            .zip(committed_user_types.as_ref())
+            .map(|(before, after)| {
+                let mut changed = before
+                    .iter()
+                    .chain(after)
+                    .map(|ty| ty.oid)
+                    .collect::<HashSet<_>>();
+                changed.retain(|oid| {
+                    before.iter().find(|ty| ty.oid == *oid)
+                        != after.iter().find(|ty| ty.oid == *oid)
+                });
+                changed
+            });
         // Both guards borrow `self`, and the bookkeeping below needs it back.
         // The batch has landed, so neither has anything left to protect.
         if let Some(frame) = self.savepoints.last_mut() {
@@ -7610,26 +7716,26 @@ impl SqlSession {
         drop(_g);
         drop(_id_guard);
         drop(_unique_guard);
-        let ddl_end_context = if let Some(dropped) = &drop_event_context {
-            Some(Arc::new(crate::clock::EventTriggerContext {
-                event: crabka_pgcatalog::trigger::EventTriggerEvent::DdlCommandEnd,
-                tag: event_tag.to_string(),
-                commands: dropped.dropped.clone(),
-                dropped: Vec::new(),
-                rewrite: None,
-            }))
-        } else if fires_event_triggers {
-            Some(crate::trigger::event_trigger_context(
-                &*self.catalog_kv,
-                &self.resolution_scope(),
-                stmt,
-                crabka_pgcatalog::trigger::EventTriggerEvent::DdlCommandEnd,
-                event_tag,
-            )?)
-        } else {
-            None
-        };
         let event_result = async {
+            let ddl_end_context = if let Some(dropped) = &drop_event_context {
+                Some(Arc::new(crate::clock::EventTriggerContext {
+                    event: crabka_pgcatalog::trigger::EventTriggerEvent::DdlCommandEnd,
+                    tag: event_tag.to_string(),
+                    commands: dropped.dropped.clone(),
+                    dropped: Vec::new(),
+                    rewrite: None,
+                }))
+            } else if fires_event_triggers {
+                Some(crate::trigger::event_trigger_context(
+                    &*self.catalog_kv,
+                    &self.resolution_scope(),
+                    stmt,
+                    crabka_pgcatalog::trigger::EventTriggerEvent::DdlCommandEnd,
+                    event_tag,
+                )?)
+            } else {
+                None
+            };
             if fires_event_triggers && crate::trigger::is_drop_ddl(stmt) {
                 self.fire_event_triggers(
                     crabka_pgcatalog::trigger::EventTriggerEvent::SqlDrop,
@@ -7664,17 +7770,29 @@ impl SqlSession {
         }
         .await;
         if let Err(error) = event_result {
-            let undo = catalog_before
-                .into_iter()
-                .map(|(key, value)| match value {
-                    Some(value) => WriteOp::Put { key, value },
-                    None => WriteOp::Delete { key },
+            // A hook can run nested type DDL. Capture that committed state
+            // before restoring this statement so the registry publishes the
+            // same inverse delta as the durable catalog.
+            let rejected_user_types = changed_user_type_oids
+                .as_ref()
+                .map(|changed| {
+                    crabka_pgcatalog::list_user_types(&*self.catalog_kv).map(|types| {
+                        types
+                            .into_iter()
+                            .filter(|ty| changed.contains(&ty.oid))
+                            .collect::<Vec<_>>()
+                    })
                 })
-                .collect::<Vec<_>>();
-            if Arc::ptr_eq(&self.kv, &self.catalog_kv) {
-                self.committer.commit(undo).await?;
-            } else {
-                self.catalog_kv.write_batch(&undo)?;
+                .transpose();
+            self.restore_catalog_snapshot(&catalog_before).await?;
+            if let (Some(rejected), Some(changed)) =
+                (rejected_user_types?, changed_user_type_oids.as_ref())
+            {
+                let restored = crabka_pgcatalog::list_user_types(&*self.catalog_kv)?
+                    .into_iter()
+                    .filter(|ty| changed.contains(&ty.oid))
+                    .collect::<Vec<_>>();
+                crabka_pgtypes::usertype::publish_catalog_delta(&rejected, &restored);
             }
             return Err(error);
         }
@@ -7683,6 +7801,20 @@ impl SqlSession {
             self.plpgsql_notice(PgError::notice(format!(
                 "merging multiple inherited definitions of column \"{column}\""
             )))?;
+        }
+        if let (Some(before), Some(changed)) = (&user_types_before, &changed_user_type_oids) {
+            // Hooks can commit nested type DDL after the outer batch. Publish
+            // the final durable state, not the pre-hook snapshot.
+            let before = before
+                .iter()
+                .filter(|ty| changed.contains(&ty.oid))
+                .cloned()
+                .collect::<Vec<_>>();
+            let after = crabka_pgcatalog::list_user_types(&*self.catalog_kv)?
+                .into_iter()
+                .filter(|ty| changed.contains(&ty.oid))
+                .collect::<Vec<_>>();
+            crabka_pgtypes::usertype::publish_catalog_delta(&before, &after);
         }
         Ok(result)
     }
@@ -8866,8 +8998,12 @@ impl Drop for SqlSession {
     }
 }
 
-fn parse_single_extended_statement(sql: &str) -> Result<Statement, PgError> {
-    let statements = crabka_pgparser::parse(sql).map_err(|e| ExecError::from(e).into_pg())?;
+fn parse_single_extended_statement(
+    sql: &str,
+    type_schemas: &[String],
+) -> Result<Statement, PgError> {
+    let statements = crabka_pgparser::parse_with_type_schemas(sql, type_schemas)
+        .map_err(|e| ExecError::from(e).into_pg())?;
     match statements.as_slice() {
         [] => Err(PgError::error(
             sqlstate::SYNTAX_ERROR,
@@ -8881,8 +9017,12 @@ fn parse_single_extended_statement(sql: &str) -> Result<Statement, PgError> {
     }
 }
 
-fn parse_single_copy_statement(sql: &str) -> Result<Option<CopyStmt>, PgError> {
-    let statements = crabka_pgparser::parse(sql).map_err(|e| ExecError::from(e).into_pg())?;
+fn parse_single_copy_statement(
+    sql: &str,
+    type_schemas: &[String],
+) -> Result<Option<CopyStmt>, PgError> {
+    let statements = crabka_pgparser::parse_with_type_schemas(sql, type_schemas)
+        .map_err(|e| ExecError::from(e).into_pg())?;
     match statements.as_slice() {
         [stmt] => match copy_sentinel_stmt(stmt)? {
             Some(copy) if matches!(copy.source, CopySource::Stdin) => Ok(Some(copy)),
@@ -10623,8 +10763,7 @@ fn decode_array_binary(
         return Err(PgError::error(
             "42804",
             format!(
-                "binary array parameter has element type {elem_oid}, but {} was expected",
-                expected_elem_oid
+                "binary array parameter has element type {elem_oid}, but {expected_elem_oid} was expected"
             ),
         ));
     }
@@ -11397,12 +11536,10 @@ fn resolve_ordering_family_oid(
         .schema
         .as_deref()
         .is_none_or(|schema| schema == "pg_catalog")
+        && let Some(oid) = crate::catalog_rel::builtin_operator_family_oid("btree", &reference.name)
     {
-        if let Some(oid) = crate::catalog_rel::builtin_operator_family_oid("btree", &reference.name)
-        {
-            return u32::try_from(oid)
-                .map_err(|_| ExecError::Unsupported("operator family oid is negative".into()));
-        }
+        return u32::try_from(oid)
+            .map_err(|_| ExecError::Unsupported("operator family oid is negative".into()));
     }
     let name = resolve_operator_object_name(
         kv,
@@ -11424,7 +11561,52 @@ fn resolve_ordering_family_oid(
 
 fn attach_known_runtime_diagnostics(sql: &str, stmt: &Statement, error: PgError) -> PgError {
     let error = attach_hidden_target_alias_diagnostic(sql, stmt, error);
-    attach_undefined_function_position(sql, attach_range_literal_position(sql, error))
+    attach_undefined_function_position(
+        sql,
+        attach_range_literal_position(sql, attach_bool_literal_position(sql, error)),
+    )
+}
+
+/// PostgreSQL resolves the legacy `bool 'literal'` type-input syntax during
+/// analysis and points at that literal when `boolin` rejects it. Attach the
+/// position only when the source contains one exact matching bool literal;
+/// ordinary text-to-boolean casts remain runtime errors without a caret.
+fn attach_bool_literal_position(sql: &str, error: PgError) -> PgError {
+    use crabka_pgparser::token::Token;
+
+    if error.code != "22P02"
+        || error
+            .diagnostics
+            .as_ref()
+            .is_some_and(|diagnostics| diagnostics.position.is_some())
+    {
+        return error;
+    }
+    let Some(value) = error
+        .message
+        .strip_prefix("invalid input syntax for type boolean: \"")
+        .and_then(|message| message.strip_suffix('"'))
+    else {
+        return error;
+    };
+    let Ok(tokens) = crabka_pgparser::lexer::lex(sql) else {
+        return error;
+    };
+    let positions: Vec<usize> = tokens
+        .windows(2)
+        .filter_map(|pair| match (&pair[0].0, &pair[1].0) {
+            (Token::Ident(type_name), Token::StringLit(candidate))
+                if matches!(type_name.as_str(), "bool" | "boolean") && candidate == value =>
+            {
+                Some(sql[..pair[1].1].chars().count() + 1)
+            }
+            _ => None,
+        })
+        .collect();
+    match positions.as_slice() {
+        [position] => error.with_position(*position),
+        _ => error,
+    }
 }
 
 /// Refine a missing DML target reference when the statement proves an alias
@@ -11797,7 +11979,8 @@ impl Session for SqlSession {
             self.reject_prepared_participant()
                 .map_err(ExecError::into_pg)?;
             let result = (|| {
-                let statement = parse_single_extended_statement(sql)?;
+                let type_schemas = self.type_search_schemas().map_err(ExecError::into_pg)?;
+                let statement = parse_single_extended_statement(sql, &type_schemas)?;
                 let shape = self.describe_prepared_shape(&statement, param_types)?;
                 let description = PreparedDescription {
                     fields: shape.fields?,
@@ -12062,7 +12245,8 @@ impl Session for SqlSession {
         // This is the wire loop's first look at a simple-query string, so a
         // parse failure here is the one the client sees — and PostgreSQL aborts
         // an open transaction block on a syntax error like any other.
-        let parsed = parse_single_copy_statement(sql).inspect_err(|_| {
+        let type_schemas = self.type_search_schemas().map_err(ExecError::into_pg)?;
+        let parsed = parse_single_copy_statement(sql, &type_schemas).inspect_err(|_| {
             self.mark_transaction_failed();
         })?;
         let Some(copy) = parsed else {
@@ -12076,7 +12260,8 @@ impl Session for SqlSession {
         sql: &str,
         data: Vec<bytes::Bytes>,
     ) -> Result<QueryResult, PgError> {
-        let Some(copy) = parse_single_copy_statement(sql)? else {
+        let type_schemas = self.type_search_schemas().map_err(ExecError::into_pg)?;
+        let Some(copy) = parse_single_copy_statement(sql, &type_schemas)? else {
             return Err(PgError::error(
                 sqlstate::SYNTAX_ERROR,
                 "COPY data received for a non-COPY statement",
@@ -17709,6 +17894,52 @@ mod session_conformance_tests {
             .with_position(position);
             assert!(error == expected, "{sql}: {error:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn legacy_bool_input_errors_point_at_the_literal() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for (sql, position) in [
+            ("SELECT bool 'test'", 13),
+            ("INSERT INTO missing VALUES (bool 'XXX')", 34),
+        ] {
+            let error = if sql.starts_with("INSERT") {
+                // Isolate the type-input error from relation lookup.
+                session
+                    .simple_query("CREATE TABLE missing (value bool)")
+                    .await
+                    .expect("table");
+                session.simple_query(sql).await.expect_err("invalid bool")
+            } else {
+                session.simple_query(sql).await.expect_err("invalid bool")
+            };
+            assert!(error.code == "22P02", "{sql}: {error:?}");
+            assert!(
+                error
+                    .diagnostics
+                    .as_ref()
+                    .and_then(|diagnostics| diagnostics.position)
+                    == Some(position),
+                "{sql}: {error:?}"
+            );
+        }
+
+        let ambiguous = super::attach_bool_literal_position(
+            "SELECT bool 'bad', bool 'bad'",
+            crabka_pgwire::error::PgError::error(
+                "22P02",
+                "invalid input syntax for type boolean: \"bad\"",
+            ),
+        );
+        assert!(
+            ambiguous
+                .diagnostics
+                .as_ref()
+                .and_then(|diagnostics| diagnostics.position)
+                .is_none(),
+            "an ambiguous literal is not guessed"
+        );
     }
 
     #[tokio::test]

@@ -1,17 +1,17 @@
-//! PostgreSQL geometric scalar values.
+//! `PostgreSQL` geometric scalar values.
 
 use std::hash::{Hash, Hasher};
 
 use crate::TypeError;
 
-/// PostgreSQL `point`: two IEEE-754 double-precision coordinates.
+/// `PostgreSQL` `point`: two IEEE-754 double-precision coordinates.
 #[derive(Debug, Clone, Copy)]
 pub struct Point {
     pub x: f64,
     pub y: f64,
 }
 
-/// PostgreSQL `path`: an ordered series of points, either open or closed.
+/// `PostgreSQL` `path`: an ordered series of points, either open or closed.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Path {
     pub closed: bool,
@@ -160,16 +160,16 @@ mod tests {
 
     #[test]
     fn point_input_accepts_coordinates_and_rejects_bad_shapes() {
-        assert!(
-            Point::parse(" ( -10, Infinity ) ")
-                == Ok(Point {
-                    x: -10.0,
-                    y: f64::INFINITY
-                })
+        assert_eq!(
+            Point::parse(" ( -10, Infinity ) "),
+            Ok(Point {
+                x: -10.0,
+                y: f64::INFINITY
+            })
         );
-        assert!(Point::parse("10,20") == Ok(Point { x: 10.0, y: 20.0 }));
-        assert!(Point::parse("(10 20)").unwrap_err().sqlstate() == "22P02");
-        assert!(Point::parse("(10,1e500)").unwrap_err().sqlstate() == "22003");
+        assert_eq!(Point::parse("10,20"), Ok(Point { x: 10.0, y: 20.0 }));
+        assert_eq!(Point::parse("(10 20)").unwrap_err().sqlstate(), "22P02");
+        assert_eq!(Point::parse("(10,1e500)").unwrap_err().sqlstate(), "22003");
     }
 
     #[test]
@@ -178,6 +178,6 @@ mod tests {
         assert!(!open.closed && open.points.len() == 2);
         let closed = Path::parse("((0,0),(1,1))").unwrap();
         assert!(closed.closed && closed.points.len() == 2);
-        assert!(Path::parse("[(0,0),]").unwrap_err().sqlstate() == "22P02");
+        assert_eq!(Path::parse("[(0,0),]").unwrap_err().sqlstate(), "22P02");
     }
 }

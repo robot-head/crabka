@@ -313,6 +313,33 @@ async fn aggregate_over_join() {
 }
 
 #[tokio::test]
+async fn left_join_or_equality_branches_return_each_match_once() {
+    let client = connect(spawn().await).await;
+    client
+        .batch_execute(
+            "CREATE TABLE or_left (x int4, y int4); \
+             CREATE TABLE or_right (k int4); \
+             INSERT INTO or_left \
+               SELECT i % 100, CASE WHEN i < 100 THEN i % 100 ELSE (i + 1) % 100 END \
+               FROM generate_series(0, 999) AS g(i); \
+             INSERT INTO or_right SELECT i % 100 FROM generate_series(0, 999) AS g(i)",
+        )
+        .await
+        .expect("seed OR equijoin");
+
+    let row = client
+        .query_one(
+            "SELECT count(*) FROM or_left l LEFT JOIN or_right r \
+             ON r.k = l.x OR r.k = l.y",
+            &[],
+        )
+        .await
+        .expect("OR equijoin count");
+
+    assert_eq!(row.get::<_, i64>(0), 19_000);
+}
+
+#[tokio::test]
 async fn ambiguous_bare_column_is_42702() {
     let client = connect(spawn().await).await;
     seed(&client).await;

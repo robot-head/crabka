@@ -10,11 +10,9 @@
 //! The registry is process-wide rather than per-session because
 //! [`ColumnType::from_sql_name`] is a pure function reached from the parser,
 //! from `CHECK`-constraint re-parsing, and from view expansion, none of which
-//! hold a catalog handle. Gres already applies DDL outside transaction control
-//! (a `CREATE TABLE` in a rolled-back block survives), so a type surviving its
-//! rolled-back `CREATE TYPE` is the same documented divergence rather than a new
-//! one. The durable definition still lives in the catalog; [`register`] is how
-//! the catalog's contents reach the parser.
+//! hold a catalog handle. The durable definition still lives in the catalog;
+//! accepted DDL publishes an atomic catalog-snapshot delta here, and catalog
+//! rollback publishes the inverse delta.
 
 use std::{
     collections::HashMap,
@@ -162,6 +160,10 @@ pub enum UserTypeBody {
 pub struct RangeBody {
     pub subtype: ColumnType,
     pub collation: Option<String>,
+    /// Schema of an explicitly named multirange companion. `None` means the
+    /// default companion in the range type's own schema.
+    pub multirange_schema: Option<String>,
+    /// Unqualified name of an explicitly named multirange companion.
     pub multirange_name: Option<String>,
 }
 
@@ -184,36 +186,50 @@ pub struct DomainBody {
 pub struct UserType {
     /// `pg_type.oid`.
     pub oid: u32,
-    /// `pg_type.typname`.
+    /// `pg_namespace.nspname` for the type.
+    pub schema: String,
+    /// `pg_type.typname`, always unqualified.
     pub name: String,
     /// The definition.
     pub body: UserTypeBody,
 }
 
 impl UserType {
+    /// The name used by SQL lookup: bare in `public`, schema-qualified
+    /// everywhere else.
+    #[must_use]
+    pub fn qualified_name(&self) -> String {
+        if self.schema == USER_TYPE_DEFAULT_SCHEMA {
+            self.name.clone()
+        } else {
+            format!("{}.{}", self.schema, self.name)
+        }
+    }
+
     /// The `Copy` reference that a [`ColumnType`] carries for this type.
     #[must_use]
     pub fn type_ref(&self) -> UserTypeRef {
         UserTypeRef {
             oid: self.oid,
-            name: intern(&self.name),
+            name: intern(&self.qualified_name()),
         }
     }
 
     /// This type as a [`ColumnType`].
     #[must_use]
     pub fn column_type(&self) -> ColumnType {
+        let qualified_name = self.qualified_name();
         match &self.body {
             UserTypeBody::Composite(_) => ColumnType::Record(Some(self.type_ref())),
             UserTypeBody::Enum(_) => ColumnType::Enum(self.type_ref()),
             UserTypeBody::Range(range) => ColumnType::Range(RangeRef {
                 oid: self.oid,
-                name: intern(&self.name),
+                name: intern(&qualified_name),
                 subtype: leak_column_type(range.subtype),
             }),
             UserTypeBody::Domain(domain) => ColumnType::Domain(DomainRef {
                 oid: self.oid,
-                name: intern(&self.name),
+                name: intern(&qualified_name),
                 base: leak_column_type(domain.base),
             }),
         }
@@ -235,15 +251,25 @@ impl UserType {
     /// The explicit or automatically-derived companion name.
     #[must_use]
     pub fn multirange_name(&self) -> Option<String> {
+        let (schema, name) = self.multirange_identity()?;
+        Some(if schema == USER_TYPE_DEFAULT_SCHEMA {
+            name
+        } else {
+            format!("{schema}.{name}")
+        })
+    }
+
+    /// Exact schema and unqualified name of a range's companion type.
+    #[must_use]
+    pub fn multirange_identity(&self) -> Option<(String, String)> {
         let UserTypeBody::Range(range) = &self.body else {
             return None;
         };
-        Some(
-            range
-                .multirange_name
-                .clone()
-                .unwrap_or_else(|| default_multirange_name(&self.name)),
-        )
+        match (&range.multirange_schema, &range.multirange_name) {
+            (Some(schema), Some(name)) => Some((schema.clone(), name.clone())),
+            (None, None) => Some((self.schema.clone(), default_multirange_name(&self.name))),
+            _ => None,
+        }
     }
 
     /// `pg_type.typtype`.
@@ -300,13 +326,18 @@ impl UserType {
 /// (16384) so that `oid >= 16384` "is a user object" tests behave.
 const FIRST_USER_TYPE_OID: u32 = 300_000;
 
+/// The default schema used by the process-wide parser registry.
+pub const USER_TYPE_DEFAULT_SCHEMA: &str = "public";
+
 /// Oids are handed out in this stride so that a composite's type oid, its array
 /// type oid and its backing `pg_class` relation oid never collide.
 const OID_STRIDE: u32 = 4;
 
 #[derive(Default)]
 struct Registry {
+    by_identity: HashMap<(String, String), u32>,
     by_lower_name: HashMap<String, u32>,
+    multirange_by_identity: HashMap<(String, String), u32>,
     multirange_by_lower_name: HashMap<String, u32>,
     by_oid: HashMap<u32, UserType>,
     next_oid: u32,
@@ -396,20 +427,30 @@ pub fn register(name: &str, body: UserTypeBody) -> UserType {
     guard.next_oid += OID_STRIDE;
     let ty = UserType {
         oid,
+        schema: USER_TYPE_DEFAULT_SCHEMA.to_string(),
         name: name.to_string(),
         body,
     };
-    guard.by_lower_name.insert(name.to_ascii_lowercase(), oid);
+    let qualified_name = ty.qualified_name();
+    guard
+        .by_identity
+        .insert((ty.schema.clone(), ty.name.clone()), oid);
+    guard
+        .by_lower_name
+        .insert(qualified_name.to_ascii_lowercase(), oid);
     if let Some(companion) = ty.multirange_name() {
         guard
             .multirange_by_lower_name
             .insert(companion.to_ascii_lowercase(), oid);
     }
+    if let Some(identity) = ty.multirange_identity() {
+        guard.multirange_by_identity.insert(identity, oid);
+    }
     guard.by_oid.insert(oid, ty.clone());
     // Intern eagerly so `column_type()` never has to take the interner lock
     // while the registry lock is held.
     drop(guard);
-    let _ = intern(name);
+    let _ = intern(&qualified_name);
     ty
 }
 
@@ -421,25 +462,90 @@ pub fn register(name: &str, body: UserTypeBody) -> UserType {
 /// If the process-wide user-type registry lock is poisoned, which can only
 /// happen if another thread panicked while holding it.
 pub fn replace(ty: &UserType) {
-    let _ = intern(&ty.name);
+    let qualified_name = ty.qualified_name();
+    let _ = intern(&qualified_name);
     if let Some(companion) = ty.multirange_name() {
         let _ = intern(&companion);
     }
     let mut guard = registry().write().expect("user type registry is healthy");
-    guard.by_lower_name.retain(|_, oid| *oid != ty.oid);
-    guard
+    remove_name_mappings(&mut guard, ty.oid);
+    insert_type(&mut guard, ty);
+}
+
+/// Atomically publish the user-type changes between two durable catalog
+/// snapshots. Callers take the snapshots on either side of one committed DDL
+/// batch and invoke this only after every post-DDL acceptance hook succeeds.
+/// Dropped definitions remain addressable by oid for decoding old rows, while
+/// their SQL names disappear.
+///
+/// # Panics
+///
+/// If the process-wide user-type registry lock is poisoned, which can only
+/// happen if another thread panicked while holding it.
+pub fn publish_catalog_delta(before: &[UserType], after: &[UserType]) {
+    let before_by_oid = before
+        .iter()
+        .map(|ty| (ty.oid, ty))
+        .collect::<HashMap<_, _>>();
+    let after_by_oid = after
+        .iter()
+        .map(|ty| (ty.oid, ty))
+        .collect::<HashMap<_, _>>();
+    let changed_after = after
+        .iter()
+        .filter(|ty| before_by_oid.get(&ty.oid).copied() != Some(*ty))
+        .collect::<Vec<_>>();
+
+    // Intern before taking the registry lock: constructing a ColumnType from
+    // the newly published definition may take the interner lock in the other
+    // order.
+    for ty in &changed_after {
+        let _ = intern(&ty.qualified_name());
+        if let Some(companion) = ty.multirange_name() {
+            let _ = intern(&companion);
+        }
+    }
+
+    let mut guard = registry().write().expect("user type registry is healthy");
+    for ty in before {
+        if after_by_oid.get(&ty.oid).copied() != Some(ty) {
+            remove_name_mappings(&mut guard, ty.oid);
+        }
+    }
+    for ty in changed_after {
+        insert_type(&mut guard, ty);
+    }
+}
+
+fn remove_name_mappings(registry: &mut Registry, oid: u32) {
+    registry.by_identity.retain(|_, found| *found != oid);
+    registry.by_lower_name.retain(|_, found| *found != oid);
+    registry
+        .multirange_by_identity
+        .retain(|_, found| *found != oid);
+    registry
         .multirange_by_lower_name
-        .retain(|_, oid| *oid != ty.oid);
-    guard
+        .retain(|_, found| *found != oid);
+}
+
+fn insert_type(registry: &mut Registry, ty: &UserType) {
+    let qualified_name = ty.qualified_name();
+    registry
+        .by_identity
+        .insert((ty.schema.clone(), ty.name.clone()), ty.oid);
+    registry
         .by_lower_name
-        .insert(ty.name.to_ascii_lowercase(), ty.oid);
+        .insert(qualified_name.to_ascii_lowercase(), ty.oid);
     if let Some(companion) = ty.multirange_name() {
-        guard
+        registry
             .multirange_by_lower_name
             .insert(companion.to_ascii_lowercase(), ty.oid);
     }
-    guard.by_oid.insert(ty.oid, ty.clone());
-    guard.next_oid = guard.next_oid.max(ty.oid + OID_STRIDE);
+    if let Some(identity) = ty.multirange_identity() {
+        registry.multirange_by_identity.insert(identity, ty.oid);
+    }
+    registry.by_oid.insert(ty.oid, ty.clone());
+    registry.next_oid = registry.next_oid.max(ty.oid + OID_STRIDE);
 }
 
 /// Forget the type named `name` (`DROP TYPE` / `DROP DOMAIN`).
@@ -460,6 +566,31 @@ pub fn unregister(name: &str) {
     // reference is 42704 and `CREATE TYPE` may reuse the name with a fresh oid.
     let mut guard = registry().write().expect("user type registry is healthy");
     if let Some(oid) = guard.by_lower_name.remove(&name.to_ascii_lowercase()) {
+        guard.by_identity.retain(|_, found| *found != oid);
+        guard
+            .multirange_by_identity
+            .retain(|_, found| *found != oid);
+        guard
+            .multirange_by_lower_name
+            .retain(|_, found| *found != oid);
+    }
+}
+
+/// Forget one exact `(schema, name)` identity while retaining the legacy raw-
+/// string entrypoint for callers that do not have structured parser metadata.
+///
+/// # Panics
+///
+/// If the process-wide user-type registry lock is poisoned, which can only
+/// happen if another thread panicked while holding it.
+pub fn unregister_in(schema: &str, name: &str) {
+    let mut guard = registry().write().expect("user type registry is healthy");
+    let identity = (schema.to_string(), name.to_string());
+    if let Some(oid) = guard.by_identity.remove(&identity) {
+        guard.by_lower_name.retain(|_, found| *found != oid);
+        guard
+            .multirange_by_identity
+            .retain(|_, found| *found != oid);
         guard
             .multirange_by_lower_name
             .retain(|_, found| *found != oid);
@@ -476,7 +607,26 @@ pub fn unregister(name: &str) {
 #[must_use]
 pub fn lookup(name: &str) -> Option<UserType> {
     let guard = registry().read().expect("user type registry is healthy");
-    let oid = *guard.by_lower_name.get(&name.to_ascii_lowercase())?;
+    let lower_name = name.to_ascii_lowercase();
+    let oid = *guard
+        .by_identity
+        .get(&(USER_TYPE_DEFAULT_SCHEMA.to_string(), name.to_string()))
+        .or_else(|| guard.by_lower_name.get(&lower_name))?;
+    guard.by_oid.get(&oid).cloned()
+}
+
+/// The type with this exact structured identity.
+///
+/// # Panics
+///
+/// If the process-wide user-type registry lock is poisoned, which can only
+/// happen if another thread panicked while holding it.
+#[must_use]
+pub fn lookup_in(schema: &str, name: &str) -> Option<UserType> {
+    let guard = registry().read().expect("user type registry is healthy");
+    let oid = *guard
+        .by_identity
+        .get(&(schema.to_string(), name.to_string()))?;
     guard.by_oid.get(&oid).cloned()
 }
 
@@ -512,6 +662,11 @@ pub fn all() -> Vec<UserType> {
 
 /// The `ColumnType` a SQL type name resolves to when it is not built in.
 /// [`ColumnType::from_sql_name`] falls through to this.
+///
+/// # Panics
+///
+/// If the process-wide user-type registry lock is poisoned, which can only
+/// happen if another thread panicked while holding it.
 #[must_use]
 pub fn column_type_for_name(name: &str) -> Option<ColumnType> {
     if let Some(ty) = lookup(name) {
@@ -524,6 +679,24 @@ pub fn column_type_for_name(name: &str) -> Option<ColumnType> {
     guard.by_oid.get(&oid)?.multirange_type()
 }
 
+/// Resolve an exact schema and unqualified user-type name.
+///
+/// # Panics
+///
+/// If the process-wide user-type registry lock is poisoned, which can only
+/// happen if another thread panicked while holding it.
+#[must_use]
+pub fn column_type_for_name_in(schema: &str, name: &str) -> Option<ColumnType> {
+    if let Some(ty) = lookup_in(schema, name) {
+        return Some(ty.column_type());
+    }
+    let guard = registry().read().expect("user type registry is healthy");
+    let oid = *guard
+        .multirange_by_identity
+        .get(&(schema.to_string(), name.to_string()))?;
+    guard.by_oid.get(&oid)?.multirange_type()
+}
+
 /// Resolve either a user type oid or its derived multirange oid.
 #[must_use]
 pub fn column_type_for_oid(oid: u32) -> Option<ColumnType> {
@@ -533,11 +706,24 @@ pub fn column_type_for_oid(oid: u32) -> Option<ColumnType> {
     lookup_oid(oid.checked_sub(3)?)?.multirange_type()
 }
 
+/// Derives the default multirange companion name for a range type.
+#[must_use]
 pub fn default_multirange_name(range_name: &str) -> String {
-    range_name.strip_suffix("range").map_or_else(
+    let mut name = range_name.find("range").map_or_else(
         || format!("{range_name}_multirange"),
-        |stem| format!("{stem}multirange"),
-    )
+        |start| {
+            let end = start + "range".len();
+            format!("{}multirange{}", &range_name[..start], &range_name[end..])
+        },
+    );
+    if name.len() > 63 {
+        let mut end = 63;
+        while !name.is_char_boundary(end) {
+            end -= 1;
+        }
+        name.truncate(end);
+    }
+    name
 }
 
 /// The `pg_class` oid of the relation backing a composite type
@@ -564,6 +750,15 @@ pub fn user_multirange_array_oid(multirange_oid: u32) -> u32 {
 mod tests {
 
     #[test]
+    fn default_multirange_names_replace_first_range_and_fit_name_limit() {
+        assert_eq!(default_multirange_name("price"), "price_multirange");
+        assert_eq!(default_multirange_name("range_range"), "multirange_range");
+        let clipped = default_multirange_name(&"x".repeat(70));
+        assert_eq!(clipped.len(), 63);
+        assert!(clipped.is_char_boundary(clipped.len()));
+    }
+
+    #[test]
     fn range_registers_derived_multirange_name_and_oid() {
         use crate::{ColumnType, usertype::RangeBody};
 
@@ -572,6 +767,7 @@ mod tests {
             UserTypeBody::Range(RangeBody {
                 subtype: ColumnType::Text,
                 collation: Some("C".into()),
+                multirange_schema: None,
                 multirange_name: None,
             }),
         );

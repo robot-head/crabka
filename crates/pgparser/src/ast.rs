@@ -836,7 +836,7 @@ pub enum UtilityStatement {
     },
     /// `SECURITY LABEL [FOR provider] ON { TABLE | ROLE } object IS { label | NULL }`.
     /// Object and label are intentionally discarded: without a loaded provider,
-    /// PostgreSQL fails before resolving either one.
+    /// `PostgreSQL` fails before resolving either one.
     SecurityLabel {
         provider: Option<String>,
     },
@@ -1296,6 +1296,10 @@ pub enum OnConflictTarget {
 }
 
 /// What to do with a row that conflicts.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "boxing public AST variants would cascade API changes through parser and executor consumers"
+)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum OnConflictAction {
     /// `DO NOTHING` — skip the row.
@@ -3515,6 +3519,10 @@ pub enum PlPgSqlVariableConflict {
 }
 
 /// One entry in a PL/pgSQL `DECLARE` section.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "boxing public AST variants would cascade API changes through parser and executor consumers"
+)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlPgSqlDeclaration {
     Variable {
@@ -3630,6 +3638,10 @@ pub enum PlPgSqlStatement {
 }
 
 /// The source iterated by a PL/pgSQL loop.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "boxing public AST variants would cascade API changes through parser and executor consumers"
+)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlPgSqlLoop {
     Unconditional,

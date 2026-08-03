@@ -682,7 +682,16 @@ impl ColumnType {
     /// Resolve a bare SQL type name (no modifier). `numeric`/`decimal` resolve to
     /// the unconstrained form; the parser layers the `(p, s)` modifier on top.
     pub fn from_sql_name(name: &str) -> Option<Self> {
-        match name.to_ascii_lowercase().as_str() {
+        Self::from_builtin_sql_name(&name.to_ascii_lowercase())
+            .or_else(|| crate::usertype::column_type_for_name(name))
+    }
+
+    /// Resolve only a built-in SQL type name. Session-aware parsers use this
+    /// while walking `pg_catalog` in search-path order, then consult exact user
+    /// type identities for every other visible schema.
+    #[must_use]
+    pub fn from_builtin_sql_name(name: &str) -> Option<Self> {
+        match name {
             "int2" | "smallint" => Some(ColumnType::Int2),
             "int4" | "integer" | "int" => Some(ColumnType::Int4),
             "int8" | "bigint" => Some(ColumnType::Int8),
@@ -751,9 +760,7 @@ impl ColumnType {
             "tstzmultirange" => ColumnType::builtin_multirange(oids::TSTZMULTIRANGE),
             "datemultirange" => ColumnType::builtin_multirange(oids::DATEMULTIRANGE),
             "int8multirange" => ColumnType::builtin_multirange(oids::INT8MULTIRANGE),
-            // A name that is not built in may be a user-defined type; the
-            // registry the DDL writes into is what makes `x::my_type` resolve.
-            other => crate::usertype::column_type_for_name(other),
+            _ => None,
         }
     }
 

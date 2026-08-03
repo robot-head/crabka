@@ -311,6 +311,7 @@ pub(crate) async fn execute_trigger_function(
     invocation: crate::trigger::TriggerInvocation,
 ) -> Result<Datum, ExecError> {
     let block = crate::routine::parse_plpgsql_body(routine)?;
+    let is_event_trigger = invocation.event.is_some();
     let mut frame = root_frame();
     frame.label = Some(routine.name.clone());
     let record_types: Arc<[ColumnType]> = Arc::from(invocation.column_types);
@@ -382,6 +383,7 @@ pub(crate) async fn execute_trigger_function(
     };
     match interpreter.exec_block(&block).await? {
         Flow::Return(value) => Ok(value),
+        Flow::Next if is_event_trigger => Ok(Datum::Null),
         Flow::Next => Err(ExecError::FunctionError {
             sqlstate: "2F005",
             message: "control reached end of trigger procedure without RETURN".to_string(),

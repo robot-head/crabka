@@ -24,14 +24,15 @@ use crate::{
 /// error. Measured on that 2 MiB stack (both plain-debug AND llvm-cov-
 /// instrumented builds, since CI runs `cargo llvm-cov nextest`), a deeply-nested
 /// `(((…)))` paren parse — the heaviest recursion, an `expr`→`prefix`→`expr`
-/// round-trip per level — overflows the stack at a nesting depth of ~133. `50`
-/// leaves ~2.6x headroom below that ceiling; the executor's eval recursion
+/// round-trip per level — can exhaust the stack before 50 levels once the full
+/// pgwire/session call stack is included. `24` keeps the explicit 20-level
+/// compatibility floor while leaving headroom for those enclosing frames; eval
 /// (ceiling >12 000 on the same stack) and the AST's recursive `Box` `Drop` are
-/// nowhere near it. Real queries nest well under ~50 levels. This cap is
+/// nowhere near it. Real queries nest well under 24 levels. This cap is
 /// deliberately MUCH more conservative than `PostgreSQL`'s own (far higher)
 /// `max_stack_depth` — both return `54001` for sufficiently deep input, which is
 /// what matters for closing the `DoS`.
-pub(crate) const MAX_DEPTH: usize = 50;
+pub(crate) const MAX_DEPTH: usize = 24;
 
 /// The result-level tail of a query expression: `ORDER BY` plus the row-count
 /// window. `limit`/`offset` are arbitrary expressions because `PostgreSQL`
@@ -107,6 +108,9 @@ pub(crate) struct Parser {
     toks: Vec<(Token, usize)>,
     source: String,
     pos: usize,
+    /// Ordered schemas used to resolve an unqualified user type. `None` keeps
+    /// the public parser entrypoint's legacy process-registry lookup.
+    type_schemas: Option<Vec<String>>,
     /// Current recursion depth of the recursive productions (`expr`,
     /// `select_core`). Held behind an `Rc<Cell<…>>` so the RAII [`DepthGuard`]
     /// can hold an OWNED clone of the handle rather than a borrow of `self` —
@@ -225,12 +229,18 @@ impl Parser {
             toks,
             source,
             pos: 0,
+            type_schemas: None,
             depth: Rc::new(Cell::new(0)),
             select_into: None,
             window_calls: Vec::new(),
             window_spec_depth: 0,
             unnamed_subqueries: 0,
         }
+    }
+
+    fn with_type_schemas(mut self, schemas: &[String]) -> Self {
+        self.type_schemas = Some(schemas.to_vec());
+        self
     }
 
     fn peek(&self) -> &Token {
@@ -484,13 +494,13 @@ impl Parser {
     fn parse_type_name(&mut self) -> Result<crabka_pgtypes::ColumnType, ParseError> {
         let type_pos = self.peek_pos();
         let mut type_word = self.expect_ident()?;
-        // PostgreSQL allows qualifying any built-in type with its schema
-        // (`$1::pg_catalog.regclass`, `x::pg_catalog.text`); built-ins all
-        // live in pg_catalog, so the qualifier resolves to the bare name.
-        if type_word == "pg_catalog" && *self.peek() == Token::Dot {
+        let type_schema = if *self.peek() == Token::Dot {
             self.bump();
-            type_word = self.expect_ident()?;
-        }
+            let schema = std::mem::replace(&mut type_word, self.expect_ident()?);
+            Some(schema)
+        } else {
+            None
+        };
         if type_word.eq_ignore_ascii_case("double")
             && matches!(self.peek(), Token::Ident(w) if w.eq_ignore_ascii_case("precision"))
         {
@@ -533,10 +543,33 @@ impl Parser {
             let qualifier = if with_zone { "with" } else { "without" };
             type_word = format!("{} {qualifier} time zone", type_word.to_ascii_lowercase());
         }
-        let ty = crabka_pgtypes::ColumnType::from_sql_name(&type_word).ok_or_else(|| {
+        let lookup_name = type_schema.as_ref().map_or_else(
+            || type_word.clone(),
+            |schema| format!("{schema}.{type_word}"),
+        );
+        // `pg_catalog` qualification exposes built-ins. Every other qualifier
+        // reaches the user-type registry as two identity parts so a quoted dot
+        // in either identifier is never mistaken for qualification.
+        let ty = match type_schema.as_deref() {
+            Some("pg_catalog") => crabka_pgtypes::ColumnType::from_builtin_sql_name(&type_word),
+            Some(schema) => crabka_pgtypes::usertype::column_type_for_name_in(schema, &type_word),
+            None => self.type_schemas.as_ref().map_or_else(
+                || crabka_pgtypes::ColumnType::from_sql_name(&type_word),
+                |schemas| {
+                    schemas.iter().find_map(|schema| {
+                        if schema == "pg_catalog" {
+                            crabka_pgtypes::ColumnType::from_builtin_sql_name(&type_word)
+                        } else {
+                            crabka_pgtypes::usertype::column_type_for_name_in(schema, &type_word)
+                        }
+                    })
+                },
+            ),
+        }
+        .ok_or_else(|| {
             ParseError::new_sqlstate(
                 "42704",
-                format!("type \"{type_word}\" does not exist"),
+                format!("type \"{lookup_name}\" does not exist"),
                 type_pos,
             )
         })?;
@@ -552,7 +585,7 @@ impl Parser {
         } else {
             ty
         };
-        self.parse_array_type_suffix(base, &type_word, type_pos)
+        self.parse_array_type_suffix(base, &lookup_name, type_pos)
     }
 
     /// Consume an optional array suffix after a base type name — `[]`, `[N]`,
@@ -7734,7 +7767,7 @@ impl Parser {
             }
             right
         } else if allow_one {
-            left.clone()
+            left
         } else {
             return Err(ParseError::new_sqlstate(
                 "42601",
@@ -11731,6 +11764,28 @@ pub fn parse(sql: &str) -> Result<Vec<crate::ast::Statement>, ParseError> {
         .collect())
 }
 
+/// Parse statements with an ordered, already-resolved type search path.
+/// Built-ins resolve when `pg_catalog` is reached; user types resolve by their
+/// exact `(schema, name)` identity in every other entry.
+///
+/// # Errors
+///
+/// Returns a parse error when the SQL text cannot be tokenized or parsed.
+pub fn parse_with_type_schemas(
+    sql: &str,
+    schemas: &[String],
+) -> Result<Vec<crate::ast::Statement>, ParseError> {
+    if let Some((statement, _identity)) = bounded_non_goal_refusal(sql) {
+        return Ok(vec![statement]);
+    }
+    let mut parser = Parser::new(lex(sql)?, sql.to_string()).with_type_schemas(schemas);
+    Ok(parser
+        .program_spanned()?
+        .into_iter()
+        .map(|(parsed, _)| parsed.statement)
+        .collect())
+}
+
 /// Parse a standalone scalar expression — the stored source text of a `CHECK`
 /// predicate, a generated-column expression, or a partial-index predicate.
 ///
@@ -12154,7 +12209,7 @@ mod tests {
         let Statement::CreateIndex { keys, .. } = one("CREATE INDEX i ON t (data)") else {
             panic!("expected CREATE INDEX");
         };
-        assert!(keys[0].column.as_deref() == Some("data"));
+        assert_eq!(keys[0].column.as_deref(), Some("data"));
     }
 
     #[test]

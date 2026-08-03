@@ -1,4 +1,4 @@
-//! Planner gates for operations whose PostgreSQL implementation needs an
+//! Planner gates for operations whose `PostgreSQL` implementation needs an
 //! equality, ordering, or default index operator class.
 
 use crabka_pgexec::{SqlEngine, SqlSession};

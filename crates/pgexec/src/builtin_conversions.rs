@@ -1,4 +1,8 @@
 // Generated from PostgreSQL REL_18_4 postgres.bki.
+#[allow(
+    clippy::type_complexity,
+    reason = "generated PostgreSQL catalog rows preserve the source tuple shape"
+)]
 pub(crate) const BUILTIN_CONVERSIONS: &[(i32, &str, i32, i32, i32, i32, i32, bool)] = &[
     (4402, "koi8_r_to_mic", 11, 10, 22, 7, 4302, true),
     (4403, "mic_to_koi8_r", 11, 10, 7, 22, 4303, true),

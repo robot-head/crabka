@@ -18,9 +18,8 @@ fn rows(result: &QueryResult) -> &Vec<Vec<Option<crabka_pgwire::engine::Cell>>> 
     rows
 }
 
-fn text(cell: &Option<crabka_pgwire::engine::Cell>) -> Option<&str> {
-    cell.as_ref()
-        .map(|cell| std::str::from_utf8(&cell.text).expect("UTF-8 result"))
+fn text(cell: Option<&crabka_pgwire::engine::Cell>) -> Option<&str> {
+    cell.map(|cell| std::str::from_utf8(&cell.text).expect("UTF-8 result"))
 }
 
 #[tokio::test]
@@ -44,7 +43,10 @@ async fn jsonpath_is_canonicalized_and_reports_native_wire_metadata() {
     assert_eq!(cell.binary.as_ref(), b"\x01$.\"a\"");
 
     let typeof_result = run(&mut session, "SELECT pg_typeof('$.a'::jsonpath)").await;
-    assert_eq!(text(&rows(&typeof_result[0])[0][0]), Some("jsonpath"));
+    assert_eq!(
+        text(rows(&typeof_result[0])[0][0].as_ref()),
+        Some("jsonpath")
+    );
 
     let error = session
         .simple_query("SELECT ''::jsonpath")
@@ -59,7 +61,10 @@ async fn jsonpath_is_canonicalized_and_reports_native_wire_metadata() {
     )
     .await;
     assert_eq!(
-        rows(&validity[0])[0].iter().map(text).collect::<Vec<_>>(),
+        rows(&validity[0])[0]
+            .iter()
+            .map(|cell| text(cell.as_ref()))
+            .collect::<Vec<_>>(),
         vec![Some("t"), Some("f")],
     );
     let info = run(
@@ -68,7 +73,10 @@ async fn jsonpath_is_canonicalized_and_reports_native_wire_metadata() {
     )
     .await;
     assert_eq!(
-        rows(&info[0])[0].iter().map(text).collect::<Vec<_>>(),
+        rows(&info[0])[0]
+            .iter()
+            .map(|cell| text(cell.as_ref()))
+            .collect::<Vec<_>>(),
         vec![
             Some("invalid input syntax for type jsonpath: \"\""),
             Some("22P02"),
@@ -99,7 +107,11 @@ async fn jsonpath_catalog_storage_and_jsonb_calls_keep_the_distinct_type() {
     assert_eq!(
         rows(&catalog[0])
             .iter()
-            .map(|row| row.iter().map(text).collect::<Vec<_>>())
+            .map(|row| {
+                row.iter()
+                    .map(|cell| text(cell.as_ref()))
+                    .collect::<Vec<_>>()
+            })
             .collect::<Vec<_>>(),
         vec![vec![
             Some("4072"),
@@ -121,9 +133,9 @@ async fn jsonpath_catalog_storage_and_jsonb_calls_keep_the_distinct_type() {
         panic!("expected rows");
     };
     assert_eq!(fields[0].type_oid, 4072);
-    assert_eq!(text(&stored_rows[0][0]), Some("$.\"a\""));
+    assert_eq!(text(stored_rows[0][0].as_ref()), Some("$.\"a\""));
     let stored_type = run(&mut session, "SELECT pg_typeof(path) FROM paths").await;
-    assert_eq!(text(&rows(&stored_type[0])[0][0]), Some("jsonpath"));
+    assert_eq!(text(rows(&stored_type[0])[0][0].as_ref()), Some("jsonpath"));
 
     run(
         &mut session,
@@ -146,7 +158,7 @@ async fn jsonpath_catalog_storage_and_jsonb_calls_keep_the_distinct_type() {
         panic!("expected rows");
     };
     assert_eq!(fields[0].type_oid, 4072);
-    assert_eq!(text(&echoed_rows[0][0]), Some("$.\"a\""));
+    assert_eq!(text(echoed_rows[0][0].as_ref()), Some("$.\"a\""));
 
     let evaluated = run(
         &mut session,
@@ -157,7 +169,10 @@ async fn jsonpath_catalog_storage_and_jsonb_calls_keep_the_distinct_type() {
     )
     .await;
     assert_eq!(
-        rows(&evaluated[0])[0].iter().map(text).collect::<Vec<_>>(),
+        rows(&evaluated[0])[0]
+            .iter()
+            .map(|cell| text(cell.as_ref()))
+            .collect::<Vec<_>>(),
         vec![Some("t"), Some("t"), Some("t"), None, None],
     );
 }
@@ -177,7 +192,7 @@ async fn jsonpath_defaults_arrays_and_assignment_keep_native_identity() {
     .await;
     run(
         &mut session,
-        r#"INSERT INTO path_values VALUES (DEFAULT, DEFAULT), (NULL, NULL)"#,
+        "INSERT INTO path_values VALUES (DEFAULT, DEFAULT), (NULL, NULL)",
     )
     .await;
 
@@ -196,8 +211,11 @@ async fn jsonpath_defaults_arrays_and_assignment_keep_native_identity() {
     };
     assert_eq!(fields[0].type_oid, 4072);
     assert_eq!(fields[1].type_oid, 4073);
-    assert_eq!(text(&default_rows[0][0]), Some("$.\"default\""));
-    assert_eq!(text(&default_rows[0][1]), Some("{\"$.\\\"item\\\"\",NULL}"));
+    assert_eq!(text(default_rows[0][0].as_ref()), Some("$.\"default\""));
+    assert_eq!(
+        text(default_rows[0][1].as_ref()),
+        Some("{\"$.\\\"item\\\"\",NULL}")
+    );
     let array_binary = default_rows[0][1]
         .as_ref()
         .expect("jsonpath[]")
@@ -220,7 +238,10 @@ async fn jsonpath_defaults_arrays_and_assignment_keep_native_identity() {
     )
     .await;
     assert_eq!(
-        rows(&null_type[0])[0].iter().map(text).collect::<Vec<_>>(),
+        rows(&null_type[0])[0]
+            .iter()
+            .map(|cell| text(cell.as_ref()))
+            .collect::<Vec<_>>(),
         vec![Some("jsonpath"), Some("jsonpath[]")],
     );
 
@@ -230,7 +251,10 @@ async fn jsonpath_defaults_arrays_and_assignment_keep_native_identity() {
     )
     .await;
     let updated = run(&mut session, "SELECT path FROM path_values LIMIT 1").await;
-    assert_eq!(text(&rows(&updated[0])[0][0]), Some("$.\"updated\""));
+    assert_eq!(
+        text(rows(&updated[0])[0][0].as_ref()),
+        Some("$.\"updated\"")
+    );
 
     for sql in [
         "UPDATE path_values SET path = '$.typed'::text",
@@ -244,7 +268,10 @@ async fn jsonpath_defaults_arrays_and_assignment_keep_native_identity() {
     }
 
     let explicit = run(&mut session, "SELECT '$.explicit'::text::jsonpath").await;
-    assert_eq!(text(&rows(&explicit[0])[0][0]), Some("$.\"explicit\""));
+    assert_eq!(
+        text(rows(&explicit[0])[0][0].as_ref()),
+        Some("$.\"explicit\"")
+    );
 
     let arrays = run(
         &mut session,
@@ -264,11 +291,11 @@ async fn jsonpath_defaults_arrays_and_assignment_keep_native_identity() {
     assert_eq!(fields[0].type_oid, 4073);
     assert_eq!(fields[1].type_oid, 4073);
     assert_eq!(
-        text(&array_rows[0][0]),
+        text(array_rows[0][0].as_ref()),
         Some("{\"$.\\\"a\\\"\",\"$.\\\"b\\\"\"}")
     );
     assert!(
-        text(&array_rows[0][1])
+        text(array_rows[0][1].as_ref())
             .expect("array_append result")
             .contains("$.\\\"appended\\\"")
     );
@@ -281,7 +308,7 @@ async fn jsonpath_defaults_arrays_and_assignment_keep_native_identity() {
     )
     .await;
     assert_eq!(
-        text(&rows(&grouped[0])[0][0]),
+        text(rows(&grouped[0])[0][0].as_ref()),
         Some("{\"$.\\\"grouped\\\"\",\"$.\\\"b\\\"\"}")
     );
 
@@ -295,7 +322,10 @@ async fn jsonpath_defaults_arrays_and_assignment_keep_native_identity() {
         "SELECT paths[1] FROM path_values WHERE paths IS NOT NULL",
     )
     .await;
-    assert_eq!(text(&rows(&assigned[0])[0][0]), Some("$.\"assigned\""));
+    assert_eq!(
+        text(rows(&assigned[0])[0][0].as_ref()),
+        Some("$.\"assigned\"")
+    );
 }
 
 #[tokio::test]
@@ -369,7 +399,7 @@ async fn jsonpath_has_no_sql_equality_hash_or_ordering_semantics() {
         assert!(rows(&result[0]).is_empty(), "{sql}");
     }
     let min_empty = run(&mut session, "SELECT min(paths) FROM path_ops WHERE false").await;
-    assert_eq!(text(&rows(&min_empty[0])[0][0]), None);
+    assert_eq!(text(rows(&min_empty[0])[0][0].as_ref()), None);
 
     let empty_arrays = run(
         &mut session,
@@ -382,7 +412,7 @@ async fn jsonpath_has_no_sql_equality_hash_or_ordering_semantics() {
     assert_eq!(
         rows(&empty_arrays[0])[0]
             .iter()
-            .map(text)
+            .map(|cell| text(cell.as_ref()))
             .collect::<Vec<_>>(),
         vec![None, Some("{}"), Some("{}"), Some("{}")],
     );
@@ -404,7 +434,7 @@ async fn common_type_coercions_run_the_jsonpath_input_function() {
             panic!("expected rows for {sql:?}");
         };
         assert_eq!(fields[0].type_oid, 4072, "{sql}");
-        assert_eq!(text(&rows[0][0]), Some("$.\"a\""), "{sql}");
+        assert_eq!(text(rows[0][0].as_ref()), Some("$.\"a\""), "{sql}");
     }
 
     for sql in [
@@ -440,7 +470,10 @@ async fn jsonpath_domains_use_the_native_input_function() {
     )
     .await;
     assert_eq!(
-        rows(&result[0])[0].iter().map(text).collect::<Vec<_>>(),
+        rows(&result[0])[0]
+            .iter()
+            .map(|cell| text(cell.as_ref()))
+            .collect::<Vec<_>>(),
         vec![
             Some("$.\"a\""),
             Some("$.\"b\""),
@@ -470,7 +503,10 @@ async fn jsonpath_domains_use_the_native_input_function() {
     )
     .await;
     assert_eq!(
-        rows(&stored[0])[0].iter().map(text).collect::<Vec<_>>(),
+        rows(&stored[0])[0]
+            .iter()
+            .map(|cell| text(cell.as_ref()))
+            .collect::<Vec<_>>(),
         vec![Some("$.\"inserted\""), Some("{\"$.\\\"array\\\"\"}")]
     );
 

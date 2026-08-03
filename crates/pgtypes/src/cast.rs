@@ -335,7 +335,7 @@ pub fn cast_in(
         (Datum::Text(s), ColumnType::OidVector) => {
             let elems = s
                 .split_whitespace()
-                .map(|value| text_to_i32(value))
+                .map(text_to_i32)
                 .collect::<Result<Vec<_>, _>>()?;
             let len = i32::try_from(elems.len()).unwrap_or(i32::MAX);
             Ok(Datum::OidVector(crate::datum::ArrayValue::with_dims(
@@ -941,9 +941,9 @@ fn i8_from_f64(f: f64) -> Result<Datum, TypeError> {
 
 /// `text → bool`, mirroring PostgreSQL `boolin`/`parse_bool_with_len`: case-
 /// insensitive, leading/trailing whitespace trimmed, then a non-empty prefix of
-/// `true`/`false`/`yes`/`no`/`on`/`off`, or the single chars `1`/`0`. The `o`
-/// prefix is ambiguous between `on`/`off` and PostgreSQL resolves it to `on`
-/// (true) by testing `on` first; everything else is 22P02.
+/// `true`/`false`/`yes`/`no`/`on`/`off`, or the single chars `1`/`0`. A prefix
+/// must identify one spelling unambiguously, so bare `o` is 22P02 while `of`
+/// is accepted as `off`.
 fn text_to_bool(s: &str) -> Result<Datum, TypeError> {
     let t = s.trim().to_ascii_lowercase();
     let v = match t.as_bytes().first() {
@@ -951,8 +951,8 @@ fn text_to_bool(s: &str) -> Result<Datum, TypeError> {
         Some(b'f') if "false".starts_with(&t) => false,
         Some(b'y') if "yes".starts_with(&t) => true,
         Some(b'n') if "no".starts_with(&t) => false,
-        Some(b'o') if "on".starts_with(&t) => true, // `on` checked before `off`
-        Some(b'o') if "off".starts_with(&t) => false,
+        Some(b'o') if t.len() > 1 && "on".starts_with(&t) => true,
+        Some(b'o') if t.len() > 1 && "off".starts_with(&t) => false,
         Some(b'1') if t.len() == 1 => true,
         Some(b'0') if t.len() == 1 => false,
         _ => {
@@ -1453,7 +1453,7 @@ mod tests {
                 ColumnType::Varchar(Some(3)),
                 &tz
             ),
-            Err(TypeError::StringDataRightTruncation)
+            Err(TypeError::StringDataRightTruncation { .. })
         ));
         assert_eq!(
             cast_assign(
@@ -1469,7 +1469,7 @@ mod tests {
         let elem = ColumnType::Array(crate::ElemType::Varchar(Some(3)));
         assert!(matches!(
             cast_assign(&Datum::Text("{abcd}".into()), elem, &tz),
-            Err(TypeError::StringDataRightTruncation)
+            Err(TypeError::StringDataRightTruncation { .. })
         ));
         assert_eq!(
             cast_assign(&Datum::Null, ColumnType::Varchar(Some(3)), &tz).expect("null"),
@@ -2060,12 +2060,11 @@ mod tests {
                 "{s:?}"
             );
         }
-        // `o` is the prefix PG resolves to `on` → true (checked before `off`);
-        // `of` is a prefix only of `off` → false.
-        assert_eq!(
-            cast(&Datum::Text("o".into()), ColumnType::Bool, &tz).expect("o"),
-            Datum::Bool(true)
-        );
+        // `o` is ambiguous between `on` and `off`; `of` identifies only `off`.
+        assert!(matches!(
+            cast(&Datum::Text("o".into()), ColumnType::Bool, &tz),
+            Err(TypeError::InvalidText { .. })
+        ));
         assert_eq!(
             cast(&Datum::Text("of".into()), ColumnType::Bool, &tz).expect("of"),
             Datum::Bool(false)

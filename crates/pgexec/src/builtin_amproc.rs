@@ -1,4 +1,8 @@
 // Generated from PostgreSQL REL_18_4 catalog data.
+#[allow(
+    clippy::unreadable_literal,
+    reason = "generated PostgreSQL catalog rows preserve source numeric spelling"
+)]
 pub(crate) const BUILTIN_AMPROC: &[(i32, i32, i32, i32, i16, i32)] = &[
     (310000, 397, 2277, 2277, 1, 382),
     (310001, 423, 1560, 1560, 1, 1596),

@@ -369,7 +369,7 @@ async fn a_self_reference_inside_create_table_resolves_against_the_in_flight_def
     );
 }
 
-/// DROP COLUMN runs before ADD CONSTRAINT inside PostgreSQL's ALTER TABLE pass
+/// DROP COLUMN runs before ADD CONSTRAINT inside `PostgreSQL`'s ALTER TABLE pass
 /// order. A self-reference therefore sees the referenced column as missing;
 /// CASCADE does not change that analysis error, and neither failed statement
 /// may disturb the original primary key or create the staged foreign key.

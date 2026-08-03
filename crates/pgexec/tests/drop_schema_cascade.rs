@@ -408,6 +408,105 @@ async fn drop_schema_without_cascade_refuses_and_drops_nothing() {
     .await;
 }
 
+/// User types occupy a schema even though they are stored outside the relation
+/// key families. A range's generated multirange may occupy a different schema
+/// from its primary row, and user types in still-live schemas may depend on
+/// either identity. The same cleanup batch also owns temporary namespace type
+/// removal, so that path is exercised sequentially here: user-type parser state
+/// is process-wide, while each test engine has an independent OID counter.
+#[tokio::test]
+async fn schema_user_types_require_cascade_and_drop_dependents() {
+    const SCHEMA_TYPES: &str = "SELECT n.nspname, t.typname FROM pg_type t \
+                                JOIN pg_namespace n ON n.oid = t.typnamespace \
+                                WHERE t.typname IN \
+                                ('root_e', 'local_range', 'local_multirange', \
+                                 'dep_pair', 'external_range', 'generated_mr', \
+                                 'range_dep', 'multirange_dep') \
+                                ORDER BY 1, 2";
+    const TEMP_TYPES: &str = "SELECT typname FROM pg_type WHERE typname IN \
+                              ('discard_temp_e', 'discard_temp_dep', \
+                               'discard_temp_range', 'discard_temp_multirange') \
+                              ORDER BY 1";
+    run_cases(vec![
+        Case {
+            why: "RESTRICT sees type-only contents; CASCADE drops primary and generated type \
+                  rows, including dependents in another schema",
+            setup: &[
+                "CREATE SCHEMA type_drop_s",
+                "CREATE SCHEMA type_drop_o",
+                "CREATE TYPE type_drop_s.root_e AS ENUM ('x')",
+                "CREATE TYPE type_drop_s.local_range AS RANGE (SUBTYPE = int4)",
+                "CREATE TYPE type_drop_o.dep_pair AS (value type_drop_s.root_e)",
+                "CREATE TYPE type_drop_o.external_range AS RANGE \
+                 (SUBTYPE = int4, MULTIRANGE_TYPE_NAME = type_drop_s.generated_mr)",
+                "CREATE TYPE type_drop_o.range_dep AS (value type_drop_o.external_range)",
+                "CREATE TYPE type_drop_o.multirange_dep AS \
+                 (value type_drop_s.local_multirange)",
+            ],
+            script: &[
+                "DROP SCHEMA type_drop_s",
+                SCHEMA_TYPES,
+                "DROP SCHEMA type_drop_s CASCADE",
+                SCHEMA_TYPES,
+                "SELECT NULL::type_drop_s.root_e",
+                "SELECT NULL::type_drop_s.generated_mr",
+                "SELECT NULL::type_drop_o.dep_pair",
+            ],
+            expect: vec![
+                error(
+                    "2BP01",
+                    "cannot drop schema type_drop_s because other objects depend on it",
+                ),
+                rows(&[
+                    &["type_drop_o", "dep_pair"],
+                    &["type_drop_o", "external_range"],
+                    &["type_drop_o", "multirange_dep"],
+                    &["type_drop_o", "range_dep"],
+                    &["type_drop_s", "generated_mr"],
+                    &["type_drop_s", "local_multirange"],
+                    &["type_drop_s", "local_range"],
+                    &["type_drop_s", "root_e"],
+                ]),
+                tag("DROP SCHEMA"),
+                empty(),
+                error("42704", "type \"type_drop_s.root_e\" does not exist"),
+                error("42704", "type \"type_drop_s.generated_mr\" does not exist"),
+                error("42704", "type \"type_drop_o.dep_pair\" does not exist"),
+            ],
+        },
+        Case {
+            why: "DISCARD TEMP removes durable rows and parser registry identities for all temp \
+                  types",
+            setup: &[
+                "CREATE TEMP TABLE temp_type_seed (id int4)",
+                "CREATE TYPE pg_temp.discard_temp_e AS ENUM ('x')",
+                "CREATE TYPE pg_temp.discard_temp_dep AS (value discard_temp_e)",
+                "CREATE TYPE pg_temp.discard_temp_range AS RANGE (SUBTYPE = int4)",
+            ],
+            script: &[
+                TEMP_TYPES,
+                "DISCARD TEMP",
+                TEMP_TYPES,
+                "SELECT NULL::discard_temp_e",
+                "SELECT NULL::discard_temp_multirange",
+            ],
+            expect: vec![
+                rows(&[
+                    &["discard_temp_dep"],
+                    &["discard_temp_e"],
+                    &["discard_temp_multirange"],
+                    &["discard_temp_range"],
+                ]),
+                tag("DISCARD TEMP"),
+                empty(),
+                error("42704", "type \"discard_temp_e\" does not exist"),
+                error("42704", "type \"discard_temp_multirange\" does not exist"),
+            ],
+        },
+    ])
+    .await;
+}
+
 // ---------------------------------------------------------------------------
 // A session's own temporary namespace
 // ---------------------------------------------------------------------------

@@ -12,6 +12,7 @@ import unittest
 
 
 SCRIPT = Path(__file__).parents[1] / "gres-pg-regress-baseline.py"
+RUNNER = Path(__file__).parents[1] / "gres-pg-regress.sh"
 
 
 def diff_section(
@@ -101,6 +102,15 @@ def run(*arguments: str) -> subprocess.CompletedProcess[str]:
 
 
 class BaselineTest(unittest.TestCase):
+    def test_runner_checks_serial_baseline_from_retained_command_log(self) -> None:
+        runner = RUNNER.read_text(encoding="utf-8")
+        start = runner.index("check_serial_baseline()")
+        end = runner.index("\n}\n", start)
+        function = runner[start:end]
+
+        self.assertIn('--tap "${output}/command.log"', function)
+        self.assertNotIn("regression.out", function)
+
     def test_hunk_content_that_looks_like_a_header_is_hashed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -163,6 +173,41 @@ class BaselineTest(unittest.TestCase):
             )
             self.assertEqual(first_document["failures"]["float4"]["hunks"], 1)
             self.assertEqual(first_document["failures"]["float4"]["changed_lines"], 2)
+
+    def test_check_accepts_all_pass_command_log_without_diff(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            old_root = root / "old"
+            current_root = root / "current"
+            old_root.mkdir()
+            current_root.mkdir()
+            old = Dataset(old_root, ["smoke"], {"smoke": (1, "old")})
+            current = Dataset(current_root, ["smoke"], {})
+            command_log = current_root / "command.log"
+            current.tap.rename(command_log)
+            current.tap = command_log
+            current.diff.unlink()
+            baseline = root / "baseline.json"
+            actual = root / "actual.json"
+            self.assertEqual(
+                run("seed", *old.arguments(), "--baseline", str(baseline)).returncode,
+                0,
+            )
+
+            checked = run(
+                "check",
+                *current.arguments(),
+                "--baseline",
+                str(baseline),
+                "--actual-output",
+                str(actual),
+            )
+
+            self.assertEqual(checked.returncode, 1, checked.stderr)
+            self.assertIn("removed: smoke", checked.stderr)
+            document = json.loads(actual.read_text(encoding="utf-8"))
+            self.assertEqual(document["passed"], 1)
+            self.assertEqual(document["failures"], {})
 
     def test_check_reports_every_failure_classification(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

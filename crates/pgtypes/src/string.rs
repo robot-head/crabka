@@ -59,7 +59,16 @@ fn apply_string_typmod(
     let limit = usize::from(limit);
     let char_count = value.chars().count();
     if char_count > limit {
-        return truncate(value, limit, how);
+        return truncate(
+            value,
+            limit,
+            how,
+            if pad_to_limit {
+                "character"
+            } else {
+                "character varying"
+            },
+        );
     }
     if !pad_to_limit || char_count == limit {
         return Ok(value.to_string());
@@ -74,7 +83,12 @@ fn apply_string_typmod(
 /// Cut `value` to `limit` characters, and decide whether losing the rest is
 /// allowed. Trailing spaces are always discardable: they carry no information
 /// for a bounded string type, so even an assignment accepts them.
-fn truncate(value: &str, limit: usize, how: Coercion) -> Result<String, TypeError> {
+fn truncate(
+    value: &str,
+    limit: usize,
+    how: Coercion,
+    type_name: &str,
+) -> Result<String, TypeError> {
     let mut out = String::new();
     let mut chars = value.chars();
     for _ in 0..limit {
@@ -86,7 +100,9 @@ fn truncate(value: &str, limit: usize, how: Coercion) -> Result<String, TypeErro
     if how == Coercion::Explicit || chars.all(|ch| ch == ' ') {
         Ok(out)
     } else {
-        Err(TypeError::StringDataRightTruncation)
+        Err(TypeError::StringDataRightTruncation {
+            type_name: format!("{type_name}({limit})"),
+        })
     }
 }
 
@@ -104,7 +120,7 @@ mod tests {
         assert_eq!(ok("abc  ", Some(3)), "abc");
         assert!(matches!(
             apply_varchar_typmod("abcd", Some(3), Assignment),
-            Err(TypeError::StringDataRightTruncation)
+            Err(TypeError::StringDataRightTruncation { .. })
         ));
     }
 
@@ -116,7 +132,7 @@ mod tests {
         assert_eq!(ok("unconstrained", None), "unconstrained");
         assert!(matches!(
             apply_char_typmod("abcd", Some(3), Assignment),
-            Err(TypeError::StringDataRightTruncation)
+            Err(TypeError::StringDataRightTruncation { .. })
         ));
     }
 

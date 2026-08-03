@@ -96,10 +96,9 @@ pub fn lex(sql: &str) -> Result<Vec<(Token, usize)>, ParseError> {
                 let n: i32 = sql[ds..i]
                     .parse()
                     .map_err(|_| ParseError::new("parameter number too large", start))?;
-                out.push((
-                    Token::Param(u32::try_from(n).expect("parameter digits are nonnegative")),
-                    start,
-                ));
+                let n = u32::try_from(n)
+                    .map_err(|_| ParseError::new("parameter number too large", start))?;
+                out.push((Token::Param(n), start));
             }
             // `$$…$$` / `$tag$…$tag$` — dollar quoting. The body is taken verbatim
             // (no escape processing, no `''` doubling), so the token is an ordinary

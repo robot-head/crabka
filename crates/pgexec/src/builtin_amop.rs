@@ -1,4 +1,9 @@
 // Generated from PostgreSQL REL_18_4 catalog data.
+#[allow(
+    clippy::unreadable_literal,
+    clippy::type_complexity,
+    reason = "generated PostgreSQL catalog rows preserve source numeric spelling and tuple shape"
+)]
 pub(crate) const BUILTIN_AMOP: &[(i32, i32, i32, i32, i16, u8, i32, i32, i32)] = &[
     (300000, 1976, 21, 21, 1, 115, 95, 403, 0),
     (300001, 1976, 21, 21, 2, 115, 522, 403, 0),
