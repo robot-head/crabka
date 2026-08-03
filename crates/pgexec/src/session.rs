@@ -129,7 +129,18 @@ pub(crate) enum TableWriteGuard {
 /// same lock exclusively, so it waits for in-flight writers and blocks new
 /// ones while it scans.
 pub(crate) struct UniqueIndexGuard {
-    _guard: OwnedRwLockReadGuard<()>,
+    gates: Arc<RowLockManager>,
+    table: crabka_pgcatalog::TableId,
+    owner: crate::lockmgr::LockOwner,
+}
+
+impl Drop for UniqueIndexGuard {
+    fn drop(&mut self) {
+        self.gates.release_key_as(
+            &crate::lockmgr::LockKey::UniqueIndexRelation(self.table),
+            self.owner,
+        );
+    }
 }
 
 /// Per-connection transaction state. `Failed` carries the aborted block's
@@ -2446,7 +2457,8 @@ pub struct SqlSession {
     writer_fence: Arc<crate::WriterFence>,
     /// Retains the registry entry while this session can hold a writer lease.
     _coordination: Arc<crate::EngineCoordination>,
-    unique_index_gates: Arc<crate::UniqueIndexGates>,
+    unique_index_gates: Arc<RowLockManager>,
+    lock_owner: crate::lockmgr::LockOwner,
     committer: Arc<dyn crate::commit::Committer>,
     linearizer: Arc<dyn crate::read_gate::Linearizer>,
     persist_mode: crate::PersistMode,
@@ -2666,7 +2678,7 @@ pub(crate) struct SqlSessionConfig {
     pub table_write_gate: Arc<tokio::sync::RwLock<()>>,
     pub writer_fence: Arc<crate::WriterFence>,
     pub coordination: Arc<crate::EngineCoordination>,
-    pub unique_index_gates: Arc<crate::UniqueIndexGates>,
+    pub unique_index_gates: Arc<RowLockManager>,
     pub committer: Arc<dyn crate::commit::Committer>,
     pub linearizer: Arc<dyn crate::read_gate::Linearizer>,
     pub persist_mode: crate::PersistMode,
@@ -2951,6 +2963,10 @@ impl SqlSession {
             backend_pid,
         } = config;
         let session_lock_id = session_locks.next_session_id();
+        let unique_index_owner = coordination
+            .next_unique_index_owner
+            .fetch_add(1, Ordering::Relaxed);
+        let lock_owner = crate::lockmgr::LockOwner::Session(unique_index_owner);
         // The parser resolves a user-defined type *name* through a process-wide
         // registry (it holds no catalog handle), so the registry has to be
         // populated from the durable catalog before this session parses
@@ -2978,6 +2994,7 @@ impl SqlSession {
             writer_fence,
             _coordination: coordination,
             unique_index_gates,
+            lock_owner,
             committer,
             linearizer,
             persist_mode,
@@ -3216,6 +3233,7 @@ impl SqlSession {
             global_snapshot: statement.global_snapshot,
             procarray: self.procarray.as_ref(),
             lockmgr: self.lockmgr.as_ref(),
+            lock_owner: self.lock_owner,
             seq: self.seq.as_ref(),
             snapshot: statement.snapshot,
             xid: statement.xid,
@@ -4047,9 +4065,7 @@ impl SqlSession {
         self.require_transaction_block("SAVEPOINT")?;
         let deferral = self.deferred_constraints().modes().clone();
         let notify_pending = self.pending_notify().clone();
-        let row_locks = self
-            .local_xid()
-            .map_or_else(HashMap::new, |xid| self.lockmgr.held_locks(xid));
+        let row_locks = self.lockmgr.held_locks_as(self.lock_owner);
         self.savepoints.push(SavepointFrame {
             name: name.to_string(),
             role: self.current_role.clone(),
@@ -4191,8 +4207,19 @@ impl SqlSession {
                 frame.advisory_lock_count,
             )
         };
-        if let Some(xid) = self.local_xid() {
-            self.lockmgr.restore_locks(xid, &row_locks);
+        self.lockmgr
+            .restore_locks_as(self.lock_owner, &row_locks);
+        let retained_unique_relations = row_locks
+            .keys()
+            .filter_map(|key| match key {
+                crate::lockmgr::LockKey::UniqueIndexRelation(table) => Some(*table),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        if let TxnState::InTransaction(context) | TxnState::Failed(context) = &mut self.state {
+            context
+                .unique_index_guards
+                .retain(|table, _| retained_unique_relations.contains(table));
         }
         self.session_locks
             .tables
@@ -6250,7 +6277,7 @@ impl SqlSession {
             // Committed), so a phantom running xid must not be stranded here.
             self.procarray.finish(xid);
             // Free every row this transaction locked, waking any blocked writers.
-            self.lockmgr.release_all(xid);
+            self.lockmgr.release_all_as(self.lock_owner);
             r?;
         }
         Ok(())
@@ -6534,7 +6561,7 @@ impl SqlSession {
                 );
                 let status = self.commit_global_decision(g, XidStatus::Committed).await?;
                 self.procarray.finish(xid);
-                self.lockmgr.release_all(xid);
+                self.lockmgr.release_all_as(self.lock_owner);
                 if let Some(gtm) = &self.gtm {
                     gtm.finish_global(g);
                 }
@@ -6580,7 +6607,7 @@ impl SqlSession {
             let r = self.committer.commit(ops).await;
             self.procarray.finish(xid);
             // Free every row this transaction locked, waking waiters.
-            self.lockmgr.release_all(xid);
+            self.lockmgr.release_all_as(self.lock_owner);
             r?;
         } else {
             // A block that wrote nothing (`BEGIN; NOTIFY a; COMMIT;`) never
@@ -7726,23 +7753,33 @@ impl SqlSession {
                 Ok::<_, ExecError>((relation, id))
             })
             .transpose()?;
-        if unique_target.is_some()
-            && matches!(
-                &self.state,
-                TxnState::InTransaction(context) if !context.unique_index_guards.is_empty()
-            )
-        {
-            return Err(ExecError::Unsupported(
-                "unique-index DDL after writes in the same transaction is not supported".into(),
-            ));
-        }
         let _unique_guard = if let Some((_, table)) = &unique_target {
-            Some(
-                self.unique_index_gates
-                    .for_table(*table)
-                    .write_owned()
-                    .await,
-            )
+            let owner = self.lock_owner;
+            self.unique_index_gates
+                .acquire_key_as(
+                    crate::lockmgr::LockKey::UniqueIndexRelation(*table),
+                    crate::lockmgr::LockMode::Exclusive,
+                    owner,
+                    self.lock_wait_cap,
+                )
+                .await
+                .map_err(crate::exec::lock_acquire_error)?;
+            if let TxnState::InTransaction(context) = &mut self.state {
+                context.unique_index_guards.entry(*table).or_insert_with(|| {
+                    UniqueIndexGuard {
+                        gates: Arc::clone(&self.unique_index_gates),
+                        table: *table,
+                        owner,
+                    }
+                });
+                None
+            } else {
+                Some(UniqueIndexGuard {
+                    gates: Arc::clone(&self.unique_index_gates),
+                    table: *table,
+                    owner,
+                })
+            }
         } else {
             None
         };
@@ -7890,24 +7927,46 @@ impl SqlSession {
         Ok(result)
     }
 
-    async fn ensure_unique_index_guard(&mut self, mode: UniqueLocalSerialization) {
+    async fn ensure_unique_index_guard(
+        &mut self,
+        mode: UniqueLocalSerialization,
+    ) -> Result<(), ExecError> {
         let UniqueLocalSerialization::Shared(table) = mode else {
-            return;
+            return Ok(());
         };
         match &self.state {
             TxnState::InTransaction(ctx) if !ctx.unique_index_guards.contains_key(&table) => {}
-            _ => return,
+            _ => return Ok(()),
         }
-        let guard = UniqueIndexGuard {
-            _guard: self
-                .unique_index_gates
-                .for_table(table)
-                .read_owned()
-                .await,
-        };
+        let guard = self
+            .acquire_unique_index_guard(table, crate::lockmgr::LockMode::Shared)
+            .await?;
         if let TxnState::InTransaction(ctx) = &mut self.state {
             ctx.unique_index_guards.insert(table, guard);
         }
+        Ok(())
+    }
+
+    async fn acquire_unique_index_guard(
+        &self,
+        table: crabka_pgcatalog::TableId,
+        mode: crate::lockmgr::LockMode,
+    ) -> Result<UniqueIndexGuard, ExecError> {
+        let owner = self.lock_owner;
+        self.unique_index_gates
+            .acquire_key_as(
+                crate::lockmgr::LockKey::UniqueIndexRelation(table),
+                mode,
+                owner,
+                self.lock_wait_cap,
+            )
+            .await
+            .map_err(crate::exec::lock_acquire_error)?;
+        Ok(UniqueIndexGuard {
+            gates: Arc::clone(&self.unique_index_gates),
+            table,
+            owner,
+        })
     }
 
     async fn ensure_table_write_guard(&mut self) {
@@ -7938,6 +7997,7 @@ impl SqlSession {
         let range_scanner = Arc::clone(&self.range_scanner);
         let blocking_query_memory = self.blocking_query_memory;
         let lock_wait_cap = self.lock_wait_cap;
+        let lock_owner = self.lock_owner;
         let (request_tx, request_rx) = mpsc::channel(1);
         let (worker_id, mut cancel, finished) = self.register_worker();
         // Re-enter the statement's span on the pool thread; the current-thread
@@ -7985,6 +8045,7 @@ impl SqlSession {
                             &read_ctx,
                             procarray.as_ref(),
                             lockmgr.as_ref(),
+                            lock_owner,
                             repeatable_read,
                             lock_wait_cap,
                             &select,
@@ -8011,6 +8072,7 @@ impl SqlSession {
         let deferred_fk = Arc::clone(&self.deferred_fk);
         let defer_constraints = matches!(self.state, TxnState::InTransaction(_));
         let lock_wait_cap = self.lock_wait_cap;
+        let lock_owner = self.lock_owner;
         let guc_values = self.guc.effective_map();
         let guc_settings = self.guc.settings();
         let prepared = self.prepared_statement_rows();
@@ -8051,6 +8113,7 @@ impl SqlSession {
                 global_snapshot: &global_snapshot,
                 procarray: procarray.as_ref(),
                 lockmgr: lockmgr.as_ref(),
+                lock_owner,
                 seq: seq.as_ref(),
                 snapshot: &snapshot,
                 xid,
@@ -8240,7 +8303,7 @@ impl SqlSession {
                     &self.resolution_scope(),
                     stmt,
                 )?;
-                self.ensure_unique_index_guard(unique_serialization).await;
+                self.ensure_unique_index_guard(unique_serialization).await?;
                 // UPDATE/DELETE's eval_plan_qual re-check reads range 0's global clog
                 // to resolve a cross-range supersede, so catch range 0's replica up
                 // before the gsnap capture. (RR already barriered at BEGIN; the
@@ -8363,13 +8426,13 @@ impl SqlSession {
                     stmt,
                 )? {
                     UniqueLocalSerialization::None => None,
-                    UniqueLocalSerialization::Shared(table) => Some(UniqueIndexGuard {
-                        _guard: self
-                            .unique_index_gates
-                            .for_table(table)
-                            .read_owned()
-                            .await,
-                    }),
+                    UniqueLocalSerialization::Shared(table) => Some(
+                        self.acquire_unique_index_guard(
+                            table,
+                            crate::lockmgr::LockMode::Shared,
+                        )
+                        .await?,
+                    ),
                 };
                 // Autocommit UPDATE/DELETE's eval_plan_qual re-check reads range 0's
                 // global clog, so catch range 0's replica up before the gsnap capture.
@@ -8428,7 +8491,7 @@ impl SqlSession {
                         abort_ops.extend(self.take_pending_sequence_ops());
                         let _ = self.committer.commit(abort_ops).await;
                         self.procarray.finish(xid);
-                        self.lockmgr.release_all(xid);
+                        self.lockmgr.release_all_as(self.lock_owner);
                         return Err(e);
                     }
                 };
@@ -8449,7 +8512,7 @@ impl SqlSession {
                 // left holding a finished xid on a commit-batch failure.
                 let r = self.committer.commit(ops).await;
                 self.procarray.finish(xid);
-                self.lockmgr.release_all(xid);
+                self.lockmgr.release_all_as(self.lock_owner);
                 r?;
                 self.fire_pending_after_triggers().await?;
                 if let Some(g) = sharded_global {
@@ -8507,7 +8570,7 @@ impl SqlSession {
                     &self.resolution_scope(),
                     copy,
                 )?;
-                self.ensure_unique_index_guard(unique_serialization).await;
+                self.ensure_unique_index_guard(unique_serialization).await?;
                 self.ensure_write_xid()?;
                 let xid = match &self.state {
                     TxnState::InTransaction(ctx) => ctx.xid.expect("xid set"),
@@ -8578,13 +8641,13 @@ impl SqlSession {
                     copy,
                 )? {
                     UniqueLocalSerialization::None => None,
-                    UniqueLocalSerialization::Shared(table) => Some(UniqueIndexGuard {
-                        _guard: self
-                            .unique_index_gates
-                            .for_table(table)
-                            .read_owned()
-                            .await,
-                    }),
+                    UniqueLocalSerialization::Shared(table) => Some(
+                        self.acquire_unique_index_guard(
+                            table,
+                            crate::lockmgr::LockMode::Shared,
+                        )
+                        .await?,
+                    ),
                 };
                 let xid = self.procarray.begin_write()?;
                 let ctx = self.eval_ctx();
@@ -8617,7 +8680,7 @@ impl SqlSession {
                         let _ = self.committer.commit(abort_ops).await;
                         self.procarray.finish(xid);
                         // Free the unique-key locks the failed COPY acquired.
-                        self.lockmgr.release_all(xid);
+                        self.lockmgr.release_all_as(self.lock_owner);
                         return Err(error);
                     }
                 };
@@ -8629,7 +8692,7 @@ impl SqlSession {
                 let commit = self.committer.commit(ops).await;
                 self.procarray.finish(xid);
                 // Free the unique-key locks this COPY acquired, waking waiters.
-                self.lockmgr.release_all(xid);
+                self.lockmgr.release_all_as(self.lock_owner);
                 if let Err(error) = commit {
                     // Nothing became durable, so the reservation this COPY took
                     // ahead of the batch is released with the queue.
@@ -9084,7 +9147,7 @@ impl SqlSession {
         let implicit_xid = self.implicit_xid.take();
         if let Some(xid) = self.local_xid().or(implicit_xid) {
             self.procarray.finish(xid);
-            self.lockmgr.release_all(xid);
+            self.lockmgr.release_all_as(self.lock_owner);
         }
         self.discard_deferred_constraints();
         self.finish_transaction_scoped_state(keep_holdable);
@@ -13041,8 +13104,12 @@ mod tests {
             .simple_query("SELECT pg_advisory_xact_lock(42)")
             .await
             .expect("advisory lock");
-        let xid = session.local_xid().expect("locking read allocated xid");
-        assert!(!session.lockmgr.held_locks(xid).is_empty());
+        assert!(
+            !session
+                .lockmgr
+                .held_locks_as(session.lock_owner)
+                .is_empty()
+        );
         assert!(
             session
                 .session_locks
@@ -13062,7 +13129,7 @@ mod tests {
             .simple_query("ROLLBACK TO lock_boundary")
             .await
             .expect("rollback to");
-        assert!(session.lockmgr.held_locks(xid).is_empty());
+        assert!(session.lockmgr.held_locks_as(session.lock_owner).is_empty());
         assert!(
             session
                 .session_locks

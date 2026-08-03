@@ -112,7 +112,7 @@ it is not the compatibility headline. Compatibility is the upstream 231-test
 serial and parallel result. The checked-in baseline-eligible serial run is
 `6/231` with 225 semantic failures. The latest infrastructure-clean review run
 is `8/231` with 223 semantic failures after `portals_p2`
-passed, with 154980 changed lines across 4499 hunks. It records observed
+passed, with 154984 changed lines across 4501 hunks. It records observed
 conformance without replacing the monotone baseline. Neither result satisfies
 the 231/231 completion gate.
 
