@@ -267,12 +267,13 @@ async fn wrapped_aggregate_row_descriptions_match_the_materializing_path() {
 
     // (name, oid) pairs recorded from the materializing path before this
     // streamed: int8 = 20, int4 = 23.
-    let cases: [(&str, &[(&str, u32)]); 5] = [
+    let cases: [(&str, &[(&str, u32)]); 6] = [
         // A CAST is labelled by what is inside it, as PostgreSQL's FigureColname
         // is: the aggregate's own name here, the type's name when the inner
         // expression supplies none.
         ("SELECT CAST(count(*) AS BIGINT) FROM s", &[("count", 20)]),
-        ("SELECT CAST(1 AS BIGINT) FROM s", &[("bigint", 20)]),
+        ("SELECT CAST(1 AS BIGINT) FROM s", &[("int8", 20)]),
+        ("SELECT CAST(1 AS BOOLEAN) FROM s", &[("bool", 16)]),
         ("SELECT COALESCE(sum(x), 0) FROM s", &[("coalesce", 20)]),
         // An arithmetic expression has no name of its own, and unlike a CAST it
         // has no type-name fallback either.

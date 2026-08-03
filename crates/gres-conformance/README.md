@@ -100,7 +100,7 @@ RUN=target/pg-regress-runs/<run>/gres-serial
 python3 scripts/gres-pg-regress-baseline.py update \
   --postgres-tag REL_18_4 \
   --schedule target/pg-regress-postgresql-18.4/source/src/test/regress/parallel_schedule \
-  --tap "$RUN/regression.out" --diff "$RUN/regression.diffs" \
+  --tap "$RUN/command.log" --diff "$RUN/regression.diffs" \
   --source-root target/pg-regress-postgresql-18.4/source \
   --build-root "$RUN" \
   --baseline crates/gres-conformance/pg-regress-baseline.json \

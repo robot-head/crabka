@@ -736,9 +736,9 @@ const COMMAND_PROBES: &[CommandProbe] = &[
     },
     CommandProbe {
         command: "ALTER SCHEMA",
-        sql: "ALTER SCHEMA parser_commands_schema RENAME TO parser_commands_schema2",
+        sql: "ALTER SCHEMA parser_commands_schema OWNER TO postgres",
         expected_statement: "AlterSchema",
-        refusal: Some(("0A000", "is not supported")),
+        refusal: None,
     },
     CommandProbe {
         command: "DROP SCHEMA",

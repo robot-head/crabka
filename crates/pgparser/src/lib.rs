@@ -12,5 +12,7 @@ pub mod plpgsql;
 pub mod token;
 
 pub use error::ParseError;
-pub use parser::{parse, parse_with_command_identities, parse_with_source};
+pub use parser::{
+    parse, parse_with_command_identities, parse_with_source, parse_with_type_schemas,
+};
 pub use plpgsql::parse_plpgsql;

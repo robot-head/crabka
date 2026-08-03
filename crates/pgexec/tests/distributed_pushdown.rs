@@ -4,8 +4,8 @@ use crabka_pgcatalog::{Column, RelationName, Table};
 use crabka_pgexec::{
     ColumnPredicate, JoinExecutionStrategy, JoinRangeRequest, JoinRangeResult,
     PartialAggregateFunction, PartialAggregateSpec, PredicateOp, PredicatePushdown,
-    ProjectionPushdown, RangeCursor, RangeScanner, ScanPage, ScanRequest, ScannedRow, SqlEngine,
-    TopKColumn, TopKSpec,
+    ProjectionPushdown, RangeCursor, RangeScanner, RuntimePolicy, ScanPage, ScanRequest,
+    ScannedRow, SqlEngine, TopKColumn, TopKSpec,
     plan_dist::{
         CheckpointMetadata, JoinInputs, JoinStrategy, PlannerConfig, SequenceCounters, Stats,
         plan_join, plan_join_for_tables, plan_scan, strict_predicate_for_filter,
@@ -1017,6 +1017,308 @@ impl RangeScanner for RecordingScanner {
             "recording scanner requests deterministic local fallback".into(),
         ))
     }
+}
+
+#[tokio::test]
+async fn correlated_scalar_limit_one_builds_one_lazy_lookup() {
+    let scanner = Arc::new(RecordingScanner::default());
+    let mut engine = SqlEngine::new();
+    engine.set_range_scanner(scanner.clone());
+    let mut session = engine.connect();
+    session
+        .simple_query(
+            "CREATE TABLE correlated_lookup_inner (k int4, v int4); \
+             CREATE TABLE correlated_lookup_outer (id int4, k int4, expected int4); \
+             INSERT INTO correlated_lookup_inner \
+                 SELECT x, x * 10 FROM generate_series(1, 999) AS g(x); \
+             INSERT INTO correlated_lookup_inner VALUES (1, -1); \
+             INSERT INTO correlated_lookup_outer \
+                 SELECT x, x, x * 10 FROM generate_series(1, 999) AS g(x); \
+             INSERT INTO correlated_lookup_outer VALUES (1000, 2000, NULL)",
+        )
+        .await
+        .expect("seed 1k lookup rows");
+
+    let optimized = cells(
+        session
+            .simple_query(
+                "SELECT o.id FROM correlated_lookup_outer o \
+                 WHERE (SELECT i.v FROM correlated_lookup_inner i \
+                        WHERE i.k = o.k LIMIT 1) \
+                       IS NOT DISTINCT FROM o.expected \
+                 ORDER BY o.id",
+            )
+            .await
+            .expect("cached correlated lookup")
+            .pop()
+            .expect("one optimized result"),
+    );
+    assert_eq!(optimized.len(), 1_000);
+    assert_eq!(optimized.first(), Some(&vec![Some("1".into())]));
+    assert_eq!(optimized.last(), Some(&vec![Some("1000".into())]));
+    let inner_scans = scanner
+        .scans()
+        .into_iter()
+        .filter(|scan| scan.table == RelationName::public("correlated_lookup_inner"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        inner_scans.len(),
+        1,
+        "the inner table is materialized once, not once per outer row"
+    );
+    assert_eq!(
+        inner_scans[0].projection,
+        ProjectionPushdown::Columns(vec![0, 1])
+    );
+
+    session
+        .simple_query(
+            "SELECT o.id FROM correlated_lookup_outer o \
+             WHERE CASE WHEN true THEN true ELSE \
+                 (SELECT i.v FROM correlated_lookup_inner i \
+                  WHERE i.k = o.k LIMIT 1) = 0 \
+                 AND (SELECT 1 / 0) = 0 END \
+             LIMIT 1",
+        )
+        .await
+        .expect("dead CASE branch stays lazy");
+    assert_eq!(
+        scanner
+            .scans()
+            .iter()
+            .filter(|scan| scan.table == RelationName::public("correlated_lookup_inner"))
+            .count(),
+        1,
+        "a dead CASE branch must not initialize its lookup"
+    );
+
+    let fallback = cells(
+        session
+            .simple_query(
+                "SELECT o.id FROM correlated_lookup_outer o \
+                 WHERE (SELECT i.v FROM correlated_lookup_inner i \
+                        WHERE i.k = o.k ORDER BY i.k LIMIT 1) \
+                       IS NOT DISTINCT FROM o.expected \
+                 ORDER BY o.id",
+            )
+            .await
+            .expect("unsupported lookup shape uses scalar fallback")
+            .pop()
+            .expect("one fallback result"),
+    );
+    assert_eq!(
+        optimized, fallback,
+        "duplicates and missing keys keep parity"
+    );
+}
+
+#[tokio::test]
+async fn correlated_exists_equality_builds_one_lazy_lookup() {
+    let scanner = Arc::new(RecordingScanner::default());
+    let mut engine = SqlEngine::new();
+    engine.set_range_scanner(scanner.clone());
+    let mut session = engine.connect();
+    session
+        .simple_query(
+            "CREATE TABLE tenk1 (unique1 int4, unique2 int4, thousand int4); \
+             CREATE TABLE correlated_exists_empty (k int4); \
+             INSERT INTO tenk1 \
+                 SELECT x, x, x % 1000 FROM generate_series(0, 9999) AS g(x)",
+        )
+        .await
+        .expect("seed correlated EXISTS rows");
+
+    let hotspot = cells(
+        session
+            .simple_query(
+                "SELECT * FROM ( \
+                   SELECT max(unique1) FROM tenk1 AS a \
+                   WHERE EXISTS (SELECT 1 FROM tenk1 AS b \
+                                 WHERE b.thousand = a.unique2) \
+                 ) ss",
+            )
+            .await
+            .expect("cached correlated EXISTS")
+            .pop()
+            .expect("one hotspot result"),
+    );
+    assert_eq!(hotspot, vec![vec![Some("999".into())]]);
+    assert_eq!(
+        scanner
+            .scans()
+            .iter()
+            .filter(|scan| scan.table == RelationName::public("tenk1"))
+            .count(),
+        2,
+        "one outer scan plus one materialized inner scan"
+    );
+
+    let not_exists = cells(
+        session
+            .simple_query(
+                "SELECT min(unique1) FROM tenk1 AS a \
+                 WHERE NOT EXISTS (SELECT 1 FROM tenk1 AS b \
+                                   WHERE b.thousand = a.unique2)",
+            )
+            .await
+            .expect("cached correlated NOT EXISTS")
+            .pop()
+            .expect("one NOT EXISTS result"),
+    );
+    assert_eq!(not_exists, vec![vec![Some("1000".into())]]);
+    assert_eq!(
+        scanner
+            .scans()
+            .iter()
+            .filter(|scan| scan.table == RelationName::public("tenk1"))
+            .count(),
+        4,
+        "NOT EXISTS also uses one outer and one inner scan"
+    );
+
+    let scans_before_dead_branch = scanner
+        .scans()
+        .iter()
+        .filter(|scan| scan.table == RelationName::public("tenk1"))
+        .count();
+    session
+        .simple_query(
+            "SELECT unique1 FROM tenk1 AS a \
+             WHERE CASE WHEN true THEN true ELSE \
+                 EXISTS (SELECT 1 FROM tenk1 AS b \
+                         WHERE b.thousand = a.unique2) END \
+             LIMIT 1",
+        )
+        .await
+        .expect("dead EXISTS branch stays lazy");
+    assert_eq!(
+        scanner
+            .scans()
+            .iter()
+            .filter(|scan| scan.table == RelationName::public("tenk1"))
+            .count(),
+        scans_before_dead_branch + 1,
+        "the dead branch must not scan the inner relation"
+    );
+
+    let empty = cells(
+        session
+            .simple_query(
+                "SELECT max(unique1) FROM tenk1 AS a \
+                 WHERE EXISTS (SELECT 1 FROM correlated_exists_empty AS b \
+                               WHERE b.k = 1 / (a.unique1 - a.unique1))",
+            )
+            .await
+            .expect("an empty inner relation does not evaluate the outer key")
+            .pop()
+            .expect("one empty-inner result"),
+    );
+    assert_eq!(empty, vec![vec![None]]);
+    assert_eq!(
+        scanner
+            .scans()
+            .iter()
+            .filter(|scan| scan.table == RelationName::public("correlated_exists_empty"))
+            .count(),
+        1,
+        "the empty inner relation is scanned once"
+    );
+}
+
+#[tokio::test]
+async fn correlated_exists_inside_or_builds_one_lazy_lookup() {
+    let scanner = Arc::new(RecordingScanner::default());
+    let mut engine = SqlEngine::new_with_policy(RuntimePolicy {
+        blocking_query_memory: crabka_units::mebibytes(20),
+        ..RuntimePolicy::default()
+    })
+    .expect("20 MiB runner policy");
+    engine.set_range_scanner(scanner.clone());
+    let mut session = engine.connect();
+    session
+        .simple_query(
+            "CREATE TABLE exists_or_tenk ( \
+                 unique1 int4, unique2 int4, two int4, four int4, ten int4, \
+                 twenty int4, hundred int4, thousand int4, twothousand int4, \
+                 fivethous int4, tenthous int4, odd int4, even int4, \
+                 stringu1 name, stringu2 name, string4 name); \
+             INSERT INTO exists_or_tenk \
+                 SELECT x, x, x % 2, x % 4, x % 10, x % 20, x % 100, \
+                        x % 1000, x % 2000, x % 5000, x % 10000, \
+                        x * 2 + 1, x * 2, 'AAAAAA', 'BBBBBB', 'CCCCxx' \
+                 FROM generate_series(0, 9999) AS g(x); \
+             CREATE INDEX exists_or_unique1 ON exists_or_tenk (unique1); \
+             CREATE INDEX exists_or_unique2 ON exists_or_tenk (unique2); \
+             CREATE INDEX exists_or_hundred ON exists_or_tenk (hundred); \
+             CREATE INDEX exists_or_thousand_tenthous \
+                 ON exists_or_tenk (thousand, tenthous)",
+        )
+        .await
+        .expect("seed PostgreSQL-shaped tenk1 data and indexes");
+
+    let scans_before_direct = scanner
+        .scans()
+        .iter()
+        .filter(|scan| scan.table == RelationName::public("exists_or_tenk"))
+        .count();
+    let direct = cells(
+        session
+            .simple_query(
+                "SELECT count(*) FROM exists_or_tenk t \
+                 WHERE EXISTS (SELECT 1 FROM exists_or_tenk k \
+                               WHERE k.thousand = t.unique2)",
+            )
+            .await
+            .expect("cached direct correlated EXISTS")
+            .pop()
+            .expect("one direct count result"),
+    );
+    assert_eq!(direct, vec![vec![Some("1000".into())]]);
+    let direct_scans = scanner.scans();
+    assert_eq!(
+        direct_scans
+            .iter()
+            .filter(|scan| scan.table == RelationName::public("exists_or_tenk"))
+            .count(),
+        scans_before_direct + 2,
+        "direct EXISTS uses one outer scan plus one materialized inner scan"
+    );
+    assert_eq!(
+        direct_scans.last().expect("direct inner scan").projection,
+        ProjectionPushdown::Columns(vec![7])
+    );
+
+    let scans_before_or = scanner
+        .scans()
+        .iter()
+        .filter(|scan| scan.table == RelationName::public("exists_or_tenk"))
+        .count();
+    let result = cells(
+        session
+            .simple_query(
+                "SELECT count(*) FROM exists_or_tenk t \
+                 WHERE (EXISTS (SELECT 1 FROM exists_or_tenk k \
+                                WHERE k.unique1 = t.unique2) OR ten < 0)",
+            )
+            .await
+            .expect("cached OR-wrapped correlated EXISTS")
+            .pop()
+            .expect("one count result"),
+    );
+    assert_eq!(result, vec![vec![Some("10000".into())]]);
+    let or_scans = scanner.scans();
+    assert_eq!(
+        or_scans
+            .iter()
+            .filter(|scan| scan.table == RelationName::public("exists_or_tenk"))
+            .count(),
+        scans_before_or + 2,
+        "one outer scan plus one materialized inner scan"
+    );
+    assert_eq!(
+        or_scans.last().expect("OR inner scan").projection,
+        ProjectionPushdown::Columns(vec![0])
+    );
 }
 
 #[tokio::test]

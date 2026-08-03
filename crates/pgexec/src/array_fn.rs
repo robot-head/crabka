@@ -1508,7 +1508,11 @@ fn require_same_element(
     l: &Datum,
     r: &Datum,
 ) -> Result<(), ExecError> {
-    if left.elem == right.elem {
+    let same_family = matches!(
+        (l, r),
+        (Datum::Array(_), Datum::Array(_)) | (Datum::OidVector(_), Datum::OidVector(_))
+    );
+    if left.elem == right.elem && same_family {
         Ok(())
     } else {
         Err(operator_undefined(op, l, r))

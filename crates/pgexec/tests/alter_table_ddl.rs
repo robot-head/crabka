@@ -634,7 +634,7 @@ async fn generated_columns_depend_on_the_columns_they_read() {
     assert!(err_code(&mut s, "SELECT b FROM t").await == "42703");
 }
 
-/// PostgreSQL runs the DROP COLUMN pass before it builds constraints added by
+/// `PostgreSQL` runs the DROP COLUMN pass before it builds constraints added by
 /// the same ALTER TABLE, regardless of their written order. The missing key is
 /// therefore a 42703 and the whole statement leaves both schema and catalog
 /// untouched.
@@ -662,7 +662,7 @@ async fn drop_column_precedes_an_added_unique_constraint() {
     );
 }
 
-/// DROP COLUMN, ADD COLUMN, and ADD CONSTRAINT run in separate PostgreSQL
+/// DROP COLUMN, ADD COLUMN, and ADD CONSTRAINT run in separate `PostgreSQL`
 /// passes. Their written order therefore cannot make a constraint bind to the
 /// dropped incarnation of a same-named column.
 #[tokio::test]
@@ -692,7 +692,7 @@ async fn drop_and_readd_column_precedes_an_added_unique_constraint() {
     }
 }
 
-/// SET NOT NULL is PostgreSQL's column-attribute pass, before the pass that
+/// SET NOT NULL is `PostgreSQL`'s column-attribute pass, before the pass that
 /// builds a UNIQUE index. A row set containing both NULLs and duplicate keys
 /// must therefore report the null failure first, independent of written order.
 #[tokio::test]
@@ -770,6 +770,8 @@ async fn alter_table_on_a_view_reports_the_unsupported_action() {
             "ALTER TABLE v ADD CONSTRAINT c CHECK (id > 0)",
             "ADD CONSTRAINT",
         ),
+        ("ALTER TABLE v ADD PRIMARY KEY (id)", "ADD CONSTRAINT"),
+        ("ALTER TABLE v ADD UNIQUE (id)", "ADD CONSTRAINT"),
         ("ALTER TABLE v VALIDATE CONSTRAINT c", "VALIDATE CONSTRAINT"),
     ] {
         assert!(err_code(&mut s, sql).await == "42809", "{sql}");

@@ -2,6 +2,12 @@ use std::cmp::Ordering;
 
 use crate::{ColumnType, Datum, RangeValue, TypeError, usertype::RangeRef};
 
+/// Parses and canonicalizes a range literal.
+///
+/// # Errors
+///
+/// Returns an error if the literal is malformed, a bound cannot be converted
+/// to the range subtype, or canonicalizing a discrete bound overflows.
 pub fn parse(input: &str, ty: RangeRef, tz: &jiff::tz::TimeZone) -> Result<RangeValue, TypeError> {
     let canonical = canonicalize(input, *ty.subtype, tz)?;
     if canonical == "empty" {
@@ -50,6 +56,12 @@ pub fn to_text(range: &RangeValue, mut encode: impl FnMut(&Datum) -> String) -> 
     )
 }
 
+/// Tests whether `outer` contains `inner`.
+///
+/// # Errors
+///
+/// Returns an error if the ranges have different types or their bounds cannot
+/// be compared.
 pub fn contains_range(outer: &RangeValue, inner: &RangeValue) -> Result<bool, TypeError> {
     if outer.ty != inner.ty {
         return Err(TypeError::TypeMismatch {
@@ -65,13 +77,19 @@ pub fn contains_range(outer: &RangeValue, inner: &RangeValue) -> Result<bool, Ty
     Ok(lower_contains(outer, inner)? && upper_contains(outer, inner)?)
 }
 
+/// Tests whether `range` contains `value`.
+///
+/// # Errors
+///
+/// Returns an error if the element and range bounds cannot be compared or a
+/// compared value is null.
 pub fn contains_element(range: &RangeValue, value: &Datum) -> Result<bool, TypeError> {
     if range.empty {
         return Ok(false);
     }
     let above_lower = match range.lower.as_deref() {
         None => true,
-        Some(lower) => match crate::ops::compare(value, lower)?.expect("range bound is non-null") {
+        Some(lower) => match compare_non_null(value, lower)? {
             Ordering::Greater => true,
             Ordering::Equal => range.lower_inclusive,
             Ordering::Less => false,
@@ -79,7 +97,7 @@ pub fn contains_element(range: &RangeValue, value: &Datum) -> Result<bool, TypeE
     };
     let below_upper = match range.upper.as_deref() {
         None => true,
-        Some(upper) => match crate::ops::compare(value, upper)?.expect("range bound is non-null") {
+        Some(upper) => match compare_non_null(value, upper)? {
             Ordering::Less => true,
             Ordering::Equal => range.upper_inclusive,
             Ordering::Greater => false,
@@ -88,6 +106,12 @@ pub fn contains_element(range: &RangeValue, value: &Datum) -> Result<bool, TypeE
     Ok(above_lower && below_upper)
 }
 
+/// Tests whether two ranges overlap.
+///
+/// # Errors
+///
+/// Returns an error if the ranges have different types or their bounds cannot
+/// be compared.
 pub fn overlaps(a: &RangeValue, b: &RangeValue) -> Result<bool, TypeError> {
     if a.ty != b.ty {
         return Err(TypeError::TypeMismatch {
@@ -100,6 +124,12 @@ pub fn overlaps(a: &RangeValue, b: &RangeValue) -> Result<bool, TypeError> {
     Ok(!strictly_left(a, b)? && !strictly_left(b, a)?)
 }
 
+/// Tests whether `a` lies strictly to the left of `b`.
+///
+/// # Errors
+///
+/// Returns an error if the ranges have different types or their bounds cannot
+/// be compared.
 pub fn strictly_left(a: &RangeValue, b: &RangeValue) -> Result<bool, TypeError> {
     same_type(a, b)?;
     if a.empty || b.empty {
@@ -108,10 +138,22 @@ pub fn strictly_left(a: &RangeValue, b: &RangeValue) -> Result<bool, TypeError> 
     left_of(a, b)
 }
 
+/// Tests whether `a` lies strictly to the right of `b`.
+///
+/// # Errors
+///
+/// Returns an error if the ranges have different types or their bounds cannot
+/// be compared.
 pub fn strictly_right(a: &RangeValue, b: &RangeValue) -> Result<bool, TypeError> {
     strictly_left(b, a)
 }
 
+/// Tests whether `a` does not extend to the right of `b`.
+///
+/// # Errors
+///
+/// Returns an error if the ranges have different types or their bounds cannot
+/// be compared.
 pub fn does_not_extend_right(a: &RangeValue, b: &RangeValue) -> Result<bool, TypeError> {
     same_type(a, b)?;
     if a.empty || b.empty {
@@ -120,6 +162,12 @@ pub fn does_not_extend_right(a: &RangeValue, b: &RangeValue) -> Result<bool, Typ
     Ok(compare_upper_bound(a, b)? != Ordering::Greater)
 }
 
+/// Tests whether `a` does not extend to the left of `b`.
+///
+/// # Errors
+///
+/// Returns an error if the ranges have different types or their bounds cannot
+/// be compared.
 pub fn does_not_extend_left(a: &RangeValue, b: &RangeValue) -> Result<bool, TypeError> {
     same_type(a, b)?;
     if a.empty || b.empty {
@@ -128,6 +176,12 @@ pub fn does_not_extend_left(a: &RangeValue, b: &RangeValue) -> Result<bool, Type
     Ok(compare_lower_bound(a, b)? != Ordering::Less)
 }
 
+/// Tests whether two ranges are adjacent.
+///
+/// # Errors
+///
+/// Returns an error if the ranges have different types or their bounds cannot
+/// be compared.
 pub fn adjacent(a: &RangeValue, b: &RangeValue) -> Result<bool, TypeError> {
     same_type(a, b)?;
     if a.empty || b.empty {
@@ -136,6 +190,12 @@ pub fn adjacent(a: &RangeValue, b: &RangeValue) -> Result<bool, TypeError> {
     Ok(adjacent_on(a, b)? || adjacent_on(b, a)?)
 }
 
+/// Returns the smallest range spanning both inputs.
+///
+/// # Errors
+///
+/// Returns an error if the ranges have different types or their bounds cannot
+/// be compared.
 pub fn merge(a: &RangeValue, b: &RangeValue) -> Result<RangeValue, TypeError> {
     same_type(a, b)?;
     if a.empty {
@@ -147,7 +207,7 @@ pub fn merge(a: &RangeValue, b: &RangeValue) -> Result<RangeValue, TypeError> {
     let lower_order = compare_lower(a, b)?;
     let upper_order = compare_upper(a, b)?;
     Ok(RangeValue {
-        ty: a.ty.clone(),
+        ty: a.ty,
         lower: if lower_order == Ordering::Greater {
             b.lower.clone()
         } else {
@@ -172,6 +232,12 @@ pub fn merge(a: &RangeValue, b: &RangeValue) -> Result<RangeValue, TypeError> {
     })
 }
 
+/// Returns the contiguous union of two ranges.
+///
+/// # Errors
+///
+/// Returns an error if the ranges have different types, their bounds cannot be
+/// compared, or their union is not contiguous.
 pub fn union(a: &RangeValue, b: &RangeValue) -> Result<RangeValue, TypeError> {
     if !a.empty && !b.empty && !overlaps(a, b)? && !adjacent(a, b)? {
         return Err(TypeError::Coded {
@@ -182,6 +248,12 @@ pub fn union(a: &RangeValue, b: &RangeValue) -> Result<RangeValue, TypeError> {
     merge(a, b)
 }
 
+/// Returns the intersection of two ranges.
+///
+/// # Errors
+///
+/// Returns an error if the ranges have different types or their bounds cannot
+/// be compared.
 pub fn intersection(a: &RangeValue, b: &RangeValue) -> Result<RangeValue, TypeError> {
     same_type(a, b)?;
     if a.empty || b.empty || !overlaps(a, b)? {
@@ -190,7 +262,7 @@ pub fn intersection(a: &RangeValue, b: &RangeValue) -> Result<RangeValue, TypeEr
     let lower_order = compare_lower(a, b)?;
     let upper_order = compare_upper(a, b)?;
     Ok(RangeValue {
-        ty: a.ty.clone(),
+        ty: a.ty,
         lower: if lower_order == Ordering::Less {
             b.lower.clone()
         } else {
@@ -215,6 +287,12 @@ pub fn intersection(a: &RangeValue, b: &RangeValue) -> Result<RangeValue, TypeEr
     })
 }
 
+/// Subtracts `b` from `a` when the result is contiguous.
+///
+/// # Errors
+///
+/// Returns an error if the ranges have different types, their bounds cannot be
+/// compared, or the difference would produce two disjoint ranges.
 pub fn difference(a: &RangeValue, b: &RangeValue) -> Result<RangeValue, TypeError> {
     same_type(a, b)?;
     if a.empty || b.empty || !overlaps(a, b)? {
@@ -233,10 +311,10 @@ pub fn difference(a: &RangeValue, b: &RangeValue) -> Result<RangeValue, TypeErro
     }
     let mut result = a.clone();
     if cuts_left {
-        result.lower = b.upper.clone();
+        result.lower.clone_from(&b.upper);
         result.lower_inclusive = !b.upper_inclusive;
     } else {
-        result.upper = b.lower.clone();
+        result.upper.clone_from(&b.lower);
         result.upper_inclusive = !b.lower_inclusive;
     }
     Ok(result)
@@ -246,13 +324,11 @@ fn lower_contains(outer: &RangeValue, inner: &RangeValue) -> Result<bool, TypeEr
     match (outer.lower.as_deref(), inner.lower.as_deref()) {
         (None, _) => Ok(true),
         (Some(_), None) => Ok(false),
-        (Some(a), Some(b)) => Ok(
-            match crate::ops::compare(a, b)?.expect("bounds are non-null") {
-                Ordering::Less => true,
-                Ordering::Greater => false,
-                Ordering::Equal => outer.lower_inclusive || !inner.lower_inclusive,
-            },
-        ),
+        (Some(a), Some(b)) => Ok(match compare_non_null(a, b)? {
+            Ordering::Less => true,
+            Ordering::Greater => false,
+            Ordering::Equal => outer.lower_inclusive || !inner.lower_inclusive,
+        }),
     }
 }
 
@@ -260,13 +336,11 @@ fn upper_contains(outer: &RangeValue, inner: &RangeValue) -> Result<bool, TypeEr
     match (outer.upper.as_deref(), inner.upper.as_deref()) {
         (None, _) => Ok(true),
         (Some(_), None) => Ok(false),
-        (Some(a), Some(b)) => Ok(
-            match crate::ops::compare(a, b)?.expect("bounds are non-null") {
-                Ordering::Greater => true,
-                Ordering::Less => false,
-                Ordering::Equal => outer.upper_inclusive || !inner.upper_inclusive,
-            },
-        ),
+        (Some(a), Some(b)) => Ok(match compare_non_null(a, b)? {
+            Ordering::Greater => true,
+            Ordering::Less => false,
+            Ordering::Equal => outer.upper_inclusive || !inner.upper_inclusive,
+        }),
     }
 }
 
@@ -274,13 +348,11 @@ fn left_of(a: &RangeValue, b: &RangeValue) -> Result<bool, TypeError> {
     let (Some(upper), Some(lower)) = (a.upper.as_deref(), b.lower.as_deref()) else {
         return Ok(false);
     };
-    Ok(
-        match crate::ops::compare(upper, lower)?.expect("bounds are non-null") {
-            Ordering::Less => true,
-            Ordering::Greater => false,
-            Ordering::Equal => !(a.upper_inclusive && b.lower_inclusive),
-        },
-    )
+    Ok(match compare_non_null(upper, lower)? {
+        Ordering::Less => true,
+        Ordering::Greater => false,
+        Ordering::Equal => !(a.upper_inclusive && b.lower_inclusive),
+    })
 }
 
 fn same_type(a: &RangeValue, b: &RangeValue) -> Result<(), TypeError> {
@@ -301,12 +373,18 @@ fn adjacent_on(a: &RangeValue, b: &RangeValue) -> Result<bool, TypeError> {
         && a.upper_inclusive != b.lower_inclusive)
 }
 
+fn compare_non_null(a: &Datum, b: &Datum) -> Result<Ordering, TypeError> {
+    crate::ops::compare(a, b)?.ok_or_else(|| TypeError::TypeMismatch {
+        message: "range bounds and elements must not be null".into(),
+    })
+}
+
 fn compare_lower(a: &RangeValue, b: &RangeValue) -> Result<Ordering, TypeError> {
     match (a.lower.as_deref(), b.lower.as_deref()) {
         (None, None) => Ok(Ordering::Equal),
         (None, Some(_)) => Ok(Ordering::Less),
         (Some(_), None) => Ok(Ordering::Greater),
-        (Some(a), Some(b)) => Ok(crate::ops::compare(a, b)?.expect("bounds are non-null")),
+        (Some(a), Some(b)) => compare_non_null(a, b),
     }
 }
 
@@ -315,7 +393,7 @@ fn compare_upper(a: &RangeValue, b: &RangeValue) -> Result<Ordering, TypeError> 
         (None, None) => Ok(Ordering::Equal),
         (None, Some(_)) => Ok(Ordering::Greater),
         (Some(_), None) => Ok(Ordering::Less),
-        (Some(a), Some(b)) => Ok(crate::ops::compare(a, b)?.expect("bounds are non-null")),
+        (Some(a), Some(b)) => compare_non_null(a, b),
     }
 }
 
@@ -345,7 +423,7 @@ fn compare_upper_bound(a: &RangeValue, b: &RangeValue) -> Result<Ordering, TypeE
 
 fn empty(range: &RangeValue) -> RangeValue {
     RangeValue {
-        ty: range.ty.clone(),
+        ty: range.ty,
         lower: None,
         upper: None,
         lower_inclusive: false,
@@ -366,6 +444,12 @@ fn quote_bound(text: &str) -> String {
     }
 }
 
+/// Canonicalizes a range literal for its subtype.
+///
+/// # Errors
+///
+/// Returns an error if the literal is malformed, a bound cannot be converted
+/// to `subtype`, or canonicalizing a discrete bound overflows.
 pub fn canonicalize(
     input: &str,
     subtype: ColumnType,
@@ -463,10 +547,8 @@ fn separator(inner: &str, whole: &str) -> Result<usize, TypeError> {
             escaped = true;
         } else if byte == b'"' {
             quoted = !quoted;
-        } else if byte == b',' && !quoted {
-            if comma.replace(index).is_some() {
-                return Err(malformed(whole));
-            }
+        } else if byte == b',' && !quoted && comma.replace(index).is_some() {
+            return Err(malformed(whole));
         }
     }
     if quoted || escaped {
@@ -653,5 +735,26 @@ mod tests {
             canonicalize("[2000-01-01,infinity]", ColumnType::Date, &tz),
             Ok("[2000-01-01,infinity]".into())
         );
+    }
+
+    #[test]
+    fn null_element_returns_an_error() {
+        let range = RangeValue {
+            ty: RangeRef {
+                oid: crate::datum::oids::INT4RANGE,
+                name: "int4range",
+                subtype: &ColumnType::Int4,
+            },
+            lower: Some(Box::new(Datum::Int4(1))),
+            upper: Some(Box::new(Datum::Int4(2))),
+            lower_inclusive: true,
+            upper_inclusive: false,
+            empty: false,
+        };
+
+        assert!(matches!(
+            contains_element(&range, &Datum::Null),
+            Err(TypeError::TypeMismatch { .. })
+        ));
     }
 }

@@ -180,23 +180,45 @@ pub(crate) fn resolve_in_values(ctx: &SubCtx, v: &ValuesStmt) -> Result<ValuesSt
 fn resolve_subscript(
     ctx: &SubCtx,
     subscript: &crabka_pgparser::ast::ArraySubscript,
+    should_skip: &mut dyn FnMut(&Expr) -> bool,
 ) -> Result<crabka_pgparser::ast::ArraySubscript, ExecError> {
     use crabka_pgparser::ast::ArraySubscript;
 
     Ok(match subscript {
-        ArraySubscript::Index(index) => ArraySubscript::Index(resolve_expr(ctx, index)?),
-        ArraySubscript::Slice { lower, upper } => {
-            let bound = |e: &Option<Expr>| e.as_ref().map(|e| resolve_expr(ctx, e)).transpose();
-            ArraySubscript::Slice {
-                lower: bound(lower)?,
-                upper: bound(upper)?,
-            }
+        ArraySubscript::Index(index) => {
+            ArraySubscript::Index(resolve_expr_skipping(ctx, index, should_skip)?)
         }
+        ArraySubscript::Slice { lower, upper } => ArraySubscript::Slice {
+            lower: lower
+                .as_ref()
+                .map(|e| resolve_expr_skipping(ctx, e, should_skip))
+                .transpose()?,
+            upper: upper
+                .as_ref()
+                .map(|e| resolve_expr_skipping(ctx, e, should_skip))
+                .transpose()?,
+        },
     })
 }
 
 /// Recursively rewrite subquery nodes in `e`, bottom-up.
 pub(crate) fn resolve_expr(ctx: &SubCtx, e: &Expr) -> Result<Expr, ExecError> {
+    resolve_expr_skipping(ctx, e, &mut |_| false)
+}
+
+/// Recursively rewrite subquery nodes except those selected by `should_skip`.
+///
+/// The callback receives each original expression before any of its children
+/// are rewritten. Returning `true` clones that whole node untouched.
+pub(crate) fn resolve_expr_skipping(
+    ctx: &SubCtx,
+    e: &Expr,
+    should_skip: &mut dyn FnMut(&Expr) -> bool,
+) -> Result<Expr, ExecError> {
+    if should_skip(e) {
+        return Ok(e.clone());
+    }
+
     Ok(match e {
         Expr::IntLiteral(_)
         | Expr::NumericLiteral(_)
@@ -208,22 +230,24 @@ pub(crate) fn resolve_expr(ctx: &SubCtx, e: &Expr) -> Result<Expr, ExecError> {
         | Expr::Default
         | Expr::Const { .. } => e.clone(),
         Expr::FieldSelect { base, field } => Expr::FieldSelect {
-            base: Box::new(resolve_expr(ctx, base)?),
+            base: Box::new(resolve_expr_skipping(ctx, base, should_skip)?),
             field: field.clone(),
         },
-        Expr::FieldSelectAll(base) => Expr::FieldSelectAll(Box::new(resolve_expr(ctx, base)?)),
+        Expr::FieldSelectAll(base) => {
+            Expr::FieldSelectAll(Box::new(resolve_expr_skipping(ctx, base, should_skip)?))
+        }
         Expr::Unary { op, expr } => Expr::Unary {
             op: *op,
-            expr: Box::new(resolve_expr(ctx, expr)?),
+            expr: Box::new(resolve_expr_skipping(ctx, expr, should_skip)?),
         },
         Expr::Collate { expr, collation } => Expr::Collate {
-            expr: Box::new(resolve_expr(ctx, expr)?),
+            expr: Box::new(resolve_expr_skipping(ctx, expr, should_skip)?),
             collation: collation.clone(),
         },
         Expr::Binary { op, left, right } => Expr::Binary {
             op: *op,
-            left: Box::new(resolve_expr(ctx, left)?),
-            right: Box::new(resolve_expr(ctx, right)?),
+            left: Box::new(resolve_expr_skipping(ctx, left, should_skip)?),
+            right: Box::new(resolve_expr_skipping(ctx, right, should_skip)?),
         },
         Expr::Func(fc) => {
             let call = FuncCall {
@@ -233,14 +257,18 @@ pub(crate) fn resolve_expr(ctx: &SubCtx, e: &Expr) -> Result<Expr, ExecError> {
                     FuncArgs::Star => FuncArgs::Star,
                     FuncArgs::Exprs(args) => FuncArgs::Exprs(
                         args.iter()
-                            .map(|a| resolve_expr(ctx, a))
+                            .map(|a| resolve_expr_skipping(ctx, a, should_skip))
                             .collect::<Result<_, _>>()?,
                     ),
                 },
                 // The FILTER predicate resolves like an argument; dropping it here
                 // would silently turn a filtered aggregate into an unfiltered one.
                 filter: match &fc.filter {
-                    Some(predicate) => Some(Box::new(resolve_expr(ctx, predicate)?)),
+                    Some(predicate) => Some(Box::new(resolve_expr_skipping(
+                        ctx,
+                        predicate,
+                        should_skip,
+                    )?)),
                     None => None,
                 },
             };
@@ -251,13 +279,13 @@ pub(crate) fn resolve_expr(ctx: &SubCtx, e: &Expr) -> Result<Expr, ExecError> {
                 // become a scalar subquery, so it goes back through this pass.
                 Some(inlined) => {
                     let _guard = crate::routine::enter_inline()?;
-                    resolve_expr(ctx, &inlined)?
+                    resolve_expr_skipping(ctx, &inlined, should_skip)?
                 }
                 None => Expr::Func(call),
             }
         }
         Expr::IsNull { expr, negated } => Expr::IsNull {
-            expr: Box::new(resolve_expr(ctx, expr)?),
+            expr: Box::new(resolve_expr_skipping(ctx, expr, should_skip)?),
             negated: *negated,
         },
         Expr::InList {
@@ -265,10 +293,10 @@ pub(crate) fn resolve_expr(ctx: &SubCtx, e: &Expr) -> Result<Expr, ExecError> {
             list,
             negated,
         } => Expr::InList {
-            expr: Box::new(resolve_expr(ctx, expr)?),
+            expr: Box::new(resolve_expr_skipping(ctx, expr, should_skip)?),
             list: list
                 .iter()
-                .map(|x| resolve_expr(ctx, x))
+                .map(|x| resolve_expr_skipping(ctx, x, should_skip))
                 .collect::<Result<_, _>>()?,
             negated: *negated,
         },
@@ -278,9 +306,9 @@ pub(crate) fn resolve_expr(ctx: &SubCtx, e: &Expr) -> Result<Expr, ExecError> {
             high,
             negated,
         } => Expr::Between {
-            expr: Box::new(resolve_expr(ctx, expr)?),
-            low: Box::new(resolve_expr(ctx, low)?),
-            high: Box::new(resolve_expr(ctx, high)?),
+            expr: Box::new(resolve_expr_skipping(ctx, expr, should_skip)?),
+            low: Box::new(resolve_expr_skipping(ctx, low, should_skip)?),
+            high: Box::new(resolve_expr_skipping(ctx, high, should_skip)?),
             negated: *negated,
         },
         Expr::Like {
@@ -290,12 +318,12 @@ pub(crate) fn resolve_expr(ctx: &SubCtx, e: &Expr) -> Result<Expr, ExecError> {
             kind,
             escape,
         } => Expr::Like {
-            expr: Box::new(resolve_expr(ctx, expr)?),
-            pattern: Box::new(resolve_expr(ctx, pattern)?),
+            expr: Box::new(resolve_expr_skipping(ctx, expr, should_skip)?),
+            pattern: Box::new(resolve_expr_skipping(ctx, pattern, should_skip)?),
             negated: *negated,
             kind: *kind,
             escape: match escape {
-                Some(e) => Some(Box::new(resolve_expr(ctx, e)?)),
+                Some(e) => Some(Box::new(resolve_expr_skipping(ctx, e, should_skip)?)),
                 None => None,
             },
         },
@@ -305,25 +333,32 @@ pub(crate) fn resolve_expr(ctx: &SubCtx, e: &Expr) -> Result<Expr, ExecError> {
             else_result,
         } => Expr::Case {
             operand: match operand {
-                Some(o) => Some(Box::new(resolve_expr(ctx, o)?)),
+                Some(o) => Some(Box::new(resolve_expr_skipping(ctx, o, should_skip)?)),
                 None => None,
             },
             whens: whens
                 .iter()
-                .map(|(c, r)| Ok((resolve_expr(ctx, c)?, resolve_expr(ctx, r)?)))
+                .map(|(c, r)| {
+                    Ok((
+                        resolve_expr_skipping(ctx, c, should_skip)?,
+                        resolve_expr_skipping(ctx, r, should_skip)?,
+                    ))
+                })
                 .collect::<Result<_, ExecError>>()?,
             else_result: match else_result {
-                Some(o) => Some(Box::new(resolve_expr(ctx, o)?)),
+                Some(o) => Some(Box::new(resolve_expr_skipping(ctx, o, should_skip)?)),
                 None => None,
             },
         },
         Expr::Cast { expr, ty } => Expr::Cast {
-            expr: Box::new(resolve_expr(ctx, expr)?),
+            expr: Box::new(resolve_expr_skipping(ctx, expr, should_skip)?),
             ty: *ty,
         },
-        Expr::SqlJson(json) => Expr::SqlJson(Box::new(
-            json.map_children(|child| resolve_expr(ctx, child))?,
-        )),
+        Expr::SqlJson(json) => {
+            Expr::SqlJson(Box::new(json.map_children(|child| {
+                resolve_expr_skipping(ctx, child, should_skip)
+            })?))
+        }
         // The array expression forms carry ordinary child expressions, any of
         // which may contain a subquery (`ARRAY[(SELECT …)]`, `arr[(SELECT …)]`,
         // `x = ANY((SELECT …))`), so they recurse like every other node — the
@@ -331,24 +366,24 @@ pub(crate) fn resolve_expr(ctx: &SubCtx, e: &Expr) -> Result<Expr, ExecError> {
         Expr::ArrayLiteral(items) => Expr::ArrayLiteral(
             items
                 .iter()
-                .map(|item| resolve_expr(ctx, item))
+                .map(|item| resolve_expr_skipping(ctx, item, should_skip))
                 .collect::<Result<_, _>>()?,
         ),
         Expr::Row(items) => Expr::Row(
             items
                 .iter()
-                .map(|item| resolve_expr(ctx, item))
+                .map(|item| resolve_expr_skipping(ctx, item, should_skip))
                 .collect::<Result<_, _>>()?,
         ),
         Expr::Subscript { base, index } => Expr::Subscript {
-            base: Box::new(resolve_expr(ctx, base)?),
-            index: Box::new(resolve_expr(ctx, index)?),
+            base: Box::new(resolve_expr_skipping(ctx, base, should_skip)?),
+            index: Box::new(resolve_expr_skipping(ctx, index, should_skip)?),
         },
         Expr::ArrayRef { base, subscripts } => Expr::ArrayRef {
-            base: Box::new(resolve_expr(ctx, base)?),
+            base: Box::new(resolve_expr_skipping(ctx, base, should_skip)?),
             subscripts: subscripts
                 .iter()
-                .map(|s| resolve_subscript(ctx, s))
+                .map(|s| resolve_subscript(ctx, s, should_skip))
                 .collect::<Result<_, _>>()?,
         },
         Expr::QuantifiedArray {
@@ -357,10 +392,10 @@ pub(crate) fn resolve_expr(ctx: &SubCtx, e: &Expr) -> Result<Expr, ExecError> {
             all,
             array,
         } => Expr::QuantifiedArray {
-            expr: Box::new(resolve_expr(ctx, expr)?),
+            expr: Box::new(resolve_expr_skipping(ctx, expr, should_skip)?),
             op: *op,
             all: *all,
-            array: Box::new(resolve_expr(ctx, array)?),
+            array: Box::new(resolve_expr_skipping(ctx, array, should_skip)?),
         },
         // ---- the subquery nodes: run once, fold to constants ----
         Expr::ScalarSubquery(s) => {
@@ -393,7 +428,7 @@ pub(crate) fn resolve_expr(ctx: &SubCtx, e: &Expr) -> Result<Expr, ExecError> {
         } => {
             let (ty, values) = run_single_column(ctx, subquery)?;
             Expr::InList {
-                expr: Box::new(resolve_expr(ctx, expr)?),
+                expr: Box::new(resolve_expr_skipping(ctx, expr, should_skip)?),
                 list: values
                     .into_iter()
                     .map(|value| Expr::Const { value, ty })
@@ -408,7 +443,7 @@ pub(crate) fn resolve_expr(ctx: &SubCtx, e: &Expr) -> Result<Expr, ExecError> {
             subquery,
         } => {
             let (ty, values) = run_single_column(ctx, subquery)?;
-            let lhs = resolve_expr(ctx, expr)?;
+            let lhs = resolve_expr_skipping(ctx, expr, should_skip)?;
             lower_quantified(&lhs, *op, *all, ty, values)
         }
     })

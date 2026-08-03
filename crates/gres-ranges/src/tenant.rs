@@ -7350,8 +7350,8 @@ fn datum_hash_bytes(value: &Datum) -> Option<Vec<u8>> {
         | Datum::Regclass(_)
         | Datum::TsVector(_)
         | Datum::TsQuery(_)
-        | Datum::Range(_) => None,
-        Datum::Multirange(_) => None,
+        | Datum::Range(_)
+        | Datum::Multirange(_) => None,
     }
 }
 

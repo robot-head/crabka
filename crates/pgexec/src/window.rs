@@ -1257,7 +1257,7 @@ enum ResolvedFrame {
     Explicit {
         mode: FrameMode,
         start: ResolvedBound,
-        end: ResolvedBound,
+        end: Box<ResolvedBound>,
         exclusion: FrameExclusion,
     },
 }
@@ -1345,7 +1345,9 @@ fn resolved_frame(call: &PlannedCall, ctx: &EvalCtx) -> Result<ResolvedFrame, Ex
     Ok(ResolvedFrame::Explicit {
         mode: frame.mode,
         start: resolve_bound(&frame.start, frame.mode, "starting", unknown_ty, ctx)?,
-        end: resolve_bound(&frame.end, frame.mode, "ending", unknown_ty, ctx)?,
+        end: Box::new(resolve_bound(
+            &frame.end, frame.mode, "ending", unknown_ty, ctx,
+        )?),
         exclusion: frame.exclusion,
     })
 }

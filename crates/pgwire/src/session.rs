@@ -728,13 +728,13 @@ where
     // self-notify reaches the client stamped with its own pid.
     let mut session = engine.connect_with_pid(cancel.pid);
     for (name, value) in &startup_params {
-        if !matches!(name.as_str(), "user" | "database") {
-            if let Err(error) = session.startup_parameter(name, value).await {
-                backend::error_response(&mut out, &error);
-                stream.write_all(&out).await?;
-                session.terminate().await;
-                return Ok(());
-            }
+        if !matches!(name.as_str(), "user" | "database")
+            && let Err(error) = session.startup_parameter(name, value).await
+        {
+            backend::error_response(&mut out, &error);
+            stream.write_all(&out).await?;
+            session.terminate().await;
+            return Ok(());
         }
     }
     if let Err(error) = session.startup().await {

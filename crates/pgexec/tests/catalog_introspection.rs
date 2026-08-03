@@ -29,7 +29,11 @@ async fn column(engine: &SqlEngine, sql: &str) -> Vec<Option<String>> {
 
 /// The whole result as text, so a test can compare an entire expected table.
 async fn grid(engine: &SqlEngine, sql: &str) -> Vec<Vec<Option<String>>> {
-    match run(engine, sql).await {
+    result_grid(run(engine, sql).await)
+}
+
+fn result_grid(result: QueryResult) -> Vec<Vec<Option<String>>> {
+    match result {
         QueryResult::Rows { rows, .. } => rows
             .into_iter()
             .map(|row| {
@@ -129,6 +133,89 @@ async fn every_named_catalog_relation_resolves() {
     }
 }
 
+/// `PostgreSQL`'s own `sanity_check.sql` requires every low-oid system catalog
+/// with an `oid` column to have an immediate, unique one-column oid index.
+#[tokio::test]
+async fn system_catalog_oid_indexes_pass_upstream_sanity_check() {
+    let engine = SqlEngine::new();
+    let missing = grid(
+        &engine,
+        "SELECT relname, nspname
+         FROM pg_class c LEFT JOIN pg_namespace n ON n.oid = relnamespace JOIN pg_attribute a ON (attrelid = c.oid AND attname = 'oid')
+         WHERE relkind = 'r' and c.oid < 16384
+             AND ((nspname ~ '^pg_') IS NOT FALSE)
+             AND NOT EXISTS (SELECT 1 FROM pg_index i WHERE indrelid = c.oid
+                             AND indkey[0] = a.attnum AND indnatts = 1
+                             AND indisunique AND indimmediate)",
+    )
+    .await;
+    assert2::assert!(missing.is_empty(), "missing oid indexes: {missing:?}");
+}
+
+#[tokio::test]
+async fn system_catalog_oid_indexes_keep_pg18_catalog_identity_and_links() {
+    let engine = SqlEngine::new();
+    let indexes = grid(
+        &engine,
+        "SELECT t.relname, x.oid, x.relname
+         FROM pg_class t
+         JOIN pg_attribute ta ON ta.attrelid = t.oid AND ta.attname = 'oid'
+         JOIN pg_index i ON i.indrelid = t.oid AND i.indkey[0] = ta.attnum
+         JOIN pg_class x ON x.oid = i.indexrelid
+         JOIN pg_attribute xa ON xa.attrelid = x.oid AND xa.attnum = 1
+         WHERE t.relnamespace = 11 AND t.relkind = 'r' AND i.indnatts = 1
+               AND t.relhasindex AND x.relnamespace = 11 AND x.relkind = 'i'
+               AND x.relam = 403 AND x.relnatts = 1
+               AND (x.relfilenode = 0 OR x.relfilenode = x.oid)
+               AND i.indnkeyatts = 1 AND i.indisunique AND i.indisprimary
+               AND i.indimmediate AND i.indisvalid AND i.indisready AND i.indislive
+               AND i.indkey[1] IS NULL AND xa.attname = 'oid'
+               AND xa.attnum = 1 AND xa.atttypid = ta.atttypid
+         ORDER BY t.relname",
+    )
+    .await;
+    assert2::assert!(
+        indexes
+            == vec![
+                some(&["pg_am", "2652", "pg_am_oid_index"]),
+                some(&["pg_amop", "2756", "pg_amop_oid_index"]),
+                some(&["pg_amproc", "2757", "pg_amproc_oid_index"]),
+                some(&["pg_attrdef", "2657", "pg_attrdef_oid_index"]),
+                some(&["pg_authid", "2677", "pg_authid_oid_index"]),
+                some(&["pg_cast", "2660", "pg_cast_oid_index"]),
+                some(&["pg_class", "2662", "pg_class_oid_index"]),
+                some(&["pg_collation", "3085", "pg_collation_oid_index"]),
+                some(&["pg_constraint", "2667", "pg_constraint_oid_index"]),
+                some(&["pg_conversion", "2670", "pg_conversion_oid_index"]),
+                some(&["pg_database", "2672", "pg_database_oid_index"]),
+                some(&["pg_enum", "3502", "pg_enum_oid_index"]),
+                some(&["pg_event_trigger", "3468", "pg_event_trigger_oid_index"]),
+                some(&["pg_extension", "3080", "pg_extension_oid_index"]),
+                some(&["pg_language", "2682", "pg_language_oid_index"]),
+                some(&["pg_namespace", "2685", "pg_namespace_oid_index"]),
+                some(&["pg_opclass", "2687", "pg_opclass_oid_index"]),
+                some(&["pg_operator", "2688", "pg_operator_oid_index"]),
+                some(&["pg_opfamily", "2755", "pg_opfamily_oid_index"]),
+                some(&["pg_policy", "3257", "pg_policy_oid_index"]),
+                some(&["pg_proc", "2690", "pg_proc_oid_index"]),
+                some(&["pg_publication", "6110", "pg_publication_oid_index"]),
+                some(&[
+                    "pg_publication_namespace",
+                    "6238",
+                    "pg_publication_namespace_oid_index"
+                ]),
+                some(&["pg_publication_rel", "6112", "pg_publication_rel_oid_index"]),
+                some(&["pg_rewrite", "2692", "pg_rewrite_oid_index"]),
+                some(&["pg_statistic_ext", "3380", "pg_statistic_ext_oid_index"]),
+                some(&["pg_tablespace", "2697", "pg_tablespace_oid_index"]),
+                some(&["pg_trigger", "2702", "pg_trigger_oid_index"]),
+                some(&["pg_ts_config", "3712", "pg_ts_config_oid_index"]),
+                some(&["pg_ts_dict", "3605", "pg_ts_dict_oid_index"]),
+                some(&["pg_type", "2703", "pg_type_oid_index"]),
+            ]
+    );
+}
+
 #[tokio::test]
 async fn pg_cast_exposes_postgresql_builtin_casts() {
     let engine = SqlEngine::new();
@@ -206,6 +293,22 @@ async fn pg_proc_support_oid_join_stays_indexable() {
     assert2::assert!(count == some(&["52"]));
 }
 
+#[tokio::test]
+async fn pg_proc_signature_self_join_stays_indexable() {
+    let engine = SqlEngine::new();
+    let duplicates = grid(
+        &engine,
+        "SELECT p1.oid, p1.proname, p2.oid, p2.proname \
+         FROM pg_proc AS p1, pg_proc AS p2 \
+         WHERE p1.oid != p2.oid AND \
+               p1.proname = p2.proname AND \
+               p1.pronargs = p2.pronargs AND \
+               p1.proargtypes = p2.proargtypes",
+    )
+    .await;
+    assert2::assert!(duplicates.is_empty());
+}
+
 /// A bare `pg_catalog.`-less name resolves to the same relation as the
 /// qualified one, because clients write both.
 #[tokio::test]
@@ -245,10 +348,612 @@ async fn pg_class_describes_every_relation_kind() {
     );
 }
 
-/// The column metadata `\d` and every ORM read.
-///
-/// This includes the packed `numeric(p, s)` modifier that `format_type`
-/// reconstructs the type name from.
+#[tokio::test]
+async fn pg_class_reports_postgresql_relkind_and_storage_semantics() {
+    let engine = fixture().await;
+    run(
+        &engine,
+        "CREATE TABLE shop_parts (id int4) PARTITION BY RANGE (id)",
+    )
+    .await;
+    run(&engine, "CREATE FOREIGN DATA WRAPPER shop_fdw").await;
+    run(
+        &engine,
+        "CREATE SERVER shop_server FOREIGN DATA WRAPPER shop_fdw",
+    )
+    .await;
+    run(
+        &engine,
+        "CREATE FOREIGN TABLE shop_remote (id int4) SERVER shop_server",
+    )
+    .await;
+    run(&engine, "CREATE SEQUENCE shop_seq").await;
+
+    let listed = grid(
+        &engine,
+        "SELECT n.nspname, c.relname, c.relkind, c.relam, c.oid > 0, \
+                c.relfilenode = c.oid, c.relfilenode = 0 \
+         FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE (n.nspname = 'public' AND \
+                c.relname IN ('shop', 'shop_v', 'shop_parts', 'shop_remote', \
+                              'shop_seq')) OR \
+               (n.nspname = 'pg_catalog' AND \
+                c.relname IN ('pg_class', 'pg_partitioned_table', \
+                              'pg_prepared_statements', 'pg_roles')) OR \
+               (n.nspname = 'information_schema' AND c.relname = 'tables') \
+         ORDER BY n.nspname, c.relname",
+    )
+    .await;
+    assert2::assert!(
+        listed
+            == vec![
+                some(&["information_schema", "tables", "v", "0", "t", "f", "t"]),
+                some(&["pg_catalog", "pg_class", "r", "2", "t", "f", "t"]),
+                some(&[
+                    "pg_catalog",
+                    "pg_partitioned_table",
+                    "r",
+                    "2",
+                    "t",
+                    "t",
+                    "f"
+                ]),
+                some(&[
+                    "pg_catalog",
+                    "pg_prepared_statements",
+                    "v",
+                    "0",
+                    "t",
+                    "f",
+                    "t"
+                ]),
+                some(&["pg_catalog", "pg_roles", "v", "0", "t", "f", "t"]),
+                some(&["public", "shop", "r", "2", "t", "t", "f"]),
+                some(&["public", "shop_parts", "p", "0", "t", "f", "t"]),
+                some(&["public", "shop_remote", "f", "0", "t", "f", "t"]),
+                some(&["public", "shop_seq", "S", "0", "t", "t", "f"]),
+                some(&["public", "shop_v", "v", "0", "t", "f", "t"]),
+            ]
+    );
+}
+
+#[tokio::test]
+async fn pg_class_distinguishes_partitioned_and_ordinary_indexes() {
+    let engine = fixture().await;
+    run(
+        &engine,
+        "CREATE TABLE shop_parts (id int4) PARTITION BY RANGE (id)",
+    )
+    .await;
+    run(&engine, "CREATE INDEX shop_parts_idx ON shop_parts (id)").await;
+
+    let listed = grid(
+        &engine,
+        "SELECT relname, relkind, relam, relfilenode = oid, relfilenode = 0 \
+         FROM pg_catalog.pg_class \
+         WHERE relname IN ('shop_code_idx', 'shop_parts_idx') \
+         ORDER BY relname",
+    )
+    .await;
+    assert2::assert!(
+        listed
+            == vec![
+                some(&["shop_code_idx", "i", "403", "t", "f"]),
+                some(&["shop_parts_idx", "I", "403", "f", "t"]),
+            ]
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn pg_class_links_schema_qualified_composite_type_relations() {
+    let engine = SqlEngine::new();
+    run(&engine, "CREATE SCHEMA s").await;
+    run(&engine, "CREATE SCHEMA mr_sch").await;
+    run(
+        &engine,
+        "CREATE TYPE \"pair.with.dot\" AS (code text, amount int4)",
+    )
+    .await;
+    run(
+        &engine,
+        "CREATE TYPE s.\"pair.dot\" AS (code text, amount int4)",
+    )
+    .await;
+    run(
+        &engine,
+        "CREATE TYPE \"s.pair.dot\" AS (code text, amount int4)",
+    )
+    .await;
+
+    let mut session = engine.connect();
+    session
+        .simple_query("SET search_path = s")
+        .await
+        .expect("set type search path");
+    session
+        .simple_query("CREATE TYPE search_path_pair AS (code text, amount int4)")
+        .await
+        .expect("create through search path");
+    let resolved = session
+        .simple_query("SELECT NULL::search_path_pair IS NULL")
+        .await
+        .expect("resolve unqualified type in the same session")
+        .pop()
+        .expect("one result");
+    assert2::assert!(result_grid(resolved) == vec![some(&["t"])]);
+
+    session
+        .simple_query("CREATE TYPE case_pair AS (value int4)")
+        .await
+        .expect("lower-case type");
+    session
+        .simple_query("CREATE TYPE \"Case_Pair\" AS (value int4)")
+        .await
+        .expect("quoted-case type");
+    session
+        .simple_query(
+            "CREATE TABLE case_type_use \
+             (lower_value case_pair, upper_value \"Case_Pair\")",
+        )
+        .await
+        .expect("exact-case type lookup");
+
+    session
+        .simple_query(
+            "CREATE TYPE public.explicit_path_range AS RANGE \
+             (SUBTYPE = int4, MULTIRANGE_TYPE_NAME = path_mr)",
+        )
+        .await
+        .expect("unqualified companion uses its own creation path");
+    session
+        .simple_query(
+            "CREATE TYPE range_with_cross_mr AS RANGE \
+             (SUBTYPE = int4, MULTIRANGE_TYPE_NAME = mr_sch.\"MR.dot\")",
+        )
+        .await
+        .expect("cross-schema dotted companion");
+    session
+        .simple_query("CREATE TYPE rename_range AS RANGE (SUBTYPE = int4)")
+        .await
+        .expect("default companion");
+    session
+        .simple_query("ALTER TYPE rename_range RENAME TO renamed_base")
+        .await
+        .expect("rename range base");
+    session
+        .simple_query("ALTER TYPE mr_sch.\"MR.dot\" RENAME TO \"MR.renamed\"")
+        .await
+        .expect("rename multirange companion");
+    session
+        .simple_query("CREATE TYPE lifecycle_pair AS (value int4)")
+        .await
+        .expect("lifecycle type");
+    session
+        .simple_query("ALTER TYPE lifecycle_pair ADD ATTRIBUTE label text")
+        .await
+        .expect("alter through search path");
+    session
+        .simple_query("DROP TYPE lifecycle_pair")
+        .await
+        .expect("drop through search path");
+    let dropped_catalog_rows = session
+        .simple_query(
+            "SELECT count(*) FROM pg_catalog.pg_type t \
+             JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace \
+             WHERE n.nspname = 's' AND t.typname = 'lifecycle_pair'",
+        )
+        .await
+        .expect("dropped type catalog visibility")
+        .pop()
+        .expect("one result");
+    assert2::assert!(result_grid(dropped_catalog_rows) == vec![some(&["0"])]);
+
+    session
+        .simple_query("CREATE TABLE rowtype_taken (value int4)")
+        .await
+        .expect("row type occupancy");
+    for sql in [
+        "CREATE TYPE self_collision AS RANGE \
+         (SUBTYPE = int4, MULTIRANGE_TYPE_NAME = self_collision)",
+        "CREATE TYPE table_collision AS RANGE \
+         (SUBTYPE = int4, MULTIRANGE_TYPE_NAME = rowtype_taken)",
+    ] {
+        let error = session
+            .simple_query(sql)
+            .await
+            .expect_err("type-name collision");
+        assert2::assert!(error.code == "42710", "{sql}: {error:?}");
+    }
+    session
+        .simple_query("CREATE TYPE blockrange AS RANGE (SUBTYPE = int4)")
+        .await
+        .expect("range used for companion dependency checks");
+    let rename_error = session
+        .simple_query("ALTER TYPE blockrange RENAME TO blockmultirange")
+        .await
+        .expect_err("base cannot take its companion name");
+    assert2::assert!(rename_error.code == "42710", "{rename_error:?}");
+    let drop_error = session
+        .simple_query("DROP TYPE blockmultirange")
+        .await
+        .expect_err("companion is internally dependent");
+    assert2::assert!(drop_error.code == "2BP01", "{drop_error:?}");
+
+    session
+        .simple_query("CREATE TYPE rowtype_primary AS (value int4)")
+        .await
+        .expect("primary type namespace occupant");
+    session
+        .simple_query(
+            "CREATE TYPE rowtype_range AS RANGE \
+             (SUBTYPE = int4, MULTIRANGE_TYPE_NAME = rowtype_companion)",
+        )
+        .await
+        .expect("companion type namespace occupant");
+    session
+        .simple_query("CREATE FOREIGN DATA WRAPPER rowtype_fdw")
+        .await
+        .expect("foreign wrapper");
+    session
+        .simple_query("CREATE SERVER rowtype_server FOREIGN DATA WRAPPER rowtype_fdw")
+        .await
+        .expect("foreign server");
+    for (sql, code) in [
+        ("CREATE TABLE rowtype_primary (value int4)", "42P07"),
+        (
+            "CREATE TABLE rowtype_companion (value int4) PARTITION BY RANGE (value)",
+            "42710",
+        ),
+        ("CREATE TABLE rowtype_primary AS SELECT 1 AS value", "42P07"),
+        (
+            "CREATE VIEW rowtype_companion AS SELECT 1 AS value",
+            "42710",
+        ),
+        (
+            "CREATE FOREIGN TABLE rowtype_primary (value int4) SERVER rowtype_server",
+            "42P07",
+        ),
+    ] {
+        let error = session
+            .simple_query(sql)
+            .await
+            .expect_err("row type cannot replace a user type identity");
+        assert2::assert!(error.code == code, "{sql}: {error:?}");
+    }
+    session
+        .simple_query("CREATE TABLE rowtype_rename_source (value int4)")
+        .await
+        .expect("rename source");
+    let rename_error = session
+        .simple_query("ALTER TABLE rowtype_rename_source RENAME TO rowtype_companion")
+        .await
+        .expect_err("rename cannot take a companion identity");
+    assert2::assert!(rename_error.code == "42710", "{rename_error:?}");
+    let rename_composite = session
+        .simple_query("ALTER TABLE rowtype_rename_source RENAME TO rowtype_primary")
+        .await
+        .expect_err("rename cannot take a composite backing relation identity");
+    assert2::assert!(rename_composite.code == "42P07", "{rename_composite:?}");
+
+    // The type namespace is schema-local.
+    session
+        .simple_query("CREATE TABLE public.rowtype_primary (value int4)")
+        .await
+        .expect("same type name in another schema");
+    session
+        .simple_query("CREATE TYPE sequence_enum_name AS ENUM ('value')")
+        .await
+        .expect("enum sequence collision fixture");
+    for (sql, code) in [
+        ("CREATE SEQUENCE rowtype_primary", "42P07"),
+        ("CREATE SEQUENCE rowtype_range", "42710"),
+        ("CREATE SEQUENCE rowtype_companion", "42710"),
+        ("CREATE SEQUENCE sequence_enum_name", "42710"),
+    ] {
+        let error = session
+            .simple_query(sql)
+            .await
+            .expect_err("sequence cannot share a user type identity");
+        assert2::assert!(error.code == code, "{sql}: {error:?}");
+    }
+
+    // An index may share enum/range names, but a composite's backing relkind=c
+    // already occupies the relation name.
+    session
+        .simple_query("CREATE TYPE index_enum_name AS ENUM ('value')")
+        .await
+        .expect("enum index name");
+    session
+        .simple_query("CREATE TABLE index_host (value int4)")
+        .await
+        .expect("index host");
+    session
+        .simple_query("CREATE INDEX index_enum_name ON index_host (value)")
+        .await
+        .expect("index shares enum name");
+    session
+        .simple_query("CREATE INDEX rowtype_range ON index_host (value)")
+        .await
+        .expect("index shares range name");
+    let composite_index = session
+        .simple_query("CREATE INDEX rowtype_primary ON index_host (value)")
+        .await
+        .expect_err("composite backing relation owns the name");
+    assert2::assert!(composite_index.code == "42P07", "{composite_index:?}");
+
+    // The inverse direction is the same relation-namespace collision: a new or
+    // renamed composite cannot claim an existing sequence/index name.
+    session
+        .simple_query("CREATE SEQUENCE composite_after_sequence")
+        .await
+        .expect("sequence before composite");
+    session
+        .simple_query("CREATE INDEX composite_after_index ON index_host (value)")
+        .await
+        .expect("index before composite");
+    for sql in [
+        "CREATE TYPE composite_after_sequence AS (value int4)",
+        "CREATE TYPE composite_after_index AS (value int4)",
+    ] {
+        let error = session
+            .simple_query(sql)
+            .await
+            .expect_err("composite backing relation collision");
+        assert2::assert!(error.code == "42P07", "{sql}: {error:?}");
+    }
+    session
+        .simple_query("CREATE TYPE composite_rename_source AS (value int4)")
+        .await
+        .expect("composite rename source");
+    let composite_rename = session
+        .simple_query("ALTER TYPE composite_rename_source RENAME TO composite_after_sequence")
+        .await
+        .expect_err("renamed composite backing relation collision");
+    assert2::assert!(composite_rename.code == "42P07", "{composite_rename:?}");
+
+    // Scalar types have no backing relation, so the inverse creation/rename
+    // direction may share an existing sequence or index name.
+    session
+        .simple_query("CREATE SEQUENCE enum_after_sequence")
+        .await
+        .expect("sequence before enum");
+    session
+        .simple_query("CREATE TYPE enum_after_sequence AS ENUM ('value')")
+        .await
+        .expect("enum shares existing sequence name");
+    session
+        .simple_query("CREATE INDEX range_after_index ON index_host (value)")
+        .await
+        .expect("index before range");
+    session
+        .simple_query("CREATE TYPE range_after_index AS RANGE (SUBTYPE = int4)")
+        .await
+        .expect("range shares existing index name");
+    session
+        .simple_query("CREATE SEQUENCE enum_rename_target")
+        .await
+        .expect("enum rename sequence target");
+    session
+        .simple_query("CREATE TYPE enum_rename_source AS ENUM ('value')")
+        .await
+        .expect("enum rename source");
+    session
+        .simple_query("ALTER TYPE enum_rename_source RENAME TO enum_rename_target")
+        .await
+        .expect("enum renames onto sequence name");
+    session
+        .simple_query("CREATE INDEX range_rename_target ON index_host (value)")
+        .await
+        .expect("range rename index target");
+    session
+        .simple_query("CREATE TYPE range_rename_source AS RANGE (SUBTYPE = int4)")
+        .await
+        .expect("range rename source");
+    session
+        .simple_query("ALTER TYPE range_rename_source RENAME TO range_rename_target")
+        .await
+        .expect("range renames onto index name");
+
+    session
+        .simple_query("CREATE TYPE public.\"INT\" AS (value int4)")
+        .await
+        .expect("quoted builtin spelling in another schema");
+    session
+        .simple_query("CREATE TYPE public.int AS (value int4)")
+        .await
+        .expect("builtin spelling in another schema");
+    session
+        .simple_query("CREATE TYPE public.int4 AS (value int4)")
+        .await
+        .expect("catalog type name in another schema");
+    session
+        .simple_query("SET search_path = public, pg_catalog, s, mr_sch")
+        .await
+        .expect("put public before pg_catalog");
+    let shadows = session
+        .simple_query("SELECT NULL::\"INT\" IS NULL, NULL::int IS NULL")
+        .await
+        .expect("public types shadow later pg_catalog")
+        .pop()
+        .expect("one result");
+    assert2::assert!(result_grid(shadows) == vec![some(&["t", "t"])]);
+    assert2::assert!(
+        session
+            .simple_query("SELECT NULL::pg_catalog.\"INT\"")
+            .await
+            .is_err()
+    );
+    session
+        .simple_query("SET search_path = pg_catalog, public, s, mr_sch")
+        .await
+        .expect("system catalog first");
+    let system_drop = session
+        .simple_query("DROP TYPE int4")
+        .await
+        .expect_err("catalog type shadows public type for DDL");
+    assert2::assert!(system_drop.code == "2BP01", "{system_drop:?}");
+    session
+        .simple_query("ALTER TYPE int RENAME TO int_alias_renamed")
+        .await
+        .expect("non-catalog alias still resolves through the path");
+    session
+        .simple_query("ALTER TYPE public.int_alias_renamed RENAME TO int")
+        .await
+        .expect("restore alias fixture");
+    session
+        .simple_query("SET search_path = mr_sch, s, public")
+        .await
+        .expect("companion lookup path");
+    let companions = session
+        .simple_query(
+            "SELECT NULL::\"MR.renamed\" IS NULL, \
+                    NULL::s.rename_multirange IS NULL, \
+                    NULL::s.path_mr IS NULL",
+        )
+        .await
+        .expect("structured companion lookup")
+        .pop()
+        .expect("one result");
+    assert2::assert!(result_grid(companions) == vec![some(&["t", "t", "t"])]);
+    drop(session);
+
+    assert2::assert!(
+        grid(
+            &engine,
+            "SELECT NULL::\"pair.with.dot\" IS NULL, \
+                    NULL::s.\"pair.dot\" IS NULL, \
+                    NULL::\"s.pair.dot\" IS NULL",
+        )
+        .await
+            == vec![some(&["t", "t", "t"])]
+    );
+
+    let listed = grid(
+        &engine,
+        "SELECT cn.nspname, c.relname, c.relkind, c.relam = 0, c.reltype = t.oid, \
+                c.relfilenode = 0, c.relnatts, tn.nspname, t.typname \
+         FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_namespace cn ON cn.oid = c.relnamespace \
+         JOIN pg_catalog.pg_type t ON t.typrelid = c.oid \
+         JOIN pg_catalog.pg_namespace tn ON tn.oid = t.typnamespace \
+         WHERE (cn.nspname = 'public' AND c.relname = 'pair.with.dot') OR \
+               (cn.nspname = 'public' AND c.relname = 's.pair.dot') OR \
+               (cn.nspname = 's' AND \
+                c.relname IN ('pair.dot', 'search_path_pair')) \
+         ORDER BY cn.nspname, c.relname",
+    )
+    .await;
+    assert2::assert!(
+        listed
+            == vec![
+                some(&[
+                    "public",
+                    "pair.with.dot",
+                    "c",
+                    "t",
+                    "t",
+                    "t",
+                    "2",
+                    "public",
+                    "pair.with.dot"
+                ]),
+                some(&[
+                    "public",
+                    "s.pair.dot",
+                    "c",
+                    "t",
+                    "t",
+                    "t",
+                    "2",
+                    "public",
+                    "s.pair.dot"
+                ]),
+                some(&["s", "pair.dot", "c", "t", "t", "t", "2", "s", "pair.dot"]),
+                some(&[
+                    "s",
+                    "search_path_pair",
+                    "c",
+                    "t",
+                    "t",
+                    "t",
+                    "2",
+                    "s",
+                    "search_path_pair"
+                ]),
+            ]
+    );
+
+    let case_type_oids = column(
+        &engine,
+        "SELECT a.atttypid FROM pg_catalog.pg_attribute a \
+         JOIN pg_catalog.pg_class c ON c.oid = a.attrelid \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = 's' AND c.relname = 'case_type_use' \
+         ORDER BY a.attname",
+    )
+    .await;
+    assert2::assert!(case_type_oids.len() == 2 && case_type_oids[0] != case_type_oids[1]);
+
+    let range_catalog = grid(
+        &engine,
+        "SELECT rn.nspname, r.typname, mn.nspname, m.typname, \
+                r.typtype, m.typtype, pr.rngmultitypid = m.oid \
+         FROM pg_catalog.pg_range pr \
+         JOIN pg_catalog.pg_type r ON r.oid = pr.rngtypid \
+         JOIN pg_catalog.pg_namespace rn ON rn.oid = r.typnamespace \
+         JOIN pg_catalog.pg_type m ON m.oid = pr.rngmultitypid \
+         JOIN pg_catalog.pg_namespace mn ON mn.oid = m.typnamespace \
+         WHERE r.typname IN ('explicit_path_range', 'range_with_cross_mr', 'renamed_base') \
+         ORDER BY rn.nspname, r.typname",
+    )
+    .await;
+    assert2::assert!(
+        range_catalog
+            == vec![
+                some(&[
+                    "public",
+                    "explicit_path_range",
+                    "s",
+                    "path_mr",
+                    "r",
+                    "m",
+                    "t"
+                ]),
+                some(&[
+                    "s",
+                    "range_with_cross_mr",
+                    "mr_sch",
+                    "MR.renamed",
+                    "r",
+                    "m",
+                    "t"
+                ]),
+                some(&["s", "renamed_base", "s", "rename_multirange", "r", "m", "t"]),
+            ]
+    );
+}
+
+#[tokio::test]
+async fn pg_type_classifies_multirange_arrays_as_base_arrays() {
+    let engine = SqlEngine::new();
+    assert2::assert!(
+        grid(
+            &engine,
+            "SELECT typname, typcategory, typtype FROM pg_catalog.pg_type \
+             WHERE typname IN ('int4multirange', '_int4multirange') ORDER BY typname",
+        )
+        .await
+            == vec![
+                some(&["_int4multirange", "A", "b"]),
+                some(&["int4multirange", "R", "m"]),
+            ]
+    );
+}
+
+/// The column metadata `\d` and every ORM read, including the packed
+/// `numeric(p, s)` modifier `format_type` reconstructs the type name from.
 #[tokio::test]
 async fn pg_attribute_carries_the_metadata_psql_prints() {
     let engine = fixture().await;

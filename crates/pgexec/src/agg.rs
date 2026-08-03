@@ -2697,7 +2697,7 @@ mod tests {
         t.columns = vec![Column::new("v", ty)];
         let range = |text| {
             Datum::Range(
-                crabka_pgtypes::range::parse(text, range_ty.clone(), &jiff::tz::TimeZone::UTC)
+                crabka_pgtypes::range::parse(text, range_ty, &jiff::tz::TimeZone::UTC)
                     .expect("range"),
             )
         };

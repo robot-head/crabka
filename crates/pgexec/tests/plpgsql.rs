@@ -745,9 +745,9 @@ async fn set_functions_keep_default_strict_and_recursive_call_semantics() {
             .await
             .is_empty()
     );
-    assert!(
-        query(&mut session, "SELECT * FROM pl_recursive_rows(3)").await
-            == vec![row(&["3"]), row(&["2"]), row(&["1"])]
+    assert_eq!(
+        query(&mut session, "SELECT * FROM pl_recursive_rows(3)").await,
+        vec![row(&["3"]), row(&["2"]), row(&["1"])]
     );
 }
 

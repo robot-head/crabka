@@ -10,20 +10,20 @@ use bytes::Bytes;
 use crabka_pgcatalog::{Column, ColumnDefault, Sequence, Table, TableId};
 use crabka_pgkv::Kv;
 use crabka_pgparser::ast::{
-    ArraySubscript, BinaryOp, Expr, FuncArgs, OrderItem, SelectItem, SelectStmt, Statement,
-    UtilityStatement,
+    ArraySubscript, BinaryOp, Expr, FuncArgs, FuncCall, OrderItem, SelectItem, SelectStmt,
+    Statement, UtilityStatement,
 };
 use crabka_pgtypes::{ColumnType, Datum};
 use crabka_pgwire::engine::{Cell, FieldDescription, QueryResult};
-use crabka_units::convert::ByteSizeExt as _;
-use tracing::Instrument as _;
+use crabka_units::prelude::ByteSizeExt as _;
 use zerocopy::{FromBytes, byteorder::big_endian::U64};
 
 use crate::{
     error::ExecError,
     foreign::{ForeignScanner, ScanBounds},
     join::{
-        PreparedJoinIndex, Relation, join_relations, join_relations_prepared, prepare_join_index,
+        PreparedJoinIndex, Relation, count_join_rows, join_relations, join_relations_prepared,
+        prepare_join_index,
     },
     relname::{SchemaDisposition, is_missing_schema, resolve_relation, resolve_relations},
     scanner::{
@@ -338,24 +338,20 @@ pub(crate) fn execute_ddl(
         // live in `usertype`; only the DDL routing is here.
         Statement::CreateType { name, definition } => crate::usertype::create_type(
             kv,
-            &resolve_relation(kv, resolution, name, SchemaDisposition::Utility)?.to_string(),
+            resolution,
+            &resolve_relation(kv, resolution, name, SchemaDisposition::Creation)?,
             definition,
         ),
-        Statement::AlterType { name, action } => crate::usertype::alter_type(
-            kv,
-            &resolve_relation(kv, resolution, name, SchemaDisposition::Utility)?.to_string(),
-            action,
-        ),
+        Statement::AlterType { name, action } => {
+            crate::usertype::alter_type(kv, &resolve_user_type(kv, resolution, name)?, action)
+        }
         Statement::DropType {
             names,
             if_exists,
             cascade,
         } => crate::usertype::drop_types(
             kv,
-            &resolve_relations(kv, resolution, names, SchemaDisposition::Utility)?
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>(),
+            &resolve_user_types(kv, resolution, names)?,
             *if_exists,
             *cascade,
             false,
@@ -366,25 +362,20 @@ pub(crate) fn execute_ddl(
             constraints,
         } => crate::usertype::create_domain(
             kv,
-            &resolve_relation(kv, resolution, name, SchemaDisposition::Utility)?.to_string(),
+            &resolve_relation(kv, resolution, name, SchemaDisposition::Creation)?,
             *base,
             constraints,
         ),
-        Statement::AlterDomain { name, action } => crate::usertype::alter_domain(
-            kv,
-            &resolve_relation(kv, resolution, name, SchemaDisposition::Utility)?.to_string(),
-            action,
-        ),
+        Statement::AlterDomain { name, action } => {
+            crate::usertype::alter_domain(kv, &resolve_user_type(kv, resolution, name)?, action)
+        }
         Statement::DropDomain {
             names,
             if_exists,
             cascade,
         } => crate::usertype::drop_types(
             kv,
-            &resolve_relations(kv, resolution, names, SchemaDisposition::Utility)?
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>(),
+            &resolve_user_types(kv, resolution, names)?,
             *if_exists,
             *cascade,
             true,
@@ -426,6 +417,7 @@ pub(crate) fn execute_ddl(
             if *if_not_exists && crabka_pgcatalog::get_table(kv, name).is_ok() {
                 return Ok((command("CREATE TABLE"), Vec::new()));
             }
+            crate::usertype::ensure_relation_type_name_available(kv, name)?;
             let ddl_ctx = crate::clock::EvalCtx::for_ddl(resolution, fctx.catalog);
             let inheritance_parents = inherits
                 .iter()
@@ -710,15 +702,19 @@ pub(crate) fn execute_ddl(
             if_exists,
             cascade,
         } => {
-            let mut ops = Vec::new();
+            let mut schemas = Vec::new();
             for name in names {
                 if *if_exists && !crabka_pgcatalog::schema_exists(kv, name)? {
                     continue;
                 }
+                schemas.push((name, crabka_pgcatalog::drop_schema_ops(kv, name, *cascade)?));
+            }
+            let mut ops = Vec::new();
+            for (name, schema_ops) in schemas {
                 if *cascade {
                     ops.extend(drop_schema_contents_ops(kv, name)?);
                 }
-                ops.extend(crabka_pgcatalog::drop_schema_ops(kv, name, *cascade)?);
+                ops.extend(schema_ops);
             }
             Ok((command("DROP SCHEMA"), ops))
         }
@@ -772,6 +768,7 @@ pub(crate) fn execute_ddl(
                 SchemaDisposition::Creation
             };
             let name = &resolve_relation(kv, resolution, name, disposition)?;
+            crate::usertype::ensure_relation_type_name_available(kv, name)?;
             let described = crate::query::describe_query_expr(kv, resolution, query)?;
             // `VIEW name (a, b, c)` renames the output columns positionally; too
             // many names is PostgreSQL's own 42P10.
@@ -890,6 +887,7 @@ pub(crate) fn execute_ddl(
                 if *if_not_exists && crabka_pgcatalog::get_sequence(kv, name).is_ok() {
                     return Ok((command("CREATE SEQUENCE"), Vec::new()));
                 }
+                crate::usertype::ensure_relation_type_name_available(kv, name)?;
                 let ops = crabka_pgcatalog::create_sequence_ops(kv, name, sequence)?;
                 return Ok((command("CREATE SEQUENCE"), ops));
             }
@@ -928,6 +926,7 @@ pub(crate) fn execute_ddl(
             if *if_not_exists && crabka_pgcatalog::get_index(kv, &name).is_ok() {
                 return Ok((command("CREATE INDEX"), Vec::new()));
             }
+            crate::usertype::ensure_index_name_available(kv, &name)?;
             let name = &name;
             let columns = &columns;
             let placement = match placement {
@@ -1186,13 +1185,15 @@ pub(crate) fn execute_ddl(
             server,
             options,
         } => {
+            let name = resolve_relation(kv, resolution, name, SchemaDisposition::Creation)?;
+            crate::usertype::ensure_relation_type_name_available(kv, &name)?;
             let cols = columns
                 .iter()
                 .map(|c| Column::new(c.name.clone(), c.ty))
                 .collect();
             let (_id, ops) = crabka_pgcatalog::create_foreign_table_ops(
                 kv,
-                &resolve_relation(kv, resolution, name, SchemaDisposition::Creation)?,
+                &name,
                 cols,
                 server,
                 options.clone(),
@@ -1267,6 +1268,7 @@ pub(crate) fn execute_ddl(
                     &crabka_pgparser::ast::RelationRef::qualified(into_schema, &table.name),
                     SchemaDisposition::Creation,
                 )?;
+                crate::usertype::ensure_relation_type_name_available(kv, &into)?;
                 let id = match cursor {
                     Some(next) => next,
                     None => crabka_pgcatalog::read_next_table_id(kv)?,
@@ -1289,6 +1291,46 @@ pub(crate) fn execute_ddl(
         }
         _ => Err(ExecError::Unsupported("not a DDL statement".into())),
     }
+}
+
+/// Resolve an existing user type through the type catalog, not relation
+/// existence. Types and relations share namespaces, but only the former tells
+/// an unqualified `ALTER TYPE`/`DROP TYPE` which visible schema owns the target.
+fn resolve_user_type(
+    kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
+    reference: &crabka_pgparser::ast::RelationRef,
+) -> Result<crabka_pgcatalog::RelationName, ExecError> {
+    if reference.schema.is_some() {
+        return resolve_relation(kv, resolution, reference, SchemaDisposition::Utility);
+    }
+    let user_types = crabka_pgcatalog::list_user_types(kv)?;
+    for schema in resolution.visible_schemas(kv)? {
+        let candidate = crabka_pgcatalog::RelationName::new(schema, reference.name.clone());
+        if candidate.schema == "pg_catalog" && is_builtin_catalog_type_name(&candidate.name) {
+            return Ok(candidate);
+        }
+        let identity = (candidate.schema.clone(), candidate.name.clone());
+        if crabka_pgcatalog::get_user_type(kv, &candidate)?.is_some()
+            || user_types
+                .iter()
+                .any(|ty| ty.multirange_identity() == Some(identity.clone()))
+        {
+            return Ok(candidate);
+        }
+    }
+    resolve_relation(kv, resolution, reference, SchemaDisposition::Utility)
+}
+
+fn resolve_user_types(
+    kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
+    references: &[crabka_pgparser::ast::RelationRef],
+) -> Result<Vec<crabka_pgcatalog::RelationName>, ExecError> {
+    references
+        .iter()
+        .map(|reference| resolve_user_type(kv, resolution, reference))
+        .collect()
 }
 
 /// PostgreSQL's `checkViewColumns`: a replacement query may APPEND output
@@ -5837,8 +5879,9 @@ fn ensure_schema_ops(kv: &dyn Kv, schema: &str) -> Result<Vec<crabka_pgkv::Write
     Ok(vec![crabka_pgcatalog::create_temp_schema_op(schema)])
 }
 
-/// The batch that removes every relation `schema` holds, whatever kind each is,
-/// together with everything outside the schema that depends on one of them:
+/// The batch that removes every relation and user type `schema` holds, whatever
+/// kind each is, together with everything outside the schema that depends on
+/// one of them:
 /// dropping a table here is [the same drop](drop_table_and_dependents_ops) a
 /// `DROP TABLE … CASCADE` performs, so a foreign key or view in another schema
 /// goes with its referent rather than outliving it, and a partition stored
@@ -5890,6 +5933,7 @@ pub(crate) fn drop_schema_contents_ops(
             }
         }
     }
+    ops.extend(crate::usertype::drop_schema_types_ops(kv, schema)?);
     Ok(ops)
 }
 
@@ -7716,7 +7760,7 @@ fn execute_timestamp_update(
                 )),
             },
         )
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, ExecError>>()?;
     let rows = scan_ts_live_interval(kv, kv, table, ReadTimestamp::MAX, None, RowInterval::ALL)?;
     let mut writes = Vec::new();
     for ScannedRow { rowid, row, .. } in rows {
@@ -8290,6 +8334,9 @@ pub(crate) fn coerce(
         (Datum::Text(s), ColumnType::Char(limit)) => Datum::Text(
             crabka_pgtypes::string::apply_char_typmod(&s, limit, Coercion::Assignment)?,
         ),
+        (value, target @ (ColumnType::Varchar(_) | ColumnType::Char(_))) => {
+            crabka_pgtypes::cast::cast_assign(&value, target, &ctx.time_zone)?
+        }
         (Datum::Text(s), ColumnType::Uuid) => {
             Datum::Text(crabka_pgtypes::uuid::UuidBytes::parse(&s)?.to_canonical_text())
         }
@@ -9121,20 +9168,43 @@ fn lateral_join(
                 .sum::<usize>();
             // ponytail: cap memoization; a planner-level lateral flattening is
             // the upgrade if workloads need more than 64 stable variants.
-            let can_cache = lateral_cacheable(te)
+            let retained_without_index = cache_bytes.saturating_add(right_bytes);
+            let mut index = if lateral_cacheable(te)
                 && cache.len() < 64
                 && !crate::scanner::exceeds_query_memory(
-                    cache_bytes.saturating_add(right_bytes),
+                    retained_without_index,
+                    read_ctx.blocking_query_memory,
+                ) {
+                let remaining = read_ctx
+                    .blocking_query_memory
+                    .bytes_u64()
+                    .saturating_sub(u64::try_from(retained_without_index).unwrap_or(u64::MAX));
+                Some(prepare_join_index(
+                    &acc,
+                    &right,
+                    constraint,
+                    crabka_units::ByteSize::from_bytes(remaining),
+                )?)
+            } else {
+                None
+            };
+            let retained_bytes = right_bytes
+                .saturating_add(index.as_ref().map_or(0, PreparedJoinIndex::estimated_bytes));
+            let can_cache = index.is_some()
+                && !crate::scanner::exceeds_query_memory(
+                    cache_bytes.saturating_add(retained_bytes),
                     read_ctx.blocking_query_memory,
                 );
             if can_cache {
-                let index = prepare_join_index(&acc, &right, constraint)?;
+                let index = index
+                    .take()
+                    .expect("a cacheable lateral item prepared its index");
                 cache.push(CachedRight {
                     specialized,
                     relation: right,
                     index,
                 });
-                cache_bytes = cache_bytes.saturating_add(right_bytes);
+                cache_bytes = cache_bytes.saturating_add(retained_bytes);
                 let cached = cache.last().expect("the cache entry was just pushed");
                 join_relations_prepared(
                     one,
@@ -9144,6 +9214,18 @@ fn lateral_join(
                     ctx,
                     read_ctx.blocking_query_memory,
                     &cached.index,
+                )?
+            } else if let Some(index) = index {
+                let mut index = index;
+                index.discard_index();
+                join_relations_prepared(
+                    one,
+                    &right,
+                    kind,
+                    constraint,
+                    ctx,
+                    read_ctx.blocking_query_memory,
+                    &index,
                 )?
             } else {
                 join_relations(
@@ -9283,6 +9365,7 @@ fn expr_children(expr: &Expr) -> Vec<&Expr> {
             if let FuncArgs::Exprs(args) = &call.args {
                 owned.extend(args);
             }
+            owned.extend(call.filter.iter().map(std::convert::AsRef::as_ref));
         }
         Expr::InList { expr, list, .. } => {
             owned.push(expr);
@@ -9351,6 +9434,7 @@ fn expr_children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
             if let FuncArgs::Exprs(args) = &mut call.args {
                 owned.extend(args);
             }
+            owned.extend(call.filter.iter_mut().map(std::convert::AsMut::as_mut));
         }
         Expr::InList { expr, list, .. } => {
             owned.push(expr);
@@ -9407,7 +9491,9 @@ fn expr_children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
 /// The query expressions directly under `expr` (its subqueries).
 fn query_children_mut(expr: &mut Expr) -> Vec<&mut crabka_pgparser::ast::QueryExpr> {
     match expr {
-        Expr::ScalarSubquery(query) | Expr::Exists(query) => vec![query],
+        Expr::ScalarSubquery(query) | Expr::ArraySubquery(query) | Expr::Exists(query) => {
+            vec![query]
+        }
         Expr::InSubquery { subquery, .. } | Expr::Quantified { subquery, .. } => vec![subquery],
         _ => Vec::new(),
     }
@@ -9425,6 +9511,152 @@ struct LateralBinder<'a> {
     /// The column names each query block's FROM provides, in walk order.
     /// `None` for a block whose FROM could not be described.
     described: Vec<Option<Vec<String>>>,
+    /// Uncorrelated subqueries nested in a deferred lazy expression. Each is
+    /// initialized on first use and then reused for the rest of the statement.
+    initplans: Vec<LazyInitPlan>,
+    /// Narrow correlated scalar lookups, materialized only if their expression
+    /// is reached and then reused for the rest of the statement.
+    scalar_lookups: Vec<CorrelatedScalarLookup>,
+}
+
+const INITPLAN_MARKER: &str = "\0crabka_initplan";
+const INITPLAN_LHS_MARKER: &str = "\0crabka_initplan_lhs";
+const SCALAR_LOOKUP_MARKER: &str = "\0crabka_scalar_lookup";
+
+struct LazyInitPlan {
+    template: Expr,
+    result_type: ColumnType,
+    resolved: Option<Expr>,
+}
+
+struct CorrelatedScalarLookup {
+    query: crabka_pgparser::ast::QueryExpr,
+    table: Table,
+    key_column: usize,
+    result_column: usize,
+    result_type: ColumnType,
+    outer_on_left: bool,
+    state: CorrelatedScalarLookupState,
+}
+
+fn build_correlated_scalar_lookup(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    plan: &CorrelatedScalarLookup,
+) -> Result<CorrelatedScalarLookupState, ExecError> {
+    let projected_columns = if plan.key_column == plan.result_column {
+        vec![plan.key_column]
+    } else {
+        vec![plan.key_column, plan.result_column]
+    };
+    let projected_regclass_columns = projected_columns
+        .iter()
+        .enumerate()
+        .filter_map(|(projected, source)| {
+            holds_regclass(plan.table.columns[*source].ty).then_some(projected)
+        })
+        .collect::<Vec<_>>();
+    let result_column = usize::from(plan.key_column != plan.result_column);
+    let scanned = match crate::scanner::collect_cursor_bounded(
+        read_ctx.range_scanner,
+        ScanRequest {
+            local: read_ctx.kv,
+            global: read_ctx.global,
+            global_snapshot: read_ctx.gsnap,
+            snapshot: read_ctx.snapshot,
+            own_xid: read_ctx.own,
+            read_ts: None,
+            own_start_ts: None,
+            table: &plan.table,
+            interval: RowInterval::ALL,
+            predicate: PredicatePushdown::FullScan,
+            projection: crate::ProjectionPushdown::Columns(projected_columns),
+            partial_aggregate: None,
+            top_k: None,
+        },
+        read_ctx.blocking_query_memory,
+    ) {
+        Ok(rows) => rows,
+        Err(ExecError::Unsupported(_)) => return Ok(CorrelatedScalarLookupState::Fallback),
+        Err(ExecError::Remote(error)) if error.code == "53200" => {
+            return Ok(CorrelatedScalarLookupState::Fallback);
+        }
+        Err(error) => return Err(error),
+    };
+    let mut rows: Vec<Vec<Datum>> = scanned.into_iter().map(|row| row.row).collect();
+    resolve_regclass_at(read_ctx.catalog_kv, &projected_regclass_columns, &mut rows)?;
+    let saw_rows = !rows.is_empty();
+    let mut values = HashMap::new();
+    let mut bytes = rows.iter().fold(0usize, |used, row| {
+        used.saturating_add(std::mem::size_of::<ScannedRow>())
+            .saturating_add(crate::scanner::datum_row_bytes(row))
+    });
+    if crate::scanner::exceeds_query_memory(bytes, read_ctx.blocking_query_memory) {
+        return Ok(CorrelatedScalarLookupState::Fallback);
+    }
+    for row in &rows {
+        let Some(key) = row.first() else {
+            return Err(ExecError::Unsupported(
+                "correlated scalar lookup key is outside the scanned row".into(),
+            ));
+        };
+        if key.is_null() {
+            continue;
+        }
+        if !crate::join::hashes_like_it_compares(key) {
+            return Ok(CorrelatedScalarLookupState::Fallback);
+        }
+        if values.contains_key(key) {
+            continue;
+        }
+        let Some(value) = row.get(result_column) else {
+            return Err(ExecError::Unsupported(
+                "correlated scalar lookup result is outside the scanned row".into(),
+            ));
+        };
+        bytes = bytes
+            .saturating_add(crate::scanner::datum_row_bytes(std::slice::from_ref(key)))
+            .saturating_add(crate::scanner::datum_row_bytes(std::slice::from_ref(value)));
+        if crate::scanner::exceeds_query_memory(bytes, read_ctx.blocking_query_memory) {
+            return Ok(CorrelatedScalarLookupState::Fallback);
+        }
+        values.insert(key.clone(), value.clone());
+    }
+    Ok(CorrelatedScalarLookupState::Ready { values, saw_rows })
+}
+
+fn resolve_correlated_scalar_fallback(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    plan: &CorrelatedScalarLookup,
+    key_expr: &Expr,
+) -> Result<Expr, ExecError> {
+    let mut query = plan.query.clone();
+    let crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Select(select)) =
+        &mut query.body
+    else {
+        unreachable!("a scalar lookup plan always has one SELECT body")
+    };
+    let Expr::Binary { left, right, .. } = select
+        .filter
+        .as_mut()
+        .expect("a scalar lookup plan always has an equality filter")
+    else {
+        unreachable!("a scalar lookup plan always has an equality filter")
+    };
+    if plan.outer_on_left {
+        **left = key_expr.clone();
+    } else {
+        **right = key_expr.clone();
+    }
+    crate::subquery::resolve_expr(read_ctx, &Expr::ScalarSubquery(Box::new(query)))
+}
+
+enum CorrelatedScalarLookupState {
+    Uninitialized,
+    Ready {
+        values: HashMap<Datum, Datum>,
+        saw_rows: bool,
+    },
+    Fallback,
 }
 
 impl<'a> LateralBinder<'a> {
@@ -9438,7 +9670,19 @@ impl<'a> LateralBinder<'a> {
             resolution,
             ctes,
             described: Vec::new(),
+            initplans: Vec::new(),
+            scalar_lookups: Vec::new(),
         }
+    }
+
+    fn with_initplans(mut self, initplans: Vec<LazyInitPlan>) -> Self {
+        self.initplans = initplans;
+        self
+    }
+
+    fn with_scalar_lookups(mut self, scalar_lookups: Vec<CorrelatedScalarLookup>) -> Self {
+        self.scalar_lookups = scalar_lookups;
+        self
     }
 
     /// Replace every reference to an outer column inside `te` with that column's
@@ -9459,17 +9703,146 @@ impl<'a> LateralBinder<'a> {
         row: &[Datum],
     ) -> (crabka_pgparser::ast::TableExpr, Option<String>) {
         let mut bound = te.clone();
+        let ctes = self.ctes.child();
         let mut pass = BindPass {
             binder: self,
             outer,
             row,
             visited: 0,
             referenced: None,
+            substituted: false,
+            ctes,
+            error: None,
         };
         let shadow = Shadow::default();
         pass.table_expr(&mut bound, &shadow);
         let referenced = pass.referenced;
         (bound, referenced)
+    }
+
+    /// Specialize one query expression against an enclosing row. The boolean
+    /// reports whether any outer value was substituted; unlike `referenced`, it
+    /// also covers USING/NATURAL-coalesced columns, whose scope binding has no
+    /// relation qualifier.
+    fn bind_query(
+        &mut self,
+        query: &crabka_pgparser::ast::QueryExpr,
+        outer: &Scope,
+        row: &[Datum],
+    ) -> Result<(crabka_pgparser::ast::QueryExpr, bool), ExecError> {
+        let mut bound = query.clone();
+        let ctes = self.ctes.child();
+        let mut pass = BindPass {
+            binder: self,
+            outer,
+            row,
+            visited: 0,
+            referenced: None,
+            substituted: false,
+            ctes,
+            error: None,
+        };
+        pass.query(&mut bound, &Shadow::default());
+        match pass.error {
+            Some(error) => Err(error),
+            None => Ok((bound, pass.substituted)),
+        }
+    }
+
+    /// Specialize an expression and every query nested inside it against an
+    /// enclosing row.
+    fn bind_expr(
+        &mut self,
+        expr: &Expr,
+        outer: &Scope,
+        row: &[Datum],
+    ) -> Result<(Expr, bool), ExecError> {
+        let mut bound = expr.clone();
+        let ctes = self.ctes.child();
+        let mut pass = BindPass {
+            binder: self,
+            outer,
+            row,
+            visited: 0,
+            referenced: None,
+            substituted: false,
+            ctes,
+            error: None,
+        };
+        pass.expr(&mut bound, &Shadow::default());
+        match pass.error {
+            Some(error) => Err(error),
+            None => Ok((bound, pass.substituted)),
+        }
+    }
+
+    fn resolve_initplan(
+        &mut self,
+        read_ctx: &crate::subquery::SubCtx<'_>,
+        index: usize,
+        lhs: Option<&Expr>,
+    ) -> Result<Expr, ExecError> {
+        let plan = self
+            .initplans
+            .get_mut(index)
+            .ok_or_else(|| ExecError::Unsupported("invalid deferred subquery marker".into()))?;
+        if plan.resolved.is_none() {
+            plan.resolved = Some(crate::subquery::resolve_expr(read_ctx, &plan.template)?);
+        }
+        let mut resolved = plan
+            .resolved
+            .clone()
+            .expect("the deferred subquery was just initialized");
+        if let Some(lhs) = lhs {
+            substitute_initplan_lhs(&mut resolved, lhs);
+        }
+        Ok(resolved)
+    }
+
+    fn resolve_scalar_lookup(
+        &mut self,
+        read_ctx: &crate::subquery::SubCtx<'_>,
+        index: usize,
+        key_expr: &Expr,
+    ) -> Result<Expr, ExecError> {
+        let plan = self.scalar_lookups.get(index).ok_or_else(|| {
+            ExecError::Unsupported("invalid correlated scalar lookup marker".into())
+        })?;
+        if matches!(&plan.state, CorrelatedScalarLookupState::Uninitialized) {
+            let state = build_correlated_scalar_lookup(read_ctx, plan)?;
+            self.scalar_lookups[index].state = state;
+        }
+        let plan = &self.scalar_lookups[index];
+        match &plan.state {
+            CorrelatedScalarLookupState::Uninitialized => unreachable!("lookup was initialized"),
+            CorrelatedScalarLookupState::Fallback => {
+                resolve_correlated_scalar_fallback(read_ctx, plan, key_expr)
+            }
+            CorrelatedScalarLookupState::Ready { values, saw_rows } => {
+                if !saw_rows {
+                    return Ok(Expr::Const {
+                        value: Datum::Null,
+                        ty: plan.result_type,
+                    });
+                }
+                let resolved_key_expr = crate::subquery::resolve_expr(read_ctx, key_expr)?;
+                let key =
+                    crate::eval::eval(&resolved_key_expr, &Scope::empty(), &[], read_ctx.eval_ctx)?;
+                if key.is_null() {
+                    return Ok(Expr::Const {
+                        value: Datum::Null,
+                        ty: plan.result_type,
+                    });
+                }
+                if !crate::join::hashes_like_it_compares(&key) {
+                    return resolve_correlated_scalar_fallback(read_ctx, plan, key_expr);
+                }
+                Ok(Expr::Const {
+                    value: values.get(&key).cloned().unwrap_or(Datum::Null),
+                    ty: plan.result_type,
+                })
+            }
+        }
     }
 }
 
@@ -9483,6 +9856,14 @@ struct BindPass<'a, 'b> {
     visited: usize,
     /// The outer relation whose column was first substituted, if any.
     referenced: Option<String>,
+    /// Whether any outer column was substituted, including an unqualified
+    /// coalesced column whose scope binding has no relation qualifier.
+    substituted: bool,
+    /// Query-local CTEs visible at the current query block.
+    ctes: crate::cte::CteContext,
+    /// A bindable ambiguous outer reference must retain 42702 instead of being
+    /// left for the inner scope to misreport as an undefined column.
+    error: Option<ExecError>,
 }
 
 /// The FROM-item names visible at the point being rewritten, which take
@@ -9535,7 +9916,7 @@ impl BindPass<'_, '_> {
                     self.binder.catalog_kv,
                     self.binder.resolution,
                     from,
-                    self.binder.ctes,
+                    &self.ctes,
                 )
                 .ok()
                 .map(|relation| {
@@ -9582,8 +9963,10 @@ impl BindPass<'_, '_> {
     }
 
     fn query(&mut self, query: &mut crabka_pgparser::ast::QueryExpr, shadow: &Shadow) {
+        let parent_ctes = self.ctes.clone();
         // A CTE inside a lateral item may reference the outer row too, so the
-        // WITH list is part of the walk.
+        // WITH list is part of the walk. Describe each bound item in declaration
+        // order so the query body can distinguish its columns from outer ones.
         if let Some(with) = &mut query.with {
             for cte in &mut with.ctes {
                 match &mut cte.body {
@@ -9592,15 +9975,49 @@ impl BindPass<'_, '_> {
                     // alone keeps the reference to be reported by name resolution.
                     crabka_pgparser::ast::CteBody::Dml(_) => {}
                 }
+                if let Ok(relation) = crate::cte::describe_cte_relation(
+                    self.binder.catalog_kv,
+                    self.binder.resolution,
+                    cte,
+                    with.recursive,
+                    &self.ctes,
+                ) {
+                    self.ctes.insert(cte.name.clone(), relation);
+                }
             }
         }
         self.set_expr(&mut query.body, shadow);
+        let order_shadow = match &query.body {
+            crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Select(
+                select,
+            )) => {
+                let mut inner = self.extended(shadow, &select.from);
+                if let Some(columns) = &mut inner.columns {
+                    columns.extend(select.projection.iter().filter_map(|item| match item {
+                        SelectItem::Expr { expr, alias } => {
+                            Some(alias.clone().unwrap_or_else(|| derived_name(expr)))
+                        }
+                        _ => None,
+                    }));
+                }
+                inner
+            }
+            // A set operation or nested query exposes its output columns to the
+            // tail ORDER BY. If that shape cannot be described cheaply here,
+            // leave bare names to its own resolver instead of mistaking them for
+            // outer references.
+            _ => Shadow {
+                qualifiers: shadow.qualifiers.clone(),
+                columns: None,
+            },
+        };
         for item in &mut query.order_by {
-            self.expr(&mut item.expr, shadow);
+            self.expr(&mut item.expr, &order_shadow);
         }
         for expr in query.limit.iter_mut().chain(query.offset.iter_mut()) {
             self.expr(expr, shadow);
         }
+        self.ctes = parent_ctes;
     }
 
     fn set_expr(&mut self, body: &mut crabka_pgparser::ast::SetExpr, shadow: &Shadow) {
@@ -9633,23 +10050,29 @@ impl BindPass<'_, '_> {
     fn expr(&mut self, expr: &mut Expr, shadow: &Shadow) {
         if let Expr::Column { table, name } = expr {
             let bindable = match table {
-                Some(qualifier) => !shadow
-                    .qualifiers
-                    .iter()
-                    .any(|q| q.eq_ignore_ascii_case(qualifier)),
+                Some(qualifier) => !shadow.qualifiers.iter().any(|q| q == qualifier),
                 None => shadow
                     .columns
                     .as_ref()
                     .is_some_and(|columns| !columns.iter().any(|column| column == name)),
             };
-            if bindable && let Ok(index) = self.outer.resolve(table.as_deref(), name) {
-                if self.referenced.is_none() {
-                    self.referenced = self.outer.columns[index].qualifier.clone();
+            if bindable {
+                match self.outer.resolve(table.as_deref(), name) {
+                    Ok(index) => {
+                        self.substituted = true;
+                        if self.referenced.is_none() {
+                            self.referenced = self.outer.columns[index].qualifier.clone();
+                        }
+                        *expr = Expr::Const {
+                            value: self.row[index].clone(),
+                            ty: self.outer.ty_at(index),
+                        };
+                    }
+                    Err(error @ ExecError::AmbiguousColumn(_)) if self.error.is_none() => {
+                        self.error = Some(error);
+                    }
+                    Err(_) => {}
                 }
-                *expr = Expr::Const {
-                    value: self.row[index].clone(),
-                    ty: self.outer.ty_at(index),
-                };
             }
             return;
         }
@@ -9669,7 +10092,7 @@ fn collect_qualifiers(from: &[crabka_pgparser::ast::TableExpr], out: &mut Vec<St
     for item in from {
         match item {
             TableExpr::Table { name, alias, .. } => {
-                out.push(alias.clone().unwrap_or_else(|| name.to_string()));
+                out.push(alias.clone().unwrap_or_else(|| name.name.clone()));
             }
             TableExpr::Derived { alias, .. } => out.push(alias.clone()),
             TableExpr::Function {
@@ -9703,7 +10126,914 @@ fn select_exprs_mut(select: &mut SelectStmt) -> Vec<&mut Expr> {
     if let crabka_pgparser::ast::DistinctClause::On(on) = &mut select.distinct {
         out.extend(on.iter_mut());
     }
+    for call in &mut select.window_calls {
+        if let FuncArgs::Exprs(args) = &mut call.args {
+            out.extend(args);
+        }
+        out.extend(call.filter.iter_mut());
+        if let crabka_pgparser::ast::WindowRef::Spec(spec) = &mut call.over {
+            out.extend(window_spec_exprs_mut(spec));
+        }
+    }
+    for window in &mut select.windows {
+        out.extend(window_spec_exprs_mut(&mut window.spec));
+    }
     out
+}
+
+fn window_spec_exprs_mut(spec: &mut crabka_pgparser::ast::WindowSpec) -> Vec<&mut Expr> {
+    let mut out = Vec::new();
+    out.extend(&mut spec.partition_by);
+    out.extend(spec.order_by.iter_mut().map(|item| &mut item.expr));
+    if let Some(frame) = &mut spec.frame {
+        for bound in [&mut frame.start, &mut frame.end] {
+            match bound {
+                crabka_pgparser::ast::FrameBound::Preceding(expr)
+                | crabka_pgparser::ast::FrameBound::Following(expr) => out.push(expr),
+                crabka_pgparser::ast::FrameBound::UnboundedPreceding
+                | crabka_pgparser::ast::FrameBound::CurrentRow
+                | crabka_pgparser::ast::FrameBound::UnboundedFollowing => {}
+            }
+        }
+    }
+    out
+}
+
+fn initplan_lhs_marker() -> Expr {
+    Expr::Column {
+        table: Some(INITPLAN_LHS_MARKER.into()),
+        name: "value".into(),
+    }
+}
+
+fn initplan_marker(index: usize, lhs: Option<Expr>) -> Expr {
+    let mut args = vec![Expr::IntLiteral(index.to_string())];
+    args.extend(lhs);
+    Expr::Func(FuncCall {
+        name: INITPLAN_MARKER.into(),
+        distinct: false,
+        args: FuncArgs::Exprs(args),
+        filter: None,
+    })
+}
+
+fn initplan_parts(expr: &Expr) -> Option<(usize, Option<&Expr>)> {
+    let Expr::Func(FuncCall {
+        name,
+        distinct: false,
+        args: FuncArgs::Exprs(args),
+        filter: None,
+    }) = expr
+    else {
+        return None;
+    };
+    if name != INITPLAN_MARKER {
+        return None;
+    }
+    if !(1..=2).contains(&args.len()) {
+        return None;
+    }
+    let Expr::IntLiteral(index) = &args[0] else {
+        return None;
+    };
+    Some((index.parse().ok()?, args.get(1)))
+}
+
+fn scalar_lookup_marker(index: usize, key: Expr) -> Expr {
+    Expr::Func(FuncCall {
+        name: SCALAR_LOOKUP_MARKER.into(),
+        distinct: false,
+        args: FuncArgs::Exprs(vec![Expr::IntLiteral(index.to_string()), key]),
+        filter: None,
+    })
+}
+
+fn scalar_lookup_parts(expr: &Expr) -> Option<(usize, &Expr)> {
+    let Expr::Func(FuncCall {
+        name,
+        distinct: false,
+        args: FuncArgs::Exprs(args),
+        filter: None,
+    }) = expr
+    else {
+        return None;
+    };
+    if name != SCALAR_LOOKUP_MARKER || args.len() != 2 {
+        return None;
+    }
+    let Expr::IntLiteral(index) = &args[0] else {
+        return None;
+    };
+    Some((index.parse().ok()?, &args[1]))
+}
+
+fn plan_correlated_scalar_lookup(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    query: &crabka_pgparser::ast::QueryExpr,
+    outer: &Scope,
+) -> Result<Option<(CorrelatedScalarLookup, Expr)>, ExecError> {
+    use crabka_pgparser::ast::{DistinctClause, QueryBody, SetExpr, TableExpr};
+
+    if query.with.is_some()
+        || !query.order_by.is_empty()
+        || !matches!(query.limit, Some(Expr::IntLiteral(ref value)) if value == "1")
+        || query.offset.is_some()
+        || query.with_ties
+        || query.locking.is_some()
+    {
+        return Ok(None);
+    }
+    let SetExpr::Query(QueryBody::Select(select)) = &query.body else {
+        return Ok(None);
+    };
+    if !matches!(select.distinct, DistinctClause::All)
+        || !select.group_by.is_empty()
+        || select.grouping.is_some()
+        || select.having.is_some()
+        || !select.windows.is_empty()
+        || !select.window_calls.is_empty()
+        || !select.order_by.is_empty()
+        || select.limit.is_some()
+        || select.offset.is_some()
+        || select.with_ties
+        || select.locking.is_some()
+    {
+        return Ok(None);
+    }
+    let [SelectItem::Expr { .. }] = select.projection.as_slice() else {
+        return Ok(None);
+    };
+    let [
+        TableExpr::Table {
+            name,
+            alias,
+            columns: None,
+            sample: None,
+            ..
+        },
+    ] = select.from.as_slice()
+    else {
+        return Ok(None);
+    };
+    if name.schema.is_none() && read_ctx.ctes.lookup(&name.name).is_some() {
+        return Ok(None);
+    }
+    let resolved_name = resolve_relation(
+        read_ctx.catalog_kv,
+        read_ctx.fctx.resolution,
+        name,
+        SchemaDisposition::Reference,
+    )?;
+    let table = match crabka_pgcatalog::get_table(read_ctx.catalog_kv, &resolved_name) {
+        Ok(table) => table,
+        Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if table.sharded
+        || table.sharding.is_some()
+        || table.foreign.is_some()
+        || crate::partition::is_partitioned(read_ctx.catalog_kv, &table.name)?
+        || crate::partition::parent_of(read_ctx.catalog_kv, &table.name)?.is_some()
+        || !crate::inheritance::parents_of(read_ctx.catalog_kv, &table.name)?.is_empty()
+        || !crate::inheritance::children_of(read_ctx.catalog_kv, &table.name)?.is_empty()
+    {
+        return Ok(None);
+    }
+    let qualifier = alias.as_deref().unwrap_or(&table.name.name);
+    let inner = Scope::single(&table, qualifier);
+    let nulls = vec![Datum::Null; outer.width()];
+    let mut binder =
+        LateralBinder::new(read_ctx.catalog_kv, read_ctx.fctx.resolution, read_ctx.ctes);
+    let (bound_query, correlated) = binder.bind_query(query, outer, &nulls)?;
+    if !correlated {
+        return Ok(None);
+    }
+    let SetExpr::Query(QueryBody::Select(bound_select)) = &bound_query.body else {
+        unreachable!("binding preserves a scalar lookup SELECT body")
+    };
+    let [
+        SelectItem::Expr {
+            expr: bound_projection,
+            ..
+        },
+    ] = bound_select.projection.as_slice()
+    else {
+        unreachable!("binding preserves a scalar lookup projection")
+    };
+    let Some(result_column) = direct_lookup_column(bound_projection, &inner) else {
+        return Ok(None);
+    };
+    let Some(Expr::Binary {
+        op: BinaryOp::Eq,
+        left: original_left,
+        right: original_right,
+    }) = select.filter.as_ref()
+    else {
+        return Ok(None);
+    };
+    let Some(Expr::Binary {
+        op: BinaryOp::Eq,
+        left: bound_left,
+        right: bound_right,
+    }) = bound_select.filter.as_ref()
+    else {
+        unreachable!("binding preserves a scalar lookup equality")
+    };
+    let (key_column, outer_expr, outer_on_left) = if let Some(column) =
+        direct_lookup_column(bound_left, &inner)
+        && !lookup_expr_contains_column(bound_right)
+    {
+        (column, original_right.as_ref(), false)
+    } else if let Some(column) = direct_lookup_column(bound_right, &inner)
+        && !lookup_expr_contains_column(bound_left)
+    {
+        (column, original_left.as_ref(), true)
+    } else {
+        return Ok(None);
+    };
+    if !lookup_key_is_immutable(read_ctx.catalog_kv, outer_expr) {
+        return Ok(None);
+    }
+    let key_type = table.columns[key_column].ty;
+    if crate::eval::infer_type(outer_expr, outer)? != key_type {
+        return Ok(None);
+    }
+    let result_type = table.columns[result_column].ty;
+    Ok(Some((
+        CorrelatedScalarLookup {
+            query: query.clone(),
+            table,
+            key_column,
+            result_column,
+            result_type,
+            outer_on_left,
+            state: CorrelatedScalarLookupState::Uninitialized,
+        },
+        outer_expr.clone(),
+    )))
+}
+
+fn plan_correlated_exists_lookup(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    query: &crabka_pgparser::ast::QueryExpr,
+    outer: &Scope,
+) -> Result<Option<(CorrelatedScalarLookup, Expr)>, ExecError> {
+    use crabka_pgparser::ast::{QueryBody, SetExpr};
+
+    if query.limit.is_some() {
+        return Ok(None);
+    }
+    let SetExpr::Query(QueryBody::Select(select)) = &query.body else {
+        return Ok(None);
+    };
+    if crate::grouping::is_grouping_query(select)
+        || crate::srf::projection_contains_srf(&select.projection)
+    {
+        return Ok(None);
+    }
+    let Some(Expr::Binary {
+        op: BinaryOp::Eq,
+        left,
+        right,
+    }) = select.filter.as_ref()
+    else {
+        return Ok(None);
+    };
+
+    // For an equality match the inner key cannot be NULL, so EXISTS is the
+    // same as selecting that key once and testing it for NULL. Trying both
+    // operands lets the scalar planner identify the inner column without a
+    // second copy of its relation-resolution rules.
+    for projection in [left.as_ref(), right.as_ref()] {
+        let mut scalar = query.clone();
+        scalar.limit = Some(Expr::IntLiteral("1".into()));
+        let SetExpr::Query(QueryBody::Select(candidate)) = &mut scalar.body else {
+            unreachable!("the EXISTS lookup has one SELECT body")
+        };
+        candidate.projection = vec![SelectItem::Expr {
+            expr: projection.clone(),
+            alias: None,
+        }];
+        if let Some(lookup) = plan_correlated_scalar_lookup(read_ctx, &scalar, outer)? {
+            return Ok(Some(lookup));
+        }
+    }
+    Ok(None)
+}
+
+fn direct_lookup_column(expr: &Expr, scope: &Scope) -> Option<usize> {
+    let Expr::Column { table, name } = expr else {
+        return None;
+    };
+    scope.resolve(table.as_deref(), name).ok()
+}
+
+fn lookup_expr_contains_column(expr: &Expr) -> bool {
+    matches!(expr, Expr::Column { .. })
+        || expr_children(expr)
+            .into_iter()
+            .any(lookup_expr_contains_column)
+}
+
+fn lookup_key_is_immutable(catalog_kv: &dyn Kv, expr: &Expr) -> bool {
+    if !immutable_row_predicate(expr) {
+        return false;
+    }
+    let mut immutable = true;
+    crate::grouping::visit_expr(expr, &mut |node| {
+        let Expr::Func(call) = node else {
+            return;
+        };
+        immutable &= match crabka_pgcatalog::routine::routines_named(catalog_kv, &call.name) {
+            Ok(routines) if routines.is_empty() => is_immutable_function(&call.name),
+            Ok(routines) => routines.iter().all(|routine| routine.volatility == 'i'),
+            Err(_) => false,
+        };
+    });
+    immutable
+}
+
+fn substitute_initplan_lhs(expr: &mut Expr, lhs: &Expr) {
+    if matches!(
+        expr,
+        Expr::Column {
+            table: Some(table),
+            name,
+        } if table == INITPLAN_LHS_MARKER && name == "value"
+    ) {
+        *expr = lhs.clone();
+        return;
+    }
+    for child in expr_children_mut(expr) {
+        substitute_initplan_lhs(child, lhs);
+    }
+}
+
+fn direct_subquery_is_correlated(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    expr: &Expr,
+    outer: &Scope,
+) -> Result<bool, ExecError> {
+    let Some(query) = direct_subquery(expr) else {
+        return Ok(false);
+    };
+    let nulls = vec![Datum::Null; outer.width()];
+    let mut binder =
+        LateralBinder::new(read_ctx.catalog_kv, read_ctx.fctx.resolution, read_ctx.ctes);
+    Ok(binder.bind_query(query, outer, &nulls)?.1)
+}
+
+/// Replace uncorrelated subqueries under an expression that must remain deferred
+/// with on-demand initplan markers. This keeps CASE/COALESCE lazy while retaining
+/// PostgreSQL's once-only execution for an initplan that is eventually selected.
+fn install_lazy_initplans(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    expr: &Expr,
+    outer: &Scope,
+    deferred: bool,
+    initplans: &mut Vec<LazyInitPlan>,
+    scalar_lookups: &mut Vec<CorrelatedScalarLookup>,
+) -> Result<Expr, ExecError> {
+    let direct_correlated = direct_subquery_is_correlated(read_ctx, expr, outer)?;
+    // Keep one materialized lookup per query so retained hash state stays
+    // within the query's single blocking-memory budget. Additional eligible
+    // subqueries remain on the ordinary correlated fallback path.
+    if scalar_lookups.is_empty()
+        && direct_correlated
+        && let Expr::ScalarSubquery(query) = expr
+        && let Some((lookup, key)) = plan_correlated_scalar_lookup(read_ctx, query, outer)?
+    {
+        let index = scalar_lookups.len();
+        scalar_lookups.push(lookup);
+        return Ok(scalar_lookup_marker(index, key));
+    }
+    if scalar_lookups.is_empty()
+        && direct_correlated
+        && let Expr::Exists(query) = expr
+        && let Some((lookup, key)) = plan_correlated_exists_lookup(read_ctx, query, outer)?
+    {
+        let index = scalar_lookups.len();
+        scalar_lookups.push(lookup);
+        return Ok(Expr::IsNull {
+            expr: Box::new(scalar_lookup_marker(index, key)),
+            negated: true,
+        });
+    }
+    let lazy_correlated = matches!(expr, Expr::Func(_) | Expr::Case { .. })
+        && expression_contains_correlated_subquery(read_ctx, expr, outer);
+    let child_deferred = deferred || direct_correlated || lazy_correlated;
+
+    if deferred && direct_subquery(expr).is_some() && !direct_correlated {
+        let (template, lhs) = match expr {
+            Expr::InSubquery {
+                expr: lhs,
+                subquery,
+                negated,
+            } => (
+                Expr::InSubquery {
+                    expr: Box::new(initplan_lhs_marker()),
+                    subquery: subquery.clone(),
+                    negated: *negated,
+                },
+                Some(install_lazy_initplans(
+                    read_ctx,
+                    lhs,
+                    outer,
+                    true,
+                    initplans,
+                    scalar_lookups,
+                )?),
+            ),
+            Expr::Quantified {
+                expr: lhs,
+                op,
+                all,
+                subquery,
+            } => (
+                Expr::Quantified {
+                    expr: Box::new(initplan_lhs_marker()),
+                    op: *op,
+                    all: *all,
+                    subquery: subquery.clone(),
+                },
+                Some(install_lazy_initplans(
+                    read_ctx,
+                    lhs,
+                    outer,
+                    true,
+                    initplans,
+                    scalar_lookups,
+                )?),
+            ),
+            _ => (expr.clone(), None),
+        };
+        let typed = replace_subqueries_with_typed_nulls(read_ctx, &template)?;
+        let result_type = crate::eval::infer_type(&typed, &Scope::empty())?;
+        let index = initplans.len();
+        initplans.push(LazyInitPlan {
+            template,
+            result_type,
+            resolved: None,
+        });
+        return Ok(initplan_marker(index, lhs));
+    }
+
+    let mut planned = expr.clone();
+    for child in expr_children_mut(&mut planned) {
+        *child = install_lazy_initplans(
+            read_ctx,
+            child,
+            outer,
+            child_deferred,
+            initplans,
+            scalar_lookups,
+        )?;
+    }
+    Ok(planned)
+}
+
+fn resolve_select_subqueries(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    select: &SelectStmt,
+) -> Result<
+    (
+        SelectStmt,
+        bool,
+        Vec<LazyInitPlan>,
+        Vec<CorrelatedScalarLookup>,
+    ),
+    ExecError,
+> {
+    if !select.filter.as_ref().is_some_and(contains_subquery) {
+        return Ok((
+            crate::subquery::resolve_in_select(read_ctx, select)?,
+            false,
+            Vec::new(),
+            Vec::new(),
+        ));
+    }
+    let scope = if select.from.is_empty() {
+        Scope::empty()
+    } else {
+        build_from_schema_with_ctes_and_context(
+            read_ctx.catalog_kv,
+            read_ctx.fctx.resolution,
+            &select.from,
+            read_ctx.ctes,
+            Some(read_ctx.eval_ctx),
+        )?
+        .scope
+    };
+    prepare_correlated_subqueries(read_ctx, select, &scope)
+}
+
+/// Resolve a SELECT while deferring only WHERE subtrees that read the SELECT's
+/// source row. Ordinary siblings retain the existing once-only resolution.
+///
+/// Other clauses deliberately stay on their existing path. Projection, HAVING,
+/// and window expressions run at different stages; evaluating them here would
+/// incorrectly execute a subquery for rows an earlier stage discards.
+fn prepare_correlated_subqueries(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    select: &SelectStmt,
+    outer: &Scope,
+) -> Result<
+    (
+        SelectStmt,
+        bool,
+        Vec<LazyInitPlan>,
+        Vec<CorrelatedScalarLookup>,
+    ),
+    ExecError,
+> {
+    let mut without_filter = select.clone();
+    let filter = without_filter.filter.take();
+    let mut resolved = crate::subquery::resolve_in_select(read_ctx, &without_filter)?;
+    let correlated = filter
+        .as_ref()
+        .map(|filter| validate_correlated_subqueries(read_ctx, filter, outer))
+        .transpose()?
+        .unwrap_or(false);
+    let mut initplans = Vec::new();
+    let mut scalar_lookups = Vec::new();
+    resolved.filter = filter
+        .as_ref()
+        .map(|filter| {
+            let planned = install_lazy_initplans(
+                read_ctx,
+                filter,
+                outer,
+                false,
+                &mut initplans,
+                &mut scalar_lookups,
+            )?;
+            crate::subquery::resolve_expr_skipping(read_ctx, &planned, &mut |node| {
+                let candidate = scalar_lookup_parts(node).is_some()
+                    || direct_subquery(node).is_some()
+                    || matches!(node, Expr::Func(_) | Expr::Case { .. });
+                scalar_lookup_parts(node).is_some()
+                    || candidate && expression_contains_correlated_subquery(read_ctx, node, outer)
+            })
+        })
+        .transpose()?;
+    if correlated {
+        let nulls = vec![Datum::Null; outer.width()];
+        let mut binder =
+            LateralBinder::new(read_ctx.catalog_kv, read_ctx.fctx.resolution, read_ctx.ctes);
+        let (bound, _) = binder.bind_expr(
+            resolved
+                .filter
+                .as_ref()
+                .expect("a correlated filter is present"),
+            outer,
+            &nulls,
+        )?;
+        let typed =
+            type_without_evaluating_subqueries(read_ctx, &bound, &initplans, &scalar_lookups)?;
+        crate::eval::check_predicate_resolves(&typed, outer)?;
+        let result_type = crate::eval::infer_type(&typed, outer)?;
+        if result_type != ColumnType::Bool {
+            return Err(ExecError::TypeMismatch(format!(
+                "argument of WHERE must be type boolean, not type {}",
+                result_type.name()
+            )));
+        }
+    }
+    Ok((resolved, correlated, initplans, scalar_lookups))
+}
+
+fn validate_correlated_subqueries(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    expr: &Expr,
+    outer: &Scope,
+) -> Result<bool, ExecError> {
+    let mut correlated = false;
+    if let Some(query) = direct_subquery(expr) {
+        let nulls = vec![Datum::Null; outer.width()];
+        let mut binder =
+            LateralBinder::new(read_ctx.catalog_kv, read_ctx.fctx.resolution, read_ctx.ctes);
+        let (bound, direct_correlated) = binder.bind_query(query, outer, &nulls)?;
+        let fields = crate::query::describe_query_expr_with_ctes(
+            read_ctx.catalog_kv,
+            read_ctx.fctx.resolution,
+            &bound,
+            read_ctx.ctes,
+        )?;
+        if !matches!(expr, Expr::Exists(_)) && fields.len() != 1 {
+            return Err(ExecError::SubqueryColumns);
+        }
+        correlated |= direct_correlated;
+    }
+    for child in expr_children(expr) {
+        correlated |= validate_correlated_subqueries(read_ctx, child, outer)?;
+    }
+    Ok(correlated)
+}
+
+fn contains_subquery(expr: &Expr) -> bool {
+    direct_subquery(expr).is_some() || expr_children(expr).into_iter().any(contains_subquery)
+}
+
+fn contains_pending_subquery(expr: &Expr) -> bool {
+    initplan_parts(expr).is_some()
+        || scalar_lookup_parts(expr).is_some()
+        || direct_subquery(expr).is_some()
+        || expr_children(expr)
+            .into_iter()
+            .any(contains_pending_subquery)
+}
+
+fn expression_contains_correlated_subquery(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    expr: &Expr,
+    outer: &Scope,
+) -> bool {
+    if scalar_lookup_parts(expr).is_some() {
+        return true;
+    }
+    if let Some(query) = direct_subquery(expr) {
+        let nulls = vec![Datum::Null; outer.width()];
+        let mut binder =
+            LateralBinder::new(read_ctx.catalog_kv, read_ctx.fctx.resolution, read_ctx.ctes);
+        if binder
+            .bind_query(query, outer, &nulls)
+            .is_ok_and(|(_, correlated)| correlated)
+        {
+            return true;
+        }
+    }
+    expr_children(expr)
+        .into_iter()
+        .any(|child| expression_contains_correlated_subquery(read_ctx, child, outer))
+}
+
+fn direct_subquery(expr: &Expr) -> Option<&crabka_pgparser::ast::QueryExpr> {
+    match expr {
+        Expr::ScalarSubquery(query) | Expr::ArraySubquery(query) | Expr::Exists(query) => {
+            Some(query)
+        }
+        Expr::InSubquery { subquery, .. } | Expr::Quantified { subquery, .. } => Some(subquery),
+        _ => None,
+    }
+}
+
+fn row_matches_correlated(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    filter: Option<&Expr>,
+    outer: &Scope,
+    row: &[Datum],
+    binder: &mut LateralBinder<'_>,
+) -> Result<bool, ExecError> {
+    let Some(filter) = filter else {
+        return Ok(true);
+    };
+    let (bound, correlated) = binder.bind_expr(filter, outer, row)?;
+    debug_assert!(correlated);
+    let lazy = fold_correlated_lazy_expressions(read_ctx, &bound, outer, row, binder)?;
+    let initialized = resolve_lazy_initplans(read_ctx, &lazy, binder)?;
+    let resolved = crate::subquery::resolve_expr(read_ctx, &initialized)?;
+    row_matches(Some(&resolved), outer, row, read_ctx.eval_ctx)
+}
+
+/// Fold lazy expressions containing deferred subqueries one selected branch or
+/// argument at a time. Eager subquery rewriting must not execute a dead CASE
+/// branch or an unused COALESCE argument.
+fn fold_correlated_lazy_expressions(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    expr: &Expr,
+    scope: &Scope,
+    row: &[Datum],
+    binder: &mut LateralBinder<'_>,
+) -> Result<Expr, ExecError> {
+    if let Expr::Func(call) = expr
+        && call.name == "coalesce"
+        && contains_pending_subquery(expr)
+    {
+        let typed = type_without_evaluating_subqueries(
+            read_ctx,
+            expr,
+            &binder.initplans,
+            &binder.scalar_lookups,
+        )?;
+        if let Expr::Func(typed_call) = &typed
+            && typed_call.name == "coalesce"
+            && crate::routine::plpgsql_declared_call_type(read_ctx.catalog_kv, typed_call)?
+                .is_none()
+        {
+            let result_type = crate::eval::infer_type(&typed, scope)?;
+            let value = crate::func::eval_scalar(call, None, read_ctx.eval_ctx, |arg| {
+                eval_correlated_child(read_ctx, arg, scope, row, binder)
+            })?;
+            return Ok(Expr::Const {
+                value: crate::eval::cast_value(&value, result_type, &read_ctx.eval_ctx.time_zone)?,
+                ty: result_type,
+            });
+        }
+    }
+
+    if let Expr::Case {
+        operand,
+        whens,
+        else_result,
+    } = expr
+        && contains_pending_subquery(expr)
+    {
+        let typed = type_without_evaluating_subqueries(
+            read_ctx,
+            expr,
+            &binder.initplans,
+            &binder.scalar_lookups,
+        )?;
+        let result_type = crate::eval::infer_type(&typed, scope)?;
+        let selected = if let Some(operand) = operand {
+            let value = eval_correlated_child(read_ctx, operand, scope, row, binder)?;
+            let mut selected = None;
+            for (when, then) in whens {
+                let candidate = eval_correlated_child(read_ctx, when, scope, row, binder)?;
+                if crate::eval::apply_binary(
+                    crabka_pgparser::ast::BinaryOp::Eq,
+                    &value,
+                    &candidate,
+                    read_ctx.eval_ctx,
+                )? == Datum::Bool(true)
+                {
+                    selected = Some(then);
+                    break;
+                }
+            }
+            selected.or(else_result.as_deref())
+        } else {
+            let mut selected = None;
+            for (when, then) in whens {
+                match eval_correlated_child(read_ctx, when, scope, row, binder)? {
+                    Datum::Bool(true) => {
+                        selected = Some(then);
+                        break;
+                    }
+                    Datum::Bool(false) | Datum::Null => {}
+                    _ => {
+                        return Err(ExecError::TypeMismatch(
+                            "argument of CASE/WHEN must be type boolean".into(),
+                        ));
+                    }
+                }
+            }
+            selected.or(else_result.as_deref())
+        };
+        let value = match selected {
+            Some(selected) => eval_correlated_child(read_ctx, selected, scope, row, binder)?,
+            None => Datum::Null,
+        };
+        return Ok(Expr::Const {
+            value: crate::eval::cast_value(&value, result_type, &read_ctx.eval_ctx.time_zone)?,
+            ty: result_type,
+        });
+    }
+
+    let mut folded = expr.clone();
+    for child in expr_children_mut(&mut folded) {
+        *child = fold_correlated_lazy_expressions(read_ctx, child, scope, row, binder)?;
+    }
+    Ok(folded)
+}
+
+fn eval_correlated_child(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    expr: &Expr,
+    scope: &Scope,
+    row: &[Datum],
+    binder: &mut LateralBinder<'_>,
+) -> Result<Datum, ExecError> {
+    let folded = fold_correlated_lazy_expressions(read_ctx, expr, scope, row, binder)?;
+    let initialized = resolve_lazy_initplans(read_ctx, &folded, binder)?;
+    let resolved = crate::subquery::resolve_expr(read_ctx, &initialized)?;
+    crate::eval::eval(&resolved, scope, row, read_ctx.eval_ctx)
+}
+
+fn resolve_lazy_initplans(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    expr: &Expr,
+    binder: &mut LateralBinder<'_>,
+) -> Result<Expr, ExecError> {
+    if let Some((index, key)) = scalar_lookup_parts(expr) {
+        let resolved = binder.resolve_scalar_lookup(read_ctx, index, key)?;
+        return resolve_lazy_initplans(read_ctx, &resolved, binder);
+    }
+    if let Some((index, lhs)) = initplan_parts(expr) {
+        let resolved = binder.resolve_initplan(read_ctx, index, lhs)?;
+        return resolve_lazy_initplans(read_ctx, &resolved, binder);
+    }
+    let mut initialized = expr.clone();
+    for child in expr_children_mut(&mut initialized) {
+        *child = resolve_lazy_initplans(read_ctx, child, binder)?;
+    }
+    Ok(initialized)
+}
+
+fn replace_initplan_markers_with_typed_nulls(
+    expr: &Expr,
+    initplans: &[LazyInitPlan],
+    scalar_lookups: &[CorrelatedScalarLookup],
+) -> Result<Expr, ExecError> {
+    if let Some((index, _)) = scalar_lookup_parts(expr) {
+        let plan = scalar_lookups.get(index).ok_or_else(|| {
+            ExecError::Unsupported("invalid correlated scalar lookup marker".into())
+        })?;
+        return Ok(Expr::Const {
+            value: Datum::Null,
+            ty: plan.result_type,
+        });
+    }
+    if let Some((index, _)) = initplan_parts(expr) {
+        let plan = initplans
+            .get(index)
+            .ok_or_else(|| ExecError::Unsupported("invalid deferred subquery marker".into()))?;
+        return Ok(Expr::Const {
+            value: Datum::Null,
+            ty: plan.result_type,
+        });
+    }
+    let mut typed = expr.clone();
+    for child in expr_children_mut(&mut typed) {
+        *child = replace_initplan_markers_with_typed_nulls(child, initplans, scalar_lookups)?;
+    }
+    Ok(typed)
+}
+
+fn type_without_evaluating_subqueries(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    expr: &Expr,
+    initplans: &[LazyInitPlan],
+    scalar_lookups: &[CorrelatedScalarLookup],
+) -> Result<Expr, ExecError> {
+    let typed = replace_initplan_markers_with_typed_nulls(expr, initplans, scalar_lookups)?;
+    let typed = replace_subqueries_with_typed_nulls(read_ctx, &typed)?;
+    let typed = crate::subquery::resolve_expr_skipping(read_ctx, &typed, &mut |node| {
+        direct_subquery(node).is_some()
+    })?;
+    replace_subqueries_with_typed_nulls(read_ctx, &typed)
+}
+
+/// Replace subquery nodes with typed NULLs without executing them, so CASE can
+/// determine its common result type before choosing a branch.
+fn replace_subqueries_with_typed_nulls(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    expr: &Expr,
+) -> Result<Expr, ExecError> {
+    let typed_null = |query: &crabka_pgparser::ast::QueryExpr| {
+        let fields = crate::query::describe_query_expr_with_ctes(
+            read_ctx.catalog_kv,
+            read_ctx.fctx.resolution,
+            query,
+            read_ctx.ctes,
+        )?;
+        if fields.len() != 1 {
+            return Err(ExecError::SubqueryColumns);
+        }
+        column_type_from_oid(fields[0].type_oid)
+    };
+    match expr {
+        Expr::ScalarSubquery(query) => Ok(Expr::Const {
+            value: Datum::Null,
+            ty: typed_null(query)?,
+        }),
+        Expr::ArraySubquery(query) => {
+            let ty = typed_null(query)?;
+            let elem = crabka_pgtypes::ElemType::from_column_type(ty).ok_or_else(|| {
+                ExecError::Unsupported(format!("arrays of {} are not supported", ty.name()))
+            })?;
+            Ok(Expr::Const {
+                value: Datum::Null,
+                ty: ColumnType::Array(elem),
+            })
+        }
+        Expr::Exists(query) => {
+            crate::query::describe_query_expr_with_ctes(
+                read_ctx.catalog_kv,
+                read_ctx.fctx.resolution,
+                query,
+                read_ctx.ctes,
+            )?;
+            Ok(Expr::Const {
+                value: Datum::Null,
+                ty: ColumnType::Bool,
+            })
+        }
+        Expr::InSubquery { subquery, .. } | Expr::Quantified { subquery, .. } => {
+            typed_null(subquery)?;
+            Ok(Expr::Const {
+                value: Datum::Null,
+                ty: ColumnType::Bool,
+            })
+        }
+        _ => {
+            let mut typed = expr.clone();
+            for child in expr_children_mut(&mut typed) {
+                *child = replace_subqueries_with_typed_nulls(read_ctx, child)?;
+            }
+            Ok(typed)
+        }
+    }
 }
 
 /// Read a partitioned parent as the append of its leaf partitions.
@@ -10609,6 +11939,88 @@ fn try_execute_partial_aggregate_pushdown(
     }))
 }
 
+/// Count one direct local INNER/LEFT join without retaining its output rows.
+/// The narrow shape keeps every other aggregate query on the ordinary grouping
+/// path; in particular, a WHERE/FILTER/HAVING needs materialized joined rows.
+fn try_execute_local_join_count(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    s: &SelectStmt,
+) -> Result<Option<Relation>, ExecError> {
+    if s.filter.is_some() || !s.group_by.is_empty() || !select_modifiers_allow_partial_aggregate(s)
+    {
+        return Ok(None);
+    }
+    let [
+        SelectItem::Expr {
+            expr: Expr::Func(call),
+            ..
+        },
+    ] = s.projection.as_slice()
+    else {
+        return Ok(None);
+    };
+    if call.name != "count"
+        || call.distinct
+        || !matches!(call.args, FuncArgs::Star)
+        || call.filter.is_some()
+    {
+        return Ok(None);
+    }
+    let [
+        crabka_pgparser::ast::TableExpr::Join {
+            left,
+            right,
+            kind:
+                kind @ (crabka_pgparser::ast::JoinKind::Inner | crabka_pgparser::ast::JoinKind::Left),
+            constraint,
+        },
+    ] = s.from.as_slice()
+    else {
+        return Ok(None);
+    };
+    if !is_plain_local_join_table(read_ctx, left)? || !is_plain_local_join_table(read_ctx, right)? {
+        return Ok(None);
+    }
+
+    let left = build_table_expr(read_ctx, left, None, None)?;
+    let right = build_table_expr(read_ctx, right, None, None)?;
+    let count = count_join_rows(
+        &left,
+        &right,
+        *kind,
+        constraint,
+        read_ctx.eval_ctx,
+        read_ctx.blocking_query_memory,
+    )?;
+    let (fields, _, types) = resolve_projection(&s.projection, &Scope::empty())?;
+    Ok(Some(Relation {
+        scope: projected_scope(&fields, &types),
+        rows: vec![vec![Datum::Int8(count)]],
+    }))
+}
+
+fn is_plain_local_join_table(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    expression: &crabka_pgparser::ast::TableExpr,
+) -> Result<bool, ExecError> {
+    let crabka_pgparser::ast::TableExpr::Table {
+        name,
+        columns: None,
+        sample: None,
+        ..
+    } = expression
+    else {
+        return Ok(false);
+    };
+    if name.schema.is_none() && read_ctx.ctes.lookup(&name.name).is_some() {
+        return Ok(false);
+    }
+    Ok(
+        scan_plan_table(read_ctx.catalog_kv, read_ctx.fctx.resolution, name)?
+            .is_some_and(|table| !table.sharded),
+    )
+}
+
 /// Stream a supported local aggregate through per-page partial-aggregate
 /// folding, instead of a fold over every visible row after it is materialized.
 ///
@@ -11237,9 +12649,11 @@ pub(crate) fn select_to_relation_with_ctes(
     let fctx = read_ctx.fctx;
     reject_nested_relation_locking(s)?;
 
-    // SP34: resolve this (sub)query's uncorrelated subquery expressions to constants
-    // first, under the same snapshot handles. Nested subqueries recurse here.
-    let resolved = crate::subquery::resolve_in_select(read_ctx, s)?;
+    // Correlated WHERE subqueries need the current source row, while
+    // uncorrelated ones must retain SP34's once-only folding. Only queries whose
+    // WHERE contains a subquery pay for the schema description used to tell the
+    // two apart.
+    let (resolved, correlated, initplans, scalar_lookups) = resolve_select_subqueries(read_ctx, s)?;
     let s = &resolved;
     crate::window::reject_misplaced_calls(s)?;
     crate::grouping::reject_misplaced_calls(s)?;
@@ -11263,6 +12677,9 @@ pub(crate) fn select_to_relation_with_ctes(
             return Ok(relation);
         }
         if let Some(relation) = try_execute_local_streaming_aggregate(read_ctx, s)? {
+            return Ok(relation);
+        }
+        if let Some(relation) = try_execute_local_join_count(read_ctx, s)? {
             return Ok(relation);
         }
         let scan_plan = match s.from.as_slice() {
@@ -11297,9 +12714,19 @@ pub(crate) fn select_to_relation_with_ctes(
             s.filter.as_ref(),
         )?
     };
+    let mut binder = correlated.then(|| {
+        LateralBinder::new(catalog_kv, read_ctx.fctx.resolution, read_ctx.ctes)
+            .with_initplans(initplans)
+            .with_scalar_lookups(scalar_lookups)
+    });
     let mut kept = Vec::new();
     for row in &relation.rows {
-        if row_matches(s.filter.as_ref(), &relation.scope, row, ctx)? {
+        let matches = if let Some(binder) = &mut binder {
+            row_matches_correlated(read_ctx, s.filter.as_ref(), &relation.scope, row, binder)?
+        } else {
+            row_matches(s.filter.as_ref(), &relation.scope, row, ctx)?
+        };
+        if matches {
             kept.push(row.clone());
         }
     }
@@ -11793,7 +13220,10 @@ fn virtual_catalog_columns(name: &str) -> Vec<Column> {
             ("indisready", Bool),
             ("indislive", Bool),
             ("indisreplident", Bool),
-            ("indkey", Text),
+            // PostgreSQL's `int2vector` is a zero-based, space-rendered vector.
+            // `OidVector` is crabka's existing representation with those same
+            // catalog-facing semantics, including `indkey[0]` subscripting.
+            ("indkey", ColumnType::OidVector),
             ("indcollation", Text),
             ("indclass", Text),
             ("indoption", Text),
@@ -11992,7 +13422,7 @@ fn virtual_catalog_rows(
         "pg_namespace" => pg_namespace_rows(catalog_kv),
         "pg_class" => pg_class_rows(catalog_kv),
         "pg_attribute" => pg_attribute_rows(catalog_kv),
-        "pg_type" => Ok(pg_type_rows()),
+        "pg_type" => pg_type_rows(catalog_kv),
         "pg_ts_config" => text_search_catalog_rows(
             catalog_kv,
             crabka_pgparser::ast::TextSearchObjectKind::Configuration,
@@ -12001,9 +13431,7 @@ fn virtual_catalog_rows(
             catalog_kv,
             crabka_pgparser::ast::TextSearchObjectKind::Dictionary,
         ),
-        // Zero rows: no built-in type in the exposed scalar slice is a range
-        // type. Drivers still LEFT JOIN it in their typeinfo queries.
-        "pg_range" => Ok(Vec::new()),
+        "pg_range" => pg_range_rows(catalog_kv),
         "pg_index" => pg_index_rows(catalog_kv),
         "pg_settings" => pg_settings_rows(),
         "pg_prepared_statements" => pg_prepared_statement_rows(),
@@ -12140,7 +13568,6 @@ fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         row.relchecks = table.checks.len();
         row.relhasindex = indexed_table_ids.contains(&table.id);
         row.relhastriggers = triggered_relation_ids.contains(&table.id);
-        row.relam = crate::catalog_rel::BTREE_AM_OID;
         row.relispartition = crate::partition::parent_of(catalog_kv, &table.name)?.is_some();
         row.relpersistence = crabka_pgcatalog::relpersistence_of(&table.name.schema);
         row.reltablespace = crabka_pgcatalog::relation_tablespace_oid(catalog_kv, &table.name)?;
@@ -12178,24 +13605,58 @@ fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         row.relpersistence = crabka_pgcatalog::relpersistence_of(&name.schema);
         rows.push(row.build()?);
     }
+    for ty in crabka_pgcatalog::list_user_types(catalog_kv)? {
+        let Some(fields) = ty.fields() else { continue };
+        let type_oid = i32::try_from(ty.oid)
+            .map_err(|_| ExecError::Unsupported("composite type oid exceeds int4".into()))?;
+        let oid = i32::try_from(crabka_pgtypes::usertype::composite_relation_oid(ty.oid))
+            .map_err(|_| ExecError::Unsupported("composite relation oid exceeds int4".into()))?;
+        let mut row = PgClassRow::new(
+            oid,
+            &ty.name,
+            "c",
+            crate::catalog_rel::namespace_oid(&ty.schema),
+        );
+        row.reltype = type_oid;
+        row.relnatts = fields.len();
+        rows.push(row.build()?);
+    }
     for virtual_table in virtual_table_names() {
         let table = virtual_catalog_table(virtual_table);
+        let oid = virtual_relation_oid(virtual_table);
+        let (relkind, relfilenode) = virtual_pg_class_properties(virtual_table, oid);
         let mut row = PgClassRow::new(
-            virtual_relation_oid(virtual_table),
+            oid,
             &table.name.name,
-            "v",
+            relkind,
             virtual_relation_namespace_oid(virtual_table),
         );
         row.relnatts = table.columns.len();
+        row.relfilenode = relfilenode;
+        row.relhasindex = builtin_catalog_oid_index(virtual_table).is_some();
+        rows.push(row.build()?);
+    }
+    for index in BUILTIN_CATALOG_OID_INDEXES {
+        let mut row = PgClassRow::new(index.oid, index.name, "i", PG_CATALOG_NAMESPACE_OID);
+        row.relnatts = 1;
+        row.relam = crate::catalog_rel::BTREE_AM_OID;
+        if virtual_pg_class_properties(index.table, virtual_relation_oid(index.table)).1 == 0 {
+            row.relfilenode = 0;
+        }
         rows.push(row.build()?);
     }
     for index in indexes {
         // An index lives in the schema of the table it indexes, which is also
         // what makes a temporary table's index temporary.
+        let relkind = if crate::partition::is_partitioned(catalog_kv, &index.table)? {
+            "I"
+        } else {
+            "i"
+        };
         let mut row = PgClassRow::new(
             catalog_index_oid(index.id)?,
             &index.name,
-            "i",
+            relkind,
             crate::catalog_rel::namespace_oid(&index.table.schema),
         );
         row.relnatts = index.columns.len();
@@ -12214,6 +13675,42 @@ fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     Ok(rows)
 }
 
+/// PostgreSQL catalogs are base relations except for its SQL views. Relation-
+/// mapped catalogs retain `relfilenode = 0`; ordinary catalogs use their oid.
+fn virtual_pg_class_properties(name: &str, oid: i32) -> (&'static str, i32) {
+    let is_view = name.starts_with("information_schema.")
+        || matches!(
+            name,
+            "pg_indexes"
+                | "pg_locks"
+                | "pg_prepared_statements"
+                | "pg_replication_slots"
+                | "pg_roles"
+                | "pg_settings"
+                | "pg_shmem_allocations_numa"
+                | "pg_stat_activity"
+                | "pg_tables"
+                | "pg_user"
+                | "pg_views"
+        );
+    let is_mapped = matches!(
+        name,
+        "pg_attribute"
+            | "pg_authid"
+            | "pg_class"
+            | "pg_database"
+            | "pg_proc"
+            | "pg_shdescription"
+            | "pg_tablespace"
+            | "pg_type"
+    );
+    if is_view {
+        ("v", 0)
+    } else {
+        ("r", if is_mapped { 0 } else { oid })
+    }
+}
+
 /// The handful of `pg_class` fields that actually vary between crabka's
 /// relation kinds. Everything else in the row is the same constant for all of
 /// them, and [`PgClassRow::build`] writes it.
@@ -12223,12 +13720,14 @@ struct PgClassRow<'a> {
     relname: &'a str,
     relkind: &'a str,
     relnamespace: i32,
+    reltype: i32,
     relnatts: usize,
     relchecks: usize,
     relhasindex: bool,
     relhasrules: bool,
     relhastriggers: bool,
     relam: i32,
+    relfilenode: i32,
     relispartition: bool,
     reltablespace: u32,
     /// `p` for an ordinary relation, `t` for one in a session's temporary
@@ -12239,17 +13738,23 @@ struct PgClassRow<'a> {
 
 impl<'a> PgClassRow<'a> {
     fn new(oid: i32, relname: &'a str, relkind: &'a str, relnamespace: i32) -> Self {
+        let relfilenode = match relkind {
+            "v" | "c" | "f" | "p" | "I" => 0,
+            _ => oid,
+        };
         Self {
             oid,
             relname,
             relkind,
             relnamespace,
+            reltype: 0,
             relnatts: 0,
             relchecks: 0,
             relhasindex: false,
             relhasrules: false,
             relhastriggers: false,
-            relam: 0,
+            relam: if relkind == "r" { 2 } else { 0 },
+            relfilenode,
             relispartition: false,
             reltablespace: 0,
             relpersistence: 'p',
@@ -12265,11 +13770,11 @@ impl<'a> PgClassRow<'a> {
             int(self.oid),
             text(self.relname),
             int(self.relnamespace),
-            int(0),
+            int(self.reltype),
             int(0),
             int(crate::catalog_fn::BOOTSTRAP_ROLE_OID),
             int(self.relam),
-            int(self.oid),
+            int(self.relfilenode),
             int(i32::try_from(self.reltablespace)
                 .map_err(|_| ExecError::Unsupported("tablespace oid exceeds int4".into()))?),
             int(0),
@@ -12315,19 +13820,20 @@ fn pg_attribute_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> 
             &table,
         )?);
     }
+    for index in BUILTIN_CATALOG_OID_INDEXES {
+        let table = builtin_catalog_index_table(index);
+        rows.extend(attribute_rows_for_table(index.oid, &table)?);
+    }
     // A composite type's attributes hang off the relation its `pg_type.typrelid`
     // points at, which is how `\d <type>` and the driver introspection queries
     // reach them.
-    for ty in crabka_pgtypes::usertype::all() {
+    for ty in crabka_pgcatalog::list_user_types(catalog_kv)? {
         let Some(fields) = ty.fields() else { continue };
         let relid = i32::try_from(crabka_pgtypes::usertype::composite_relation_oid(ty.oid))
             .map_err(|_| ExecError::Unsupported("composite relation oid exceeds int4".into()))?;
         let table = crabka_pgcatalog::Table {
             id: 0,
-            name: crabka_pgcatalog::RelationName::new(
-                crate::search_path::PG_CATALOG,
-                ty.name.clone(),
-            ),
+            name: crabka_pgcatalog::RelationName::new(ty.schema.clone(), ty.name.clone()),
             columns: fields
                 .iter()
                 .map(|field| crabka_pgcatalog::Column::new(field.name.clone(), field.ty))
@@ -12750,7 +14256,7 @@ fn text_collation_oid(ty: ColumnType) -> i32 {
     }
 }
 
-fn pg_type_rows() -> Vec<Vec<Datum>> {
+fn pg_type_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut rows: Vec<Vec<Datum>> = builtin_type_rows()
         .iter()
         .map(|ty| {
@@ -12765,7 +14271,7 @@ fn pg_type_rows() -> Vec<Vec<Datum>> {
                 // ('b') with no domain base type, matching PostgreSQL 18's
                 // pg_type for these OIDs. Only `box` uses a typdelim other
                 // than ',', and crabka has no geometric types.
-                text(if ty.name.ends_with("multirange") {
+                text(if ty.category == "R" && ty.name.ends_with("multirange") {
                     "m"
                 } else if ty.category == "R" {
                     "r"
@@ -12779,8 +14285,8 @@ fn pg_type_rows() -> Vec<Vec<Datum>> {
             ]
         })
         .collect();
-    rows.extend(user_type_rows());
-    rows
+    rows.extend(user_type_rows(catalog_kv)?);
+    Ok(rows)
 }
 
 fn text_search_catalog_rows(
@@ -12824,43 +14330,77 @@ fn text_search_catalog_rows(
 ///
 /// `typrelid` of a composite is the derived `pg_class` oid its attributes hang
 /// off (`pg_attribute` uses the same derivation), and `typbasetype` of a domain
-/// is the base type's oid. Those are the two columns `\d` and every driver's
-/// type introspection walk.
-fn user_type_rows() -> Vec<Vec<Datum>> {
+/// is the base type's oid — the two columns `\d` and every driver's type
+/// introspection walk.
+fn user_type_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     use crabka_pgtypes::usertype;
-    usertype::all()
-        .into_iter()
-        .map(|ty| {
-            let column_type = ty.column_type();
-            let (typrelid, typbasetype, category) = match &ty.body {
-                usertype::UserTypeBody::Composite(_) => (
-                    i32::try_from(usertype::composite_relation_oid(ty.oid)).unwrap_or(0),
-                    0,
-                    "C",
-                ),
-                usertype::UserTypeBody::Enum(_) => (0, 0, "E"),
-                usertype::UserTypeBody::Range(_) => (0, 0, "R"),
-                usertype::UserTypeBody::Domain(domain) => (
-                    0,
-                    i32::try_from(domain.base.oid()).unwrap_or(0),
-                    builtin_type_category(domain.base),
-                ),
-            };
-            vec![
-                int(i32::try_from(ty.oid).unwrap_or(0)),
-                text(&ty.name),
-                int(i32::from(column_type.type_size())),
-                text(category),
-                int(PUBLIC_NAMESPACE_OID),
-                int(typrelid),
-                text(ty.typtype()),
+    let mut rows = Vec::new();
+    for ty in crabka_pgcatalog::list_user_types(catalog_kv)? {
+        let column_type = ty.column_type();
+        let (typrelid, typbasetype, category) = match &ty.body {
+            usertype::UserTypeBody::Composite(_) => (
+                i32::try_from(usertype::composite_relation_oid(ty.oid)).unwrap_or(0),
+                0,
+                "C",
+            ),
+            usertype::UserTypeBody::Enum(_) => (0, 0, "E"),
+            usertype::UserTypeBody::Range(_) => (0, 0, "R"),
+            usertype::UserTypeBody::Domain(domain) => (
+                0,
+                i32::try_from(domain.base.oid()).unwrap_or(0),
+                builtin_type_category(domain.base),
+            ),
+        };
+        rows.push(vec![
+            int(i32::try_from(ty.oid).unwrap_or(0)),
+            text(&ty.name),
+            int(i32::from(column_type.type_size())),
+            text(category),
+            int(crate::catalog_rel::namespace_oid(&ty.schema)),
+            int(typrelid),
+            text(ty.typtype()),
+            text(","),
+            int(0),
+            int(0),
+            int(typbasetype),
+        ]);
+        if let (Some((schema, name)), Some(multirange)) =
+            (ty.multirange_identity(), ty.multirange_type())
+        {
+            rows.push(vec![
+                int(i32::try_from(ty.oid + 3).unwrap_or(0)),
+                text(&name),
+                int(i32::from(multirange.type_size())),
+                text("R"),
+                int(crate::catalog_rel::namespace_oid(&schema)),
+                int(0),
+                text("m"),
                 text(","),
                 int(0),
                 int(0),
-                int(typbasetype),
-            ]
+                int(0),
+            ]);
+        }
+    }
+    Ok(rows)
+}
+
+fn pg_range_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    Ok(crabka_pgcatalog::list_user_types(catalog_kv)?
+        .into_iter()
+        .filter_map(|ty| {
+            let range = ty.range()?;
+            Some(vec![
+                int(i32::try_from(ty.oid).unwrap_or(0)),
+                int(i32::try_from(range.subtype.oid()).unwrap_or(0)),
+                int(i32::try_from(ty.oid + 3).unwrap_or(0)),
+                int(0),
+                int(0),
+                Datum::Null,
+                Datum::Null,
+            ])
         })
-        .collect()
+        .collect())
 }
 
 /// The `pg_type.typcategory` of a built-in type, for the domain rows that
@@ -12872,8 +14412,199 @@ fn builtin_type_category(base: crabka_pgtypes::ColumnType) -> &'static str {
         .map_or("U", |row| row.category)
 }
 
+/// The one-column OID indexes declared with `DECLARE_UNIQUE_INDEX_PKEY` by the
+/// PostgreSQL 18.4 headers for the base catalogs crabka exposes. Their names
+/// and oids are catalog identity, so keep the pinned values rather than minting
+/// synthetic index ids as user-created indexes do.
+struct BuiltinCatalogOidIndex {
+    table: &'static str,
+    name: &'static str,
+    oid: i32,
+}
+
+const BUILTIN_CATALOG_OID_INDEXES: &[BuiltinCatalogOidIndex] = &[
+    BuiltinCatalogOidIndex {
+        table: "pg_namespace",
+        name: "pg_namespace_oid_index",
+        oid: 2685,
+    },
+    BuiltinCatalogOidIndex {
+        table: "pg_class",
+        name: "pg_class_oid_index",
+        oid: 2662,
+    },
+    BuiltinCatalogOidIndex {
+        table: "pg_type",
+        name: "pg_type_oid_index",
+        oid: 2703,
+    },
+    BuiltinCatalogOidIndex {
+        table: "pg_ts_config",
+        name: "pg_ts_config_oid_index",
+        oid: 3712,
+    },
+    BuiltinCatalogOidIndex {
+        table: "pg_ts_dict",
+        name: "pg_ts_dict_oid_index",
+        oid: 3605,
+    },
+    BuiltinCatalogOidIndex {
+        table: "pg_am",
+        name: "pg_am_oid_index",
+        oid: 2652,
+    },
+    BuiltinCatalogOidIndex {
+        table: "pg_amop",
+        name: "pg_amop_oid_index",
+        oid: 2756,
+    },
+    BuiltinCatalogOidIndex {
+        table: "pg_amproc",
+        name: "pg_amproc_oid_index",
+        oid: 2757,
+    },
+    BuiltinCatalogOidIndex {
+        table: "pg_attrdef",
+        name: "pg_attrdef_oid_index",
+        oid: 2657,
+    },
+    BuiltinCatalogOidIndex {
+        table: "pg_authid",
+        name: "pg_authid_oid_index",
+        oid: 2677,
+    },
+    BuiltinCatalogOidIndex {
+        table: "pg_cast",
+        name: "pg_cast_oid_index",
+        oid: 2660,
+    },
+    BuiltinCatalogOidIndex {
+        table: "pg_collation",
+        name: "pg_collation_oid_index",
+        oid: 3085,
+    },
+    BuiltinCatalogOidIndex {
+        table: "pg_constraint",
+        name: "pg_constraint_oid_index",
+        oid: 2667,
+    },
+    BuiltinCatalogOidIndex {
+        table: "pg_conversion",
+        name: "pg_conversion_oid_index",
+        oid: 2670,
+    },
+    BuiltinCatalogOidIndex {
+        table: "pg_database",
+        name: "pg_database_oid_index",
+        oid: 2672,
+    },
+    BuiltinCatalogOidIndex {
+        table: "pg_enum",
+        name: "pg_enum_oid_index",
+        oid: 3502,
+    },
+    BuiltinCatalogOidIndex {
+        table: "pg_event_trigger",
+        name: "pg_event_trigger_oid_index",
+        oid: 3468,
+    },
+    BuiltinCatalogOidIndex {
+        table: "pg_extension",
+        name: "pg_extension_oid_index",
+        oid: 3080,
+    },
+    BuiltinCatalogOidIndex {
+        table: "pg_language",
+        name: "pg_language_oid_index",
+        oid: 2682,
+    },
+    BuiltinCatalogOidIndex {
+        table: "pg_policy",
+        name: "pg_policy_oid_index",
+        oid: 3257,
+    },
+    BuiltinCatalogOidIndex {
+        table: "pg_opclass",
+        name: "pg_opclass_oid_index",
+        oid: 2687,
+    },
+    BuiltinCatalogOidIndex {
+        table: "pg_opfamily",
+        name: "pg_opfamily_oid_index",
+        oid: 2755,
+    },
+    BuiltinCatalogOidIndex {
+        table: "pg_operator",
+        name: "pg_operator_oid_index",
+        oid: 2688,
+    },
+    BuiltinCatalogOidIndex {
+        table: "pg_proc",
+        name: "pg_proc_oid_index",
+        oid: 2690,
+    },
+    BuiltinCatalogOidIndex {
+        table: "pg_publication",
+        name: "pg_publication_oid_index",
+        oid: 6110,
+    },
+    BuiltinCatalogOidIndex {
+        table: "pg_publication_namespace",
+        name: "pg_publication_namespace_oid_index",
+        oid: 6238,
+    },
+    BuiltinCatalogOidIndex {
+        table: "pg_publication_rel",
+        name: "pg_publication_rel_oid_index",
+        oid: 6112,
+    },
+    BuiltinCatalogOidIndex {
+        table: "pg_rewrite",
+        name: "pg_rewrite_oid_index",
+        oid: 2692,
+    },
+    BuiltinCatalogOidIndex {
+        table: "pg_statistic_ext",
+        name: "pg_statistic_ext_oid_index",
+        oid: 3380,
+    },
+    BuiltinCatalogOidIndex {
+        table: "pg_tablespace",
+        name: "pg_tablespace_oid_index",
+        oid: 2697,
+    },
+    BuiltinCatalogOidIndex {
+        table: "pg_trigger",
+        name: "pg_trigger_oid_index",
+        oid: 2702,
+    },
+];
+
+fn builtin_catalog_oid_index(table: &str) -> Option<&'static BuiltinCatalogOidIndex> {
+    BUILTIN_CATALOG_OID_INDEXES
+        .iter()
+        .find(|index| index.table == table)
+}
+
+fn builtin_catalog_index_table(index: &BuiltinCatalogOidIndex) -> Table {
+    let oid_column = virtual_catalog_table(index.table)
+        .columns
+        .into_iter()
+        .find(|column| column.name == "oid")
+        .expect("catalog oid index refers to a catalog with an oid column");
+    Table {
+        id: u32::try_from(index.oid).expect("built-in index oid is positive"),
+        name: crabka_pgcatalog::RelationName::new(crate::search_path::PG_CATALOG, index.name),
+        columns: vec![oid_column],
+        sharded: false,
+        sharding: None,
+        foreign: None,
+        checks: Vec::new(),
+    }
+}
+
 fn pg_index_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
-    crabka_pgcatalog::list_indexes(catalog_kv)?
+    let mut rows = crabka_pgcatalog::list_indexes(catalog_kv)?
         .into_iter()
         .map(|index| {
             let table = crabka_pgcatalog::get_table(catalog_kv, &index.table)?;
@@ -12883,11 +14614,11 @@ fn pg_index_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 .map(|column| {
                     table
                         .column_index(column)
-                        .map(|idx| (idx + 1).to_string())
+                        .and_then(|idx| i32::try_from(idx + 1).ok())
+                        .map(Datum::Int4)
                         .ok_or_else(|| ExecError::UndefinedColumn(column.clone()))
                 })
-                .collect::<Result<Vec<_>, _>>()?
-                .join(" ");
+                .collect::<Result<Vec<_>, _>>()?;
             let natts = i16::try_from(index.columns.len())
                 .map_err(|_| ExecError::Unsupported("indnatts exceeds int2 range".into()))?;
             Ok(vec![
@@ -12912,7 +14643,11 @@ fn pg_index_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 Datum::Bool(true),
                 Datum::Bool(true),
                 Datum::Bool(false),
-                text(&indkey),
+                Datum::OidVector(crabka_pgtypes::ArrayValue::with_dims(
+                    crabka_pgtypes::ElemType::Int4,
+                    indkey,
+                    vec![crabka_pgtypes::ArrayDim::new(0, i32::from(natts))],
+                )),
                 Datum::Null,
                 Datum::Null,
                 Datum::Null,
@@ -12920,7 +14655,47 @@ fn pg_index_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 Datum::Null,
             ])
         })
-        .collect()
+        .collect::<Result<Vec<_>, ExecError>>()?;
+    for index in BUILTIN_CATALOG_OID_INDEXES {
+        let table = virtual_catalog_table(index.table);
+        let attnum = table
+            .column_index("oid")
+            .and_then(|index| i16::try_from(index + 1).ok())
+            .ok_or_else(|| {
+                ExecError::Unsupported(format!(
+                    "catalog {} has no addressable oid column",
+                    index.table
+                ))
+            })?;
+        rows.push(vec![
+            int(index.oid),
+            int(virtual_relation_oid(index.table)),
+            Datum::Int2(1),
+            Datum::Int2(1),
+            Datum::Bool(true),
+            Datum::Bool(false),
+            Datum::Bool(true),
+            Datum::Bool(false),
+            Datum::Bool(true),
+            Datum::Bool(false),
+            Datum::Bool(true),
+            Datum::Bool(false),
+            Datum::Bool(true),
+            Datum::Bool(true),
+            Datum::Bool(false),
+            Datum::OidVector(crabka_pgtypes::ArrayValue::with_dims(
+                crabka_pgtypes::ElemType::Int4,
+                vec![Datum::Int4(i32::from(attnum))],
+                vec![crabka_pgtypes::ArrayDim::new(0, 1)],
+            )),
+            Datum::Null,
+            Datum::Null,
+            Datum::Null,
+            Datum::Null,
+            Datum::Null,
+        ]);
+    }
+    Ok(rows)
 }
 
 fn pg_settings_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
@@ -13019,6 +14794,7 @@ pub(crate) fn virtual_table_names() -> &'static [&'static str] {
             "pg_range",
             "pg_index",
             "pg_settings",
+            "pg_prepared_statements",
             "pg_roles",
             "pg_user",
             "information_schema.schemata",
@@ -13935,6 +15711,12 @@ fn builtin_type_rows() -> &'static [BuiltinTypeRow] {
     &ROWS
 }
 
+/// Whether `name` is an exact `pg_catalog.pg_type.typname`, excluding SQL
+/// aliases such as `int` that parse as built-ins but are not catalog objects.
+pub(crate) fn is_builtin_catalog_type_name(name: &str) -> bool {
+    builtin_type_rows().iter().any(|ty| ty.name == name)
+}
+
 fn oid_i32(oid: u32) -> Result<i32, ExecError> {
     i32::try_from(oid).map_err(|_| ExecError::Unsupported("oid exceeds int4 range".into()))
 }
@@ -14090,6 +15872,7 @@ pub(crate) async fn execute_read_locking(
     lock_wait_cap: Option<std::time::Duration>,
     s: &SelectStmt,
 ) -> Result<QueryResult, ExecError> {
+    let original = s;
     let catalog_kv = read_ctx.catalog_kv;
     let resolution = read_ctx.fctx.resolution;
     let kv = read_ctx.kv;
@@ -14108,10 +15891,6 @@ pub(crate) async fn execute_read_locking(
     // PostgreSQL refuses these shapes during parse analysis, so a query it will
     // not run must not be part-run to report it.
     check_select_locking(s, locking.strength)?;
-    // SP34: resolve uncorrelated subqueries (e.g. in the WHERE of a FOR UPDATE) to
-    // constants first, under this statement's snapshot handles.
-    let resolved = crate::subquery::resolve_in_select(read_ctx, s)?;
-    let s = &resolved;
     let mode = lock_mode_for(locking.strength);
     // FOR UPDATE/SHARE names base-table rows. A FROM with none — a FROM-less
     // SELECT, a set-returning function, a derived table — has nothing to lock,
@@ -14128,7 +15907,7 @@ pub(crate) async fn execute_read_locking(
             return Err(ExecError::MissingFromEntry(named.clone()));
         }
     }
-    let t = match s.from.as_slice() {
+    let (t, qualifier) = match s.from.as_slice() {
         [
             crabka_pgparser::ast::TableExpr::Table {
                 name,
@@ -14149,18 +15928,18 @@ pub(crate) async fn execute_read_locking(
                     .iter()
                     .any(|named| named.eq_ignore_ascii_case(&qualifier))
             {
-                table
+                (table, qualifier)
             } else {
                 // The clause names other relations only, so this one is read
                 // without locking.
-                return execute_read_body(read_ctx, s);
+                return execute_read_body(read_ctx, original);
             }
         }
         // A FROM with nothing lockable — no FROM at all, a set-returning
         // function, a derived table — just runs the query, as in PostgreSQL.
-        [] => return execute_read_body(read_ctx, s),
+        [] => return execute_read_body(read_ctx, original),
         [item] if !matches!(item, crabka_pgparser::ast::TableExpr::Table { .. }) => {
-            return execute_read_body(read_ctx, s);
+            return execute_read_body(read_ctx, original);
         }
         _ => {
             return Err(ExecError::Unsupported(format!(
@@ -14176,14 +15955,25 @@ pub(crate) async fn execute_read_locking(
             locking.strength.as_sql()
         )));
     }
-    let scope = Scope::single(&t, &t.name.name);
+    // Resolve only after proving this is a lockable base-table shape. Fallbacks
+    // execute through the ordinary read path, which owns their single subquery
+    // resolution; doing it before the shape decision would run volatile
+    // uncorrelated subqueries twice.
+    let (resolved, correlated, initplans, scalar_lookups) = resolve_select_subqueries(read_ctx, s)?;
+    let s = &resolved;
+    let scope = Scope::single(&t, &qualifier);
+    let mut binder = correlated.then(|| {
+        LateralBinder::new(catalog_kv, read_ctx.fctx.resolution, read_ctx.ctes)
+            .with_initplans(initplans)
+            .with_scalar_lookups(scalar_lookups)
+    });
 
     // Scan visible rows, then lock and EvalPlanQual-recheck each one.
     let mut kept: Vec<Vec<Datum>> = Vec::new();
     for ScannedRow {
         rowid,
+        xmin: scanned_xmin,
         row: scanned_row,
-        ..
     } in read_ctx.range_scanner.scan(ScanRequest {
         local: kv,
         global,
@@ -14202,7 +15992,12 @@ pub(crate) async fn execute_read_locking(
         // 1. Filter on the snapshot-visible row FIRST — only lock rows that
         //    match the WHERE clause (a FOR UPDATE/SHARE with no WHERE still
         //    locks all rows because row_matches(None, ..) returns true).
-        if !row_matches(s.filter.as_ref(), &scope, &scanned_row, ctx)? {
+        let matches = if let Some(binder) = &mut binder {
+            row_matches_correlated(read_ctx, s.filter.as_ref(), &scope, &scanned_row, binder)?
+        } else {
+            row_matches(s.filter.as_ref(), &scope, &scanned_row, ctx)?
+        };
+        if !matches {
             continue;
         }
 
@@ -14233,7 +16028,7 @@ pub(crate) async fn execute_read_locking(
 
         // 3. EvalPlanQual: re-read the row under the lock (40001 under RR if
         //    changed since our snapshot; RC re-finds the latest live version).
-        let Some((_cur_key_xid, _cur_xmin, cur_row)) = eval_plan_qual(
+        let Some((_cur_key_xid, cur_xmin, cur_row)) = eval_plan_qual(
             &MutationContext {
                 kv,
                 global,
@@ -14249,9 +16044,18 @@ pub(crate) async fn execute_read_locking(
             continue; // deleted by a concurrent committed txn — skip
         };
 
-        // 4. Re-apply the WHERE filter against the (possibly newer) row.
-        if !row_matches(s.filter.as_ref(), &scope, &cur_row, ctx)? {
-            continue; // no longer matches
+        // 4. Re-apply the WHERE filter only when EvalPlanQual found a newer
+        //    tuple version. Re-running a volatile predicate against the same
+        //    version would evaluate it twice even without a concurrent update.
+        if cur_xmin != scanned_xmin {
+            let matches = if let Some(binder) = &mut binder {
+                row_matches_correlated(read_ctx, s.filter.as_ref(), &scope, &cur_row, binder)?
+            } else {
+                row_matches(s.filter.as_ref(), &scope, &cur_row, ctx)?
+            };
+            if !matches {
+                continue; // no longer matches
+            }
         }
         kept.push(cur_row);
     }
@@ -15048,15 +16852,25 @@ pub(crate) fn derived_name(expr: &Expr) -> String {
         // through the parentheses the parser has already discarded), so
         // `b::numeric`, `count(*)::bigint`, `b COLLATE "C"` and `(b)` are labelled
         // `b`, `count`, `b`, `b`. When the inner expression supplies no name of
-        // its own, a CAST falls back to the TYPE's name — `1::bigint` is `bigint`,
-        // not `?column?` — while a COLLATE has no such fallback.
+        // its own, a CAST falls back to the catalog TYPE name — `1::bigint` is
+        // `int8`, not `?column?` — while a COLLATE has no such fallback.
         Expr::Cast { expr, ty } => match derived_name(expr) {
-            unnamed if unnamed == "?column?" => ty.name().to_string(),
+            unnamed if unnamed == "?column?" => catalog_type_name(*ty),
             named => named,
         },
         Expr::Collate { expr, .. } => derived_name(expr),
         _ => "?column?".to_string(),
     }
+}
+
+/// `FigureColname` sees the canonical type name produced by PostgreSQL's type
+/// parser, which is `pg_type.typname` rather than an SQL alias (`boolean`
+/// becomes `bool`, `bigint` becomes `int8`, and so on).
+fn catalog_type_name(ty: ColumnType) -> String {
+    builtin_type_rows()
+        .iter()
+        .find(|row| u32::try_from(row.oid) == Ok(ty.oid()))
+        .map_or_else(|| ty.name().to_string(), |row| row.name.to_string())
 }
 
 pub(crate) fn field(name: &str, ty: ColumnType) -> FieldDescription {
@@ -16654,6 +18468,9 @@ fn alter_table_ops(
         // `RENAME TO` never moves a relation between schemas: the new name is
         // unqualified and lands beside the old one, exactly as in PostgreSQL.
         let new_name = &table_name.sibling(new_name);
+        if crabka_pgcatalog::get_table(kv, table_name).is_ok() {
+            crate::usertype::ensure_relation_type_name_available(kv, new_name)?;
+        }
         return match crabka_pgcatalog::rename_table_ops(kv, table_name, new_name) {
             Ok(mut ops) => {
                 ops.extend(rename_relation_comment_ops(kv, table_name, new_name)?);
@@ -21108,6 +22925,39 @@ mod tests {
             cells(&engine, "SELECT g FROM generate_series(1, 1) g FOR UPDATE").await
                 == cell_rows(&[&["1"]])
         );
+        run(&engine, "CREATE SEQUENCE locking_fallback_seq").await;
+        assert!(
+            cells(
+                &engine,
+                "SELECT (SELECT nextval('locking_fallback_seq')) \
+                 FROM (SELECT 1) d FOR UPDATE",
+            )
+            .await
+                == cell_rows(&[&["1"]])
+        );
+        assert!(
+            cells(&engine, "SELECT nextval('locking_fallback_seq')").await == cell_rows(&[&["2"]])
+        );
+
+        // EvalPlanQual must not re-run a volatile correlated predicate when the
+        // locked tuple is the same version that the statement already tested.
+        run(&engine, "CREATE SEQUENCE locking_correlated_seq").await;
+        assert!(
+            cells(
+                &engine,
+                "SELECT o.id FROM lk o \
+                 WHERE EXISTS (SELECT 1 \
+                               WHERE nextval('locking_correlated_seq') > 0 \
+                                 AND o.id > 0) \
+                 ORDER BY o.id FOR UPDATE",
+            )
+            .await
+                == cell_rows(&[&["1"], &["2"]])
+        );
+        assert!(
+            cells(&engine, "SELECT nextval('locking_correlated_seq')").await
+                == cell_rows(&[&["3"]])
+        );
     }
 
     #[tokio::test]
@@ -22713,7 +24563,7 @@ mod tests {
                     "typbasetype",
                 ]
         );
-        let rows = super::pg_type_rows();
+        let rows = super::pg_type_rows(&crabka_pgkv::MemKv::default()).expect("pg_type rows");
         for row in &rows {
             assert!(row.len() == columns.len());
         }
@@ -23134,7 +24984,9 @@ mod tests {
         run_s(&mut s, "CREATE UNIQUE INDEX t_v_key ON t (v)").await;
         let r = &run_s(
             &mut s,
-            "SELECT indisunique, indisprimary FROM pg_index ORDER BY indexrelid",
+            "SELECT i.indisunique, i.indisprimary
+             FROM pg_index i JOIN pg_class c ON c.oid = i.indrelid
+             WHERE c.relname = 't' ORDER BY i.indexrelid",
         )
         .await[0];
         let values: Vec<Vec<Option<String>>> = rows_of(r)

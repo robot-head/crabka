@@ -206,13 +206,29 @@ async fn every_resolved_behavior_probe_reaches_the_session_contract() {
         );
         refused += 1;
     }
-    assert!(executed == 113);
-    assert!(refused == 44);
+    assert!(executed == 114);
+    assert!(refused == 43);
+}
+
+#[tokio::test]
+async fn alter_schema_rename_remains_refused() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    session
+        .simple_query("CREATE SCHEMA parser_commands_schema")
+        .await
+        .expect("schema setup");
+    let error = session
+        .simple_query("ALTER SCHEMA parser_commands_schema RENAME TO renamed_schema")
+        .await
+        .expect_err("ALTER SCHEMA RENAME must stay refused");
+    assert!(error.code == "0A000");
+    assert!(error.message.contains("is not supported"));
 }
 
 #[tokio::test]
 async fn every_major_feature_probe_matches_its_typed_behavior() {
-    assert!(FEATURE_PROBES.len() == 48);
+    assert!(FEATURE_PROBES.len() == 49);
     for probe in FEATURE_PROBES {
         if probe.behavior == FeatureBehavior::ParserRejectPending {
             assert!(

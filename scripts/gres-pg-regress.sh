@@ -291,7 +291,7 @@ check_serial_baseline() {
     python3 "$BASELINE_HELPER" check \
         --postgres-tag "$POSTGRES_TAG" \
         --schedule "${REGRESS_SOURCE_DIR}/parallel_schedule" \
-        --tap "${output}/regression.out" \
+        --tap "${output}/command.log" \
         --diff "${output}/regression.diffs" \
         --source-root "$SOURCE_DIR" \
         --build-root "$output" \

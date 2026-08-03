@@ -1,4 +1,8 @@
 // Generated from PostgreSQL REL_18_4 catalog data.
+#[allow(
+    clippy::unreadable_literal,
+    reason = "generated PostgreSQL catalog rows preserve source numeric spelling"
+)]
 pub(crate) const BUILTIN_OPERATOR_CLASSES: &[(i32, i32, &str, i32, i32, bool, i32)] = &[
     (320000, 403, "array_ops", 397, 2277, true, 0),
     (320001, 405, "array_ops", 627, 2277, true, 0),

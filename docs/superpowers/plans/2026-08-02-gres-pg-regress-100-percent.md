@@ -33,6 +33,18 @@ is implemented; grammar, canonicalization, and evaluator compatibility remain.
 connection. The pinned `REL_18_4` schedule fingerprint is
 `63419f82d4a5faaf711658608a3b7b6b45ccc5c2a64e1b4e5c111ed9de648118`.
 
+Post-certification focused runs make `boolean`, `varchar`, and `sanity_check`
+exact on the working tree. They are likely gains, but they do not revise the
+20 / 231 headline until the final tree completes both authoritative schedules.
+A later measurement completed serial at 20 / 231 but its parallel mode stalled
+at 92 / 231, so `target/pg-regress-runs/20260803T213156Z-exists-projection-certified-gres`
+is explicitly non-certifying. A retained non-certifying replay at
+`target/pg-regress-runs/20260803T221236Z-parallel-stall-repro-gres` completed
+that cohort and reproduced a CPU-heavy OR nested loop: `join` took 294.320
+seconds and its final OR query exceeded the blocking-query memory budget. The
+replay did not reproduce a lock cycle. This classifies the replayed hotspot,
+not the exact historical blocker.
+
 The current certification also makes `create_function_c`, `delete`,
 `security_label`, `dbsize`, `vacuum_parallel`, `numa`, and `compression_pglz`
 exact. `dbsize` now covers exact size parsing/formatting and physical local
@@ -70,6 +82,7 @@ and their certified artifact describe current conformance.
 - [x] Permit a baseline update only when the owning test's mismatch count decreases or the test is removed; the changed fingerprint and supporting result artifact land in the same review.
 - [x] Keep the existing per-statement baseline for local root-cause ranking, but label it adopted-corpus parity everywhere.
 - [x] Publish upstream passed/total and the shrinking per-test mismatch baseline in the job summary.
+- [x] Parse the serial baseline from the runner's retained `command.log`; accept a missing `regression.diffs` only when the complete TAP stream reports every scheduled test passing.
 
 **Gate:** The wrapper distinguishes new, removed, improved, worsened, and same-count-but-different failures; the checked-in mismatch surface can only shrink.
 
@@ -131,6 +144,7 @@ and their certified artifact describe current conformance.
 - [x] Add native `jsonpath` and `jsonpath[]` identity with PostgreSQL OIDs 4072 and 4073, scalar and array datums, durable schema/default/row storage, text/binary parameters and results, `pg_type` rows, common-type and assignment coercion, routine/PL/pgSQL use, and PostgreSQL-compatible rejection gates for equality, ordering, hashing, and default operator classes. The upstream family remains `0/3` at 3110 changed lines / 99 hunks because language and evaluator compatibility remain incomplete.
 - [x] Enforce `jsonpath` and `jsonpath[]` domain constraints after explicit casts, assignments, omitted/default values, COPY input, and PL/pgSQL declarations, arguments, assignments, and returns.
 - [x] Run ALTER actions in PostgreSQL pass order, retain expression-index dependencies during column drops, and apply the shared default-operator-class checks to ALTER-added unique and primary-key constraints.
+- [x] Revalidate an `ALTER TABLE ... ADD PRIMARY KEY/UNIQUE` target after taking the catalog gate, so a concurrent relation replacement cannot bypass PostgreSQL's view diagnostic or build an index for a stale table identity.
 - [x] Fully consume legacy frontend Fastpath (`F`) messages and reject them nonfatally with `0A000`, or `25P02` in a failed transaction, while preserving extended-protocol ignore-until-Sync behavior. `largeobject` remains 468 / 5, but `psql \lo_unlink` no longer terminates the connection; legacy functions are not executed.
 - [x] Re-run the upstream owners for the implemented PL/pgSQL, trigger, foreign-key, schema, and full-text-search surfaces. Serial results are `create_schema` 54/1, `triggers` 1272/88, `foreign_key` 1515/78, `tsearch` 1510/73, `tsdicts` 741/8, `tstypes` 480/23, and `plpgsql` 2047/173 changed lines/hunks.
 - [x] Match PostgreSQL's hidden-target DELETE diagnostic for the uniquely provable outer alias case, including `42P01`, alias hint, and source position. `delete` becomes exact; broader DML alias diagnostics remain pending.
@@ -141,11 +155,18 @@ and their certified artifact describe current conformance.
 - [x] Preserve C routine object files separately from link symbols, validate the explicitly configured static regression module and pinned internal symbols before catalog writes, and project `pg_proc.prosrc`/`probin` plus `pg_get_functiondef` correctly. Arbitrary server files are never read or executed, and general C execution remains pending; `create_function_c` becomes exact.
 - [x] Execute only the metadata-gated regression `test_pglz_compress`/`test_pglz_decompress` signatures through a bounded safe-Rust PGLZ codec and add the exact `length(bytea)` overload. The decompressor deliberately caps declared output at 64 MiB and returns `54000` above it; `compression_pglz` is exact within that safety bound, not a general C ABI.
 - [x] Encode PostgreSQL's optional one-based `P` source-position field without changing errors that do not carry a known position. Full-suite review rejected unconditional parser attachment because unsupported valid SQL would gain additional wrong output.
+- [x] Match PostgreSQL boolean input ambiguity and canonical derived type labels, and attach a source position only to the exact legacy `bool 'literal'` form. The untouched PostgreSQL 18.4 `boolean` file is exact in `target/pg-regress-runs/20260803T220700Z-focused-boolean-current`.
+- [x] Apply scalar-to-`varchar(n)`/`char(n)` assignment coercion through the shared cast path and preserve the target typmod in truncation and `pg_input_error_info` diagnostics. The untouched `varchar` file is exact in `target/pg-regress-runs/20260803T222100Z-focused-varchar-current`.
+- [x] Expose PostgreSQL 18.4's 31 pinned catalog OID indexes consistently through `pg_class`, `pg_attribute`, and `pg_index`, including uniqueness/immediacy and index-key invariants. The untouched `sanity_check` file is exact in `target/pg-regress-runs/20260803T222000Z-focused-sanity-current`.
+- [x] Box recursively re-entered SELECT/function futures in PL/pgSQL and cap parser recursion below the default 2 MiB thread-stack limit while retaining the explicit twenty-level acceptance floor. Focused PL/pgSQL, parser, and recursion-guard suites pass without a process abort.
 - [ ] Match remaining exact wire-visible diagnostics.
 - [ ] Eliminate nondeterministic unordered results rather than weakening comparisons.
 - [x] Treat every crash, I/O loss, or timeout as a harness failure, never as an SQL mismatch or a match on two dead connections.
 - [x] Reject positional parameter numbers outside PostgreSQL's signed-32-bit lexer range before allocating parameter-shape vectors; the upstream `numerology` case now returns `42601` rather than consuming unbounded CPU and memory.
 - [x] Keep regress-scale lateral derived joins bounded by caching only conservative, nonvolatile specializations (including the semantic no-op `OFFSET 0`) and reusing their equijoin indexes under the blocking-query memory limit.
+- [x] Index a top-level OR join only when every disjunct has a safe hash-comparable equality key. Union and deduplicate candidate right-row positions in original order, then recheck the full ON predicate; all four join kinds match an independent nested loop with NULLs, duplicates, overlap, and unmatched rows, while an unsafe branch declines the entire optimization.
+- [ ] Rebuild Gres and replay both the isolated upstream OR join and its retained 20-test cohort under the 20 MiB policy. The isolated PostgreSQL query now returns the expected `19000` in 0.30 seconds without a memory error, versus the retained pre-fix replay's 294.320-second `join` file and final-query failure; evidence: `target/pg-regress-runs/20260803T230847Z-or-join-postfix-pass`. Bounded post-build index accounting, fixed-capacity OR merge scratch, and count-only join folding are implemented. The retained cohort and full parallel schedule remain before this gate closes.
+- [ ] Eliminate bounded lateral-cache thrashing without retaining every full right relation: for cacheable `INNER`/`LEFT` exact equijoins, group outer rows by stable specialization, build each right relation/index once, restore outer-row order, and stream or projection-prune downstream aggregation so wide joined results remain inside the same memory policy.
 - [x] Evaluate default-frame window `count` and `sum` incrementally by peer group; retain the general frame evaluator for every other aggregate and explicit frame.
 - [ ] Re-run the full serial schedule after each shared fix and ratchet only tests whose recorded mismatch surface shrank.
 
@@ -157,11 +178,27 @@ For each item, first add one focused test at the shared layer that fails before 
 
 - [ ] Reclassify the fresh artifact by semantic root and fix the largest coherent family first; do not carry forward the stale 1089 wrong-row count.
 - [ ] Fix the earliest error in each transaction-abort cascade before touching its downstream `25P02` statements.
-- [ ] Review the latest result against the monotone baseline before ratcheting: there are no new failures; 18 retain exact baseline signatures, 66 worsen, 21 retain their mismatch size with a changed fingerprint, 106 improve, and 14 failures disappear. Keep the checked-in `6/231` floor until each non-monotone change is explained.
+- [x] Review the current certified result against the monotone baseline: there are no new failures; 18 retain exact baseline signatures, 66 worsen, 21 retain their mismatch size with a changed fingerprint, 106 improve, and 14 failures disappear.
+- [ ] Explain every non-monotone fingerprint before ratcheting the checked-in `6/231` floor.
 - [ ] Finish JSONPath grammar and canonicalization: recursive-descent bounds, escape and surrogate handling, context-sensitive `last` and `@`, numeric methods, and exact output formatting.
 - [ ] Finish JSONPath evaluator gaps, especially datetime/template behavior and remaining strict/lax path semantics.
 - [ ] Implement durable user-defined operator objects and `CREATE`/`ALTER`/`DROP OPERATOR` in Q4, separately from the supported `OPERATOR(...)` expression wrapper: implementation-routine/type linkage, unary `NONE` signatures, commutator/negator links and cleanup, `pg_operator` projection/dependencies, signature-based drop, `IF EXISTS`, and schema/type diagnostics. The bounded representatives currently refuse with `0A000`.
-- [ ] Implement correlated `EXISTS`/`NOT EXISTS` outer-column binding and execution. The `drop_operator` orphan checks currently fail while resolving their `fk` outer references.
+- [x] Implement correlated `SELECT ... WHERE` subqueries for the tested `EXISTS`/`NOT EXISTS`, `IN`, and scalar forms. Preserve inner-name shadowing, case-sensitive qualifiers, ambiguous-column errors, empty-input validation, lazy CASE/COALESCE/initplans, and locking EPQ behavior. For the narrow scalar shape of one local base table, one directly projected column, an immutable same-typed outer equality key, and literal `LIMIT 1` without ordering, grouping, or locking, build one lazy statement-local hash lookup while preserving first-visible-row, duplicate, NULL, snapshot, and fallback semantics. Eligible equality-key `EXISTS`/`NOT EXISTS`, including an `EXISTS` nested under `OR`, reuse the same lazy lookup while projecting only the retained key/result columns under the blocking-memory policy.
+- [ ] Extend correlation to projection, HAVING, UPDATE SET, RETURNING, and grouped-output scopes; the completed WHERE forms do not imply general decorrelation.
+- [ ] Verify PostgreSQL operator lookup and coercion for `varchar(n)[]`/`bpchar(n)[]`, including typmod preservation across array construction, comparison, containment, concatenation, and `ANY`/`ALL`.
+- [x] Implement exact `(schema, name)` identity for schema-qualified user types and automatic/explicit multirange companions, including quoted identifiers containing dots, durable catalog serialization/hydration, namespace collisions, rename/drop behavior, and fresh-session lookup.
+- [ ] Certify the schema-qualified user-type and multirange identity wave in a complete serial and parallel artifact before updating the certified headline or score.
+- [x] Include schema-qualified user types and their generated multirange/dependent types in schema dependency discovery and cleanup. `DROP SCHEMA ... RESTRICT` rejects a nonempty type-only schema; `CASCADE` and the shared temp cleanup remove roots and transitive dependents in dependents-first order, including primary and multirange registry identities. The schema lifecycle integration target passes 10 / 10 and pgcatalog schema tests pass 9 / 9.
+- [x] Within one active catalog, publish the process type registry only from the durable catalog delta after TYPE/DOMAIN create, alter, drop, `DROP SCHEMA CASCADE`, `DISCARD TEMP`, session teardown, or stale-temp reclamation commits and event triggers accept it. Successful nested event-trigger DDL re-reads the final durable type set before publication; a rejected hook publishes the current-to-restored rollback delta. Event-trigger rejection, partial multi-drop builder failure, commit/read failure, and savepoint rollback leave parser-visible names aligned with catalog state; one registry write lock applies removals and replacements atomically, including multirange mappings.
+- [ ] Scope the process user-type registry by a stable catalog identity and replace each catalog namespace atomically during hydration. Independent `SqlEngine` catalogs currently allocate the same local user-type OIDs and can overwrite one another's global name/OID mappings; single-catalog atomic publication does not provide multi-catalog isolation.
+- [ ] Extend schema/type dependency closure beyond user types to every non-type dependent: table columns and defaults, routines, views, indexes, and their catalog dependency rows. In particular, `DROP TYPE`/`DROP SCHEMA ... CASCADE` can remove a user-type record while leaving a table outside the dropped schema with a column that references the tombstoned OID. A type-to-type cascade is not yet full PostgreSQL object dependency closure.
+- [ ] Make stored SQL/expression reparsers (views, SQL/PL/pgSQL bodies, and domain/check expressions) use the session or captured type search path; today an unqualified non-`public` user type can fail to resolve or rebind after creation.
+- [x] Retain usable hash-compatible keys in mixed-key equijoins and recheck the full join predicate for every candidate.
+- [x] Let PL/pgSQL event-trigger functions fall through with a NULL result while ordinary trigger functions still report `2F005` when control reaches the end.
+- [x] Implement strict `booleq`/`boolne`, including argument validation before NULL short-circuiting and boolean-domain inputs.
+- [x] Resolve range/multirange relation and arithmetic families before applying strict NULL semantics, including typed-peer inference for unknown multirange literals and typed-invalid/all-unknown operator errors.
+- [x] Match `pg_class` relation-kind, access-method, and filenode semantics for mapped catalogs, ordinary and partitioned relations/indexes, views, sequences, and composite-type relations.
+- [x] Classify multirange array `pg_type` rows as category `A` / base type `b`, while scalar multiranges remain category `R` / multirange type `m`.
 - [ ] Implement native `tid`/`tid[]` identity and input diagnostics, stable `ctid` system-column projection, `currtid2`, `WHERE CURRENT OF`, and TID/TID-range access semantics. The KV row identity is not a PostgreSQL heap page/offset TID, so `tid`, `tidscan`, and `tidrangescan` remain storage-semantic blockers rather than EXPLAIN-only mismatches.
 - [ ] Complete bit strings, remaining named composite/record semantics, `bytea`, `reg*` object identifiers, and exact float special-value behavior. Anonymous-record OID 2249 plumbing is only the shared foundation.
 - [ ] Implement aggregate `ORDER BY`, ordered-set aggregates, record-returning function column definitions, and recursive CTE `SEARCH`/`CYCLE`.
@@ -172,9 +209,9 @@ For each item, first add one focused test at the shared layer that fails before 
 - [ ] Implement full `name` type identity plus executable unique/partial expression indexes and hash-index entries/options before claiming `hash_index`; catalog-only expression metadata is insufficient.
 - [ ] Implement schema element transformation/execution atomically, `CURRENT_ROLE` authorization resolution, ColId relation components, and DROP CASCADE notices before claiming `create_schema` exactness.
 - [ ] Treat `unicode.out`, not the non-UTF8 skip alternate, as the UTF8 authority; finish U& strings/identifiers, UESCAPE, normalization syntax/predicates, and Unicode catalog helpers.
-- [ ] Preserve typed COPY query/TO, CSV/file, and encoding-conversion semantics as one coherent COPY wave; `copyencoding` is not a one-error fix.
+- [ ] Preserve typed COPY query/TO, CSV/file, and encoding-conversion semantics as one coherent COPY wave; `copyencoding` is not a one-error fix. Implement it through one typed relation-or-query COPY AST, the ordinary write/trigger epilogue for COPY FROM, option-aware text/CSV field decoding, COPY TO file and pgwire output, resumable multi-statement COPY state, and explicit/client encoding conversion.
 - [ ] Implement database lifecycle/routing and `pg_database` metadata as one coherent database wave; a canned CREATE DATABASE success cannot satisfy reconnect/isolation tests.
-- [ ] Finish catalog descriptions and dependency rows required by upstream sanity and introspection queries.
+- [ ] Finish catalog descriptions and dependency rows required by upstream sanity and introspection queries. Generate complete PostgreSQL 18.4 `pg_type` metadata and built-in `pg_range` rows; make user/catalog relation OIDs and system columns consistent across virtual catalogs; use exact catalog field identities; add the remaining small catalog helpers; and expose the generated `pg_get_catalog_foreign_keys()` descriptor set for `oidjoins`.
 
 **Gate:** The adopted corpus reaches 100% for every already-vendored file, and the upstream serial failure list strictly shrinks in each reviewed wave.
 
@@ -193,7 +230,8 @@ Literal 231 / 231 is incompatible with retaining PostgreSQL-visible exclusions e
 
 ## Task 6: Turn on concurrency and distributed storage
 
-- [ ] Reach 231 / 231 with `--max-connections=1` before diagnosing parallel-only failures.
+- [ ] Reach 231 / 231 with `--max-connections=1` before spending a wave on parallel-only semantic parity; infrastructure crashes, stalls, and connection loss are investigated immediately in either mode.
+- [x] Diagnose the non-certifying parallel stall recorded at 92 / 231 in `target/pg-regress-runs/20260803T213156Z-exists-projection-certified-gres`. The retained non-certifying replay at `target/pg-regress-runs/20260803T221236Z-parallel-stall-repro-gres` completes the cohort and does not reproduce a lock cycle: the slowest files were `join` 294.320s, `aggregates` 207.830s, `btree_index` 207.091s, and `subselect` 199.769s; the final OR join then exceeds the memory budget. This does not classify the exact historical blocker, and the post-fix replay gate above is still open.
 - [ ] Run the untouched parallel schedule at PostgreSQL's normal concurrency and fix MVCC, locking, concurrent DDL, advisory-lock, and catalog races at their shared source.
 - [ ] Add one focused Rust regression for each parallel-only defect.
 - [ ] Run one parallel pass per PR and require three consecutive clean passes for milestone certification.

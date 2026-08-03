@@ -4,12 +4,13 @@
 //! The durable definition lives in the catalog (`crabka_pgcatalog`). The
 //! process-wide registry in `crabka_pgtypes::usertype` is what makes a type
 //! *name* resolvable from the parser, which holds no catalog handle. Every DDL
-//! path here writes both. [`hydrate`] restores the registry from the catalog
-//! when a session opens, so a restart or a second node still resolves the
-//! names.
+//! successful DDL publishes the catalog delta through the session boundary, and
+//! [`hydrate`] restores the registry from the catalog when a session opens so a
+//! restart or a second node still resolves the names.
 
 use std::collections::HashSet;
 
+use crabka_pgcatalog::RelationName;
 use crabka_pgkv::{Kv, WriteOp};
 use crabka_pgparser::ast::{
     AlterDomainAction, AlterTypeAction, CompositeFieldDef, CreateTypeDefinition, DomainConstraint,
@@ -21,7 +22,10 @@ use crabka_pgtypes::{
 };
 use crabka_pgwire::engine::QueryResult;
 
-use crate::error::ExecError;
+use crate::{
+    error::ExecError,
+    relname::{SchemaDisposition, resolve_relation},
+};
 
 /// Load every catalog-stored type into the process registry.
 ///
@@ -32,9 +36,7 @@ use crate::error::ExecError;
 ///
 /// Propagates catalog read errors.
 pub fn hydrate(kv: &dyn Kv) -> Result<(), ExecError> {
-    for ty in crabka_pgcatalog::list_user_types(kv)? {
-        usertype::replace(&ty);
-    }
+    crabka_pgcatalog::hydrate_user_types(kv)?;
     Ok(())
 }
 
@@ -46,25 +48,37 @@ pub fn hydrate(kv: &dyn Kv) -> Result<(), ExecError> {
 /// 42P16/42701 for a malformed composite.
 pub fn create_type(
     kv: &dyn Kv,
-    name: &str,
+    resolution: &crate::relname::ResolutionScope,
+    name: &RelationName,
     definition: &CreateTypeDefinition,
 ) -> Result<(QueryResult, Vec<WriteOp>), ExecError> {
+    let lookup_name = name.to_string();
     let body = match definition {
         CreateTypeDefinition::Composite(fields) => {
             UserTypeBody::Composite(composite_fields(fields)?)
         }
-        CreateTypeDefinition::Enum(labels) => UserTypeBody::Enum(enum_labels(name, labels)?),
+        CreateTypeDefinition::Enum(labels) => {
+            UserTypeBody::Enum(enum_labels(&lookup_name, labels)?)
+        }
         CreateTypeDefinition::Range {
             subtype,
             collation,
             multirange_type_name,
-        } => UserTypeBody::Range(RangeBody {
-            subtype: *subtype,
-            collation: collation.clone(),
-            multirange_name: multirange_type_name
-                .as_ref()
-                .map(|companion| companion_name(name, companion)),
-        }),
+        } => {
+            let (schema, companion) = match multirange_type_name {
+                Some(companion) => companion_identity(kv, resolution, companion)?,
+                None => (
+                    name.schema.clone(),
+                    usertype::default_multirange_name(&name.name),
+                ),
+            };
+            UserTypeBody::Range(RangeBody {
+                subtype: *subtype,
+                collation: collation.clone(),
+                multirange_schema: Some(schema),
+                multirange_name: Some(companion),
+            })
+        }
         CreateTypeDefinition::Shell => {
             return Err(ExecError::Unsupported(
                 "CREATE TYPE without a definition (a shell type) is not supported: shell types \
@@ -84,7 +98,7 @@ pub fn create_type(
 /// contradictory.
 pub fn create_domain(
     kv: &dyn Kv,
-    name: &str,
+    name: &RelationName,
     base: ColumnType,
     constraints: &[DomainConstraint],
 ) -> Result<(QueryResult, Vec<WriteOp>), ExecError> {
@@ -112,7 +126,7 @@ pub fn create_domain(
                 unnamed += 1;
                 let check_name = check_name
                     .clone()
-                    .unwrap_or_else(|| default_check_name(name, unnamed));
+                    .unwrap_or_else(|| default_check_name(&name.name, unnamed));
                 body.checks.push(DomainCheck {
                     name: check_name,
                     expr: text.clone(),
@@ -184,41 +198,35 @@ fn check_label_length(type_name: &str, label: &str) -> Result<(), ExecError> {
     Ok(())
 }
 
-/// Allocate the oid, write the catalog record, and register the type so the
-/// parser resolves its name from the next statement onward.
+/// Allocate the oid and build the catalog record. The session publishes the
+/// committed definition to the parser registry only after event triggers pass.
 fn register(
     kv: &dyn Kv,
-    name: &str,
+    name: &RelationName,
     body: UserTypeBody,
     tag: &str,
 ) -> Result<(QueryResult, Vec<WriteOp>), ExecError> {
-    if ColumnType::from_sql_name(name).is_some() {
-        return Err(ExecError::DuplicateObject(format!(
-            "type \"{name}\" already exists"
-        )));
+    if matches!(&body, UserTypeBody::Composite(_)) && crabka_pgcatalog::relation_exists(kv, name)? {
+        return Err(crabka_pgcatalog::CatalogError::DuplicateTable(name.to_string()).into());
     }
+    ensure_type_name_available(kv, name, None)?;
     if let UserTypeBody::Range(range) = &body {
-        let companion = range
-            .multirange_name
-            .clone()
-            .unwrap_or_else(|| usertype::default_multirange_name(name));
-        if ColumnType::from_sql_name(&companion).is_some() {
+        let (schema, companion) = match (&range.multirange_schema, &range.multirange_name) {
+            (Some(schema), Some(companion)) => (schema.clone(), companion.clone()),
+            _ => (
+                name.schema.clone(),
+                usertype::default_multirange_name(&name.name),
+            ),
+        };
+        let companion = RelationName::new(schema, companion);
+        if companion == *name {
             return Err(ExecError::DuplicateObject(format!(
                 "type \"{companion}\" already exists"
             )));
         }
+        ensure_type_name_available(kv, &companion, None)?;
     }
-    // A type and a relation share one namespace in `PostgreSQL`, so a name a
-    // relation already holds is 42P07 rather than a duplicate type. A user type
-    // carries no schema of its own here, so `public` is the only namespace it
-    // can collide in.
-    if crabka_pgcatalog::get_table(kv, &crabka_pgcatalog::RelationName::public(name)).is_ok() {
-        return Err(ExecError::DuplicateObject(format!(
-            "relation \"{name}\" already exists"
-        )));
-    }
-    let (ty, ops) = crabka_pgcatalog::create_user_type_ops(kv, name, body)?;
-    usertype::replace(&ty);
+    let (_, ops) = crabka_pgcatalog::create_user_type_ops(kv, name, body)?;
     Ok((
         QueryResult::Command {
             tag: tag.to_string(),
@@ -227,14 +235,98 @@ fn register(
     ))
 }
 
-fn companion_name(range_name: &str, companion: &crabka_pgparser::ast::RelationRef) -> String {
-    if companion.schema.is_some() {
-        return companion.to_string();
+#[derive(Clone, Copy)]
+enum TypeNameExclusion {
+    Primary(u32),
+    Multirange(u32),
+}
+
+/// Enforce PostgreSQL's shared type namespace: base types, multirange
+/// companions, and relation row types cannot occupy the same exact identity.
+fn ensure_type_name_available(
+    kv: &dyn Kv,
+    name: &RelationName,
+    exclude: Option<TypeNameExclusion>,
+) -> Result<(), ExecError> {
+    let types = crabka_pgcatalog::list_user_types(kv)?;
+    let primary_taken = types.iter().any(|ty| {
+        ty.schema == name.schema
+            && ty.name == name.name
+            && !matches!(exclude, Some(TypeNameExclusion::Primary(oid)) if oid == ty.oid)
+    });
+    let identity = (name.schema.clone(), name.name.clone());
+    let companion_taken = types.iter().any(|ty| {
+        ty.multirange_identity() == Some(identity.clone())
+            && !matches!(exclude, Some(TypeNameExclusion::Multirange(oid)) if oid == ty.oid)
+    });
+    let row_type_taken = crabka_pgcatalog::list_tables(kv)?
+        .iter()
+        .any(|table| table.name == *name)
+        || crabka_pgcatalog::list_views(kv)?
+            .iter()
+            .any(|view| view.name == *name);
+    let builtin_taken =
+        name.schema == "pg_catalog" && crate::exec::is_builtin_catalog_type_name(&name.name);
+    if primary_taken || companion_taken || row_type_taken || builtin_taken {
+        return Err(ExecError::DuplicateObject(format!(
+            "type \"{name}\" already exists"
+        )));
     }
-    range_name.rsplit_once('.').map_or_else(
-        || companion.name.clone(),
-        |(schema, _)| format!("{schema}.{}", companion.name),
-    )
+    Ok(())
+}
+
+/// Refuse a rowtype-producing relation whose exact schema/name identity is
+/// already occupied by a user type or a range's multirange companion.
+pub(crate) fn ensure_relation_type_name_available(
+    kv: &dyn Kv,
+    name: &RelationName,
+) -> Result<(), ExecError> {
+    let identity = (name.schema.clone(), name.name.clone());
+    let types = crabka_pgcatalog::list_user_types(kv)?;
+    if let Some(ty) = types
+        .iter()
+        .find(|ty| ty.schema == name.schema && ty.name == name.name)
+    {
+        if ty.fields().is_some() {
+            return Err(crabka_pgcatalog::CatalogError::DuplicateTable(name.to_string()).into());
+        }
+        return Err(ExecError::DuplicateObject(format!(
+            "type \"{name}\" already exists"
+        )));
+    }
+    if types
+        .iter()
+        .any(|ty| ty.multirange_identity() == Some(identity.clone()))
+    {
+        return Err(ExecError::DuplicateObject(format!(
+            "type \"{name}\" already exists"
+        )));
+    }
+    Ok(())
+}
+
+/// An index may share a name with scalar user types, but not with a composite:
+/// the composite's backing `pg_class` row already occupies that relation name.
+pub(crate) fn ensure_index_name_available(
+    kv: &dyn Kv,
+    name: &RelationName,
+) -> Result<(), ExecError> {
+    if crabka_pgcatalog::list_user_types(kv)?
+        .iter()
+        .any(|ty| ty.schema == name.schema && ty.name == name.name && ty.fields().is_some())
+    {
+        return Err(crabka_pgcatalog::CatalogError::DuplicateTable(name.to_string()).into());
+    }
+    Ok(())
+}
+
+fn companion_identity(
+    kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
+    companion: &crabka_pgparser::ast::RelationRef,
+) -> Result<(String, String), ExecError> {
+    let companion = resolve_relation(kv, resolution, companion, SchemaDisposition::Creation)?;
+    Ok((companion.schema, companion.name))
 }
 
 /// `ALTER TYPE name <action>`.
@@ -246,16 +338,27 @@ fn companion_name(range_name: &str, companion: &crabka_pgparser::ast::RelationRe
 /// does not implement.
 pub fn alter_type(
     kv: &dyn Kv,
-    name: &str,
+    name: &RelationName,
     action: &AlterTypeAction,
 ) -> Result<(QueryResult, Vec<WriteOp>), ExecError> {
-    let mut ty = require_type(kv, name)?;
+    let lookup_name = name.to_string();
+    let (mut ty, is_multirange) = require_type_or_multirange(kv, name)?;
+    if is_multirange {
+        return match action {
+            AlterTypeAction::RenameTo(new_name) => rename_multirange(kv, ty, name, new_name),
+            AlterTypeAction::OwnerTo(_) => Ok((command("ALTER TYPE"), Vec::new())),
+            AlterTypeAction::AddAttribute(_) => Err(wrong_kind(name, "a composite type")),
+            AlterTypeAction::AddValue { .. } | AlterTypeAction::RenameValue { .. } => {
+                Err(wrong_kind(name, "an enum"))
+            }
+        };
+    }
     match action {
         AlterTypeAction::AddAttribute(field) => {
             if column_type_contains_oid(field.ty, ty.oid, &mut HashSet::new()) {
                 return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
                     "42P16",
-                    format!("composite type {name} cannot be made a member of itself"),
+                    format!("composite type {lookup_name} cannot be made a member of itself"),
                 )));
             }
             let UserTypeBody::Composite(fields) = &mut ty.body else {
@@ -263,7 +366,7 @@ pub fn alter_type(
             };
             if fields.iter().any(|existing| existing.name == field.name) {
                 return Err(ExecError::DuplicateObject(format!(
-                    "column \"{}\" of relation \"{name}\" already exists",
+                    "column \"{}\" of relation \"{lookup_name}\" already exists",
                     field.name
                 )));
             }
@@ -289,14 +392,14 @@ pub fn alter_type(
                     "enum label \"{label}\" already exists"
                 )));
             }
-            check_label_length(name, label)?;
+            check_label_length(&lookup_name, label)?;
             let index = match position {
                 None => labels.len(),
                 Some(EnumValuePosition::Before(neighbour)) => {
-                    label_position(name, labels, neighbour)?
+                    label_position(&lookup_name, labels, neighbour)?
                 }
                 Some(EnumValuePosition::After(neighbour)) => {
-                    label_position(name, labels, neighbour)? + 1
+                    label_position(&lookup_name, labels, neighbour)? + 1
                 }
             };
             labels.insert(index, label.clone());
@@ -310,8 +413,8 @@ pub fn alter_type(
                     "enum label \"{to}\" already exists"
                 )));
             }
-            let index = label_position(name, labels, from)?;
-            check_label_length(name, to)?;
+            let index = label_position(&lookup_name, labels, from)?;
+            check_label_length(&lookup_name, to)?;
             labels[index] = to.clone();
         }
         AlterTypeAction::RenameTo(new_name) => return rename(kv, ty, new_name, "ALTER TYPE"),
@@ -320,10 +423,32 @@ pub fn alter_type(
         // treats `OWNER TO`.
         AlterTypeAction::OwnerTo(_) => return Ok((command("ALTER TYPE"), Vec::new())),
     }
-    usertype::replace(&ty);
     Ok((
         command("ALTER TYPE"),
-        vec![crabka_pgcatalog::put_user_type_op(&ty)],
+        crabka_pgcatalog::put_user_type_ops(kv, &ty)?,
+    ))
+}
+
+fn rename_multirange(
+    kv: &dyn Kv,
+    mut range_type: UserType,
+    old_name: &RelationName,
+    new_name: &str,
+) -> Result<(QueryResult, Vec<WriteOp>), ExecError> {
+    let renamed = RelationName::new(old_name.schema.clone(), new_name);
+    ensure_type_name_available(
+        kv,
+        &renamed,
+        Some(TypeNameExclusion::Multirange(range_type.oid)),
+    )?;
+    let UserTypeBody::Range(range) = &mut range_type.body else {
+        unreachable!("a multirange companion belongs to a range type")
+    };
+    range.multirange_schema = Some(renamed.schema);
+    range.multirange_name = Some(renamed.name);
+    Ok((
+        command("ALTER TYPE"),
+        crabka_pgcatalog::put_user_type_ops(kv, &range_type)?,
     ))
 }
 
@@ -359,9 +484,10 @@ fn column_type_contains_oid(ty: ColumnType, target: u32, seen: &mut HashSet<u32>
 /// and 42710/42704 for constraint-name conflicts.
 pub fn alter_domain(
     kv: &dyn Kv,
-    name: &str,
+    name: &RelationName,
     action: &AlterDomainAction,
 ) -> Result<(QueryResult, Vec<WriteOp>), ExecError> {
+    let lookup_name = name.to_string();
     let mut ty = require_type(kv, name)?;
     if let AlterDomainAction::RenameTo(new_name) = action {
         if ty.domain().is_none() {
@@ -394,14 +520,14 @@ pub fn alter_domain(
             let ordinal = domain.checks.len() + 1;
             let constraint_name = constraint_name
                 .clone()
-                .unwrap_or_else(|| default_check_name(name, ordinal));
+                .unwrap_or_else(|| default_check_name(&name.name, ordinal));
             if domain
                 .checks
                 .iter()
                 .any(|check| check.name == constraint_name)
             {
                 return Err(ExecError::DuplicateObject(format!(
-                    "constraint \"{constraint_name}\" for domain \"{name}\" already exists"
+                    "constraint \"{constraint_name}\" for domain \"{lookup_name}\" already exists"
                 )));
             }
             domain.checks.push(DomainCheck {
@@ -417,7 +543,7 @@ pub fn alter_domain(
             domain.checks.retain(|check| check.name != *constraint_name);
             if domain.checks.len() == before && !*if_exists {
                 return Err(ExecError::UndefinedObject(format!(
-                    "constraint \"{constraint_name}\" of domain \"{name}\" does not exist"
+                    "constraint \"{constraint_name}\" of domain \"{lookup_name}\" does not exist"
                 )));
             }
         }
@@ -432,19 +558,19 @@ pub fn alter_domain(
                 .any(|check| check.name == *constraint_name)
             {
                 return Err(ExecError::UndefinedObject(format!(
-                    "constraint \"{constraint_name}\" of domain \"{name}\" does not exist"
+                    "constraint \"{constraint_name}\" of domain \"{lookup_name}\" does not exist"
                 )));
             }
         }
         AlterDomainAction::RenameConstraint { from, to } => {
             if domain.checks.iter().any(|check| check.name == *to) {
                 return Err(ExecError::DuplicateObject(format!(
-                    "constraint \"{to}\" for domain \"{name}\" already exists"
+                    "constraint \"{to}\" for domain \"{lookup_name}\" already exists"
                 )));
             }
             let Some(check) = domain.checks.iter_mut().find(|check| check.name == *from) else {
                 return Err(ExecError::UndefinedObject(format!(
-                    "constraint \"{from}\" of domain \"{name}\" does not exist"
+                    "constraint \"{from}\" of domain \"{lookup_name}\" does not exist"
                 )));
             };
             check.name = to.clone();
@@ -453,10 +579,9 @@ pub fn alter_domain(
             unreachable!("handled before the domain body is borrowed")
         }
     }
-    usertype::replace(&ty);
     Ok((
         command("ALTER DOMAIN"),
-        vec![crabka_pgcatalog::put_user_type_op(&ty)],
+        crabka_pgcatalog::put_user_type_ops(kv, &ty)?,
     ))
 }
 
@@ -466,19 +591,31 @@ fn rename(
     new_name: &str,
     tag: &str,
 ) -> Result<(QueryResult, Vec<WriteOp>), ExecError> {
-    if crabka_pgcatalog::get_user_type(kv, new_name)?.is_some() {
-        return Err(ExecError::DuplicateObject(format!(
-            "type \"{new_name}\" already exists"
-        )));
+    let renamed_identity = RelationName::new(ty.schema.clone(), new_name);
+    if ty.fields().is_some() && crabka_pgcatalog::relation_exists(kv, &renamed_identity)? {
+        return Err(
+            crabka_pgcatalog::CatalogError::DuplicateTable(renamed_identity.to_string()).into(),
+        );
     }
-    let old_name = std::mem::replace(&mut ty.name, new_name.to_string());
-    usertype::unregister(&old_name);
-    usertype::replace(&ty);
+    ensure_type_name_available(
+        kv,
+        &renamed_identity,
+        Some(TypeNameExclusion::Primary(ty.oid)),
+    )?;
+    let old = ty.clone();
+    if let Some((schema, name)) = ty.multirange_identity()
+        && let UserTypeBody::Range(range) = &mut ty.body
+        && range.multirange_schema.is_none()
+    {
+        range.multirange_schema = Some(schema);
+        range.multirange_name = Some(name);
+    }
+    ty.name = new_name.to_string();
     Ok((
         QueryResult::Command {
             tag: tag.to_string(),
         },
-        crabka_pgcatalog::rename_user_type_ops(&old_name, &ty),
+        crabka_pgcatalog::rename_user_type_ops(kv, &old, &ty)?,
     ))
 }
 
@@ -493,7 +630,7 @@ fn rename(
 /// kind mismatch, and 2BP01 when a table column still uses the type.
 pub fn drop_types(
     kv: &dyn Kv,
-    names: &[String],
+    names: &[RelationName],
     if_exists: bool,
     cascade: bool,
     domain_only: bool,
@@ -506,6 +643,19 @@ pub fn drop_types(
     let mut ops = Vec::new();
     for name in names {
         let Some(ty) = crabka_pgcatalog::get_user_type(kv, name)? else {
+            if name.schema == "pg_catalog" && crate::exec::is_builtin_catalog_type_name(&name.name)
+            {
+                return Err(ExecError::DependentObjectsStillExist(format!(
+                    "cannot drop type {name} because it is required by the database system"
+                )));
+            }
+            if crabka_pgcatalog::list_user_types(kv)?.iter().any(|ty| {
+                ty.multirange_identity() == Some((name.schema.clone(), name.name.clone()))
+            }) {
+                return Err(ExecError::DependentObjectsStillExist(format!(
+                    "cannot drop type {name} because its range type requires it"
+                )));
+            }
             if if_exists {
                 continue;
             }
@@ -529,7 +679,7 @@ pub fn drop_types(
                 format!(
                     "cannot drop type {name} because other objects depend on it\nDETAIL:  \
                      type {} depends on type {name}",
-                    dependent.name
+                    dependent.qualified_name()
                 ),
             )));
         }
@@ -543,11 +693,9 @@ pub fn drop_types(
             )));
         }
         for dependent in dependents.into_iter().rev() {
-            usertype::unregister(&dependent.name);
-            ops.extend(crabka_pgcatalog::drop_user_type_ops(&dependent.name));
+            ops.extend(crabka_pgcatalog::drop_user_type_ops(kv, &dependent)?);
         }
-        usertype::unregister(name);
-        ops.extend(crabka_pgcatalog::drop_user_type_ops(name));
+        ops.extend(crabka_pgcatalog::drop_user_type_ops(kv, &ty)?);
     }
     Ok((
         QueryResult::Command {
@@ -561,13 +709,10 @@ fn dependent_user_types(kv: &dyn Kv, root_oid: u32) -> Result<Vec<UserType>, Exe
     let types = crabka_pgcatalog::list_user_types(kv)?;
     let mut dropped = HashSet::from([root_oid]);
     let mut dependents = Vec::new();
-    loop {
-        let Some(dependent) = types
-            .iter()
-            .find(|ty| !dropped.contains(&ty.oid) && user_type_references_any(ty, &dropped))
-        else {
-            break;
-        };
+    while let Some(dependent) = types
+        .iter()
+        .find(|ty| !dropped.contains(&ty.oid) && user_type_references_any(ty, &dropped))
+    {
         dropped.insert(dependent.oid);
         dependents.push(dependent.clone());
     }
@@ -576,13 +721,84 @@ fn dependent_user_types(kv: &dyn Kv, root_oid: u32) -> Result<Vec<UserType>, Exe
 
 fn user_type_references_any(ty: &UserType, oids: &HashSet<u32>) -> bool {
     match &ty.body {
-        UserTypeBody::Composite(fields) => {
-            fields.iter().any(|field| oids.contains(&field.ty.oid()))
-        }
-        UserTypeBody::Range(range) => oids.contains(&range.subtype.oid()),
-        UserTypeBody::Domain(domain) => oids.contains(&domain.base.oid()),
+        UserTypeBody::Composite(fields) => fields
+            .iter()
+            .any(|field| column_type_references_any(field.ty, oids)),
+        UserTypeBody::Range(range) => column_type_references_any(range.subtype, oids),
+        UserTypeBody::Domain(domain) => column_type_references_any(domain.base, oids),
         UserTypeBody::Enum(_) => false,
     }
+}
+
+fn column_type_references_any(ty: ColumnType, oids: &HashSet<u32>) -> bool {
+    if oids.contains(&ty.oid()) {
+        return true;
+    }
+    match ty {
+        ColumnType::Array(element) => column_type_references_any(element.column_type(), oids),
+        ColumnType::Domain(domain) => column_type_references_any(*domain.base, oids),
+        ColumnType::Range(range) => column_type_references_any(*range.subtype, oids),
+        ColumnType::Multirange(multirange) => {
+            oids.contains(&multirange.range.oid)
+                || column_type_references_any(*multirange.range.subtype, oids)
+        }
+        _ => false,
+    }
+}
+
+/// Drop every user type owned by `schema`, including a range whose multirange
+/// companion lives there, and every user type that depends on one of them.
+///
+/// The returned catalog writes are ordered dependents first. The caller
+/// publishes their committed catalog delta at its transaction boundary.
+///
+/// # Errors
+///
+/// Returns catalog storage/corruption errors, or an invalid-state error for a
+/// cyclic user-type dependency graph.
+pub(crate) fn drop_schema_types_ops(kv: &dyn Kv, schema: &str) -> Result<Vec<WriteOp>, ExecError> {
+    let types = crabka_pgcatalog::list_user_types(kv)?;
+    let mut dropping: HashSet<u32> = types
+        .iter()
+        .filter(|ty| {
+            ty.schema == schema
+                || ty
+                    .multirange_identity()
+                    .is_some_and(|(companion_schema, _)| companion_schema == schema)
+        })
+        .map(|ty| ty.oid)
+        .collect();
+    while let Some(dependent) = types
+        .iter()
+        .find(|ty| !dropping.contains(&ty.oid) && user_type_references_any(ty, &dropping))
+    {
+        dropping.insert(dependent.oid);
+    }
+
+    let mut remaining: Vec<UserType> = types
+        .into_iter()
+        .filter(|ty| dropping.contains(&ty.oid))
+        .collect();
+    let mut ordered = Vec::with_capacity(remaining.len());
+    while !remaining.is_empty() {
+        let Some(index) = remaining.iter().position(|candidate| {
+            let candidate_oid = HashSet::from([candidate.oid]);
+            !remaining.iter().any(|other| {
+                other.oid != candidate.oid && user_type_references_any(other, &candidate_oid)
+            })
+        }) else {
+            return Err(ExecError::ObjectNotInPrerequisiteState(
+                "cyclic user-type dependency graph".into(),
+            ));
+        };
+        ordered.push(remaining.remove(index));
+    }
+
+    let mut ops = Vec::new();
+    for ty in &ordered {
+        ops.extend(crabka_pgcatalog::drop_user_type_ops(kv, ty)?);
+    }
+    Ok(ops)
 }
 
 /// `table.column` of the first table column declared with `ty`, if any.
@@ -609,12 +825,32 @@ fn label_position(type_name: &str, labels: &[String], label: &str) -> Result<usi
         })
 }
 
-fn require_type(kv: &dyn Kv, name: &str) -> Result<UserType, ExecError> {
+fn require_type(kv: &dyn Kv, name: &RelationName) -> Result<UserType, ExecError> {
     crabka_pgcatalog::get_user_type(kv, name)?
         .ok_or_else(|| ExecError::UndefinedObject(format!("type \"{name}\" does not exist")))
 }
 
-fn wrong_kind(name: &str, wanted: &str) -> ExecError {
+fn require_type_or_multirange(
+    kv: &dyn Kv,
+    name: &RelationName,
+) -> Result<(UserType, bool), ExecError> {
+    if let Some(ty) = crabka_pgcatalog::get_user_type(kv, name)? {
+        return Ok((ty, false));
+    }
+    if name.schema == "pg_catalog" && crate::exec::is_builtin_catalog_type_name(&name.name) {
+        return Err(ExecError::Unsupported(format!(
+            "cannot alter system type {name}"
+        )));
+    }
+    let identity = (name.schema.clone(), name.name.clone());
+    crabka_pgcatalog::list_user_types(kv)?
+        .into_iter()
+        .find(|ty| ty.multirange_identity() == Some(identity.clone()))
+        .map(|ty| (ty, true))
+        .ok_or_else(|| ExecError::UndefinedObject(format!("type \"{name}\" does not exist")))
+}
+
+fn wrong_kind(name: &RelationName, wanted: &str) -> ExecError {
     ExecError::Remote(crabka_pgwire::error::PgError::error(
         "42809",
         format!("\"{name}\" is not {wanted}"),
@@ -761,9 +997,10 @@ mod tests {
     #[test]
     fn range_companion_names_are_preserved_and_collisions_rejected() {
         let kv = MemKv::default();
-        create_type(
+        let (_, ops) = create_type(
             &kv,
-            "named_range_test",
+            crate::relname::ResolutionScope::default_scope(),
+            &RelationName::public("named_range_test"),
             &CreateTypeDefinition::Range {
                 subtype: ColumnType::Text,
                 collation: None,
@@ -771,21 +1008,42 @@ mod tests {
             },
         )
         .expect("explicit companion");
-        assert!(matches!(
-            ColumnType::from_sql_name("named_multirange_test"),
-            Some(ColumnType::Multirange(_))
-        ));
+        kv.write_batch(&ops).expect("store explicit companion");
+        let stored =
+            crabka_pgcatalog::get_user_type(&kv, &RelationName::public("named_range_test"))
+                .expect("read explicit companion")
+                .expect("stored range");
+        assert!(
+            stored.multirange_identity() == Some(("public".into(), "named_multirange_test".into()))
+        );
 
         let error = create_type(
             &kv,
-            "invalid_companion_range_test",
+            crate::relname::ResolutionScope::default_scope(),
+            &RelationName::public("invalid_companion_range_test"),
             &CreateTypeDefinition::Range {
                 subtype: ColumnType::Text,
                 collation: None,
-                multirange_type_name: Some(RelationRef::bare("int")),
+                multirange_type_name: Some(RelationRef::bare("named_multirange_test")),
             },
         )
-        .expect_err("builtin companion collision");
+        .expect_err("existing companion collision");
+        assert!(error.into_pg().code == "42710");
+
+        let error = create_type(
+            &kv,
+            crate::relname::ResolutionScope::default_scope(),
+            &RelationName::public("system_companion_range_test"),
+            &CreateTypeDefinition::Range {
+                subtype: ColumnType::Text,
+                collation: None,
+                multirange_type_name: Some(RelationRef {
+                    schema: Some("pg_catalog".into()),
+                    name: "int4".into(),
+                }),
+            },
+        )
+        .expect_err("exact pg_catalog type collision");
         assert!(error.into_pg().code == "42710");
     }
 
@@ -794,7 +1052,7 @@ mod tests {
         let kv = MemKv::default();
         let (composite, composite_ops) = crabka_pgcatalog::create_user_type_ops(
             &kv,
-            "cascade_composite_test",
+            &RelationName::public("cascade_composite_test"),
             UserTypeBody::Composite(vec![CompositeField {
                 name: "value".into(),
                 ty: ColumnType::Int4,
@@ -802,21 +1060,34 @@ mod tests {
         )
         .expect("composite");
         kv.write_batch(&composite_ops).expect("store composite");
+        hydrate(&kv).expect("publish composite");
         let (_range, range_ops) = crabka_pgcatalog::create_user_type_ops(
             &kv,
-            "cascade_composite_range_test",
+            &RelationName::public("cascade_composite_range_test"),
             UserTypeBody::Range(RangeBody {
                 subtype: composite.column_type(),
                 collation: None,
+                multirange_schema: None,
                 multirange_name: None,
             }),
         )
         .expect("range");
         kv.write_batch(&range_ops).expect("store range");
+        hydrate(&kv).expect("publish range");
 
-        let (_, drop_ops) =
-            drop_types(&kv, &[composite.name.clone()], false, true, false).expect("cascade");
+        let composite_name = RelationName::new(&composite.schema, &composite.name);
+        let before = crabka_pgcatalog::list_user_types(&kv).expect("types before drop");
+        let (_, drop_ops) = drop_types(
+            &kv,
+            std::slice::from_ref(&composite_name),
+            false,
+            true,
+            false,
+        )
+        .expect("cascade");
         kv.write_batch(&drop_ops).expect("drop types");
+        let after = crabka_pgcatalog::list_user_types(&kv).expect("types after drop");
+        usertype::publish_catalog_delta(&before, &after);
 
         assert!(
             crabka_pgcatalog::list_user_types(&kv)
@@ -830,17 +1101,18 @@ mod tests {
         let kv = MemKv::default();
         let (composite, composite_ops) = crabka_pgcatalog::create_user_type_ops(
             &kv,
-            "recursive_composite_test",
+            &RelationName::public("recursive_composite_test"),
             UserTypeBody::Composite(vec![]),
         )
         .expect("composite");
         kv.write_batch(&composite_ops).expect("store composite");
         let (range, range_ops) = crabka_pgcatalog::create_user_type_ops(
             &kv,
-            "recursive_composite_range_test",
+            &RelationName::public("recursive_composite_range_test"),
             UserTypeBody::Range(RangeBody {
                 subtype: composite.column_type(),
                 collation: None,
+                multirange_schema: None,
                 multirange_name: None,
             }),
         )
@@ -849,7 +1121,7 @@ mod tests {
 
         let error = alter_type(
             &kv,
-            &composite.name,
+            &RelationName::new(&composite.schema, &composite.name),
             &AlterTypeAction::AddAttribute(CompositeFieldDef {
                 name: "recursive".into(),
                 ty: range.column_type(),

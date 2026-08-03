@@ -416,6 +416,14 @@ pub const FEATURE_PROBES: &[FeatureProbe] = &[
         message_fragment: None,
     },
     FeatureProbe {
+        item: "Correlated SELECT subqueries in WHERE",
+        sql: "SELECT o.id FROM feature_t o WHERE EXISTS (SELECT 1 WHERE o.id = 1)",
+        behavior: FeatureBehavior::SessionExecute,
+        setup: TABLE_ID_ROW,
+        sqlstate: None,
+        message_fragment: None,
+    },
+    FeatureProbe {
         item: "LATERAL FROM items",
         sql: "SELECT t.id, g FROM feature_t t, LATERAL generate_series(1, t.id) g",
         behavior: FeatureBehavior::SessionExecute,

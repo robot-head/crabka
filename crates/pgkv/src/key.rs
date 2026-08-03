@@ -440,12 +440,32 @@ pub fn meta_next_table_id_key() -> Vec<u8> {
     k
 }
 
-/// Key for a user-defined type stored in the catalog: `/0/usertype/<name>`.
+/// Key for a user-defined type stored in the catalog:
+/// `/0/usertype/<schema><name>`, with both identity parts length-prefixed.
 #[must_use]
-pub fn user_type_key(name: &str) -> Vec<u8> {
+pub fn user_type_key(schema: &str, name: &str) -> Vec<u8> {
+    let mut k = user_type_prefix();
+    push_key_part(&mut k, schema);
+    push_key_part(&mut k, name);
+    k
+}
+
+/// Pre-structured key used by existing catalogs. Callers retain this only as a
+/// read/delete fallback while new records use [`user_type_key`].
+#[must_use]
+pub fn legacy_user_type_key(name: &str) -> Vec<u8> {
     let mut k = user_type_prefix();
     k.extend_from_slice(name.as_bytes());
     k
+}
+
+/// Recover the structured identity from a new-format user-type key.
+#[must_use]
+pub fn user_type_key_parts(key: &[u8]) -> Option<(&str, &str)> {
+    let prefix = user_type_prefix();
+    let suffix = key.strip_prefix(prefix.as_slice())?;
+    let parts = key_parts(suffix, 2)?;
+    Some((parts[0], parts[1]))
 }
 
 /// Shared prefix for every user-defined type, for the hydration scan.

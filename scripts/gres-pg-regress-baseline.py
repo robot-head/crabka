@@ -349,7 +349,12 @@ def write_summary(
 def add_result_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--postgres-tag", required=True)
     parser.add_argument("--schedule", required=True, type=Path)
-    parser.add_argument("--tap", required=True, type=Path, help="pg_regress regression.out")
+    parser.add_argument(
+        "--tap",
+        required=True,
+        type=Path,
+        help="pg_regress TAP stream (the runner's retained command.log)",
+    )
     parser.add_argument("--diff", required=True, type=Path, help="pg_regress regression.diffs")
     parser.add_argument("--source-root", type=Path)
     parser.add_argument("--build-root", type=Path)

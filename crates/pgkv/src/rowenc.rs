@@ -278,7 +278,11 @@ pub fn decode_row(bytes: &[u8]) -> Result<Vec<Datum>, KvError> {
     Ok(cols)
 }
 
-/// Decodes one tagged field and advances `cur` past it.
+/// Decode one tagged field, advancing `cur` past it.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one match keeps every row-wire tag and decoder in one auditable map"
+)]
 fn decode_field(cur: &mut &[u8]) -> Result<Datum, KvError> {
     let t = take_u8(cur)?;
     Ok(match t {
@@ -476,15 +480,13 @@ fn decode_field(cur: &mut &[u8]) -> Result<Datum, KvError> {
         tag::RANGE => {
             let oid = u32::try_from(take_u32_len(cur)?)
                 .map_err(|_| KvError::CorruptRow("range type oid out of range".into()))?;
-            let ty = match crabka_pgtypes::ColumnType::builtin_range(oid)
-                .or_else(|| crabka_pgtypes::usertype::column_type_for_oid(oid))
-            {
-                Some(crabka_pgtypes::ColumnType::Range(range)) => range,
-                _ => {
-                    return Err(KvError::CorruptRow(format!(
-                        "range type {oid} is not registered"
-                    )));
-                }
+            let Some(crabka_pgtypes::ColumnType::Range(ty)) =
+                crabka_pgtypes::ColumnType::builtin_range(oid)
+                    .or_else(|| crabka_pgtypes::usertype::column_type_for_oid(oid))
+            else {
+                return Err(KvError::CorruptRow(format!(
+                    "range type {oid} is not registered"
+                )));
             };
             let flags = take_u8(cur)?;
             if flags & !0x1f != 0 {

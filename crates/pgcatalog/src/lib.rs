@@ -24,9 +24,9 @@ use zerocopy::{
 use crate::serde::{
     deserialize_fdw, deserialize_foreign_key, deserialize_index, deserialize_schema,
     deserialize_sequence, deserialize_server, deserialize_sharding, deserialize_user_mapping,
-    deserialize_user_type, deserialize_view, serialize_fdw, serialize_foreign_key, serialize_index,
-    serialize_schema, serialize_sequence, serialize_server, serialize_sharding,
-    serialize_user_mapping, serialize_user_type, serialize_view,
+    deserialize_user_type, deserialize_user_type_with, deserialize_view, serialize_fdw,
+    serialize_foreign_key, serialize_index, serialize_schema, serialize_sequence, serialize_server,
+    serialize_sharding, serialize_user_mapping, serialize_user_type, serialize_view,
 };
 
 /// OID-style table identifier (never 0; 0 is reserved/invalid).
@@ -269,7 +269,7 @@ pub struct NewIndex {
 
 const INDEX_EXPRESSION_PREFIX: &str = "\0expr:";
 
-/// Encode an expression key in the existing ordered key list. PostgreSQL
+/// Encode an expression key in the existing ordered key list. `PostgreSQL`
 /// columns cannot contain NUL, so this cannot collide with a real column name.
 #[must_use]
 pub fn expression_index_key(source: &str) -> String {
@@ -1117,6 +1117,10 @@ fn operator_family_member_identity(member: &OperatorFamilyMember) -> OperatorFam
 }
 
 /// Whether an operator or support-function slot exists in a family.
+///
+/// # Errors
+///
+/// Returns catalog storage errors.
 pub fn operator_family_member_exists(
     kv: &dyn Kv,
     family_oid: u32,
@@ -1873,7 +1877,15 @@ pub fn drop_schema_ops(
     if SYSTEM_SCHEMAS.contains(&name) {
         return Err(CatalogError::SystemSchemaDrop(name.to_string()));
     }
-    if !cascade && !schema_contents(kv, name)?.is_empty() {
+    if !cascade
+        && (!schema_contents(kv, name)?.is_empty()
+            || list_user_types(kv)?.iter().any(|ty| {
+                ty.schema == name
+                    || ty
+                        .multirange_identity()
+                        .is_some_and(|(schema, _)| schema == name)
+            }))
+    {
         return Err(CatalogError::SchemaNotEmpty(name.to_string()));
     }
     let mut ops = vec![WriteOp::Delete {
@@ -3927,6 +3939,10 @@ pub fn list_table_privileges(kv: &dyn Kv) -> Result<Vec<TablePrivilege>, Catalog
 }
 
 /// Build write ops for schema privilege grants.
+///
+/// # Errors
+///
+/// Returns an error for unknown schemas or roles, or catalog storage failures.
 pub fn grant_schema_privileges_ops(
     kv: &dyn Kv,
     schemas: &[String],
@@ -3937,6 +3953,10 @@ pub fn grant_schema_privileges_ops(
 }
 
 /// Build write ops for schema privilege revocations.
+///
+/// # Errors
+///
+/// Returns an error for unknown schemas or roles, or catalog storage failures.
 pub fn revoke_schema_privileges_ops(
     kv: &dyn Kv,
     schemas: &[String],
@@ -3990,6 +4010,10 @@ fn expand_schema_privileges(privileges: &[String]) -> Vec<&str> {
 }
 
 /// Whether a role has a schema privilege through ownership, PUBLIC, or role membership.
+///
+/// # Errors
+///
+/// Returns an error for an unknown schema or catalog storage failures.
 pub fn has_schema_privilege(
     kv: &dyn Kv,
     schema: &str,
@@ -4103,31 +4127,32 @@ fn deserialize_table_privilege(bytes: &[u8]) -> Result<TablePrivilege, CatalogEr
 
 /// The write batch that records a new user-defined type and allocates its oid.
 ///
-/// This function rejects a duplicate name with `PostgreSQL`'s 42710. The oid
-/// counter is a catalog key, so oids survive a restart and agree across nodes.
-/// The returned [`UserType`] carries the allocated oid, so the caller can
-/// register the type in the process type registry in the same step.
+/// Rejects a duplicate name with `PostgreSQL`'s 42710. The oid counter is a
+/// catalog key so oids survive a restart and agree across nodes; the returned
+/// [`UserType`] carries the allocated oid so the caller can publish it to the
+/// process type registry after the durable catalog commit is accepted.
 ///
 /// # Errors
 ///
 /// Returns duplicate-object or storage/corruption errors from the catalog KV seam.
 pub fn create_user_type_ops(
     kv: &dyn Kv,
-    name: &str,
+    name: &RelationName,
     body: UserTypeBody,
 ) -> Result<(UserType, Vec<WriteOp>), CatalogError> {
-    if kv.get(&key::user_type_key(name))?.is_some() {
+    if get_user_type(kv, name)?.is_some() {
         return Err(CatalogError::DuplicateObject(name.to_string()));
     }
     let oid = read_next_type_oid(kv)?;
     let ty = UserType {
         oid,
-        name: name.to_string(),
+        schema: name.schema.clone(),
+        name: name.name.clone(),
         body,
     };
     let ops = vec![
         WriteOp::Put {
-            key: key::user_type_key(name),
+            key: key::user_type_key(&name.schema, &name.name),
             value: serialize_user_type(&ty),
         },
         WriteOp::Put {
@@ -4138,33 +4163,66 @@ pub fn create_user_type_ops(
     Ok((ty, ops))
 }
 
-/// The write batch that replaces an existing type's definition in place and
-/// keeps its oid, for `ALTER TYPE` and `ALTER DOMAIN`.
-#[must_use]
-pub fn put_user_type_op(ty: &UserType) -> WriteOp {
-    WriteOp::Put {
-        key: key::user_type_key(&ty.name),
+/// The write batch that replaces an existing type's definition in place,
+/// preserving its oid (`ALTER TYPE` / `ALTER DOMAIN`).
+///
+/// # Errors
+///
+/// Returns catalog storage or corruption errors while checking for a matching
+/// legacy record.
+pub fn put_user_type_ops(kv: &dyn Kv, ty: &UserType) -> Result<Vec<WriteOp>, CatalogError> {
+    let mut ops = matching_legacy_user_type_delete(kv, ty)?
+        .into_iter()
+        .collect::<Vec<_>>();
+    ops.push(WriteOp::Put {
+        key: key::user_type_key(&ty.schema, &ty.name),
         value: serialize_user_type(ty),
-    }
+    });
+    Ok(ops)
 }
 
 /// The write batch that renames a type, keeping its oid.
-#[must_use]
-pub fn rename_user_type_ops(old_name: &str, renamed: &UserType) -> Vec<WriteOp> {
-    vec![
-        WriteOp::Delete {
-            key: key::user_type_key(old_name),
-        },
-        put_user_type_op(renamed),
-    ]
+///
+/// # Errors
+///
+/// Returns catalog storage or corruption errors while migrating legacy keys.
+pub fn rename_user_type_ops(
+    kv: &dyn Kv,
+    old: &UserType,
+    renamed: &UserType,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    let mut ops = drop_user_type_ops(kv, old)?;
+    ops.extend(put_user_type_ops(kv, renamed)?);
+    Ok(ops)
 }
 
 /// The write batch that forgets a type.
-#[must_use]
-pub fn drop_user_type_ops(name: &str) -> Vec<WriteOp> {
-    vec![WriteOp::Delete {
-        key: key::user_type_key(name),
-    }]
+///
+/// # Errors
+///
+/// Returns catalog storage or corruption errors while checking for a matching
+/// legacy record.
+pub fn drop_user_type_ops(kv: &dyn Kv, ty: &UserType) -> Result<Vec<WriteOp>, CatalogError> {
+    let mut ops = vec![WriteOp::Delete {
+        key: key::user_type_key(&ty.schema, &ty.name),
+    }];
+    ops.extend(matching_legacy_user_type_delete(kv, ty)?);
+    Ok(ops)
+}
+
+fn matching_legacy_user_type_delete(
+    kv: &dyn Kv,
+    target: &UserType,
+) -> Result<Option<WriteOp>, CatalogError> {
+    let key = key::legacy_user_type_key(&target.qualified_name());
+    let Some(bytes) = kv.get(&key)? else {
+        return Ok(None);
+    };
+    let stored = deserialize_user_type(&bytes)?;
+    Ok(
+        (stored.oid == target.oid && stored.schema == target.schema && stored.name == target.name)
+            .then_some(WriteOp::Delete { key }),
+    )
 }
 
 /// Look up a user-defined type by name.
@@ -4172,10 +4230,18 @@ pub fn drop_user_type_ops(name: &str) -> Vec<WriteOp> {
 /// # Errors
 ///
 /// Returns storage/corruption errors from the catalog KV seam.
-pub fn get_user_type(kv: &dyn Kv, name: &str) -> Result<Option<UserType>, CatalogError> {
-    match kv.get(&key::user_type_key(name))? {
-        Some(bytes) => Ok(Some(deserialize_user_type(&bytes)?)),
-        None => Ok(None),
+pub fn get_user_type(kv: &dyn Kv, name: &RelationName) -> Result<Option<UserType>, CatalogError> {
+    if let Some(bytes) = kv.get(&key::user_type_key(&name.schema, &name.name))? {
+        return Ok(Some(deserialize_user_type(&bytes)?));
+    }
+    let Some(bytes) = kv.get(&key::legacy_user_type_key(&name.to_string()))? else {
+        return Ok(None);
+    };
+    let ty = deserialize_user_type(&bytes)?;
+    if ty.schema == name.schema && ty.name == name.name {
+        Ok(Some(ty))
+    } else {
+        Ok(None)
     }
 }
 
@@ -4185,12 +4251,96 @@ pub fn get_user_type(kv: &dyn Kv, name: &str) -> Result<Option<UserType>, Catalo
 ///
 /// Returns storage/corruption errors from the catalog KV seam.
 pub fn list_user_types(kv: &dyn Kv) -> Result<Vec<UserType>, CatalogError> {
-    let mut types = Vec::new();
-    for (_, bytes) in kv.scan_prefix(&key::user_type_prefix())? {
-        types.push(deserialize_user_type(&bytes)?);
+    user_type_records(kv)?
+        .into_values()
+        .map(|(_, bytes)| deserialize_user_type(&bytes).map_err(CatalogError::from))
+        .collect()
+}
+
+fn user_type_records(kv: &dyn Kv) -> Result<BTreeMap<u32, (bool, Vec<u8>)>, CatalogError> {
+    let mut records = BTreeMap::<u32, (bool, Vec<u8>)>::new();
+    for (key, bytes) in kv.scan_prefix(&key::user_type_prefix())? {
+        let structured = key::user_type_key_parts(&key).is_some();
+        let oid = u32::from_be_bytes(
+            bytes
+                .get(..4)
+                .ok_or_else(|| KvError::CorruptRow("truncated user type oid".into()))?
+                .try_into()
+                .expect("four bytes fit u32"),
+        );
+        match records.entry(oid) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert((structured, bytes));
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry)
+                if structured && !entry.get().0 =>
+            {
+                entry.insert((true, bytes));
+            }
+            std::collections::btree_map::Entry::Occupied(_) => {}
+        }
     }
-    types.sort_by_key(|ty| ty.oid);
+    Ok(records)
+}
+
+/// Hydrate the process type registry from durable records in dependency order.
+///
+/// Unlike [`list_user_types`], this is explicitly the stateful startup path.
+///
+/// # Errors
+///
+/// Returns storage/corruption errors, including an unresolved referenced oid.
+pub fn hydrate_user_types(kv: &dyn Kv) -> Result<Vec<UserType>, CatalogError> {
+    let mut pending: Vec<Vec<u8>> = user_type_records(kv)?
+        .into_values()
+        .map(|(_, bytes)| bytes)
+        .collect();
+    let mut decoded = BTreeMap::<u32, UserType>::new();
+    while !pending.is_empty() {
+        let pending_len = pending.len();
+        let mut deferred = Vec::new();
+        let mut first_unresolved = None;
+        for bytes in pending {
+            match deserialize_user_type_with(&bytes, &|oid| hydrated_column_type(&decoded, oid)) {
+                Ok(ty) => {
+                    decoded.insert(ty.oid, ty);
+                }
+                Err(serde::UserTypeDecodeError::UnresolvedUserType(oid)) => {
+                    first_unresolved.get_or_insert(oid);
+                    deferred.push(bytes);
+                }
+                Err(serde::UserTypeDecodeError::Corrupt(error)) => return Err(error.into()),
+            }
+        }
+        if deferred.is_empty() {
+            break;
+        }
+        if deferred.len() == pending_len {
+            let Some(oid) = first_unresolved else {
+                return Err(KvError::CorruptRow("unresolved user type dependency".into()).into());
+            };
+            return Err(KvError::CorruptRow(format!(
+                "column type oid {oid} is not present in this catalog"
+            ))
+            .into());
+        }
+        pending = deferred;
+    }
+
+    let types: Vec<UserType> = decoded.into_values().collect();
+    for ty in &types {
+        crabka_pgtypes::usertype::replace(ty);
+    }
     Ok(types)
+}
+
+fn hydrated_column_type(types: &BTreeMap<u32, UserType>, oid: u32) -> Option<ColumnType> {
+    types.get(&oid).map(UserType::column_type).or_else(|| {
+        types
+            .get(&oid.checked_sub(3)?)?
+            .multirange_type()
+            .filter(|ty| ty.oid() == oid)
+    })
 }
 
 /// The first oid handed out to a user-defined type, and the stride between two
@@ -4567,7 +4717,10 @@ pub fn set_next_table_id_op(next: TableId) -> WriteOp {
 #[cfg(test)]
 mod tests {
     use crabka_pgkv::{FjallKv, MemKv};
-    use crabka_pgtypes::ColumnType;
+    use crabka_pgtypes::{
+        ColumnType,
+        usertype::{DomainBody, RangeBody},
+    };
 
     use super::*;
 
@@ -4588,6 +4741,139 @@ mod tests {
             name: name.to_string(),
             owner: owner.to_string(),
         }
+    }
+
+    #[test]
+    fn structured_dotted_type_does_not_delete_colliding_legacy_key() {
+        let kv = MemKv::default();
+        let legacy = UserType {
+            oid: 300_000,
+            schema: "a".into(),
+            name: "b".into(),
+            body: UserTypeBody::Composite(Vec::new()),
+        };
+        kv.put(
+            key::legacy_user_type_key("a.b"),
+            serialize_user_type(&legacy),
+        )
+        .expect("legacy record");
+        let dotted = UserType {
+            oid: legacy.oid,
+            schema: PUBLIC_SCHEMA.into(),
+            name: "a.b".into(),
+            body: UserTypeBody::Composite(Vec::new()),
+        };
+
+        let ops = put_user_type_ops(&kv, &dotted).expect("replacement ops");
+        assert!(ops.iter().all(|op| !matches!(op, WriteOp::Delete { .. })));
+    }
+
+    #[test]
+    fn hydration_uses_only_types_from_its_catalog() {
+        let kv = MemKv::default();
+        let foreign = UserType {
+            oid: 1_100_000,
+            schema: PUBLIC_SCHEMA.into(),
+            name: "other_tenant_type".into(),
+            body: UserTypeBody::Composite(Vec::new()),
+        };
+        crabka_pgtypes::usertype::replace(&foreign);
+        let dependent = UserType {
+            oid: 1_100_004,
+            schema: PUBLIC_SCHEMA.into(),
+            name: "local_domain_missing_base".into(),
+            body: UserTypeBody::Domain(DomainBody {
+                base: foreign.column_type(),
+                not_null: false,
+                default: None,
+                checks: Vec::new(),
+            }),
+        };
+        store_user_type(&kv, &dependent);
+
+        let error = hydrate_user_types(&kv).expect_err("foreign registry entry is ignored");
+        assert!(error.to_string().contains("1100000"));
+        assert_eq!(
+            crabka_pgtypes::usertype::lookup_oid(foreign.oid),
+            Some(foreign)
+        );
+        assert!(crabka_pgtypes::usertype::lookup_oid(dependent.oid).is_none());
+    }
+
+    #[test]
+    fn hydration_decodes_dependencies_before_lower_oid_dependents() {
+        let kv = MemKv::default();
+        let base = UserType {
+            oid: 1_200_004,
+            schema: PUBLIC_SCHEMA.into(),
+            name: "later_oid_base".into(),
+            body: UserTypeBody::Range(RangeBody {
+                subtype: ColumnType::Int4,
+                collation: None,
+                multirange_schema: Some(PUBLIC_SCHEMA.into()),
+                multirange_name: Some("later_oid_multirange".into()),
+            }),
+        };
+        let dependent = UserType {
+            oid: 1_200_000,
+            schema: PUBLIC_SCHEMA.into(),
+            name: "earlier_oid_domain".into(),
+            body: UserTypeBody::Domain(DomainBody {
+                base: base.multirange_type().expect("range has a multirange"),
+                not_null: false,
+                default: None,
+                checks: Vec::new(),
+            }),
+        };
+        store_user_type(&kv, &dependent);
+        store_user_type(&kv, &base);
+
+        let hydrated = hydrate_user_types(&kv).expect("dependency retry succeeds");
+        assert_eq!(hydrated.len(), 2);
+        assert_eq!(hydrated[0].oid, dependent.oid);
+        assert_eq!(
+            hydrated[0].domain().expect("domain").base.name(),
+            "later_oid_multirange"
+        );
+    }
+
+    #[test]
+    fn corrupt_hydration_does_not_publish_valid_prefix() {
+        let kv = MemKv::default();
+        let original = UserType {
+            oid: 1_300_000,
+            schema: PUBLIC_SCHEMA.into(),
+            name: "registry_before_failed_hydration".into(),
+            body: UserTypeBody::Composite(Vec::new()),
+        };
+        crabka_pgtypes::usertype::replace(&original);
+        let catalog_type = UserType {
+            oid: original.oid,
+            schema: PUBLIC_SCHEMA.into(),
+            name: "catalog_type_not_published".into(),
+            body: UserTypeBody::Composite(Vec::new()),
+        };
+        store_user_type(&kv, &catalog_type);
+        kv.put(
+            key::user_type_key(PUBLIC_SCHEMA, "corrupt_type"),
+            1_300_004u32.to_be_bytes().to_vec(),
+        )
+        .expect("store corrupt record with readable oid");
+
+        hydrate_user_types(&kv).expect_err("corrupt record rejects the whole hydration");
+        assert_eq!(
+            crabka_pgtypes::usertype::lookup_oid(original.oid),
+            Some(original)
+        );
+        assert!(crabka_pgtypes::usertype::lookup_oid(1_300_004).is_none());
+    }
+
+    fn store_user_type(kv: &MemKv, ty: &UserType) {
+        kv.put(
+            key::user_type_key(&ty.schema, &ty.name),
+            serialize_user_type(ty),
+        )
+        .expect("store user type");
     }
 
     fn apply(kv: &MemKv, ops: &[WriteOp]) {

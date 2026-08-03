@@ -4,12 +4,12 @@
 //! no kv or catalog access, so hand-built relations can unit-test it. See the
 //! SP33 design doc for why this single-range pure fold warrants no model.
 //!
-//! An equality-constrained join probes a hash index over the right relation
-//! instead of a walk of it per left row, so a 10k-row self-join costs 10k
-//! predicate evaluations and not 100M. Such a join is `USING`/`NATURAL`, or an
-//! `ON` whose top-level conjuncts include `left.col = right.col`. Everything
-//! else still folds as a nested loop, as does any key whose values are not
-//! exactly hash-comparable.
+//! An equality-constrained join (`USING`/`NATURAL`, an `ON` whose top-level
+//! conjuncts include `left.col = right.col`, or an `OR` whose every branch has
+//! such a key) probes hash indexes over the right relation instead of walking it
+//! per left row, so a 10k-row self-join costs thousands of predicate evaluations
+//! rather than 100M. Unusable equality keys are left to the full predicate; a
+//! join with no hash-comparable necessary key folds as a nested loop.
 
 use std::collections::HashMap;
 
@@ -54,18 +54,33 @@ pub(crate) fn join_relations(
 }
 
 pub(crate) struct PreparedJoinIndex {
-    index: Option<EquiIndex>,
+    index: Option<JoinIndex>,
+    estimated_bytes: usize,
 }
 
 pub(crate) fn prepare_join_index(
     left: &Relation,
     right: &Relation,
     constraint: &JoinConstraint,
+    blocking_query_memory: crabka_units::ByteSize,
 ) -> Result<PreparedJoinIndex, ExecError> {
-    let keys = equi_keys_for(left, right, constraint)?;
+    let index = JoinIndex::build(left, right, constraint, blocking_query_memory)?;
+    let estimated_bytes = index.as_ref().map_or(0, JoinIndex::estimated_bytes);
     Ok(PreparedJoinIndex {
-        index: EquiIndex::build(left, right, &keys),
+        index,
+        estimated_bytes,
     })
+}
+
+impl PreparedJoinIndex {
+    pub(crate) fn estimated_bytes(&self) -> usize {
+        self.estimated_bytes
+    }
+
+    pub(crate) fn discard_index(&mut self) {
+        self.index = None;
+        self.estimated_bytes = 0;
+    }
 }
 
 pub(crate) fn join_relations_prepared(
@@ -88,6 +103,162 @@ pub(crate) fn join_relations_prepared(
     )
 }
 
+/// Count a join's output rows without materializing them. This is the same
+/// candidate probe and full predicate recheck as [`join_relations`], including
+/// duplicate suppression across indexed `OR` branches and outer-join padding.
+pub(crate) fn count_join_rows(
+    left: &Relation,
+    right: &Relation,
+    kind: JoinKind,
+    constraint: &JoinConstraint,
+    ctx: &crate::clock::EvalCtx,
+    blocking_query_memory: crabka_units::ByteSize,
+) -> Result<i64, ExecError> {
+    let condition = JoinCondition::new(left, right, constraint)?;
+    let track_right = matches!(kind, JoinKind::Right | JoinKind::Full);
+    let right_match_bytes = if track_right { right.rows.len() } else { 0 };
+    if crate::scanner::exceeds_query_memory(right_match_bytes, blocking_query_memory) {
+        return Err(crate::scanner::memory_budget_exceeded());
+    }
+
+    let mut index = JoinIndex::build(left, right, constraint, blocking_query_memory)?;
+    if index.as_ref().is_some_and(|index| {
+        crate::scanner::exceeds_query_memory(
+            right_match_bytes.saturating_add(index.estimated_bytes()),
+            blocking_query_memory,
+        )
+    }) {
+        index = None;
+    }
+    let mut key_buf = Vec::new();
+    let mut candidate_buf =
+        Vec::with_capacity(index.as_ref().map_or(0, JoinIndex::candidate_capacity));
+    let mut right_matched = track_right.then(|| vec![false; right.rows.len()]);
+    let keep_left = matches!(kind, JoinKind::Left | JoinKind::Full);
+    let mut count = 0_i64;
+
+    for left_row in &left.rows {
+        let mut any = false;
+        for right_index in candidate_rows(
+            index.as_ref(),
+            right.rows.len(),
+            left_row,
+            &mut key_buf,
+            &mut candidate_buf,
+        ) {
+            if condition.matches(left_row, &right.rows[right_index], ctx)? {
+                any = true;
+                if let Some(right_matched) = &mut right_matched {
+                    right_matched[right_index] = true;
+                }
+                increment_join_count(&mut count)?;
+            }
+        }
+        if !any && keep_left {
+            increment_join_count(&mut count)?;
+        }
+    }
+    if let Some(right_matched) = right_matched {
+        for matched in right_matched {
+            if !matched {
+                increment_join_count(&mut count)?;
+            }
+        }
+    }
+    Ok(count)
+}
+
+fn increment_join_count(count: &mut i64) -> Result<(), ExecError> {
+    *count = count
+        .checked_add(1)
+        .ok_or(ExecError::Type(crabka_pgtypes::TypeError::Overflow))?;
+    Ok(())
+}
+
+struct JoinCondition<'a> {
+    combined_scope: Scope,
+    join_cols: Vec<String>,
+    pairs: Vec<(usize, usize)>,
+    on_predicate: Option<&'a Expr>,
+}
+
+impl<'a> JoinCondition<'a> {
+    fn new(
+        left: &Relation,
+        right: &Relation,
+        constraint: &'a JoinConstraint,
+    ) -> Result<Self, ExecError> {
+        for column in &right.scope.columns {
+            if let Some(qualifier) = &column.qualifier
+                && left
+                    .scope
+                    .columns
+                    .iter()
+                    .any(|left| left.qualifier.as_ref() == Some(qualifier))
+            {
+                return Err(ExecError::DuplicateAlias(qualifier.clone()));
+            }
+        }
+        let mut combined_scope = left.scope.clone();
+        combined_scope
+            .columns
+            .extend(right.scope.columns.iter().cloned());
+        let join_cols = match constraint {
+            JoinConstraint::Using(columns) => columns.clone(),
+            JoinConstraint::Natural => natural_common_columns(&left.scope, &right.scope),
+            JoinConstraint::On(_) | JoinConstraint::None => Vec::new(),
+        };
+        let mut pairs = Vec::with_capacity(join_cols.len());
+        for column in &join_cols {
+            pairs.push((
+                left.scope.resolve(None, column)?,
+                right.scope.resolve(None, column)?,
+            ));
+        }
+        Ok(Self {
+            combined_scope,
+            join_cols,
+            pairs,
+            on_predicate: match constraint {
+                JoinConstraint::On(predicate) => Some(predicate),
+                _ => None,
+            },
+        })
+    }
+
+    fn matches(
+        &self,
+        left: &[Datum],
+        right: &[Datum],
+        ctx: &crate::clock::EvalCtx,
+    ) -> Result<bool, ExecError> {
+        use std::cmp::Ordering;
+
+        if !self.pairs.is_empty() {
+            for (left_index, right_index) in &self.pairs {
+                if crabka_pgtypes::ops::compare(&left[*left_index], &right[*right_index])?
+                    != Some(Ordering::Equal)
+                {
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
+        }
+        let Some(predicate) = self.on_predicate else {
+            return Ok(true);
+        };
+        let mut combined = left.to_vec();
+        combined.extend_from_slice(right);
+        match crate::eval::eval(predicate, &self.combined_scope, &combined, ctx)? {
+            Datum::Bool(value) => Ok(value),
+            Datum::Null => Ok(false),
+            _ => Err(ExecError::TypeMismatch(
+                "JOIN/ON condition must be boolean".into(),
+            )),
+        }
+    }
+}
+
 fn join_relations_impl(
     left: Relation,
     right: &Relation,
@@ -97,100 +268,28 @@ fn join_relations_impl(
     blocking_query_memory: crabka_units::ByteSize,
     prepared: Option<&PreparedJoinIndex>,
 ) -> Result<Relation, ExecError> {
-    use std::cmp::Ordering;
-
-    // Self-join / duplicate alias: a qualifier may not appear on both sides.
-    for c in &right.scope.columns {
-        if let Some(q) = &c.qualifier
-            && left
-                .scope
-                .columns
-                .iter()
-                .any(|lc| lc.qualifier.as_ref() == Some(q))
-        {
-            return Err(ExecError::DuplicateAlias(q.clone()));
-        }
-    }
-
-    // Combined schema (left ++ right): the ON-predicate evaluation scope and the
-    // pre-reshape output schema.
-    let mut combined_scope = left.scope.clone();
-    combined_scope
-        .columns
-        .extend(right.scope.columns.iter().cloned());
-
-    // USING/NATURAL -> the join columns and their (left_idx, right_idx) pairs; a
-    // column must exist on BOTH sides (else 42703/42702 via `resolve`). NATURAL
-    // with no common column has empty pairs and degenerates to a cross join.
-    let join_cols: Vec<String> = match constraint {
-        JoinConstraint::Using(cols) => cols.clone(),
-        JoinConstraint::Natural => natural_common_columns(&left.scope, &right.scope),
-        JoinConstraint::On(_) | JoinConstraint::None => Vec::new(),
-    };
-    let mut pairs: Vec<(usize, usize)> = Vec::with_capacity(join_cols.len());
-    for jc in &join_cols {
-        let li = left.scope.resolve(None, jc)?;
-        let ri = right.scope.resolve(None, jc)?;
-        pairs.push((li, ri));
-    }
-    let on_pred: Option<&Expr> = match constraint {
-        JoinConstraint::On(e) => Some(e),
-        _ => None,
-    };
-
+    let condition = JoinCondition::new(&left, right, constraint)?;
     let lw = left.scope.width();
-    let matches = |lrow: &[Datum], rrow: &[Datum]| -> Result<bool, ExecError> {
-        // USING/NATURAL: every join-column pair must compare Equal (NULL never matches).
-        if !pairs.is_empty() {
-            for (li, ri) in &pairs {
-                if crabka_pgtypes::ops::compare(&lrow[*li], &rrow[*ri])? != Some(Ordering::Equal) {
-                    return Ok(false);
-                }
-            }
-            return Ok(true);
-        }
-        // ON(expr) over the combined row; CROSS/comma (no predicate) always matches.
-        let Some(e) = on_pred else { return Ok(true) };
-        let mut combined = lrow.to_vec();
-        combined.extend_from_slice(rrow);
-        match crate::eval::eval(e, &combined_scope, &combined, ctx)? {
-            Datum::Bool(b) => Ok(b),
-            Datum::Null => Ok(false),
-            _ => Err(ExecError::TypeMismatch(
-                "JOIN/ON condition must be boolean".into(),
-            )),
-        }
-    };
 
-    // The equality columns the ON predicate (or USING/NATURAL) requires, used to
-    // skip right rows that cannot match. `matches` still decides every candidate,
-    // so extra conjuncts and the NULL rules are unaffected.
-    let equi_keys = if pairs.is_empty() {
-        on_pred.map_or_else(Vec::new, |e| equi_key_columns(e, &combined_scope, lw))
-    } else {
-        pairs.clone()
-    };
     let built_index = prepared
         .is_none()
-        .then(|| EquiIndex::build(&left, right, &equi_keys))
+        .then(|| JoinIndex::build(&left, right, constraint, blocking_query_memory))
+        .transpose()?
         .flatten();
     let index = prepared.map_or(built_index.as_ref(), |prepared| prepared.index.as_ref());
-    // Every right row, for the rows the index cannot narrow.
-    let all_right: Vec<usize> = if index.is_some() {
-        Vec::new()
-    } else {
-        (0..right.rows.len()).collect()
-    };
-    let mut key_buf: Vec<Datum> = Vec::with_capacity(equi_keys.len());
+    let mut key_buf: Vec<Datum> = Vec::new();
+    let mut candidate_buf = Vec::with_capacity(index.map_or(0, JoinIndex::candidate_capacity));
 
     let mut rows = Vec::new();
     let mut result_bytes = 0usize;
     match kind {
         JoinKind::Inner | JoinKind::Cross => {
             for l in &left.rows {
-                for &ri in candidate_rows(index, &all_right, l, &mut key_buf) {
+                for ri in
+                    candidate_rows(index, right.rows.len(), l, &mut key_buf, &mut candidate_buf)
+                {
                     let r = &right.rows[ri];
-                    if matches(l, r)? {
+                    if condition.matches(l, r, ctx)? {
                         let mut row = l.clone();
                         row.extend(r.iter().cloned());
                         push_bounded_join_row(
@@ -210,9 +309,11 @@ fn join_relations_impl(
             let mut right_matched = vec![false; right.rows.len()];
             for l in &left.rows {
                 let mut any = false;
-                for &ri in candidate_rows(index, &all_right, l, &mut key_buf) {
+                for ri in
+                    candidate_rows(index, right.rows.len(), l, &mut key_buf, &mut candidate_buf)
+                {
                     let r = &right.rows[ri];
-                    if matches(l, r)? {
+                    if condition.matches(l, r, ctx)? {
                         any = true;
                         right_matched[ri] = true;
                         let mut row = l.clone();
@@ -255,33 +356,185 @@ fn join_relations_impl(
 
     // USING/NATURAL: coalesce + reorder the join columns. Otherwise the combined
     // left ++ right schema is the result.
-    if pairs.is_empty() {
+    if condition.pairs.is_empty() {
         Ok(Relation {
-            scope: combined_scope,
+            scope: condition.combined_scope,
             rows,
         })
     } else {
         Ok(coalesce_join_columns(
             &left.scope,
             &right.scope,
-            &pairs,
-            &join_cols,
+            &condition.pairs,
+            &condition.join_cols,
             rows,
         ))
     }
 }
 
 /// The right rows a left row could possibly join with: the index's bucket for
-/// its key, or every right row when no usable index exists.
+/// its key, or — with no usable index — every right row.
+enum CandidateRows<'a> {
+    Indexed(std::slice::Iter<'a, usize>),
+    All(std::ops::Range<usize>),
+}
+
+impl Iterator for CandidateRows<'_> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Indexed(rows) => rows.next().copied(),
+            Self::All(rows) => rows.next(),
+        }
+    }
+}
+
 fn candidate_rows<'a>(
-    index: Option<&'a EquiIndex>,
-    all_right: &'a [usize],
+    index: Option<&'a JoinIndex>,
+    right_len: usize,
     lrow: &[Datum],
     key_buf: &mut Vec<Datum>,
-) -> &'a [usize] {
+    candidate_buf: &'a mut Vec<usize>,
+) -> CandidateRows<'a> {
     match index {
-        Some(index) => index.candidates(lrow, key_buf),
-        None => all_right,
+        Some(index) => {
+            CandidateRows::Indexed(index.candidates(lrow, key_buf, candidate_buf).iter())
+        }
+        None => CandidateRows::All(0..right_len),
+    }
+}
+
+enum JoinIndex {
+    Conjunctive(EquiIndex),
+    Disjunctive {
+        indexes: Vec<EquiIndex>,
+        right_len: usize,
+    },
+}
+
+impl JoinIndex {
+    const MAX_OR_DISJUNCTS: usize = 16;
+
+    fn build(
+        left: &Relation,
+        right: &Relation,
+        constraint: &JoinConstraint,
+        blocking_query_memory: crabka_units::ByteSize,
+    ) -> Result<Option<Self>, ExecError> {
+        let mut combined = left.scope.clone();
+        combined.columns.extend(right.scope.columns.iter().cloned());
+        if let JoinConstraint::On(predicate) = constraint
+            && matches!(
+                predicate,
+                Expr::Binary {
+                    op: BinaryOp::Or,
+                    ..
+                }
+            )
+        {
+            let mut disjuncts = Vec::new();
+            collect_or_disjuncts(predicate, &mut disjuncts);
+            if disjuncts.len() > Self::MAX_OR_DISJUNCTS {
+                return Ok(None);
+            }
+            let mut indexes = Vec::with_capacity(disjuncts.len());
+            let mut index_bytes = right
+                .rows
+                .len()
+                .saturating_mul(std::mem::size_of::<usize>());
+            for disjunct in disjuncts {
+                let keys = equi_key_columns(disjunct, &combined, left.scope.width());
+                let Some(plan) = EquiIndex::plan(left, right, &keys) else {
+                    // A branch without a usable necessary equality can match any
+                    // right row, so narrowing the union would be unsound.
+                    return Ok(None);
+                };
+                index_bytes = index_bytes.saturating_add(plan.estimated_bytes);
+                if crate::scanner::exceeds_query_memory(index_bytes, blocking_query_memory) {
+                    return Ok(None);
+                }
+                indexes.push(EquiIndex::build_planned(right, plan));
+            }
+            let index = Self::Disjunctive {
+                indexes,
+                right_len: right.rows.len(),
+            };
+            return Ok((!crate::scanner::exceeds_query_memory(
+                index.estimated_bytes(),
+                blocking_query_memory,
+            ))
+            .then_some(index));
+        }
+
+        let keys = equi_keys_for(left, right, constraint)?;
+        let Some(plan) = EquiIndex::plan(left, right, &keys) else {
+            return Ok(None);
+        };
+        if crate::scanner::exceeds_query_memory(plan.estimated_bytes, blocking_query_memory) {
+            return Ok(None);
+        }
+        let index = Self::Conjunctive(EquiIndex::build_planned(right, plan));
+        Ok(
+            (!crate::scanner::exceeds_query_memory(index.estimated_bytes(), blocking_query_memory))
+                .then_some(index),
+        )
+    }
+
+    fn candidate_capacity(&self) -> usize {
+        match self {
+            Self::Conjunctive(_) => 0,
+            Self::Disjunctive { right_len, .. } => *right_len,
+        }
+    }
+
+    fn estimated_bytes(&self) -> usize {
+        match self {
+            Self::Conjunctive(index) => index.estimated_bytes(),
+            Self::Disjunctive { indexes, right_len } => indexes.iter().fold(
+                right_len
+                    .saturating_mul(std::mem::size_of::<usize>())
+                    .saturating_add(
+                        indexes
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<EquiIndex>()),
+                    ),
+                |bytes, index| bytes.saturating_add(index.estimated_bytes()),
+            ),
+        }
+    }
+
+    fn candidates<'a>(
+        &'a self,
+        lrow: &[Datum],
+        key_buf: &mut Vec<Datum>,
+        union: &'a mut Vec<usize>,
+    ) -> &'a [usize] {
+        match self {
+            Self::Conjunctive(index) => index.candidates(lrow, key_buf),
+            Self::Disjunctive { indexes, .. } => {
+                union.clear();
+                let mut lists = Vec::with_capacity(indexes.len());
+                for index in indexes {
+                    lists.push(index.candidates(lrow, key_buf));
+                }
+                let mut positions = [0usize; Self::MAX_OR_DISJUNCTS];
+                while let Some(next) = lists
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, rows)| rows.get(positions[index]).copied())
+                    .min()
+                {
+                    union.push(next);
+                    for (index, rows) in lists.iter().enumerate() {
+                        while rows.get(positions[index]) == Some(&next) {
+                            positions[index] += 1;
+                        }
+                    }
+                }
+                union
+            }
+        }
     }
 }
 
@@ -318,18 +571,37 @@ fn equi_keys_for(
     }
 }
 
+fn collect_or_disjuncts<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
+    if let Expr::Binary {
+        op: BinaryOp::Or,
+        left,
+        right,
+    } = expr
+    {
+        collect_or_disjuncts(left, out);
+        collect_or_disjuncts(right, out);
+    } else {
+        out.push(expr);
+    }
+}
+
 /// Right-relation row indices grouped by their equality key, ascending within
 /// each bucket so a probe visits candidates in the order the nested loop would.
 ///
 /// `Datum`'s hash equality agrees with `ops::compare` only for values of the
-/// SAME variant. `Int2(1)` and `Int4(1)` compare Equal but hash apart, and so do
-/// `Int4(1)` and `Numeric(1)`. So the index exists only when every non-NULL
-/// value of a key column, on BOTH sides, carries one variant. Anything
-/// else leaves the join as a nested-loop fold, which is always correct.
+/// SAME variant — `Int2(1)` and `Int4(1)` compare Equal but hash apart, and so
+/// do `Int4(1)` and `Numeric(1)`. The index uses the subset of required equality
+/// keys whose values are exactly hash-comparable; the full predicate rechecks
+/// every candidate, including equality keys omitted here.
 struct EquiIndex {
     /// Key columns, as indices into a left row.
     left_key: Vec<usize>,
     buckets: HashMap<Vec<Datum>, Vec<usize>>,
+}
+
+struct EquiIndexPlan {
+    keys: Vec<(usize, usize)>,
+    estimated_bytes: usize,
 }
 
 /// What a key column's values look like on one side of the join.
@@ -349,27 +621,59 @@ impl EquiIndex {
     /// that the buckets would cost more to build than the probes save.
     const MIN_PAIRS: usize = 4096;
 
-    /// `keys` are `(left_column, right_column)` pairs the predicate requires to
-    /// compare Equal. Returns `None` when no index applies.
-    fn build(left: &Relation, right: &Relation, keys: &[(usize, usize)]) -> Option<Self> {
+    /// Plan an index without allocating its buckets. The estimate assumes every
+    /// right row has a distinct key, which bounds the bucket/table overhead, and
+    /// includes heap-backed scalar key payloads.
+    fn plan(left: &Relation, right: &Relation, keys: &[(usize, usize)]) -> Option<EquiIndexPlan> {
         if keys.is_empty() || left.rows.len().saturating_mul(right.rows.len()) < Self::MIN_PAIRS {
             return None;
         }
-        for (li, ri) in keys {
-            match (key_variant(&left.rows, *li), key_variant(&right.rows, *ri)) {
-                (KeyVariant::Mixed, _) | (_, KeyVariant::Mixed) => return None,
-                (KeyVariant::Uniform(l), KeyVariant::Uniform(r))
-                    if std::mem::discriminant(l) != std::mem::discriminant(r)
-                        || !hashes_like_it_compares(l) =>
-                {
-                    return None;
+        let keys: Vec<(usize, usize)> = keys
+            .iter()
+            .copied()
+            .filter(|(li, ri)| {
+                match (key_variant(&left.rows, *li), key_variant(&right.rows, *ri)) {
+                    (KeyVariant::Mixed, _) | (_, KeyVariant::Mixed) => false,
+                    (KeyVariant::Uniform(l), KeyVariant::Uniform(r))
+                        if std::mem::discriminant(l) != std::mem::discriminant(r)
+                            || !hashes_like_it_compares(l) =>
+                    {
+                        false
+                    }
+                    (KeyVariant::Uniform(_), KeyVariant::Uniform(_)) => true,
+                    // With no non-NULL value on one side, no probe can hit a bucket
+                    // whatever the other side holds — which is the right answer.
+                    _ => true,
                 }
-                (KeyVariant::Uniform(_), KeyVariant::Uniform(_)) => {}
-                // With no non-NULL value on one side, no probe can hit a bucket
-                // whatever the other side holds — which is the right answer.
-                _ => {}
-            }
+            })
+            .collect();
+        if keys.is_empty() {
+            return None;
         }
+        let mut estimated_bytes = keys.len().saturating_mul(std::mem::size_of::<usize>());
+        for row in &right.rows {
+            if keys.iter().any(|(_, rc)| row[*rc].is_null()) {
+                continue;
+            }
+            let key_bytes = keys.iter().fold(0usize, |bytes, (_, rc)| {
+                bytes.saturating_add(crate::scanner::datum_row_bytes(std::slice::from_ref(
+                    &row[*rc],
+                )))
+            });
+            estimated_bytes = estimated_bytes
+                .saturating_add(key_bytes)
+                // Worst-case one HashMap entry and one bucket allocation per row,
+                // with spare vector/table capacity rather than logical lengths.
+                .saturating_add(16 * std::mem::size_of::<usize>());
+        }
+        Some(EquiIndexPlan {
+            keys,
+            estimated_bytes,
+        })
+    }
+
+    fn build_planned(right: &Relation, plan: EquiIndexPlan) -> Self {
+        let keys = plan.keys;
         let mut buckets: HashMap<Vec<Datum>, Vec<usize>> = HashMap::new();
         for (ri, row) in right.rows.iter().enumerate() {
             // A NULL in the key never compares Equal, so the row is not indexed
@@ -380,10 +684,42 @@ impl EquiIndex {
             let key: Vec<Datum> = keys.iter().map(|(_, rc)| row[*rc].clone()).collect();
             buckets.entry(key).or_default().push(ri);
         }
-        Some(Self {
+        Self {
             left_key: keys.iter().map(|(lc, _)| *lc).collect(),
             buckets,
-        })
+        }
+    }
+
+    /// `keys` are `(left_column, right_column)` pairs the predicate requires to
+    /// compare Equal. Returns `None` when no index applies.
+    #[cfg(test)]
+    fn build(left: &Relation, right: &Relation, keys: &[(usize, usize)]) -> Option<Self> {
+        Self::plan(left, right, keys).map(|plan| Self::build_planned(right, plan))
+    }
+
+    fn estimated_bytes(&self) -> usize {
+        let table_bytes = self
+            .buckets
+            .capacity()
+            .saturating_mul(4 * std::mem::size_of::<usize>());
+        self.buckets.iter().fold(
+            table_bytes.saturating_add(
+                self.left_key
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<usize>()),
+            ),
+            |bytes, (key, rows)| {
+                bytes
+                    .saturating_add(crate::scanner::datum_row_bytes(key))
+                    .saturating_add(
+                        key.capacity()
+                            .saturating_sub(key.len())
+                            .saturating_mul(std::mem::size_of::<Datum>()),
+                    )
+                    .saturating_add(rows.capacity().saturating_mul(std::mem::size_of::<usize>()))
+                    .saturating_add(10 * std::mem::size_of::<usize>())
+            },
+        )
     }
 
     fn candidates<'a>(&'a self, lrow: &[Datum], key_buf: &mut Vec<Datum>) -> &'a [usize] {
@@ -420,13 +756,12 @@ fn key_variant(rows: &[Vec<Datum>], column: usize) -> KeyVariant<'_> {
 /// Whether `Datum`'s `Eq`/`Hash` decide this variant exactly as `ops::compare`
 /// does, which is what lets a hash bucket stand in for the comparison.
 ///
-/// The scalar types agree by construction, because `Eq` and `Hash` both
-/// canonicalize NaN, signed zero, and numeric scale the way `compare` orders
-/// them. The composite types do not agree. `array_cmp` ignores the element type,
-/// so `int4[]` `{1}` and `int8[]` `{1}` compare Equal while `Eq` calls them
-/// different, and `interval` compares by a canonical estimate. Those keys keep
-/// the nested loop.
-fn hashes_like_it_compares(sample: &Datum) -> bool {
+/// The scalar types agree by construction (`Eq` and `Hash` both canonicalize
+/// NaN, signed zero, and numeric scale the way `compare` orders them). The
+/// composite types do not: `array_cmp` ignores the element type, so `int4[]`
+/// `{1}` and `int8[]` `{1}` compare Equal while `Eq` calls them different — and
+/// `interval` compares by a canonical estimate. Those keys keep the nested loop.
+pub(crate) fn hashes_like_it_compares(sample: &Datum) -> bool {
     matches!(
         sample,
         Datum::Bool(_)
@@ -610,7 +945,8 @@ fn coalesce_join_columns(
 
 #[cfg(test)]
 mod tests {
-    use crabka_pgtypes::ColumnType;
+    use crabka_pgtypes::{ArrayValue, ColumnType, ElemType};
+    use crabka_units::prelude::ByteSizeExt as _;
 
     use super::*;
 
@@ -669,6 +1005,26 @@ mod tests {
                 name: rc.into(),
             }),
         })
+    }
+
+    fn on_or_eq(lq: &str, left_cols: &[&str], rq: &str, rc: &str) -> JoinConstraint {
+        let mut branches = left_cols.iter().map(|lc| Expr::Binary {
+            op: BinaryOp::Eq,
+            left: Box::new(Expr::Column {
+                table: Some(lq.into()),
+                name: (*lc).into(),
+            }),
+            right: Box::new(Expr::Column {
+                table: Some(rq.into()),
+                name: rc.into(),
+            }),
+        });
+        let first = branches.next().expect("at least one OR branch");
+        JoinConstraint::On(branches.fold(first, |left, right| Expr::Binary {
+            op: BinaryOp::Or,
+            left: Box::new(left),
+            right: Box::new(right),
+        }))
     }
 
     #[test]
@@ -895,6 +1251,461 @@ mod tests {
         }
     }
 
+    #[test]
+    fn indexed_or_equi_join_agrees_with_the_nested_loop_and_order() {
+        let scope = |qualifier: &str, names: &[&str]| Scope {
+            columns: names
+                .iter()
+                .map(|name| ColumnBinding {
+                    qualifier: Some(qualifier.into()),
+                    name: (*name).into(),
+                    ty: ColumnType::Int4,
+                })
+                .collect(),
+        };
+        let left = Relation {
+            scope: scope("a", &["x", "y"]),
+            rows: (0..80)
+                .map(|i| {
+                    let x = (i % 11 != 0).then_some(Datum::Int4(i % 6));
+                    let y = if i % 13 == 0 {
+                        None
+                    } else {
+                        Some({
+                            if i % 5 == 0 {
+                                x.clone().unwrap_or(Datum::Int4(i % 6))
+                            } else {
+                                Datum::Int4((i + 1) % 6)
+                            }
+                        })
+                    };
+                    vec![x.unwrap_or(Datum::Null), y.unwrap_or(Datum::Null)]
+                })
+                .collect(),
+        };
+        let right = Relation {
+            scope: scope("b", &["k"]),
+            rows: (0..80)
+                .map(|i| {
+                    vec![if i % 17 == 0 {
+                        Datum::Null
+                    } else {
+                        Datum::Int4(i % 7)
+                    }]
+                })
+                .collect(),
+        };
+        let constraint = on_or_eq("a", &["x", "y"], "b", "k");
+        let reference = |kind: JoinKind| {
+            let mut rows = Vec::new();
+            let mut right_matched = vec![false; right.rows.len()];
+            for l in &left.rows {
+                let mut any = false;
+                for (ri, r) in right.rows.iter().enumerate() {
+                    let matched = !r[0].is_null()
+                        && ((!l[0].is_null() && l[0] == r[0]) || (!l[1].is_null() && l[1] == r[0]));
+                    if matched {
+                        any = true;
+                        right_matched[ri] = true;
+                        let mut row = l.clone();
+                        row.extend(r.iter().cloned());
+                        rows.push(row);
+                    }
+                }
+                if !any && matches!(kind, JoinKind::Left | JoinKind::Full) {
+                    let mut row = l.clone();
+                    row.push(Datum::Null);
+                    rows.push(row);
+                }
+            }
+            if matches!(kind, JoinKind::Right | JoinKind::Full) {
+                for (ri, r) in right.rows.iter().enumerate() {
+                    if !right_matched[ri] {
+                        rows.push(vec![Datum::Null, Datum::Null, r[0].clone()]);
+                    }
+                }
+            }
+            rows
+        };
+
+        for kind in [
+            JoinKind::Inner,
+            JoinKind::Left,
+            JoinKind::Right,
+            JoinKind::Full,
+        ] {
+            let actual = join_relations(left.clone(), right.clone(), kind, &constraint, &tctx())
+                .expect("OR equijoin")
+                .rows;
+            let expected = reference(kind);
+            assert2::assert!(actual == expected, "{kind:?}");
+            assert2::assert!(
+                count_join_rows(
+                    &left,
+                    &right,
+                    kind,
+                    &constraint,
+                    &tctx(),
+                    crate::scanner::BLOCKING_QUERY_MEMORY,
+                )
+                .expect("count OR equijoin")
+                    == i64::try_from(expected.len()).expect("test cardinality fits int8"),
+                "{kind:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn counted_or_join_matches_the_pg_regress_cardinality() {
+        let left = rel(
+            "t1",
+            &["tenthous", "thousand"],
+            (0..1_000)
+                .map(|row| {
+                    let key = row % 100;
+                    vec![key, if row < 100 { key } else { (key + 1) % 100 }]
+                })
+                .collect(),
+        );
+        let right = rel(
+            "t2",
+            &["thousand"],
+            (0..1_000).map(|row| vec![row % 100]).collect(),
+        );
+        let constraint = on_or_eq("t1", &["tenthous", "thousand"], "t2", "thousand");
+
+        let count = count_join_rows(
+            &left,
+            &right,
+            JoinKind::Left,
+            &constraint,
+            &tctx(),
+            crate::scanner::BLOCKING_QUERY_MEMORY,
+        )
+        .expect("count pg_regress OR join");
+
+        assert2::assert!(count == 19_000);
+    }
+
+    #[test]
+    fn counted_join_does_not_retain_wide_output_rows() {
+        let scope = |qualifier: &str| Scope {
+            columns: vec![
+                ColumnBinding {
+                    qualifier: Some(qualifier.into()),
+                    name: "k".into(),
+                    ty: ColumnType::Int4,
+                },
+                ColumnBinding {
+                    qualifier: Some(qualifier.into()),
+                    name: "payload".into(),
+                    ty: ColumnType::Text,
+                },
+            ],
+        };
+        let rows = || {
+            (0..80)
+                .map(|key| vec![Datum::Int4(key), Datum::Text("x".repeat(1_024))])
+                .collect()
+        };
+        let left = Relation {
+            scope: scope("a"),
+            rows: rows(),
+        };
+        let right = Relation {
+            scope: scope("b"),
+            rows: rows(),
+        };
+        let constraint = on_eq("a", "k", "b", "k");
+        let budget = crabka_units::ByteSize::from_bytes(16 * 1_024);
+
+        let count = count_join_rows(&left, &right, JoinKind::Left, &constraint, &tctx(), budget)
+            .expect("count without joined-row materialization");
+        let error =
+            super::join_relations(left, right, JoinKind::Left, &constraint, &tctx(), budget)
+                .expect_err("wide materialized join must exceed the same budget");
+
+        assert2::assert!(count == 80);
+        assert2::assert!(error.into_pg().code == "53200");
+    }
+
+    #[test]
+    fn prepared_or_index_matches_one_shot_inner_and_left_joins() {
+        let left = rel(
+            "a",
+            &["x", "y"],
+            (0..80)
+                .map(|i| vec![i % 9, if i % 5 == 0 { i % 9 } else { (i + 1) % 9 }])
+                .collect(),
+        );
+        let right = rel("b", &["k"], (0..80).map(|i| vec![i % 7]).collect());
+        let constraint = on_or_eq("a", &["x", "y"], "b", "k");
+        let prepared = prepare_join_index(
+            &left,
+            &right,
+            &constraint,
+            crate::scanner::BLOCKING_QUERY_MEMORY,
+        )
+        .expect("prepare OR index");
+
+        for kind in [JoinKind::Inner, JoinKind::Left] {
+            let expected = join_relations(left.clone(), right.clone(), kind, &constraint, &tctx())
+                .expect("one-shot join")
+                .rows;
+            let mut actual = Vec::new();
+            for row in &left.rows {
+                actual.extend(
+                    join_relations_prepared(
+                        Relation {
+                            scope: left.scope.clone(),
+                            rows: vec![row.clone()],
+                        },
+                        &right,
+                        kind,
+                        &constraint,
+                        &tctx(),
+                        crate::scanner::BLOCKING_QUERY_MEMORY,
+                        &prepared,
+                    )
+                    .expect("prepared join")
+                    .rows,
+                );
+            }
+            assert2::assert!(actual == expected, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn indexed_or_equi_join_visits_only_the_union_of_matching_buckets() {
+        let left = rel(
+            "a",
+            &["x", "y"],
+            (0..10_000).map(|i| vec![i, (i + 1) % 10_000]).collect(),
+        );
+        let right = rel("b", &["k"], (0..10_000).map(|i| vec![i]).collect());
+        let constraint = on_or_eq("a", &["x", "y"], "b", "k");
+        let index = JoinIndex::build(
+            &left,
+            &right,
+            &constraint,
+            crate::scanner::BLOCKING_QUERY_MEMORY,
+        )
+        .expect("valid join constraint")
+        .expect("each OR branch has a hashable equality key");
+        assert2::assert!(matches!(index, JoinIndex::Disjunctive { .. }));
+
+        let mut key_buf = Vec::new();
+        let mut union = Vec::new();
+        let visited: usize = left
+            .rows
+            .iter()
+            .map(|row| index.candidates(row, &mut key_buf, &mut union).len())
+            .sum();
+
+        assert2::assert!(visited == 2 * left.rows.len());
+    }
+
+    #[test]
+    fn or_index_declines_when_any_branch_has_no_hashable_equality() {
+        let left = rel("a", &["x", "y"], (0..80).map(|i| vec![i, i]).collect());
+        let right = rel("b", &["k"], (0..80).map(|i| vec![i]).collect());
+        let constraint = JoinConstraint::On(Expr::Binary {
+            op: BinaryOp::Or,
+            left: Box::new(match on_eq("a", "x", "b", "k") {
+                JoinConstraint::On(expr) => expr,
+                _ => unreachable!(),
+            }),
+            right: Box::new(Expr::Binary {
+                op: BinaryOp::Gt,
+                left: Box::new(Expr::Column {
+                    table: Some("a".into()),
+                    name: "y".into(),
+                }),
+                right: Box::new(Expr::Column {
+                    table: Some("b".into()),
+                    name: "k".into(),
+                }),
+            }),
+        });
+
+        assert2::assert!(
+            JoinIndex::build(
+                &left,
+                &right,
+                &constraint,
+                crate::scanner::BLOCKING_QUERY_MEMORY,
+            )
+            .expect("valid join constraint")
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn or_index_declines_when_any_equality_branch_is_hash_unsafe() {
+        let left = Relation {
+            scope: Scope {
+                columns: ["x", "y"]
+                    .into_iter()
+                    .map(|name| ColumnBinding {
+                        qualifier: Some("a".into()),
+                        name: name.into(),
+                        ty: ColumnType::Int4,
+                    })
+                    .collect(),
+            },
+            rows: (0..80)
+                .map(|i| vec![Datum::Int4(i), Datum::Int4(i)])
+                .collect(),
+        };
+        let right = Relation {
+            scope: Scope {
+                columns: vec![
+                    ColumnBinding {
+                        qualifier: Some("b".into()),
+                        name: "k".into(),
+                        ty: ColumnType::Int4,
+                    },
+                    ColumnBinding {
+                        qualifier: Some("b".into()),
+                        name: "wide".into(),
+                        ty: ColumnType::Int8,
+                    },
+                ],
+            },
+            rows: (0..80)
+                .map(|i| vec![Datum::Int4(i), Datum::Int8(i64::from(i))])
+                .collect(),
+        };
+        let constraint = JoinConstraint::On(Expr::Binary {
+            op: BinaryOp::Or,
+            left: Box::new(match on_eq("a", "x", "b", "k") {
+                JoinConstraint::On(expr) => expr,
+                _ => unreachable!(),
+            }),
+            right: Box::new(match on_eq("a", "y", "b", "wide") {
+                JoinConstraint::On(expr) => expr,
+                _ => unreachable!(),
+            }),
+        });
+
+        assert2::assert!(
+            JoinIndex::build(
+                &left,
+                &right,
+                &constraint,
+                crate::scanner::BLOCKING_QUERY_MEMORY,
+            )
+            .expect("valid join constraint")
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn or_index_respects_branch_and_memory_limits() {
+        let names: Vec<String> = (0..=JoinIndex::MAX_OR_DISJUNCTS)
+            .map(|index| format!("k{index}"))
+            .collect();
+        let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let left = rel(
+            "a",
+            &name_refs,
+            (0..80).map(|value| vec![value; name_refs.len()]).collect(),
+        );
+        let right = rel("b", &["k"], (0..80).map(|i| vec![i]).collect());
+        let too_many = on_or_eq("a", &name_refs, "b", "k");
+        assert2::assert!(
+            JoinIndex::build(
+                &left,
+                &right,
+                &too_many,
+                crate::scanner::BLOCKING_QUERY_MEMORY,
+            )
+            .expect("valid join constraint")
+            .is_none()
+        );
+
+        let bounded = on_or_eq("a", &[name_refs[0], name_refs[1]], "b", "k");
+        assert2::assert!(
+            JoinIndex::build(
+                &left,
+                &right,
+                &bounded,
+                crabka_units::ByteSize::from_bytes(1),
+            )
+            .expect("valid join constraint")
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn index_discards_an_actual_allocation_over_the_budget() {
+        let left = rel("a", &["k"], (0..80).map(|i| vec![i]).collect());
+        let right = rel("b", &["k"], (0..80).map(|i| vec![i]).collect());
+        let keys = [(0, 0)];
+        let plan = EquiIndex::plan(&left, &right, &keys).expect("index plan");
+        let planned_bytes = plan.estimated_bytes;
+        let actual_bytes = EquiIndex::build_planned(&right, plan).estimated_bytes();
+        assert2::assert!(actual_bytes > planned_bytes);
+
+        let budget = crabka_units::ByteSize::from_bytes(
+            u64::try_from(actual_bytes - 1).expect("test allocation fits u64"),
+        );
+        let prepared = prepare_join_index(&left, &right, &on_eq("a", "k", "b", "k"), budget)
+            .expect("prepare index");
+        assert2::assert!(prepared.index.is_none());
+        assert2::assert!(prepared.estimated_bytes() == 0);
+
+        let actual = join_relations_prepared(
+            left.clone(),
+            &right,
+            JoinKind::Inner,
+            &on_eq("a", "k", "b", "k"),
+            &tctx(),
+            crate::scanner::BLOCKING_QUERY_MEMORY,
+            &prepared,
+        )
+        .expect("nested-loop fallback");
+        assert2::assert!(actual.rows == reference_join(&left, &right, JoinKind::Inner));
+    }
+
+    #[test]
+    fn or_index_preallocates_the_charged_union_scratch() {
+        let left = rel("a", &["x", "y"], vec![vec![0, 0]; 4]);
+        let right = rel("b", &["k"], vec![vec![0]; 1_025]);
+        let constraint = on_or_eq("a", &["x", "y"], "b", "k");
+        let index = JoinIndex::build(
+            &left,
+            &right,
+            &constraint,
+            crate::scanner::BLOCKING_QUERY_MEMORY,
+        )
+        .expect("valid join constraint")
+        .expect("OR index");
+
+        let mut key_buf = Vec::new();
+        let mut union = Vec::with_capacity(index.candidate_capacity());
+        let candidates = index
+            .candidates(&left.rows[0], &mut key_buf, &mut union)
+            .len();
+        let retained_without_union = match &index {
+            JoinIndex::Disjunctive { indexes, .. } => indexes.iter().fold(
+                indexes
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<EquiIndex>()),
+                |bytes, index| bytes.saturating_add(index.estimated_bytes()),
+            ),
+            JoinIndex::Conjunctive(_) => unreachable!("expected OR index"),
+        };
+
+        assert2::assert!(candidates == right.rows.len());
+        assert2::assert!(union.capacity() == right.rows.len());
+        assert2::assert!(
+            index.estimated_bytes()
+                == retained_without_union
+                    .saturating_add(union.capacity() * std::mem::size_of::<usize>())
+        );
+    }
+
     /// Key columns of different `Datum` variants must NOT be indexed: `Int4(1)`
     /// and `Int8(1)` compare Equal but hash apart, so bucketing them would lose
     /// matches. The nested loop still finds them.
@@ -923,6 +1734,43 @@ mod tests {
         .expect("join")
         .rows;
         assert2::assert!(joined.len() == 80);
+    }
+
+    #[test]
+    fn unsupported_equality_key_does_not_disable_a_supported_key() {
+        let relation = |qualifier: &str| Relation {
+            scope: Scope {
+                columns: vec![
+                    ColumnBinding {
+                        qualifier: Some(qualifier.into()),
+                        name: "name".into(),
+                        ty: ColumnType::Text,
+                    },
+                    ColumnBinding {
+                        qualifier: Some(qualifier.into()),
+                        name: "args".into(),
+                        ty: ColumnType::OidVector,
+                    },
+                ],
+            },
+            rows: (0..80)
+                .map(|i| {
+                    vec![
+                        Datum::Text(format!("name{}", i % 8)),
+                        Datum::OidVector(ArrayValue::new(ElemType::Int4, vec![Datum::Int4(i)])),
+                    ]
+                })
+                .collect(),
+        };
+        let left = relation("a");
+        let right = relation("b");
+
+        let index =
+            EquiIndex::build(&left, &right, &[(0, 0), (1, 1)]).expect("text key remains indexable");
+
+        assert2::assert!(index.left_key == vec![0]);
+        let mut key_buf = Vec::new();
+        assert2::assert!(index.candidates(&left.rows[0], &mut key_buf).len() == 10);
     }
 
     /// The point of the index: an equi-join on a unique key visits ONE right row

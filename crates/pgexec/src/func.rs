@@ -44,6 +44,9 @@ enum ScalarFunc {
     Concat,
     Abs,
     Mod,
+    BoolCompare {
+        equal: bool,
+    },
     Coalesce,
     NullIf,
     Greatest,
@@ -145,6 +148,8 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "concat" => ScalarFunc::Concat,
         "abs" => ScalarFunc::Abs,
         "mod" => ScalarFunc::Mod,
+        "booleq" => ScalarFunc::BoolCompare { equal: true },
+        "boolne" => ScalarFunc::BoolCompare { equal: false },
         "coalesce" => ScalarFunc::Coalesce,
         "nullif" => ScalarFunc::NullIf,
         "greatest" => ScalarFunc::Greatest,
@@ -455,6 +460,15 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
             } else {
                 Ok(promote(lt, rt))
             }
+        }
+        ScalarFunc::BoolCompare { .. } => {
+            require_arity(fc, n == 2)?;
+            for arg in args {
+                if !is_unknown_literal(arg) {
+                    require_bool(arg, scope)?;
+                }
+            }
+            Ok(ColumnType::Bool)
         }
         ScalarFunc::Coalesce | ScalarFunc::Greatest | ScalarFunc::Least | ScalarFunc::NullIf => {
             require_arity(
@@ -791,6 +805,16 @@ pub(crate) fn eval_scalar(
     }
     let f = scalar_func(&fc.name).ok_or_else(|| undefined_function(&fc.name))?;
     let args = checked_args(fc)?;
+    if matches!(f, ScalarFunc::BoolCompare { .. }) {
+        require_arity(fc, args.len() == 2)?;
+        if let Some(scope) = scope {
+            for arg in args {
+                if !is_unknown_literal(arg) {
+                    require_bool(arg, scope)?;
+                }
+            }
+        }
+    }
     match f {
         // coalesce returns the first non-NULL argument, NOT evaluating the rest
         // (so `coalesce(x, 1/0)` with x non-null never divides by zero).
@@ -897,18 +921,16 @@ pub(crate) fn eval_scalar(
                 .iter()
                 .map(&mut eval_child)
                 .collect::<Result<Vec<_>, _>>()?;
-            coerce_unknown_numeric_args(f, args, &mut vals, ctx)?;
+            coerce_unknown_args(f, args, &mut vals, ctx)?;
             eval_eager(f, fc, &vals, ctx)
         }
     }
 }
 
-/// Coerce `unknown` literal arguments of the numeric-family scalar functions
-/// into the type the call resolved to, so `sqrt('4')` and `mod('9', 4)` compute
-/// and do not complain about a text argument. PostgreSQL does this coercion at
-/// plan time. The scalar evaluator has no scope, so it re-derives the target
-/// from the arguments that DID carry a type.
-fn coerce_unknown_numeric_args(
+/// Coerce `unknown` literal arguments into the fixed type the scalar function
+/// resolves them to. PostgreSQL performs this at plan time; the scalar evaluator
+/// has no scope, so it re-derives the target from the function and typed inputs.
+fn coerce_unknown_args(
     f: ScalarFunc,
     args: &[Expr],
     vals: &mut [Datum],
@@ -918,6 +940,7 @@ fn coerce_unknown_numeric_args(
         return Ok(());
     }
     let target = match f {
+        ScalarFunc::BoolCompare { .. } => ColumnType::Bool,
         // The rounding pair's two-argument form is `numeric(value, int)`; its
         // one-argument form has a preferred `float8` candidate like the rest.
         ScalarFunc::Round | ScalarFunc::Trunc if args.len() == 2 => ColumnType::Numeric(None),
@@ -1034,6 +1057,11 @@ fn eval_eager(
         ));
     }
     match f {
+        ScalarFunc::BoolCompare { equal } => {
+            require_arity(fc, vals.len() == 2)?;
+            let same = bool_arg(&vals[0])? == bool_arg(&vals[1])?;
+            Ok(Datum::Bool(same == equal))
+        }
         ScalarFunc::Length => {
             require_arity(fc, vals.len() == 1)?;
             let n = match &vals[0] {
@@ -1591,15 +1619,50 @@ pub(crate) fn input_error(
     type_name: &str,
     time_zone: &jiff::tz::TimeZone,
 ) -> Result<Option<crabka_pgwire::error::PgError>, ExecError> {
-    let ty = ColumnType::from_sql_name(type_name).ok_or_else(|| ExecError::FunctionError {
+    let ty = input_type(type_name).ok_or_else(|| ExecError::FunctionError {
         sqlstate: "42704",
         message: format!("type \"{type_name}\" does not exist"),
     })?;
-    Ok(
-        crate::eval::cast_value(&Datum::Text(input.to_string()), ty, time_zone)
-            .err()
-            .map(ExecError::into_pg),
-    )
+    let value = Datum::Text(input.to_string());
+    let result = if matches!(ty, ColumnType::Varchar(Some(_)) | ColumnType::Char(Some(_))) {
+        crabka_pgtypes::cast::cast_assign(&value, ty, time_zone).map_err(ExecError::from)
+    } else {
+        crate::eval::cast_value(&value, ty, time_zone)
+    };
+    Ok(result.err().map(ExecError::into_pg))
+}
+
+/// Resolve the typmod spelling accepted by `regtype` arguments to PostgreSQL's
+/// soft-input functions. The ordinary expression parser already applies these
+/// modifiers; this text argument reaches the type layer directly.
+fn input_type(type_name: &str) -> Option<ColumnType> {
+    let normalized = type_name.trim().to_ascii_lowercase();
+    let Some(body) = normalized.strip_suffix(')') else {
+        return ColumnType::from_sql_name(&normalized);
+    };
+    let (base, modifier) = body.split_once('(')?;
+    let parts = modifier.split(',').map(str::trim).collect::<Vec<_>>();
+    match (base.trim(), parts.as_slice()) {
+        ("varchar" | "character varying", [limit]) => {
+            Some(ColumnType::Varchar(Some(limit.parse().ok()?)))
+        }
+        ("char" | "character" | "bpchar", [limit]) => {
+            Some(ColumnType::Char(Some(limit.parse().ok()?)))
+        }
+        ("numeric" | "decimal", [precision]) => {
+            Some(ColumnType::Numeric(Some(crabka_pgtypes::numeric::Typmod {
+                precision: precision.parse().ok()?,
+                scale: 0,
+            })))
+        }
+        ("numeric" | "decimal", [precision, scale]) => {
+            Some(ColumnType::Numeric(Some(crabka_pgtypes::numeric::Typmod {
+                precision: precision.parse().ok()?,
+                scale: scale.parse().ok()?,
+            })))
+        }
+        _ => None,
+    }
 }
 
 // ---- argument-type helpers ----
@@ -1636,9 +1699,10 @@ fn require_int(arg: &Expr, scope: &Scope) -> Result<ColumnType, ExecError> {
 }
 
 fn require_bool(arg: &Expr, scope: &Scope) -> Result<(), ExecError> {
-    match crate::eval::infer_type(arg, scope)? {
-        ColumnType::Bool => Ok(()),
-        _ => Err(no_matching_function()),
+    if crate::eval::infer_type(arg, scope)?.storage_type() == ColumnType::Bool {
+        Ok(())
+    } else {
+        Err(no_matching_function())
     }
 }
 
@@ -2554,6 +2618,35 @@ mod tests {
         assert!(ev("binary_coercible(23, 25)") == Datum::Bool(false));
     }
 
+    #[test]
+    fn boolean_comparison_builtins_are_strict_and_resolve_unknown_literals() {
+        for (sql, expected) in [
+            ("booleq(true, true)", true),
+            ("booleq(true, false)", false),
+            ("booleq(bool 'false', false)", true),
+            ("boolne(true, false)", true),
+            ("boolne(false, false)", false),
+            ("booleq('true', 'true')", true),
+            ("boolne('false', 'true')", true),
+        ] {
+            assert_eq!(ev(sql), Datum::Bool(expected), "{sql}");
+        }
+        assert_eq!(ev("booleq(null, true)"), Datum::Null);
+        assert_eq!(ev("boolne(false, null)"), Datum::Null);
+
+        for sql in ["booleq(true, false)", "boolne('true', 'false')"] {
+            assert_eq!(
+                crate::eval::infer_type(&pexpr(sql).expect("parse"), &Scope::empty())
+                    .expect("type"),
+                ColumnType::Bool,
+                "{sql}"
+            );
+        }
+        assert_eq!(err_code("booleq(1, true)", None), "42883");
+        assert_eq!(err_code("boolne(true)", None), "42883");
+        assert_eq!(ec_eval("booleq('not-a-bool', true)"), "22P02");
+    }
+
     /// The SQL-standard call forms that spell their arguments with keywords.
     /// Every expectation here comes from PostgreSQL 18.4, including the
     /// clipping and error cases, because the keyword spellings and the comma
@@ -2692,8 +2785,16 @@ mod tests {
             Datum::Bool(true)
         );
         assert_eq!(
-            ev("int4multirange(int4range(2, 4), int4range(6, 8)) @> '3'"),
+            ev("int4multirange(int4range(2, 4), int4range(6, 8)) @> 3"),
             Datum::Bool(true)
+        );
+        assert_eq!(
+            ec_eval("int4multirange(int4range(2, 4), int4range(6, 8)) @> '3'"),
+            "22P02"
+        );
+        assert_eq!(
+            ec_eval("'3' <@ int4multirange(int4range(2, 4), int4range(6, 8))"),
+            "22P02"
         );
         assert_eq!(
             ev("int4multirange(int4range(2, 4), int4range(6, 8)) << int4range(9, 10)"),
@@ -2768,6 +2869,7 @@ mod tests {
             crabka_pgtypes::usertype::UserTypeBody::Range(crabka_pgtypes::usertype::RangeBody {
                 subtype: ColumnType::Text,
                 collation: None,
+                multirange_schema: None,
                 multirange_name: None,
             }),
         );
