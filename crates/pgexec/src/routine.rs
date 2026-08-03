@@ -1374,6 +1374,41 @@ fn known_builtin(name: &str) -> bool {
         || crate::window::is_window_only_function(name)
 }
 
+fn is_regression_binary_coercible(routine: &Routine) -> bool {
+    routine.name.eq_ignore_ascii_case("binary_coercible")
+        && routine.language == "c"
+        && std::path::Path::new(&routine.body)
+            .file_stem()
+            .is_some_and(|stem| stem == "regress")
+        && routine
+            .input_params()
+            .map(|param| type_oid(&param.ty))
+            .eq([23, 23])
+        && matches!(
+            &routine.result,
+            RoutineResult::Type { ty, setof: false }
+                if type_oid(ty) == 16
+        )
+}
+
+fn falls_back_to_regression_binary_coercible(
+    kv: &dyn Kv,
+    name: &str,
+    given: &[ArgType],
+) -> bool {
+    if !name.eq_ignore_ascii_case("binary_coercible")
+        || !routines_named(kv, name)
+            .is_ok_and(|routines| routines.iter().any(is_regression_binary_coercible))
+    {
+        return false;
+    }
+    match resolve_call(kv, name, given) {
+        Ok(Some(routine)) => is_regression_binary_coercible(&routine),
+        Ok(None) | Err(ExecError::UndefinedFunction(_)) => true,
+        Err(_) => false,
+    }
+}
+
 /// The argument types a call carries, as far as they can be known without the
 /// caller's scope.
 ///
@@ -1477,6 +1512,15 @@ pub(crate) fn plpgsql_scalar_result_type(
             return None;
         }
         let given = crate::eval::static_arg_types(args, scope);
+        if given.as_ref().is_ok_and(|given| {
+            falls_back_to_regression_binary_coercible(
+                runtime.catalog.as_ref(),
+                &call.name,
+                given,
+            )
+        }) {
+            return None;
+        }
         let result = given.and_then(|given| {
             let Some(routine) = resolve_call(runtime.catalog.as_ref(), &call.name, &given)? else {
                 return Err(undefined_routine(format!(
@@ -1558,6 +1602,18 @@ pub(crate) fn eval_plpgsql_scalar_with(
                 .map(&mut eval_arg)
                 .collect::<Result<Vec<_>, _>>()?;
             let given = crate::eval::value_arg_types(args, &values);
+            if falls_back_to_regression_binary_coercible(
+                runtime.catalog.as_ref(),
+                &call.name,
+                &given,
+            ) {
+                let mut values = values.into_iter();
+                return crate::func::eval_scalar(call, ctx, |_| {
+                    values.next().ok_or_else(|| {
+                        ExecError::Unsupported("binary_coercible argument is missing".into())
+                    })
+                });
+            }
             let Some(BoundRoutineCall {
                 routine,
                 args: bound_args,
@@ -3881,6 +3937,94 @@ mod tests {
             filter: None,
         };
         assert!(inline_scalar(&kv, &call).expect("no error").is_none());
+    }
+
+    #[test]
+    fn a_c_helper_named_like_a_builtin_uses_the_builtin() {
+        let kv = Arc::new(MemKv::default());
+        define(
+            &kv,
+            "CREATE FUNCTION binary_coercible(oid, oid) RETURNS bool \
+             AS 'regress', 'binary_coercible' LANGUAGE C",
+        )
+        .expect("C helper definition");
+        let catalog: Arc<dyn Kv> = kv;
+        let call = Expr::Func(FuncCall {
+            name: "binary_coercible".into(),
+            distinct: false,
+            args: FuncArgs::Exprs(vec![
+                Expr::IntLiteral("23".into()),
+                Expr::IntLiteral("23".into()),
+            ]),
+            filter: None,
+        });
+        let scope = crate::scope::Scope::empty();
+        let ctx = crate::clock::EvalCtx::test_default();
+        with_scalar_runtime(&catalog, None, || {
+            assert!(crate::eval::infer_type(&call, &scope).expect("type") == ColumnType::Bool);
+            assert!(
+                crate::eval::eval(&call, &scope, &[], &ctx).expect("value") == Datum::Bool(true)
+            );
+        });
+    }
+
+    #[test]
+    fn unrelated_c_name_collision_does_not_use_the_builtin() {
+        let kv = Arc::new(MemKv::default());
+        define(
+            &kv,
+            "CREATE FUNCTION md5(text) RETURNS text AS 'custom' LANGUAGE C",
+        )
+        .expect("C helper definition");
+        let catalog: Arc<dyn Kv> = kv;
+        let call = Expr::Func(FuncCall {
+            name: "md5".into(),
+            distinct: false,
+            args: FuncArgs::Exprs(vec![Expr::StringLiteral("value".into())]),
+            filter: None,
+        });
+
+        with_scalar_runtime(&catalog, None, || {
+            assert!(crate::eval::infer_type(&call, &crate::scope::Scope::empty()).is_err());
+        });
+    }
+
+    #[test]
+    fn binary_coercible_overload_keeps_user_precedence() {
+        let kv = Arc::new(MemKv::default());
+        define(
+            &kv,
+            "CREATE FUNCTION binary_coercible(oid, oid) RETURNS bool \
+             AS 'regress', 'binary_coercible' LANGUAGE C",
+        )
+        .expect("C helper definition");
+        define(
+            &kv,
+            "CREATE FUNCTION binary_coercible(text, text) RETURNS bool \
+             LANGUAGE plpgsql AS $$ BEGIN RETURN false; END $$",
+        )
+        .expect("PL/pgSQL overload definition");
+        let catalog: Arc<dyn Kv> = kv;
+        let text = |value: &str| Expr::Cast {
+            expr: Box::new(Expr::StringLiteral(value.into())),
+            ty: ColumnType::Text,
+        };
+        let call = Expr::Func(FuncCall {
+            name: "binary_coercible".into(),
+            distinct: false,
+            args: FuncArgs::Exprs(vec![text("a"), text("b")]),
+            filter: None,
+        });
+        let scope = crate::scope::Scope::empty();
+        let ctx = crate::clock::EvalCtx::test_default();
+
+        with_scalar_runtime(&catalog, None, || {
+            assert!(crate::eval::infer_type(&call, &scope).expect("type") == ColumnType::Bool);
+            assert!(
+                crate::eval::eval(&call, &scope, &[], &ctx).expect("value")
+                    == Datum::Bool(false)
+            );
+        });
     }
 
     #[test]
