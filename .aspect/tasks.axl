@@ -85,26 +85,29 @@ def _affected(ctx: TaskContext) -> int:
     if code != 0:
         return code
 
-    builds = [target for target in builds_output.split("\n") if target]
+    dedicated_prefixes = [
+        "//crates/admin-ui:",
+        "//crates/broker:",
+        "//crates/client-consumer:",
+        "//crates/client-core:",
+        "//crates/client-streams:",
+        "//crates/connect-derive:",
+        "//crates/gres",
+        "//crates/grpc-gateway:",
+        "//crates/log:",
+        "//crates/metrics-service:",
+        "//crates/operator:",
+        "//crates/pgexec:",
+        "//crates/pgwire:",
+        "//crates/promql:",
+        "//crates/schema-registry:",
+        "//crates/schema-serde:",
+        "//crates/traceql:",
+        "//crates/traces:",
+    ]
+    builds = [target for target in builds_output.split("\n") if target and not any([target.startswith(prefix) for prefix in dedicated_prefixes])]
     cargo_connect_derive = "//crates/connect-derive:derive" in tests_output.split("\n")
-    tests = [target for target in tests_output.split("\n") if target and not any([
-        target.startswith("//crates/admin-ui:"),
-        target.startswith("//crates/broker:"),
-        target.startswith("//crates/client-consumer:"),
-        target.startswith("//crates/client-core:"),
-        target.startswith("//crates/client-streams:"),
-        target.startswith("//crates/connect-derive:"),
-        target.startswith("//crates/gres"),
-        target.startswith("//crates/grpc-gateway:"),
-        target.startswith("//crates/log:"),
-        target.startswith("//crates/metrics-service:"),
-        target.startswith("//crates/operator:"),
-        target.startswith("//crates/promql:"),
-        target.startswith("//crates/schema-registry:"),
-        target.startswith("//crates/schema-serde:"),
-        target.startswith("//crates/traceql:"),
-        target.startswith("//crates/traces:"),
-    ])]
+    tests = [target for target in tests_output.split("\n") if target and not any([target.startswith(prefix) for prefix in dedicated_prefixes])]
     # Coverage changes the Rust action configuration, so building a target and
     # then testing it compiles its dependency graph twice. Keep only standalone
     # build roots that the selected tests will not compile themselves.
