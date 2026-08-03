@@ -2957,12 +2957,20 @@ pub(crate) fn pg_proc_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             .collect();
         let all_types: Vec<Datum> = catalog_all_types(&routine);
         let all_modes: Vec<Datum> = catalog_all_modes(&routine);
-        let arg_names: Vec<Datum> = routine
+        let mut arg_names: Vec<Datum> = routine
             .params
             .iter()
             .map(|param| Datum::Text(param.name.clone().unwrap_or_default()))
             .collect();
-        let has_names = routine.params.iter().any(|param| param.name.is_some());
+        let mut has_names = routine.params.iter().any(|param| param.name.is_some());
+        if let RoutineResult::Table(columns) = &routine.result {
+            arg_names.extend(
+                columns
+                    .iter()
+                    .map(|(name, _)| Datum::Text(name.clone())),
+            );
+            has_names = true;
+        }
         rows.push(vec![
             Datum::Int4(i32::try_from(routine.oid).unwrap_or(0)),
             Datum::Text(routine.name.clone()),
@@ -3084,6 +3092,9 @@ pub(crate) fn builtin_pg_proc_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
                 result_type,
                 argument_types,
                 source,
+                argument_modes,
+                all_argument_types,
+                argument_names,
             ] = fields.as_slice()
             else {
                 return Err(corrupt());
@@ -3100,6 +3111,26 @@ pub(crate) fn builtin_pg_proc_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
             if flags.len() != 4 {
                 return Err(corrupt());
             }
+            let array_items = |value: &str| -> Result<Option<Vec<String>>, ExecError> {
+                if value == "-" {
+                    return Ok(None);
+                }
+                let values = value
+                    .strip_prefix('{')
+                    .and_then(|value| value.strip_suffix('}'))
+                    .ok_or_else(corrupt)?;
+                let items = values
+                    .split(',')
+                    .map(|item| item.trim().to_string())
+                    .collect::<Vec<_>>();
+                if items.is_empty() || items.iter().any(|item| item.is_empty()) {
+                    return Err(corrupt());
+                }
+                Ok(Some(items))
+            };
+            let all_argument_types = array_items(all_argument_types)?;
+            let argument_modes = array_items(argument_modes)?;
+            let argument_names = array_items(argument_names)?;
             Ok(vec![
                 Datum::Int4(int(oid)?),
                 Datum::Text((*name).to_string()),
@@ -3135,9 +3166,44 @@ pub(crate) fn builtin_pg_proc_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
                         i32::from(short(argument_count)?),
                     )],
                 )),
-                Datum::Null,
-                Datum::Null,
-                Datum::Null,
+                match all_argument_types {
+                    Some(types) => Datum::Array(crabka_pgtypes::ArrayValue::new(
+                        crabka_pgtypes::ElemType::Int4,
+                        types
+                            .into_iter()
+                            .map(|value| int(&value).map(Datum::Int4))
+                            .collect::<Result<Vec<_>, _>>()?,
+                    )),
+                    None => Datum::Null,
+                },
+                match argument_modes {
+                    Some(modes) => {
+                        let modes = modes
+                        .into_iter()
+                        .map(|mode| match mode.as_str() {
+                            "i" | "o" | "b" | "v" | "t" => {
+                                Ok(Datum::Text(mode))
+                            }
+                            _ => Err(corrupt()),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                        Datum::Array(crabka_pgtypes::ArrayValue::new(
+                            crabka_pgtypes::ElemType::Text,
+                            modes,
+                        ))
+                    }
+                    None => Datum::Null,
+                },
+                match argument_names {
+                    Some(names) => Datum::Array(crabka_pgtypes::ArrayValue::new(
+                        crabka_pgtypes::ElemType::Text,
+                        names
+                            .into_iter()
+                            .map(Datum::Text)
+                            .collect(),
+                    )),
+                    None => Datum::Null,
+                },
                 Datum::Null,
                 Datum::Null,
                 Datum::Text((*source).to_string()),
@@ -3389,6 +3455,77 @@ mod tests {
                 .expect("catalog routine");
             assert!(row[25] == Datum::Text(source.to_string()));
         }
+    }
+
+    #[test]
+    fn builtin_routines_preserve_catalog_argument_modes() {
+        let rows = builtin_pg_proc_rows().expect("built-in pg_proc rows");
+        let concat_ws = rows
+            .iter()
+            .find(|row| row[0] == Datum::Int4(3059))
+            .expect("concat_ws row");
+        assert!(
+            concat_ws[21]
+                == Datum::Array(crabka_pgtypes::ArrayValue::new(
+                    crabka_pgtypes::ElemType::Text,
+                    vec![Datum::Text("i".into()), Datum::Text("v".into())],
+                ))
+        );
+        let boolin = rows
+            .iter()
+            .find(|row| row[0] == Datum::Int4(1242))
+            .expect("boolin row");
+        assert!(boolin[21] == Datum::Null);
+        let aclexplode = rows
+            .iter()
+            .find(|row| row[0] == Datum::Int4(1689))
+            .expect("aclexplode row");
+        assert!(
+            aclexplode[20]
+                == Datum::Array(crabka_pgtypes::ArrayValue::new(
+                    crabka_pgtypes::ElemType::Int4,
+                    vec![1034, 26, 26, 25, 16]
+                        .into_iter()
+                        .map(Datum::Int4)
+                        .collect(),
+                ))
+        );
+        assert!(
+            aclexplode[22]
+                == Datum::Array(crabka_pgtypes::ArrayValue::new(
+                    crabka_pgtypes::ElemType::Text,
+                    ["acl", "grantor", "grantee", "privilege_type", "is_grantable"]
+                        .into_iter()
+                        .map(|name| Datum::Text(name.into()))
+                        .collect(),
+                ))
+        );
+    }
+
+    #[test]
+    fn returns_table_catalog_names_include_output_columns() {
+        let kv = MemKv::default();
+        define(
+            &kv,
+            "CREATE FUNCTION tab(n int) RETURNS TABLE(a int, b text) AS 'SELECT 1' LANGUAGE sql",
+        )
+        .expect("define table function");
+        let rows = pg_proc_rows(&kv).expect("pg_proc rows");
+        let row = rows
+            .iter()
+            .find(|row| row[1] == Datum::Text("tab".into()))
+            .expect("table function row");
+        assert!(
+            row[22]
+                == Datum::Array(crabka_pgtypes::ArrayValue::new(
+                    crabka_pgtypes::ElemType::Text,
+                    vec![
+                        Datum::Text("n".into()),
+                        Datum::Text("a".into()),
+                        Datum::Text("b".into()),
+                    ],
+                ))
+        );
     }
 
     /// Run `sql` as a definition against `kv`, returning the completion tag.
