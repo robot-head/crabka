@@ -656,7 +656,14 @@ fn pg_cast_rows() -> Vec<Vec<Datum>> {
     crate::builtin_casts::BUILTIN_CASTS
         .iter()
         .map(|&(oid, source, target, function, context, method)| {
-            vec![int(oid), int(source), int(target), int(function), text(context), text(method)]
+            vec![
+                int(oid),
+                int(source),
+                int(target),
+                int(function),
+                text(context),
+                text(method),
+            ]
         })
         .collect()
 }
@@ -664,18 +671,20 @@ fn pg_cast_rows() -> Vec<Vec<Datum>> {
 fn pg_conversion_rows() -> Vec<Vec<Datum>> {
     crate::builtin_conversions::BUILTIN_CONVERSIONS
         .iter()
-        .map(|&(oid, name, namespace, owner, source, target, function, default)| {
-            vec![
-                int(oid),
-                text(name),
-                int(namespace),
-                int(owner),
-                int(source),
-                int(target),
-                int(function),
-                Datum::Bool(default),
-            ]
-        })
+        .map(
+            |&(oid, name, namespace, owner, source, target, function, default)| {
+                vec![
+                    int(oid),
+                    text(name),
+                    int(namespace),
+                    int(owner),
+                    int(source),
+                    int(target),
+                    int(function),
+                    Datum::Bool(default),
+                ]
+            },
+        )
         .collect()
 }
 
@@ -1169,11 +1178,7 @@ fn pg_catalog_columns_rest(name: &str) -> Vec<Column> {
             ("waitstart", Timestamptz),
         ]),
         "pg_replication_slots" => pg_replication_slots_columns(),
-        "pg_shmem_allocations_numa" => cols(&[
-            ("name", Text),
-            ("numa_node", Int4),
-            ("size", Int8),
-        ]),
+        "pg_shmem_allocations_numa" => cols(&[("name", Text), ("numa_node", Int4), ("size", Int8)]),
         "pg_stat_activity" => pg_stat_activity_columns(),
         "pg_indexes" => cols(&[
             ("schemaname", Text),
@@ -1519,29 +1524,33 @@ fn pg_tablespace_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         .into_iter()
         .map(|(oid, name)| vec![int(oid), text(name), int(10), Datum::Null, Datum::Null])
         .collect();
-    rows.extend(crabka_pgcatalog::list_tablespaces(kv)?.into_iter().map(|tablespace| {
-        let options = if tablespace.options.is_empty() {
-            Datum::Null
-        } else {
-            Datum::Array(crabka_pgtypes::ArrayValue::new(
-                ElemType::Text,
-                tablespace
-                    .options
-                    .into_iter()
-                    .map(|(name, value)| Datum::Text(format!("{name}={value}")))
-                    .collect(),
-            ))
-        };
-        vec![
-            int(tablespace.oid as i32),
-            text(&tablespace.name),
-            int(*role_oids
-                .get(&tablespace.owner)
-                .unwrap_or(&crate::catalog_fn::BOOTSTRAP_ROLE_OID)),
-            Datum::Null,
-            options,
-        ]
-    }));
+    rows.extend(
+        crabka_pgcatalog::list_tablespaces(kv)?
+            .into_iter()
+            .map(|tablespace| {
+                let options = if tablespace.options.is_empty() {
+                    Datum::Null
+                } else {
+                    Datum::Array(crabka_pgtypes::ArrayValue::new(
+                        ElemType::Text,
+                        tablespace
+                            .options
+                            .into_iter()
+                            .map(|(name, value)| Datum::Text(format!("{name}={value}")))
+                            .collect(),
+                    ))
+                };
+                vec![
+                    int(tablespace.oid as i32),
+                    text(&tablespace.name),
+                    int(*role_oids
+                        .get(&tablespace.owner)
+                        .unwrap_or(&crate::catalog_fn::BOOTSTRAP_ROLE_OID)),
+                    Datum::Null,
+                    options,
+                ]
+            }),
+    );
     Ok(rows)
 }
 
@@ -1559,20 +1568,22 @@ fn pg_opfamily_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             ]
         })
         .collect::<Vec<_>>();
-    rows.extend(crabka_pgcatalog::list_operator_families(kv)?
-        .into_iter()
-        .map(|family| {
-            Ok(vec![
-                int(i32::try_from(family.oid).map_err(|_| {
-                    ExecError::Unsupported("operator family oid exceeds int4".into())
-                })?),
-                int(access_method_oid(&family.method).unwrap_or_default()),
-                text(&family.name.name),
-                int(namespace_oid(&family.name.schema)),
-                int(owners.get(&family.owner).copied().unwrap_or_default()),
-            ])
-        })
-        .collect::<Result<Vec<_>, ExecError>>()?);
+    rows.extend(
+        crabka_pgcatalog::list_operator_families(kv)?
+            .into_iter()
+            .map(|family| {
+                Ok(vec![
+                    int(i32::try_from(family.oid).map_err(|_| {
+                        ExecError::Unsupported("operator family oid exceeds int4".into())
+                    })?),
+                    int(access_method_oid(&family.method).unwrap_or_default()),
+                    text(&family.name.name),
+                    int(namespace_oid(&family.name.schema)),
+                    int(owners.get(&family.owner).copied().unwrap_or_default()),
+                ])
+            })
+            .collect::<Result<Vec<_>, ExecError>>()?,
+    );
     Ok(rows)
 }
 
@@ -1597,7 +1608,12 @@ fn pg_amop_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         .collect::<Vec<_>>();
     let methods = crabka_pgcatalog::list_operator_families(kv)?
         .into_iter()
-        .map(|family| (family.oid, access_method_oid(&family.method).unwrap_or_default()))
+        .map(|family| {
+            (
+                family.oid,
+                access_method_oid(&family.method).unwrap_or_default(),
+            )
+        })
         .collect::<BTreeMap<_, _>>();
     for (index, (family, member)) in crabka_pgcatalog::list_operator_family_members(kv)?
         .into_iter()
@@ -1615,7 +1631,8 @@ fn pg_amop_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             left_type_oid,
             right_type_oid,
             order_family_oid,
-        } = member else {
+        } = member
+        else {
             continue;
         };
         let operator = operator.rsplit('.').next().unwrap_or(&operator);
@@ -1704,7 +1721,8 @@ fn pg_amproc_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             left_type_oid,
             right_type_oid,
             argument_type_oids,
-        } = member else {
+        } = member
+        else {
             continue;
         };
         let name = function.rsplit('.').next().unwrap_or(&function).to_string();
@@ -1769,40 +1787,45 @@ fn pg_opclass_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let owners = role_oids(kv)?;
     let mut rows = crate::builtin_opclasses::BUILTIN_OPERATOR_CLASSES
         .iter()
-        .map(|(oid, method, name, family, input_type, default, key_type)| {
-            vec![
-                int(*oid),
-                int(*method),
-                text(name),
-                int(crate::exec::PG_CATALOG_NAMESPACE_OID),
-                int(crate::catalog_fn::BOOTSTRAP_ROLE_OID),
-                int(*family),
-                int(*input_type),
-                Datum::Bool(*default),
-                int(*key_type),
-            ]
-        })
+        .map(
+            |(oid, method, name, family, input_type, default, key_type)| {
+                vec![
+                    int(*oid),
+                    int(*method),
+                    text(name),
+                    int(crate::exec::PG_CATALOG_NAMESPACE_OID),
+                    int(crate::catalog_fn::BOOTSTRAP_ROLE_OID),
+                    int(*family),
+                    int(*input_type),
+                    Datum::Bool(*default),
+                    int(*key_type),
+                ]
+            },
+        )
         .collect::<Vec<_>>();
-    rows.extend(crabka_pgcatalog::list_operator_classes(kv)?
-        .into_iter()
-        .map(|class| {
-            let oid = |oid: u32| {
-                i32::try_from(oid)
-                    .map_err(|_| ExecError::Unsupported("operator class oid exceeds int4".into()))
-            };
-            Ok(vec![
-                int(oid(class.oid)?),
-                int(access_method_oid(&class.method).unwrap_or_default()),
-                text(&class.name.name),
-                int(namespace_oid(&class.name.schema)),
-                int(owners.get(&class.owner).copied().unwrap_or_default()),
-                int(oid(class.family_oid)?),
-                int(oid(class.input_type_oid)?),
-                Datum::Bool(class.default),
-                int(oid(class.key_type_oid)?),
-            ])
-        })
-        .collect::<Result<Vec<_>, ExecError>>()?);
+    rows.extend(
+        crabka_pgcatalog::list_operator_classes(kv)?
+            .into_iter()
+            .map(|class| {
+                let oid = |oid: u32| {
+                    i32::try_from(oid).map_err(|_| {
+                        ExecError::Unsupported("operator class oid exceeds int4".into())
+                    })
+                };
+                Ok(vec![
+                    int(oid(class.oid)?),
+                    int(access_method_oid(&class.method).unwrap_or_default()),
+                    text(&class.name.name),
+                    int(namespace_oid(&class.name.schema)),
+                    int(owners.get(&class.owner).copied().unwrap_or_default()),
+                    int(oid(class.family_oid)?),
+                    int(oid(class.input_type_oid)?),
+                    Datum::Bool(class.default),
+                    int(oid(class.key_type_oid)?),
+                ])
+            })
+            .collect::<Result<Vec<_>, ExecError>>()?,
+    );
     Ok(rows)
 }
 
@@ -1888,8 +1911,9 @@ fn pg_sequence_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
 /// both read exactly these two.
 fn pg_description_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let corrupt = || ExecError::Unsupported("built-in pg_description fixture is corrupt".into());
-    let descriptions = zstd::decode_all(crate::builtin_proc_descriptions::BUILTIN_PROC_DESCRIPTIONS)
-        .map_err(|_| corrupt())?;
+    let descriptions =
+        zstd::decode_all(crate::builtin_proc_descriptions::BUILTIN_PROC_DESCRIPTIONS)
+            .map_err(|_| corrupt())?;
     let descriptions = std::str::from_utf8(&descriptions).map_err(|_| corrupt())?;
     let mut rows = descriptions
         .lines()

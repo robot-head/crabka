@@ -3433,9 +3433,8 @@ impl SqlSession {
         let params = values
             .iter()
             .map(|(value, ty)| {
-                let value = (!value.is_null()).then(|| {
-                    bytes::Bytes::from(crabka_pgtypes::encoding::encode_binary(value))
-                });
+                let value = (!value.is_null())
+                    .then(|| bytes::Bytes::from(crabka_pgtypes::encoding::encode_binary(value)));
                 BoundParam {
                     type_oid: Some(ty.oid()),
                     format: 1,
@@ -4168,8 +4167,7 @@ impl SqlSession {
                 frame.advisory_lock_count,
             )
         };
-        self.lockmgr
-            .restore_locks_as(self.lock_owner, &row_locks);
+        self.lockmgr.restore_locks_as(self.lock_owner, &row_locks);
         let retained_unique_relations = row_locks
             .keys()
             .filter_map(|key| match key {
@@ -4806,7 +4804,9 @@ impl SqlSession {
                 validate_tablespace_options(options.iter().map(|(name, _)| name.as_str()))?;
                 let owner = owner.as_deref().unwrap_or(&self.current_role);
                 if !crabka_pgcatalog::role_exists(&*self.catalog_kv, owner)? {
-                    return Err(crabka_pgcatalog::CatalogError::UndefinedObject(owner.into()).into());
+                    return Err(
+                        crabka_pgcatalog::CatalogError::UndefinedObject(owner.into()).into(),
+                    );
                 }
                 let _catalog_guard = Arc::clone(&self.catalog_lock).lock_owned().await;
                 let ops = crabka_pgcatalog::create_tablespace_ops(
@@ -4854,9 +4854,7 @@ impl SqlSession {
                     })?;
                 match action {
                     TablespaceAlterAction::Set(options) => {
-                        validate_tablespace_options(
-                            options.iter().map(|(name, _)| name.as_str()),
-                        )?;
+                        validate_tablespace_options(options.iter().map(|(name, _)| name.as_str()))?;
                         for (name, value) in options {
                             if let Some(existing) = tablespace
                                 .options
@@ -4885,28 +4883,25 @@ impl SqlSession {
                             owner
                         };
                         if !crabka_pgcatalog::role_exists(&*self.catalog_kv, owner)? {
-                            return Err(
-                                crabka_pgcatalog::CatalogError::UndefinedObject(owner.clone())
-                                    .into(),
-                            );
+                            return Err(crabka_pgcatalog::CatalogError::UndefinedObject(
+                                owner.clone(),
+                            )
+                            .into());
                         }
                         tablespace.owner.clone_from(owner);
                     }
                 }
-                let ops = crabka_pgcatalog::replace_tablespace_ops(
-                    &*self.catalog_kv,
-                    name,
-                    &tablespace,
-                )
-                .map_err(|error| match error {
-                    crabka_pgcatalog::CatalogError::DuplicateObject(_) => {
-                        tablespace_duplicate(&tablespace.name)
-                    }
-                    crabka_pgcatalog::CatalogError::UndefinedObject(_) => {
-                        tablespace_missing(name)
-                    }
-                    other => other.into(),
-                })?;
+                let ops =
+                    crabka_pgcatalog::replace_tablespace_ops(&*self.catalog_kv, name, &tablespace)
+                        .map_err(|error| match error {
+                            crabka_pgcatalog::CatalogError::DuplicateObject(_) => {
+                                tablespace_duplicate(&tablespace.name)
+                            }
+                            crabka_pgcatalog::CatalogError::UndefinedObject(_) => {
+                                tablespace_missing(name)
+                            }
+                            other => other.into(),
+                        })?;
                 self.commit_catalog(ops).await?;
                 Ok(QueryResult::Command {
                     tag: "ALTER TABLESPACE".into(),
@@ -5016,8 +5011,8 @@ impl SqlSession {
                     }
                 }
                 .map_err(|_| operator_object_missing(*kind, &name.name, &method))?;
-                let superuser = self.current_role == self.authenticated_user
-                    || self.current_role == "postgres";
+                let superuser =
+                    self.current_role == self.authenticated_user || self.current_role == "postgres";
                 let member_action = matches!(
                     action,
                     OperatorObjectAlterAction::AddMembers(_)
@@ -5201,16 +5196,15 @@ impl SqlSession {
                                     .copied()
                                     .or_else(|| argument_types.get(1).and_then(|ty| ty.column()))
                                     .unwrap_or(left);
-                                if method == "btree"
-                                    && matches!(*number, 4 | 6)
-                                    && left != right
-                                {
+                                if method == "btree" && matches!(*number, 4 | 6) && left != right {
                                     let message = if *number == 4 {
                                         "ordering equal image functions must not be cross-type"
                                     } else {
                                         "btree skip support functions must not be cross-type"
                                     };
-                                    return Err(ExecError::Remote(PgError::error("42P17", message)));
+                                    return Err(ExecError::Remote(PgError::error(
+                                        "42P17", message,
+                                    )));
                                 }
                                 if matches!((method.as_str(), *number), ("btree", 1) | ("hash", 1))
                                     && named.iter().any(|routine| {
@@ -5233,7 +5227,9 @@ impl SqlSession {
                                     } else {
                                         "hash function 1 must return integer"
                                     };
-                                    return Err(ExecError::Remote(PgError::error("42P17", message)));
+                                    return Err(ExecError::Remote(PgError::error(
+                                        "42P17", message,
+                                    )));
                                 }
                                 crabka_pgcatalog::OperatorFamilyMember::Function {
                                     number: *number,
@@ -5364,12 +5360,10 @@ impl SqlSession {
                                 owner,
                             )?
                         {
-                            return Err(ExecError::Remote(
-                                crabka_pgwire::error::PgError::error(
-                                    "42501",
-                                    format!("must be able to SET ROLE \"{owner}\""),
-                                ),
-                            ));
+                            return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+                                "42501",
+                                format!("must be able to SET ROLE \"{owner}\""),
+                            )));
                         }
                         owner.clone()
                     }
@@ -7530,13 +7524,14 @@ impl SqlSession {
                 .await
                 .map_err(crate::exec::lock_acquire_error)?;
             if let TxnState::InTransaction(context) = &mut self.state {
-                context.unique_index_guards.entry(*table).or_insert_with(|| {
-                    UniqueIndexGuard {
+                context
+                    .unique_index_guards
+                    .entry(*table)
+                    .or_insert_with(|| UniqueIndexGuard {
                         gates: Arc::clone(&self.unique_index_gates),
                         table: *table,
                         owner,
-                    }
-                });
+                    });
                 None
             } else {
                 Some(UniqueIndexGuard {
@@ -8153,11 +8148,8 @@ impl SqlSession {
                 )? {
                     UniqueLocalSerialization::None => None,
                     UniqueLocalSerialization::Shared(table) => Some(
-                        self.acquire_unique_index_guard(
-                            table,
-                            crate::lockmgr::LockMode::Shared,
-                        )
-                        .await?,
+                        self.acquire_unique_index_guard(table, crate::lockmgr::LockMode::Shared)
+                            .await?,
                     ),
                 };
                 // Autocommit UPDATE/DELETE's eval_plan_qual re-check reads range 0's
@@ -8368,11 +8360,8 @@ impl SqlSession {
                 )? {
                     UniqueLocalSerialization::None => None,
                     UniqueLocalSerialization::Shared(table) => Some(
-                        self.acquire_unique_index_guard(
-                            table,
-                            crate::lockmgr::LockMode::Shared,
-                        )
-                        .await?,
+                        self.acquire_unique_index_guard(table, crate::lockmgr::LockMode::Shared)
+                            .await?,
                     ),
                 };
                 let xid = self.procarray.begin_write()?;
@@ -8845,9 +8834,8 @@ impl SqlSession {
     /// (the decision was recorded once, globally, by the coordinator).
     fn finish_current_txn(&mut self, keep_holdable: bool) {
         if !keep_holdable
-            && let TxnState::InTransaction(ctx)
-                | TxnState::Failed(ctx)
-                | TxnState::Prepared(ctx) = &self.state
+            && let TxnState::InTransaction(ctx) | TxnState::Failed(ctx) | TxnState::Prepared(ctx) =
+                &self.state
         {
             self.current_role.clone_from(&ctx.role_at_start);
         }
@@ -9579,10 +9567,10 @@ impl ParamBinder<'_> {
                 self.bind_expr_with_scope_and_ctes(expr, None, scope, ctes)?;
             }
             Expr::Binary { op, left, right } => {
-                let left_expected = binary_param_type(*op, right, true, scope)
-                    .or(expected_for_binary(*op));
-                let right_expected = binary_param_type(*op, left, false, scope)
-                    .or(expected_for_binary(*op));
+                let left_expected =
+                    binary_param_type(*op, right, true, scope).or(expected_for_binary(*op));
+                let right_expected =
+                    binary_param_type(*op, left, false, scope).or(expected_for_binary(*op));
                 self.bind_expr_with_scope_and_ctes(left, left_expected, scope, ctes)?;
                 self.bind_expr_with_scope_and_ctes(right, right_expected, scope, ctes)?;
             }
@@ -9789,8 +9777,9 @@ fn binary_param_type(
         BinaryOp::JsonPathMatch => match (param_is_left, infer_param_context_type(other, scope)) {
             (true, Some(ColumnType::JsonPath)) => Some(ColumnType::Jsonb),
             (false, Some(ColumnType::Jsonb)) => Some(ColumnType::JsonPath),
-            (true, Some(ColumnType::TsVector))
-            | (false, Some(ColumnType::TsVector)) => Some(ColumnType::TsQuery),
+            (true, Some(ColumnType::TsVector)) | (false, Some(ColumnType::TsVector)) => {
+                Some(ColumnType::TsQuery)
+            }
             (false, Some(ColumnType::TsQuery)) => Some(ColumnType::TsVector),
             // `text @@ tsquery` is the preferred overload for an unknown left
             // operand; it parses the document text into a tsvector internally.
@@ -11330,9 +11319,7 @@ fn operator_family_type_name(oid: u32) -> String {
     .map_or_else(|| oid.to_string(), |ty| ty.name().to_string())
 }
 
-fn operator_family_member_repeated(
-    member: crabka_pgcatalog::OperatorFamilyMemberKey,
-) -> ExecError {
+fn operator_family_member_repeated(member: crabka_pgcatalog::OperatorFamilyMemberKey) -> ExecError {
     let (kind, number, types) = operator_family_member_parts(member);
     ExecError::Remote(PgError::error(
         "42710",
@@ -11406,7 +11393,11 @@ fn resolve_ordering_family_oid(
     scope: &crate::relname::ResolutionScope,
     reference: &crabka_pgparser::ast::RelationRef,
 ) -> Result<u32, ExecError> {
-    if reference.schema.as_deref().is_none_or(|schema| schema == "pg_catalog") {
+    if reference
+        .schema
+        .as_deref()
+        .is_none_or(|schema| schema == "pg_catalog")
+    {
         if let Some(oid) = crate::catalog_rel::builtin_operator_family_oid("btree", &reference.name)
         {
             return u32::try_from(oid)
@@ -11443,8 +11434,7 @@ fn attach_hidden_target_alias_diagnostic(
     stmt: &Statement,
     mut error: PgError,
 ) -> PgError {
-    use crabka_pgparser::ast::Expr;
-    use crabka_pgparser::token::Token;
+    use crabka_pgparser::{ast::Expr, token::Token};
 
     if error.code != "42P01" || error.diagnostics.is_some() {
         return error;
@@ -11515,7 +11505,11 @@ fn attach_hidden_target_alias_diagnostic(
 fn attach_undefined_function_position(sql: &str, error: PgError) -> PgError {
     use crabka_pgparser::token::Token;
 
-    if sql.trim_start().to_ascii_lowercase().starts_with("alter operator family") {
+    if sql
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("alter operator family")
+    {
         return error;
     }
     if error.code != "42883"
@@ -12918,12 +12912,7 @@ mod tests {
             .simple_query("SELECT pg_advisory_xact_lock(42)")
             .await
             .expect("advisory lock");
-        assert!(
-            !session
-                .lockmgr
-                .held_locks_as(session.lock_owner)
-                .is_empty()
-        );
+        assert!(!session.lockmgr.held_locks_as(session.lock_owner).is_empty());
         assert!(
             session
                 .session_locks
@@ -14272,11 +14261,17 @@ mod tests {
             ),
             (
                 "SELECT $1::tsquery @@ $2",
-                vec![crabka_pgtypes::oids::TSQUERY, crabka_pgtypes::oids::TSVECTOR],
+                vec![
+                    crabka_pgtypes::oids::TSQUERY,
+                    crabka_pgtypes::oids::TSVECTOR,
+                ],
             ),
             (
                 "SELECT $1 @@ $2::tsvector",
-                vec![crabka_pgtypes::oids::TSQUERY, crabka_pgtypes::oids::TSVECTOR],
+                vec![
+                    crabka_pgtypes::oids::TSQUERY,
+                    crabka_pgtypes::oids::TSVECTOR,
+                ],
             ),
             (
                 "SELECT $1::text @@ $2",
@@ -15860,10 +15855,7 @@ mod notify_and_binary_parameter_tests {
     #[test]
     fn jsonpath_parameters_are_canonicalized_in_both_wire_formats() {
         let expected = Datum::JsonPath("$.\"a\"".into());
-        let text = decode(
-            &param(oids::JSONPATH, 0, b"lax $.a"),
-            ColumnType::JsonPath,
-        );
+        let text = decode(&param(oids::JSONPATH, 0, b"lax $.a"), ColumnType::JsonPath);
         assert!(text.expect("text jsonpath") == expected);
 
         let binary = decode(
@@ -15872,20 +15864,18 @@ mod notify_and_binary_parameter_tests {
         );
         assert!(binary.expect("binary jsonpath") == expected);
 
-        let invalid = decode(
-            &param(oids::JSONPATH, 0, b""),
-            ColumnType::JsonPath,
-        )
-        .expect_err("empty jsonpath");
+        let invalid = decode(&param(oids::JSONPATH, 0, b""), ColumnType::JsonPath)
+            .expect_err("empty jsonpath");
         assert!(invalid.code == "22P02");
 
-        let version = decode(
-            &param(oids::JSONPATH, 1, b"\x02$"),
-            ColumnType::JsonPath,
-        )
-        .expect_err("version 2");
+        let version = decode(&param(oids::JSONPATH, 1, b"\x02$"), ColumnType::JsonPath)
+            .expect_err("version 2");
         assert!(version.code == "XX000");
-        assert!(version.message.contains("unsupported jsonpath version number: 2"));
+        assert!(
+            version
+                .message
+                .contains("unsupported jsonpath version number: 2")
+        );
 
         let empty = decode(&param(oids::JSONPATH, 1, b""), ColumnType::JsonPath)
             .expect_err("empty binary jsonpath");
@@ -15984,10 +15974,7 @@ mod notify_and_binary_parameter_tests {
             vec![crabka_pgtypes::ArrayDim::new(0, 2)],
         ));
         let encoded = encoding::encode_binary(&expected);
-        let decoded = decode(
-            &param(oids::OIDVECTOR, 1, &encoded),
-            ColumnType::OidVector,
-        );
+        let decoded = decode(&param(oids::OIDVECTOR, 1, &encoded), ColumnType::OidVector);
         assert!(decoded.expect("decode") == expected);
     }
 
@@ -17566,7 +17553,10 @@ mod session_conformance_tests {
             .await
             .expect("set role inside transaction");
         assert!(state(&mut session, "SELECT 1 / 0").await == "22012");
-        session.simple_query("ROLLBACK").await.expect("rollback role");
+        session
+            .simple_query("ROLLBACK")
+            .await
+            .expect("rollback role");
         assert!(scalar(&mut session, "SELECT current_user").await == "member_role");
         assert!(state(&mut session, "SET ROLE unrelated_role").await == "42501");
     }
@@ -17695,7 +17685,10 @@ mod session_conformance_tests {
             .await
             .expect("table and row");
 
-        for (sql, alias) in [("DELETE FROM alias_target AS d WHERE alias_target.a > 0", "d")] {
+        for (sql, alias) in [(
+            "DELETE FROM alias_target AS d WHERE alias_target.a > 0",
+            "d",
+        )] {
             let position = sql[..sql
                 .rfind("alias_target.a")
                 .expect("qualified original target")]

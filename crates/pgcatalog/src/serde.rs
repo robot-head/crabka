@@ -18,9 +18,9 @@ use crabka_pgtypes::{
 
 use crate::{
     CheckConstraint, Column, ColumnDefault, ExclusionOperator, ForeignDataWrapper, ForeignKey,
-    ForeignServer, ForeignTableMeta, HashSharding, IdentityKind, Index, IndexConstraint, IndexMethod,
-    IndexPlacement, MatchType, ReferentialAction, Sequence, ShardingStrategy, TableOptions,
-    UserMapping, View,
+    ForeignServer, ForeignTableMeta, HashSharding, IdentityKind, Index, IndexConstraint,
+    IndexMethod, IndexPlacement, MatchType, ReferentialAction, Sequence, ShardingStrategy,
+    TableOptions, UserMapping, View,
 };
 
 /// Everything [`deserialize_schema`] recovers from a stored table schema.

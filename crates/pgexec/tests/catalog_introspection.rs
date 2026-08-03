@@ -178,7 +178,17 @@ async fn pg_conversion_exposes_postgresql_builtin_conversions() {
     )
     .await;
     assert2::assert!(
-        listed == vec![some(&["4402", "koi8_r_to_mic", "11", "10", "22", "7", "4302", "t"])]
+        listed
+            == vec![some(&[
+                "4402",
+                "koi8_r_to_mic",
+                "11",
+                "10",
+                "22",
+                "7",
+                "4302",
+                "t"
+            ])]
     );
 }
 

@@ -263,7 +263,10 @@ async fn jsonpath_defaults_arrays_and_assignment_keep_native_identity() {
     };
     assert_eq!(fields[0].type_oid, 4073);
     assert_eq!(fields[1].type_oid, 4073);
-    assert_eq!(text(&array_rows[0][0]), Some("{\"$.\\\"a\\\"\",\"$.\\\"b\\\"\"}"));
+    assert_eq!(
+        text(&array_rows[0][0]),
+        Some("{\"$.\\\"a\\\"\",\"$.\\\"b\\\"\"}")
+    );
     assert!(
         text(&array_rows[0][1])
             .expect("array_append result")
@@ -277,7 +280,10 @@ async fn jsonpath_defaults_arrays_and_assignment_keep_native_identity() {
         "SELECT ARRAY['lax $.grouped', '$.b'::jsonpath], count(*) FROM path_values",
     )
     .await;
-    assert_eq!(text(&rows(&grouped[0])[0][0]), Some("{\"$.\\\"grouped\\\"\",\"$.\\\"b\\\"\"}"));
+    assert_eq!(
+        text(&rows(&grouped[0])[0][0]),
+        Some("{\"$.\\\"grouped\\\"\",\"$.\\\"b\\\"\"}")
+    );
 
     run(
         &mut session,

@@ -272,17 +272,19 @@ async fn unique_index_backfill_waits_for_inflight_dml() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn independently_constructed_engines_use_distinct_gate_owners() {
     let kv = Arc::new(MemKv::new());
-    let engine1 = Arc::new(
-        SqlEngine::with_kv(Arc::clone(&kv) as Arc<dyn Kv>).expect("first engine"),
-    );
-    let engine2 = Arc::new(
-        SqlEngine::with_kv(Arc::clone(&kv) as Arc<dyn Kv>).expect("second engine"),
-    );
+    let engine1 =
+        Arc::new(SqlEngine::with_kv(Arc::clone(&kv) as Arc<dyn Kv>).expect("first engine"));
+    let engine2 =
+        Arc::new(SqlEngine::with_kv(Arc::clone(&kv) as Arc<dyn Kv>).expect("second engine"));
 
     // This is engine1's first session, and the DDL task uses engine2's first
     // session. Per-engine owner counters would alias both as owner zero.
     let mut writer = engine1.connect();
-    run(&mut writer, "CREATE TABLE t (id int); BEGIN; INSERT INTO t VALUES (1)").await;
+    run(
+        &mut writer,
+        "CREATE TABLE t (id int); BEGIN; INSERT INTO t VALUES (1)",
+    )
+    .await;
 
     let ddl = tokio::spawn(async move {
         let mut session = engine2.connect();
@@ -464,7 +466,9 @@ async fn crossed_transactional_backfills_report_one_deadlock() {
             .simple_query("CREATE UNIQUE INDEX b_id_idx ON b (id)")
             .await;
         let code = result.as_ref().err().map(|error| error.code.clone());
-        let _ = t1.simple_query(if result.is_ok() { "COMMIT" } else { "ROLLBACK" }).await;
+        let _ = t1
+            .simple_query(if result.is_ok() { "COMMIT" } else { "ROLLBACK" })
+            .await;
         code
     });
     let second = tokio::spawn(async move {
@@ -472,16 +476,27 @@ async fn crossed_transactional_backfills_report_one_deadlock() {
             .simple_query("CREATE UNIQUE INDEX a_id_idx ON a (id)")
             .await;
         let code = result.as_ref().err().map(|error| error.code.clone());
-        let _ = t2.simple_query(if result.is_ok() { "COMMIT" } else { "ROLLBACK" }).await;
+        let _ = t2
+            .simple_query(if result.is_ok() { "COMMIT" } else { "ROLLBACK" })
+            .await;
         code
     });
 
     let codes = tokio::time::timeout(Duration::from_secs(10), async {
-        [first.await.expect("first join"), second.await.expect("second join")]
+        [
+            first.await.expect("first join"),
+            second.await.expect("second join"),
+        ]
     })
     .await
     .expect("crossed transactional backfills deadlocked");
-    assert!(codes.iter().filter(|code| code.as_deref() == Some("40P01")).count() == 1);
+    assert!(
+        codes
+            .iter()
+            .filter(|code| code.as_deref() == Some("40P01"))
+            .count()
+            == 1
+    );
     assert!(codes.iter().filter(|code| code.is_none()).count() == 1);
 }
 
@@ -584,11 +599,7 @@ async fn transactional_upgrade_wins_over_a_prequeued_backfill() {
     let other_engine = Arc::clone(&engine);
     let other = tokio::spawn(async move {
         let mut session = other_engine.connect();
-        run(
-            &mut session,
-            "CREATE UNIQUE INDEX t_id_idx ON t (id)",
-        )
-        .await;
+        run(&mut session, "CREATE UNIQUE INDEX t_id_idx ON t (id)").await;
     });
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(!other.is_finished());

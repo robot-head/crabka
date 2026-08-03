@@ -289,12 +289,7 @@ fn eval_strict(
         StrFunc::Convert => {
             require_arity(fc, vals.len() == 3)?;
             let bytes = conversion_bytes(&vals[0], ctx)?;
-            convert_encoding(
-                &bytes,
-                text_arg(&vals[1])?,
-                text_arg(&vals[2])?,
-            )
-            .map(Datum::Bytea)
+            convert_encoding(&bytes, text_arg(&vals[1])?, text_arg(&vals[2])?).map(Datum::Bytea)
         }
         StrFunc::ConvertFrom => {
             require_arity(fc, vals.len() == 2)?;
@@ -390,14 +385,12 @@ fn byte_len(n: usize) -> i32 {
 fn conversion_bytes(value: &Datum, ctx: &EvalCtx) -> Result<Vec<u8>, ExecError> {
     match value {
         Datum::Bytea(bytes) => Ok(bytes.clone()),
-        Datum::Text(_) => match crabka_pgtypes::cast::cast(
-            value,
-            ColumnType::Bytea,
-            &ctx.time_zone,
-        )? {
-            Datum::Bytea(bytes) => Ok(bytes),
-            _ => unreachable!("text to bytea cast returns bytea"),
-        },
+        Datum::Text(_) => {
+            match crabka_pgtypes::cast::cast(value, ColumnType::Bytea, &ctx.time_zone)? {
+                Datum::Bytea(bytes) => Ok(bytes),
+                _ => unreachable!("text to bytea cast returns bytea"),
+            }
+        }
         other => Err(type_error("convert", other)),
     }
 }

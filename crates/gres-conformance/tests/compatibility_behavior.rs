@@ -46,18 +46,16 @@ fn probe_setup(command: &str) -> &'static [&'static str] {
             "CREATE TABLE parser_commands_probe (id int4)",
             "CREATE INDEX parser_commands_idx ON parser_commands_probe (id)",
         ],
-        "ALTER OPERATOR CLASS" | "DROP OPERATOR CLASS" => &[
-            "CREATE OPERATOR CLASS parser_commands_ops FOR TYPE uuid USING hash AS STORAGE uuid",
-        ],
-        "ALTER OPERATOR FAMILY" | "DROP OPERATOR FAMILY" => &[
-            "CREATE OPERATOR FAMILY parser_commands_family USING hash",
-        ],
-        "ALTER TABLESPACE" | "DROP TABLESPACE" => &[
-            "CREATE TABLESPACE parser_commands_space LOCATION '/tmp/parser_commands_space'",
-        ],
-        "CREATE TABLE INHERITS" => &[
-            "CREATE TABLE parser_commands_parent (id int4)",
-        ],
+        "ALTER OPERATOR CLASS" | "DROP OPERATOR CLASS" => {
+            &["CREATE OPERATOR CLASS parser_commands_ops FOR TYPE uuid USING hash AS STORAGE uuid"]
+        }
+        "ALTER OPERATOR FAMILY" | "DROP OPERATOR FAMILY" => {
+            &["CREATE OPERATOR FAMILY parser_commands_family USING hash"]
+        }
+        "ALTER TABLESPACE" | "DROP TABLESPACE" => {
+            &["CREATE TABLESPACE parser_commands_space LOCATION '/tmp/parser_commands_space'"]
+        }
+        "CREATE TABLE INHERITS" => &["CREATE TABLE parser_commands_parent (id int4)"],
         "ALTER TABLE" | "COMMENT" | "CREATE INDEX" | "CREATE TABLE AS" | "DELETE"
         | "DROP INDEX" | "DROP TABLE" | "INSERT" | "MERGE" | "SELECT INTO" | "TABLE"
         | "TRUNCATE" | "UPDATE" => &["CREATE TABLE parser_commands_probe (id int4)"],

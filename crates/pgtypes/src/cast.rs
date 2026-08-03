@@ -1188,8 +1188,7 @@ mod tests {
     #[test]
     fn bytea_input_accepts_plain_hex_and_escape_forms() {
         let cast = |value: &str| {
-            super::cast(&Datum::Text(value.into()), ColumnType::Bytea, &utc())
-                .expect("valid bytea")
+            super::cast(&Datum::Text(value.into()), ColumnType::Bytea, &utc()).expect("valid bytea")
         };
         assert_eq!(cast("ABC"), Datum::Bytea(b"ABC".to_vec()));
         assert_eq!(cast("\\x414243"), Datum::Bytea(b"ABC".to_vec()));

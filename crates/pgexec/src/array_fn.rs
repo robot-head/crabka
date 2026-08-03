@@ -1242,14 +1242,12 @@ fn assign_slice(
         Datum::Array(a) => a.clone(),
         // `SET a[1:2] = '{1,2}'` — a bare literal on the value side is
         // `unknown`, and the target column's array type resolves it.
-        Datum::Text(_) => match crate::eval::cast_value(
-            value,
-            ColumnType::Array(array.elem),
-            &ctx.time_zone,
-        )? {
-            Datum::Array(a) => a,
-            other => return Err(not_an_array(&other)),
-        },
+        Datum::Text(_) => {
+            match crate::eval::cast_value(value, ColumnType::Array(array.elem), &ctx.time_zone)? {
+                Datum::Array(a) => a,
+                other => return Err(not_an_array(&other)),
+            }
+        }
         other => return Err(not_an_array(other)),
     };
     if array.dims.is_empty() {

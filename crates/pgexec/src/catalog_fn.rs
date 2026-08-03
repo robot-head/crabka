@@ -251,10 +251,10 @@ pub(crate) fn catalog_func_result_type(
 fn arity_ok(f: CatalogFunc, n: usize) -> bool {
     use CatalogFunc::{
         BackendPid, CharToEncoding, ClusterSize, ColDescription, ConstraintDef, CurrentSchemas,
-        EncodingToChar, Expr as ExprDef, HasPrivilege, HasRole, InRecovery, IndexDef,
-        IndexesSize, IsPublishable, IsVisible, NullDef, ObjDescription, RelationSize,
-        SerialSequence, ShobjDescription, SizeBytes, SizePretty, StartTime, TableSize,
-        TablespaceLocation, TotalRelationSize, UserById, ViewDef,
+        EncodingToChar, Expr as ExprDef, HasPrivilege, HasRole, InRecovery, IndexDef, IndexesSize,
+        IsPublishable, IsVisible, NullDef, ObjDescription, RelationSize, SerialSequence,
+        ShobjDescription, SizeBytes, SizePretty, StartTime, TableSize, TablespaceLocation,
+        TotalRelationSize, UserById, ViewDef,
     };
     match f {
         ViewDef | ConstraintDef | CatalogFunc::TriggerDef | NullDef => n == 1 || n == 2,
@@ -355,9 +355,9 @@ fn eval_resolved(
 fn tablespace_location(value: &Datum, ctx: &EvalCtx) -> Result<Datum, ExecError> {
     let oid = match value {
         Datum::Int4(oid) => *oid as u32,
-        Datum::Int8(oid) => u32::try_from(*oid).map_err(|_| ExecError::TypeMismatch(
-            "pg_tablespace_location expects a tablespace oid".into(),
-        ))?,
+        Datum::Int8(oid) => u32::try_from(*oid).map_err(|_| {
+            ExecError::TypeMismatch("pg_tablespace_location expects a tablespace oid".into())
+        })?,
         Datum::Null => return Ok(Datum::Null),
         _ => {
             return Err(ExecError::TypeMismatch(
@@ -780,10 +780,7 @@ fn size_pretty_numeric(value: &crabka_pgtypes::numeric::NumericValue) -> Result<
                 };
                 value = numeric::div_trunc(&value, &two)?;
             }
-            return Ok(Datum::Text(format!(
-                "{} {unit}",
-                numeric::to_text(&value)
-            )));
+            return Ok(Datum::Text(format!("{} {unit}", numeric::to_text(&value))));
         }
         value = numeric::div_trunc(&value, &numeric::from_i64(divisor))?;
     }
@@ -979,16 +976,11 @@ fn relation_size_with_fork(
         None => "main",
         Some(Datum::Null) => return Ok(Datum::Null),
         Some(Datum::Text(fork)) if fork == "main" => "main",
-        Some(Datum::Text(fork)) if matches!(fork.as_str(), "fsm" | "vm" | "init") => {
-            fork.as_str()
-        }
+        Some(Datum::Text(fork)) if matches!(fork.as_str(), "fsm" | "vm" | "init") => fork.as_str(),
         Some(Datum::Text(_)) => {
             return Err(ExecError::Remote(
-                crabka_pgwire::error::PgError::error(
-                    "22023",
-                    "invalid fork name",
-                )
-                .with_hint("Valid fork names are \"main\", \"fsm\", \"vm\", and \"init\"."),
+                crabka_pgwire::error::PgError::error("22023", "invalid fork name")
+                    .with_hint("Valid fork names are \"main\", \"fsm\", \"vm\", and \"init\"."),
             ));
         }
         Some(_) => {
@@ -1059,12 +1051,9 @@ fn total_relation_size(
 
 fn relation_size_bytes(catalog_kv: &dyn Kv, data_kv: &dyn Kv, oid: i32) -> Result<i64, ExecError> {
     let indexes = crabka_pgcatalog::list_indexes(catalog_kv)?;
-    let Some(index) = indexes
-        .iter()
-        .find(|index| {
-            crate::catalog_rel::index_relation_oid(index.id).is_ok_and(|index_oid| index_oid == oid)
-        })
-    else {
+    let Some(index) = indexes.iter().find(|index| {
+        crate::catalog_rel::index_relation_oid(index.id).is_ok_and(|index_oid| index_oid == oid)
+    }) else {
         return Ok(0);
     };
     secondary_index_size(data_kv, index)
@@ -1846,13 +1835,34 @@ mod tests {
 
     #[test]
     fn encoding_identity_matches_postgresql() {
-        assert_eq!(encoding_to_char(&Datum::Int4(22)), Datum::Text("KOI8R".into()));
-        assert_eq!(encoding_to_char(&Datum::Int4(41)), Datum::Text("SHIFT_JIS_2004".into()));
-        assert_eq!(encoding_to_char(&Datum::Int4(42)), Datum::Text(String::new()));
-        assert_eq!(char_to_encoding(&Datum::Text("utf8".into())), Datum::Int4(6));
-        assert_eq!(char_to_encoding(&Datum::Text("UNICODE".into())), Datum::Int4(6));
-        assert_eq!(char_to_encoding(&Datum::Text("UTF-8".into())), Datum::Int4(6));
-        assert_eq!(char_to_encoding(&Datum::Text("WINDOWS1252".into())), Datum::Int4(24));
+        assert_eq!(
+            encoding_to_char(&Datum::Int4(22)),
+            Datum::Text("KOI8R".into())
+        );
+        assert_eq!(
+            encoding_to_char(&Datum::Int4(41)),
+            Datum::Text("SHIFT_JIS_2004".into())
+        );
+        assert_eq!(
+            encoding_to_char(&Datum::Int4(42)),
+            Datum::Text(String::new())
+        );
+        assert_eq!(
+            char_to_encoding(&Datum::Text("utf8".into())),
+            Datum::Int4(6)
+        );
+        assert_eq!(
+            char_to_encoding(&Datum::Text("UNICODE".into())),
+            Datum::Int4(6)
+        );
+        assert_eq!(
+            char_to_encoding(&Datum::Text("UTF-8".into())),
+            Datum::Int4(6)
+        );
+        assert_eq!(
+            char_to_encoding(&Datum::Text("WINDOWS1252".into())),
+            Datum::Int4(24)
+        );
     }
 
     /// PostgreSQL's own `pg_size_pretty` boundaries, measured on 18.4.
@@ -1969,7 +1979,13 @@ mod tests {
             assert!(got == Datum::Int8(expected), "{input}");
         }
         assert!(size_bytes(&Datum::Null).expect("NULL") == Datum::Null);
-        assert!(size_bytes(&Datum::Int4(1)).expect_err("wrong overload").into_pg().code == "42883");
+        assert!(
+            size_bytes(&Datum::Int4(1))
+                .expect_err("wrong overload")
+                .into_pg()
+                .code
+                == "42883"
+        );
     }
 
     #[test]
@@ -2017,9 +2033,12 @@ mod tests {
         let catalog = MemKv::new();
         let data = MemKv::new();
         let table = RelationName::public("size_probe");
-        let table_id =
-            crabka_pgcatalog::create_table(&catalog, &table, vec![Column::new("a", ColumnType::Int4)])
-                .expect("table");
+        let table_id = crabka_pgcatalog::create_table(
+            &catalog,
+            &table,
+            vec![Column::new("a", ColumnType::Int4)],
+        )
+        .expect("table");
         let (ordinary_id, ops) = crabka_pgcatalog::create_index_ops(
             &catalog,
             "size_probe_a_idx",
@@ -2072,13 +2091,7 @@ mod tests {
                 == Datum::Int8(0)
         );
         assert!(
-            relation_size(
-                &catalog,
-                &data,
-                &scope,
-                &Datum::Int4(table_oid),
-            )
-            .expect("table size")
+            relation_size(&catalog, &data, &scope, &Datum::Int4(table_oid),).expect("table size")
                 == Datum::Int8(0)
         );
         assert!(
@@ -2087,8 +2100,7 @@ mod tests {
                 == Datum::Int8(expected)
         );
         assert!(
-            indexes_size(&catalog, &data, &scope, &Datum::Int4(table_oid))
-                .expect("indexes size")
+            indexes_size(&catalog, &data, &scope, &Datum::Int4(table_oid)).expect("indexes size")
                 == Datum::Int8(expected)
         );
         assert!(

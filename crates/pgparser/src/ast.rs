@@ -831,11 +831,15 @@ pub enum UtilityStatement {
     /// `CHECKPOINT`.
     Checkpoint,
     /// `LOAD 'filename'`.
-    Load { filename: String },
+    Load {
+        filename: String,
+    },
     /// `SECURITY LABEL [FOR provider] ON { TABLE | ROLE } object IS { label | NULL }`.
     /// Object and label are intentionally discarded: without a loaded provider,
     /// PostgreSQL fails before resolving either one.
-    SecurityLabel { provider: Option<String> },
+    SecurityLabel {
+        provider: Option<String>,
+    },
     /// `CREATE TABLESPACE name [OWNER role] LOCATION 'path' [WITH (...)]`.
     CreateTablespace {
         name: String,
@@ -844,7 +848,10 @@ pub enum UtilityStatement {
         options: OptionList,
     },
     /// `DROP TABLESPACE [IF EXISTS] name`.
-    DropTablespace { name: String, if_exists: bool },
+    DropTablespace {
+        name: String,
+        if_exists: bool,
+    },
     /// `ALTER TABLESPACE` catalog metadata changes.
     AlterTablespace {
         name: String,
@@ -877,7 +884,9 @@ pub enum UtilityStatement {
     },
     /// `ALTER SYSTEM SET <name> = <value>` / `ALTER SYSTEM RESET { <name> | ALL }`.
     /// `name` is `None` for `RESET ALL`.
-    AlterSystem { name: Option<String> },
+    AlterSystem {
+        name: Option<String>,
+    },
     /// `SET CONSTRAINTS { ALL | name [, …] } { DEFERRED | IMMEDIATE }`.
     SetConstraints {
         /// The named constraints in written order, or `None` for the `ALL`
