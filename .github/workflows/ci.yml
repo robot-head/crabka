@@ -341,11 +341,7 @@ jobs:
 
   affected:
     needs: changes
-    # A global lock/module change makes the first affected build cold. Let that
-    # bootstrap finish so setup-bazel's post action can persist the action
-    # caches; cancelling at 60 minutes skips cache saving and makes every retry
-    # cold again. Ordinary PRs remain much smaller through bazel-diff.
-    timeout-minutes: 90
+    timeout-minutes: 60
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

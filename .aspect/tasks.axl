@@ -105,6 +105,16 @@ def _affected(ctx: TaskContext) -> int:
         target.startswith("//crates/traceql:"),
         target.startswith("//crates/traces:"),
     ])]
+    # Coverage changes the Rust action configuration, so building a target and
+    # then testing it compiles its dependency graph twice. Keep only standalone
+    # build roots that the selected tests will not compile themselves.
+    if builds and tests:
+        build_set = "set(%s)" % " ".join(builds)
+        test_set = "set(%s)" % " ".join(tests)
+        (code, uncovered_output) = _output(ctx, "bazel", ["query", "%s except deps(%s)" % (build_set, test_set)])
+        if code != 0:
+            return code
+        builds = [target for target in uncovered_output.split("\n") if target]
     if builds:
         code = _run(ctx, "bazel", ["build", "--config=ci"] + builds)
         if code != 0:
