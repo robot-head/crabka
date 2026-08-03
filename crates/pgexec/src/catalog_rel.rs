@@ -110,6 +110,7 @@ pub(crate) fn relation_names() -> &'static [&'static str] {
 }
 
 const PG_CATALOG_RELATIONS: &[&str] = &[
+    "pg_aggregate",
     "pg_am",
     "pg_amop",
     "pg_amproc",
@@ -165,6 +166,7 @@ const INFORMATION_SCHEMA_RELATIONS: &[&str] = &[
 ];
 
 static RELATION_NAMES: &[&str] = &[
+    "pg_aggregate",
     "pg_am",
     "pg_amop",
     "pg_amproc",
@@ -223,6 +225,7 @@ static RELATION_NAMES: &[&str] = &[
 /// nothing depends on.
 pub(crate) fn relation_oid(name: &str) -> i32 {
     match name {
+        "pg_aggregate" => 2600,
         "pg_am" => 2601,
         "pg_amop" => 2602,
         "pg_amproc" => 2603,
@@ -579,6 +582,7 @@ pub(crate) fn rows(
     backend_pid: i32,
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
     match name {
+        "pg_aggregate" => Ok(pg_aggregate_rows()),
         "pg_am" => Ok(pg_am_rows()),
         "pg_amop" => pg_amop_rows(kv),
         "pg_amproc" => pg_amproc_rows(kv),
@@ -606,6 +610,54 @@ pub(crate) fn rows(
         "pg_views" => pg_views_rows(kv),
         _ => information_schema_rows(kv, name),
     }
+}
+
+fn pg_aggregate_rows() -> Vec<Vec<Datum>> {
+    crate::builtin_aggregates::BUILTIN_AGGREGATES
+        .iter()
+        .map(|row| {
+            let oid = |index: usize| int(row[index].parse().expect("pinned aggregate oid"));
+            let flag = |index: usize| Datum::Bool(row[index] == "t");
+            let nullable = |index: usize| {
+                if row[index] == "_null_" {
+                    Datum::Null
+                } else {
+                    text(row[index])
+                }
+            };
+            let optional_oid = |index: usize| {
+                if row[index] == "-" {
+                    int(0)
+                } else {
+                    oid(index)
+                }
+            };
+            vec![
+                oid(0),
+                text(row[1]),
+                small(row[2].parse().expect("pinned aggregate direct args")),
+                oid(3),
+                optional_oid(4),
+                optional_oid(5),
+                optional_oid(6),
+                optional_oid(7),
+                optional_oid(8),
+                optional_oid(9),
+                optional_oid(10),
+                flag(11),
+                flag(12),
+                text(row[13]),
+                text(row[14]),
+                oid(15),
+                oid(16),
+                oid(17),
+                oid(18),
+                oid(19),
+                nullable(20),
+                nullable(21),
+            ]
+        })
+        .collect()
 }
 
 fn pg_cast_rows() -> Vec<Vec<Datum>> {
@@ -785,6 +837,30 @@ fn pg_catalog_columns(name: &str) -> Vec<Column> {
     use ColumnType::{Bool, Float4, Int2, Int4, Int8, Text, Timestamptz};
     let acl = ColumnType::Array(ElemType::Text);
     match name {
+        "pg_aggregate" => cols(&[
+            ("aggfnoid", Int4),
+            ("aggkind", Text),
+            ("aggnumdirectargs", Int2),
+            ("aggtransfn", Int4),
+            ("aggfinalfn", Int4),
+            ("aggcombinefn", Int4),
+            ("aggserialfn", Int4),
+            ("aggdeserialfn", Int4),
+            ("aggmtransfn", Int4),
+            ("aggminvtransfn", Int4),
+            ("aggmfinalfn", Int4),
+            ("aggfinalextra", Bool),
+            ("aggmfinalextra", Bool),
+            ("aggfinalmodify", Text),
+            ("aggmfinalmodify", Text),
+            ("aggsortop", Int4),
+            ("aggtranstype", Int4),
+            ("aggtransspace", Int4),
+            ("aggmtranstype", Int4),
+            ("aggmtransspace", Int4),
+            ("agginitval", Text),
+            ("aggminitval", Text),
+        ]),
         "pg_am" => cols(&[
             ("oid", Int4),
             ("amname", Text),

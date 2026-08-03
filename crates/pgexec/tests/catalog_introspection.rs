@@ -83,6 +83,7 @@ async fn every_named_catalog_relation_resolves() {
         "pg_catalog.pg_cast",
         "pg_catalog.pg_database",
         "pg_catalog.pg_tablespace",
+        "pg_catalog.pg_aggregate",
         "pg_catalog.pg_am",
         "pg_catalog.pg_inherits",
         "pg_catalog.pg_language",
@@ -137,6 +138,35 @@ async fn pg_cast_exposes_postgresql_builtin_casts() {
     )
     .await;
     assert2::assert!(listed == vec![some(&["10039", "23", "26", "0", "i", "b"])]);
+}
+
+#[tokio::test]
+async fn pg_aggregate_exposes_postgresql_builtin_aggregates() {
+    let engine = SqlEngine::new();
+    let listed = grid(
+        &engine,
+        "SELECT aggfnoid, aggkind, aggnumdirectargs, aggtransfn, aggfinalfn, \
+                aggcombinefn, aggserialfn, aggdeserialfn, aggtranstype, \
+                aggtransspace, agginitval \
+         FROM pg_catalog.pg_aggregate WHERE aggfnoid = 2100",
+    )
+    .await;
+    assert2::assert!(
+        listed
+            == vec![vec![
+                Some("2100".into()),
+                Some("n".into()),
+                Some("0".into()),
+                Some("2746".into()),
+                Some("3389".into()),
+                Some("2785".into()),
+                Some("2786".into()),
+                Some("2787".into()),
+                Some("2281".into()),
+                Some("48".into()),
+                None,
+            ]]
+    );
 }
 
 /// A bare `pg_catalog.`-less name resolves to the same relation as the
