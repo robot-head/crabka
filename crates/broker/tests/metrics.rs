@@ -227,6 +227,7 @@ async fn metrics_endpoint_serves_openmetrics_and_counters_tick() {
     // partition writer is ready on commit) instead of guessing a duration.
     handle.wait_until_partition_present(TOPIC, 0).await;
     produce_one(kafka_addr).await;
+    handle.wait_until_high_watermark(TOPIC, 0, 1).await;
     fetch_one(kafka_addr).await;
 
     // Wait for the background gauge sampler (1s tick) to publish

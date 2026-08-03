@@ -173,10 +173,9 @@ async fn produce_batches(
 
 /// Fetch partition 0 from offset 0 and return the first decoded batch.
 ///
-/// `n` is the number of records already produced to partition 0. Single-broker
-/// RF=1 means the high-watermark tracks the local log end offset, so waiting for
-/// LEO >= n makes the produced records readable before a single deterministic
-/// fetch (no polling loop needed).
+/// `n` is the number of records already produced to partition 0. Wait for the
+/// high watermark, not just the log end offset: `acks=1` can return before the
+/// asynchronous watermark update makes those records readable by consumers.
 async fn fetch_first_batch(
     broker: &crabka_broker::BrokerHandle,
     client: &crabka_client_core::Client,
@@ -184,7 +183,7 @@ async fn fetch_first_batch(
     topic_id: WireUuid,
     n: i64,
 ) -> RecordBatch {
-    broker.wait_until_local_log_end_offset(topic, 0, n).await;
+    broker.wait_until_high_watermark(topic, 0, n).await;
     let resp = client
         .send(FetchRequest {
             replica_id: -1,

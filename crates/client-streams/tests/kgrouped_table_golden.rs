@@ -73,7 +73,11 @@ fn kgrouped_table_topology_matches_jvm() {
     let built = build_combined();
     let actual = serde_json::to_value(built.to_wire()).unwrap();
     let expected: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string("tests/testdata/golden/dsl/kgrouped_table.topology.json").unwrap(),
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/testdata/golden/dsl/kgrouped_table.topology.json"
+        ))
+        .unwrap(),
     )
     .unwrap();
     assert_eq!(
@@ -121,9 +125,10 @@ fn kgrouped_table_autonamed_topology_matches_jvm() {
     let built = build_autonamed();
     let actual = serde_json::to_value(built.to_wire()).unwrap();
     let expected: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(
-            "tests/testdata/golden/dsl/kgrouped_table_autonamed.topology.json",
-        )
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/testdata/golden/dsl/kgrouped_table_autonamed.topology.json"
+        ))
         .unwrap(),
     )
     .unwrap();
@@ -161,7 +166,11 @@ fn kgrouped_table_behavior_matches_jvm() {
         );
     }
     let golden: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string("tests/testdata/kgrouped_table/behavior.json").unwrap(),
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/testdata/kgrouped_table/behavior.json"
+        ))
+        .unwrap(),
     )
     .unwrap();
     // The golden keys count/reduce/aggregate map to sink topics count-out/reduce-out/agg-out.

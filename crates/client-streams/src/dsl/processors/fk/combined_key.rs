@@ -65,7 +65,11 @@ mod tests {
     #[test]
     fn matches_jvm_capture() {
         let v: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string("tests/testdata/fk_join/behavior.json").unwrap(),
+            &std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/testdata/fk_join/behavior.json"
+            ))
+            .unwrap(),
         )
         .unwrap();
         for e in v["combined_key"].as_array().unwrap() {

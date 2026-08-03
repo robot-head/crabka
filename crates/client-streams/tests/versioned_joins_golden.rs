@@ -41,7 +41,10 @@ struct TableTableGolden {
 }
 
 fn load_table_table_golden() -> TableTableGolden {
-    let path = "tests/testdata/versioned_joins/tabletable.json";
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/testdata/versioned_joins/tabletable.json"
+    );
     let raw = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read golden {path}: {e}"));
     serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse golden {path}: {e}"))
 }
@@ -69,7 +72,10 @@ struct Golden {
 
 /// Load + parse a golden JSON from the versioned-joins testdata dir.
 fn load_golden(name: &str) -> Golden {
-    let path = format!("tests/testdata/versioned_joins/{name}");
+    let path = format!(
+        "{}/tests/testdata/versioned_joins/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    );
     let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read golden {path}: {e}"));
     serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse golden {path}: {e}"))
 }
@@ -318,7 +324,10 @@ struct GraceGolden {
 }
 
 fn load_grace_golden() -> GraceGolden {
-    let path = "tests/testdata/versioned_joins/grace.json";
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/testdata/versioned_joins/grace.json"
+    );
     let raw = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read golden {path}: {e}"));
     serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse golden {path}: {e}"))
 }

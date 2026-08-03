@@ -12,6 +12,10 @@ rust_package(
     crate_name = "crabka_broker",
     test_binaries = {"crabka": "//crates/cli:crabka__bin"},
     test_compile_data = ["//crates/security:test_fixtures"],
+    test_sizes = {
+        "metrics": "small",
+        "produce_verbatim_passthrough": "small",
+    },
 )
 
 rust_feature_binary(

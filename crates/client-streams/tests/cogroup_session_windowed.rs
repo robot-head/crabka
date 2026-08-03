@@ -6,7 +6,10 @@ use crabka_client_streams::{
 use crabka_units::prelude::*;
 
 fn assert_matches_fixture(wire: &crabka_client_streams::topology::WireTopology, fixture: &str) {
-    let path = format!("tests/testdata/golden/dsl/{fixture}.topology.json");
+    let path = format!(
+        "{}/tests/testdata/golden/dsl/{fixture}.topology.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
     let expected: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}")),
     )
@@ -110,7 +113,11 @@ fn cogroup_session_matches_jvm_behavior() {
     // filters Change::new == None). Filter the golden to only non-null rows to
     // compare only the values both implementations agree on.
     let raw_golden: Vec<Row> = serde_json::from_str(
-        &std::fs::read_to_string("tests/testdata/cogroup/behavior_session.json").unwrap(),
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/testdata/cogroup/behavior_session.json"
+        ))
+        .unwrap(),
     )
     .unwrap();
     let golden: Vec<Row> = raw_golden

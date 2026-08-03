@@ -209,7 +209,11 @@ mod tests {
 
     fn behavior() -> serde_json::Value {
         serde_json::from_str(
-            &std::fs::read_to_string("tests/testdata/fk_join/behavior.json").unwrap(),
+            &std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/testdata/fk_join/behavior.json"
+            ))
+            .unwrap(),
         )
         .unwrap()
     }

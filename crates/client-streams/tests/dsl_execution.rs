@@ -2908,7 +2908,11 @@ fn sliding_window_count_matches_jvm_behavior() {
         });
     }
     let golden: Vec<Row> = serde_json::from_str(
-        &std::fs::read_to_string("tests/testdata/sliding_window/behavior.json").unwrap(),
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/testdata/sliding_window/behavior.json"
+        ))
+        .unwrap(),
     )
     .unwrap();
     assert_eq!(
@@ -2973,7 +2977,11 @@ fn emit_final_time_window_matches_jvm_behavior() {
         });
     }
     let golden: Vec<EmitFinalRow> = serde_json::from_str(
-        &std::fs::read_to_string("tests/testdata/emit_final/time.json").unwrap(),
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/testdata/emit_final/time.json"
+        ))
+        .unwrap(),
     )
     .unwrap();
     assert_eq!(got, golden, "emit-final time-window sequence != JVM golden");
@@ -3022,7 +3030,11 @@ fn emit_final_sliding_window_matches_jvm_behavior() {
         });
     }
     let golden: Vec<EmitFinalRow> = serde_json::from_str(
-        &std::fs::read_to_string("tests/testdata/emit_final/sliding.json").unwrap(),
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/testdata/emit_final/sliding.json"
+        ))
+        .unwrap(),
     )
     .unwrap();
     assert_eq!(
@@ -3077,7 +3089,11 @@ fn emit_final_session_window_matches_jvm_behavior() {
         });
     }
     let golden: Vec<EmitFinalRow> = serde_json::from_str(
-        &std::fs::read_to_string("tests/testdata/emit_final/session.json").unwrap(),
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/testdata/emit_final/session.json"
+        ))
+        .unwrap(),
     )
     .unwrap();
     assert_eq!(
@@ -3163,7 +3179,11 @@ fn sliding_window_reduce_matches_jvm_behavior() {
         });
     }
     let golden: Vec<Row> = serde_json::from_str(
-        &std::fs::read_to_string("tests/testdata/sliding_window/behavior_reduce.json").unwrap(),
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/testdata/sliding_window/behavior_reduce.json"
+        ))
+        .unwrap(),
     )
     .unwrap();
     assert_eq!(
@@ -3427,8 +3447,11 @@ fn versioned_table_changelog_matches_jvm() {
         })
     }
     let golden: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string("tests/testdata/golden/dsl/behavioral/versioned_changelog.json")
-            .expect("changelog golden present"),
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/testdata/golden/dsl/behavioral/versioned_changelog.json"
+        ))
+        .expect("changelog golden present"),
     )
     .unwrap();
     let expected: Vec<(String, Option<String>, i64)> = golden
@@ -3481,8 +3504,11 @@ fn versioned_table_changelog_matches_jvm() {
 #[test]
 fn versioned_table_behavioral_matches_jvm() {
     let golden: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string("tests/testdata/golden/dsl/behavioral/versioned_table.json")
-            .expect("behavioral golden present"),
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/testdata/golden/dsl/behavioral/versioned_table.json"
+        ))
+        .expect("behavioral golden present"),
     )
     .unwrap();
     let expected: Vec<(Option<String>, i64)> = golden
