@@ -114,16 +114,17 @@ is the unmodified PostgreSQL 18.4 upstream schedule: 231 whole test files in
 serial and parallel. The checked-in monotone baseline remains `6/231`; it is
 not ratcheted from a non-monotone review.
 
-The latest infrastructure-clean serial certification passes `13/231`, leaving
-218 semantic failures and 179071 canonical changed lines across 4595 hunks.
+The latest infrastructure-clean serial certification passes `20/231`, leaving
+211 semantic failures and 178550 canonical changed lines across 4574 hunks.
 Exact tests are `test_setup`, `md5`, `comments`, `mvcc`, `euc_kr`,
-`infinite_recurse`, `async`, `collate.icu.utf8`, `psql_crosstab`,
-`collate.linux.utf8`, `collate.windows.win1252`, `portals_p2`, and `bitmapops`.
-Parallel passes `13/231`, leaving 218 semantic failures and 179251 canonical
-changed lines across 4595 hunks. Both PostgreSQL self-checks pass, all 231 Gres
-tests complete in both modes, and both infrastructure reports are empty.
-Certified artifact:
-`target/pg-regress-runs/20260803T124820Z-certified-gres`. It records observed
+`create_function_c`, `infinite_recurse`, `delete`, `security_label`, `async`,
+`dbsize`, `collate.icu.utf8`, `psql_crosstab`, `collate.linux.utf8`,
+`collate.windows.win1252`, `vacuum_parallel`, `portals_p2`, `bitmapops`, `numa`,
+and `compression_pglz`. Parallel passes `20/231`, leaving 211 semantic failures
+and 178708 canonical changed lines across 4575 hunks. Both PostgreSQL
+self-checks pass, all 231 Gres tests complete in both modes, and both
+infrastructure reports are empty. Certified artifact:
+`target/pg-regress-runs/20260803T161026Z-certified-current-gres`. It records observed
 conformance without replacing the monotone baseline. Neither result satisfies
 the 231/231 completion gate.
 
@@ -139,6 +140,16 @@ compatibility, not legacy function execution. Native JSONPath plumbing removes
 the missing-type failures, but the three upstream JSONPath files remain `0/3`
 with 3110 changed lines across 99 hunks because grammar, canonical output, and
 evaluator coverage remain incomplete.
+
+This certification also makes `create_function_c`, `delete`, `security_label`,
+`dbsize`, `vacuum_parallel`, `numa`, and `compression_pglz` exact. `dbsize`
+includes exact `pg_size_bytes` diagnostics, bigint/numeric `pg_size_pretty`, and
+physical local-secondary-index key/value sizing. Heap, TOAST, PostgreSQL page
+and auxiliary-fork storage, and database/tablespace totals remain zero;
+cluster-size names/OIDs are not validated. The metadata-gated PGLZ decompressor
+caps declared output at 64 MiB and returns `54000` above that deliberate safety
+bound. Operator-definition DDL's bounded representatives currently refuse with
+`0A000` and remain assigned to Q4.
 
 `corpus-regress/` contains PostgreSQL `src/test/regress` SQL files adopted with
 `POSTGRES_TAG=REL_18_4 ../../tools/gres-adopt-regress.sh <name>`. Adopted files

@@ -583,6 +583,18 @@ const COMMAND_PROBES: &[CommandProbe] = &[
         refusal: None,
     },
     CommandProbe {
+        command: "LOAD",
+        sql: "LOAD 'regress'",
+        expected_statement: "Load",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "SECURITY LABEL",
+        sql: "SECURITY LABEL ON TABLE parser_commands_probe IS 'classified'",
+        expected_statement: "SecurityLabel",
+        refusal: Some(("22023", "no security label providers have been loaded")),
+    },
+    CommandProbe {
         command: "CREATE TABLESPACE",
         sql: "CREATE TABLESPACE parser_commands_space LOCATION '/tmp/parser_commands_space'",
         expected_statement: "CreateTablespace",
@@ -1017,6 +1029,8 @@ fn statement_shape(statement: &Statement) -> &'static str {
             crabka_pgparser::ast::UtilityStatement::Cluster => "Cluster",
             crabka_pgparser::ast::UtilityStatement::Reindex => "Reindex",
             crabka_pgparser::ast::UtilityStatement::Checkpoint => "Checkpoint",
+            crabka_pgparser::ast::UtilityStatement::Load { .. } => "Load",
+            crabka_pgparser::ast::UtilityStatement::SecurityLabel { .. } => "SecurityLabel",
             crabka_pgparser::ast::UtilityStatement::CreateTablespace { .. } => "CreateTablespace",
             crabka_pgparser::ast::UtilityStatement::DropTablespace { .. } => "DropTablespace",
             crabka_pgparser::ast::UtilityStatement::AlterTablespace { .. } => "AlterTablespace",
@@ -1107,7 +1121,7 @@ mod tests {
 
         assert!(report.format_version == PARSER_COMMAND_REPORT_FORMAT_VERSION);
         assert!(
-            report.commands.len() == 156,
+            report.commands.len() == 157,
             "all resolved command rows need probes"
         );
         assert!(report.commands.windows(2).all(|pair| pair[0] < pair[1]));
@@ -1145,7 +1159,7 @@ mod tests {
 
         assert!(json["format_version"] == PARSER_COMMAND_REPORT_FORMAT_VERSION);
         assert!(json["commands"][0] == "ABORT");
-        assert!(json["probes"].as_array().map(Vec::len) == Some(156));
+        assert!(json["probes"].as_array().map(Vec::len) == Some(157));
         let refusal = json["probes"]
             .as_array()
             .expect("probe array")

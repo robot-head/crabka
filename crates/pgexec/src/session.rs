@@ -3211,6 +3211,7 @@ impl SqlSession {
             catalog: None,
             sequence: Some(Arc::new(crate::clock::SequenceRuntime {
                 kv: Arc::clone(&self.catalog_kv),
+                data: Arc::clone(&self.kv),
                 manager: Arc::clone(&self.seq),
                 currvals: Arc::clone(&self.sequence_currvals),
                 pending: Arc::clone(&self.pending_sequences),
@@ -4824,6 +4825,19 @@ impl SqlSession {
             UtilityStatement::Checkpoint => Ok(QueryResult::Command {
                 tag: "CHECKPOINT".into(),
             }),
+            UtilityStatement::Load { filename } => {
+                crate::routine::validate_load_target(filename)?;
+                Ok(QueryResult::Command { tag: "LOAD".into() })
+            }
+            UtilityStatement::SecurityLabel { provider } => {
+                let message = match provider {
+                    Some(provider) => {
+                        format!("security label provider \"{provider}\" is not loaded")
+                    }
+                    None => "no security label providers have been loaded".into(),
+                };
+                Err(ExecError::Remote(PgError::error("22023", message)))
+            }
             UtilityStatement::CreateTablespace {
                 name,
                 owner,
@@ -11780,8 +11794,85 @@ fn resolve_ordering_family_oid(
         })
 }
 
-fn attach_known_runtime_position(sql: &str, error: PgError) -> PgError {
+fn attach_known_runtime_diagnostics(sql: &str, stmt: &Statement, error: PgError) -> PgError {
+    let error = attach_hidden_target_alias_diagnostic(sql, stmt, error);
     attach_undefined_function_position(sql, attach_range_literal_position(sql, error))
+}
+
+/// Refine a missing DML target reference when the statement proves an alias
+/// hid that target, and attach PostgreSQL's one-based source position.
+fn attach_hidden_target_alias_diagnostic(
+    sql: &str,
+    stmt: &Statement,
+    mut error: PgError,
+) -> PgError {
+    use crabka_pgparser::ast::Expr;
+    use crabka_pgparser::token::Token;
+
+    if error.code != "42P01" || error.diagnostics.is_some() {
+        return error;
+    }
+    let Some(relation) = error
+        .message
+        .strip_prefix("missing FROM-clause entry for table \"")
+        .and_then(|message| message.strip_suffix('"'))
+        .map(str::to_owned)
+    else {
+        return error;
+    };
+    let (target, alias, filter) = match stmt {
+        Statement::Delete {
+            table,
+            with: None,
+            alias: Some(alias),
+            using,
+            filter: Some(filter),
+            ..
+        } if using.is_empty() => (&table.name, alias, filter),
+        _ => return error,
+    };
+    if target != &relation || alias == target {
+        return error;
+    }
+
+    let mut outer_references = 0;
+    crate::grouping::visit_expr(filter, &mut |node| {
+        if matches!(
+            node,
+            Expr::Column {
+                table: Some(qualifier),
+                ..
+            } if qualifier == &relation
+        ) {
+            outer_references += 1;
+        }
+    });
+    if outer_references != 1 {
+        return error;
+    }
+
+    let Ok(tokens) = crabka_pgparser::lexer::lex(sql) else {
+        return error;
+    };
+    let positions: Vec<usize> = tokens
+        .windows(2)
+        .filter_map(|pair| match (&pair[0].0, &pair[1].0) {
+            (Token::Ident(candidate), Token::Dot) if candidate == &relation => {
+                Some(sql[..pair[0].1].chars().count() + 1)
+            }
+            _ => None,
+        })
+        .collect();
+    let [position] = positions.as_slice() else {
+        return error;
+    };
+
+    error.message = format!("invalid reference to FROM-clause entry for table \"{relation}\"");
+    error
+        .with_hint(format!(
+            "Perhaps you meant to reference the table alias \"{alias}\"."
+        ))
+        .with_position(*position)
 }
 
 fn attach_undefined_function_position(sql: &str, error: PgError) -> PgError {
@@ -11946,7 +12037,7 @@ impl Session for SqlSession {
                 Err(error) => {
                     let error = error.into_pg();
                     return Err(if single {
-                        attach_known_runtime_position(sql, error)
+                        attach_known_runtime_diagnostics(sql, &stmt, error)
                     } else {
                         error
                     });
@@ -11995,7 +12086,7 @@ impl Session for SqlSession {
                 .map_err(ExecError::into_pg)
                 .map_err(|error| {
                     if statements.len() == 1 {
-                        attach_known_runtime_position(sql, error)
+                        attach_known_runtime_diagnostics(sql, stmt, error)
                     } else {
                         error
                     }
@@ -13570,6 +13661,7 @@ mod tests {
             "RESET SESSION AUTHORIZATION",
             "ALTER SYSTEM SET work_mem = '8MB'",
             "ALTER SYSTEM RESET ALL",
+            "LOAD 'regress'",
             "DISCARD PLANS",
             "DISCARD SEQUENCES",
             "DISCARD TEMP",
@@ -13585,9 +13677,51 @@ mod tests {
         ] {
             assert!(sqlstate(&mut s, sql).await == "0A000", "{sql}");
         }
+        let error = s
+            .simple_query("LOAD 'nosuchfile'")
+            .await
+            .expect_err("missing shared object");
+        assert!(error.code == "58P01", "{error:?}");
+        assert!(
+            error.message == "could not access file \"nosuchfile\": No such file or directory",
+            "{error:?}"
+        );
+        let executable = std::env::current_exe().expect("current executable");
+        let sql = format!("LOAD '{}'", executable.display());
+        assert!(sqlstate(&mut s, &sql).await == "0A000", "{sql}");
+        let error = s
+            .simple_query("LOAD '/definitely/missing/regress.so'")
+            .await
+            .expect_err("an unconfigured regress basename is not trusted");
+        assert!(error.code == "58P01", "{error:?}");
         s.simple_query("BEGIN").await.expect("begin");
         assert!(sqlstate(&mut s, "DISCARD ALL").await == "25001");
         s.simple_query("ROLLBACK").await.expect("rollback");
+    }
+
+    #[tokio::test]
+    async fn security_label_refuses_before_resolving_its_target() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for (sql, expected) in [
+            (
+                "SECURITY LABEL ON TABLE no_such_security_label_table IS 'classified'",
+                "no security label providers have been loaded",
+            ),
+            (
+                "SECURITY LABEL FOR 'dummy' ON ROLE no_such_security_label_role IS NULL",
+                "security label provider \"dummy\" is not loaded",
+            ),
+        ] {
+            let error = session
+                .simple_query(sql)
+                .await
+                .expect_err("no security label provider is loaded");
+            assert!(error.code == "22023", "{sql}: {error:?}");
+            assert!(error.message == expected, "{sql}: {error:?}");
+        }
     }
 
     /// Extract the single text cell of a one-row, one-column result.
@@ -17918,6 +18052,38 @@ mod session_conformance_tests {
     }
 
     #[tokio::test]
+    async fn simple_query_refines_hidden_dml_target_diagnostics() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query("CREATE TABLE alias_target (a int); INSERT INTO alias_target VALUES (1)")
+            .await
+            .expect("table and row");
+
+        for (sql, alias) in [("DELETE FROM alias_target AS d WHERE alias_target.a > 0", "d")] {
+            let position = sql[..sql
+                .rfind("alias_target.a")
+                .expect("qualified original target")]
+                .chars()
+                .count()
+                + 1;
+            let error = session
+                .simple_query(sql)
+                .await
+                .expect_err("the original target name is hidden");
+            let expected = crabka_pgwire::error::PgError::error(
+                "42P01",
+                "invalid reference to FROM-clause entry for table \"alias_target\"",
+            )
+            .with_hint(format!(
+                "Perhaps you meant to reference the table alias \"{alias}\"."
+            ))
+            .with_position(position);
+            assert!(error == expected, "{sql}: {error:?}");
+        }
+    }
+
+    #[tokio::test]
     async fn range_cast_errors_point_at_the_unique_literal() {
         let engine = SqlEngine::new();
         let mut session = engine.connect();
@@ -18426,7 +18592,7 @@ mod session_conformance_tests {
         session
             .simple_query(
                 "CREATE FUNCTION options_func(internal) RETURNS void \
-                 AS 'ignored', 'options_func' LANGUAGE C; \
+                 AS 'regress', 'test_opclass_options_func' LANGUAGE C; \
                  CREATE OPERATOR FAMILY options_family USING btree",
             )
             .await

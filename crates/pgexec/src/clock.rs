@@ -140,6 +140,9 @@ pub(crate) struct SequenceRuntime {
     /// catalog-introspection functions read relations, views and comments
     /// through. A session has exactly one.
     pub(crate) kv: Arc<dyn crabka_pgkv::Kv>,
+    /// The session's row/index KV. This can differ from `kv` when catalog and
+    /// data storage are split.
+    pub(crate) data: Arc<dyn crabka_pgkv::Kv>,
     pub(crate) manager: Arc<crate::seq::SequenceManager>,
     pub(crate) currvals: Arc<Mutex<HashMap<String, i64>>>,
     /// The session's sequence advances that are not durable yet.
@@ -175,6 +178,11 @@ impl EvalCtx {
         self.catalog
             .as_deref()
             .or_else(|| self.sequence.as_ref().map(|runtime| runtime.kv.as_ref()))
+    }
+
+    /// The data KV backing physical row and index entries.
+    pub(crate) fn data(&self) -> Option<&dyn crabka_pgkv::Kv> {
+        self.sequence.as_ref().map(|runtime| runtime.data.as_ref())
     }
 
     /// The scope an unqualified relation name resolves against.

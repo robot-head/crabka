@@ -1263,7 +1263,14 @@ impl Parser {
             Token::Keyword(Keyword::Array) => self.array_literal(),
             Token::IntLit(s) => {
                 self.bump();
-                Ok(Expr::IntLiteral(s))
+                if s.parse::<i64>().is_ok() {
+                    Ok(Expr::IntLiteral(s))
+                } else {
+                    // PostgreSQL promotes an integer token through int4 and
+                    // int8, then to arbitrary-precision numeric when it no
+                    // longer fits either integer type.
+                    Ok(Expr::NumericLiteral(s))
+                }
             }
             Token::FloatLit(s) => {
                 self.bump();
@@ -3076,6 +3083,13 @@ impl Parser {
             {
                 emitted(I::Comment, self.comment_on())
             }
+            Token::Ident(s)
+                if s == "security"
+                    && matches!(self.peek2(), Token::Ident(label) if label == "label") =>
+            {
+                emitted(I::SecurityLabel, self.security_label())
+            }
+            Token::Ident(s) if s == "load" => emitted(I::Load, self.load_stmt()),
             Token::Ident(s) if s == "listen" => emitted(I::Listen, self.listen_stmt()),
             Token::Ident(s) if s == "notify" => emitted(I::Notify, self.notify_stmt()),
             Token::Ident(s) if s == "unlisten" => emitted(I::Unlisten, self.unlisten_stmt()),
@@ -3623,9 +3637,46 @@ impl Parser {
         } else {
             self.expect_ident_eq("role")?;
         }
+        let if_exists = self.eat_if_exists()?;
         Ok(crate::ast::Statement::DropRole {
             name: self.expect_object_name()?,
+            if_exists,
         })
+    }
+
+    fn security_label(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::{Statement, UtilityStatement};
+
+        self.expect_ident_eq("security")?;
+        self.expect_ident_eq("label")?;
+        let provider = if self.eat_keyword(Keyword::For) {
+            Some(self.expect_string_lit()?)
+        } else {
+            None
+        };
+        self.expect(&Token::Keyword(Keyword::On))?;
+        if self.eat_keyword(Keyword::Table) {
+            self.relation_ref()?;
+        } else {
+            self.expect_ident_eq("role")?;
+            self.expect_object_name()?;
+        }
+        self.expect(&Token::Keyword(Keyword::Is))?;
+        if !self.eat_keyword(Keyword::Null) {
+            self.expect_string_lit()?;
+        }
+        Ok(Statement::Utility(UtilityStatement::SecurityLabel {
+            provider,
+        }))
+    }
+
+    fn load_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.expect_ident_eq("load")?;
+        Ok(crate::ast::Statement::Utility(
+            crate::ast::UtilityStatement::Load {
+                filename: self.expect_string_lit()?,
+            },
+        ))
     }
 
     fn grant_table_privileges(&mut self) -> Result<crate::ast::Statement, ParseError> {
@@ -11087,16 +11138,18 @@ impl Parser {
         }
         if *self.peek() == Token::Keyword(Keyword::As) {
             self.bump();
-            let body = self.expect_string_lit()?;
-            // `AS 'obj_file', 'link_symbol'` — the C-language spelling. The
-            // link symbol is parsed so the statement is accepted; Gres has no
-            // dynamic loader, so the routine is refused when it is defined.
-            if *self.peek() == Token::Comma {
-                self.bump();
-                let _ = self.expect_string_lit()?;
+            let object_file = self.expect_string_lit()?;
+            if self.eat_comma() {
+                let link_symbol = self.expect_string_lit()?;
+                return Ok(Some(RoutineOption::Body(
+                    crate::ast::RoutineBody::External {
+                        object_file,
+                        link_symbol,
+                    },
+                )));
             }
             return Ok(Some(RoutineOption::Body(crate::ast::RoutineBody::Source(
-                body,
+                object_file,
             ))));
         }
         if *self.peek() == Token::Keyword(Keyword::Begin) && self.peek2_word_eq("atomic") {
@@ -12745,6 +12798,14 @@ mod tests {
         assert_eq!(expr(".25"), Expr::NumericLiteral(".25".into()));
         assert_eq!(expr("1e3"), Expr::NumericLiteral("1e3".into()));
         assert_eq!(expr("42"), Expr::IntLiteral("42".into()));
+        assert_eq!(
+            expr("9223372036854775807"),
+            Expr::IntLiteral("9223372036854775807".into())
+        );
+        assert_eq!(
+            expr("11528652096115048448"),
+            Expr::NumericLiteral("11528652096115048448".into())
+        );
         // float participates in arithmetic with the usual precedence.
         match expr("1 + 2.5 * 2") {
             Expr::Binary {
@@ -16606,7 +16667,7 @@ fn explicit_compatibility_refusals_reject_malformed_neighbors() {
 fn every_non_goal_has_a_bounded_typed_refusal_probe() {
     use crate::ast::{NON_GOAL_REFUSALS, Statement};
 
-    assert_eq!(NON_GOAL_REFUSALS.len(), 31);
+    assert_eq!(NON_GOAL_REFUSALS.len(), 29);
     for spec in NON_GOAL_REFUSALS {
         assert_eq!(
             parse(spec.representative_sql),
@@ -16626,6 +16687,126 @@ fn every_non_goal_has_a_bounded_typed_refusal_probe() {
             Ok(vec![Statement::CompatibilityRefusal(spec.command)]),
             "{} variant: {variant}",
             spec.command.command_name(),
+        );
+    }
+}
+
+#[test]
+fn drop_role_and_user_retain_if_exists() {
+    use crate::ast::Statement;
+
+    for (sql, name, if_exists) in [
+        ("DROP ROLE r", "r", false),
+        ("DROP ROLE IF EXISTS r", "r", true),
+        ("DROP USER u", "u", false),
+        ("DROP USER IF EXISTS u", "u", true),
+    ] {
+        assert_eq!(
+            parse(sql),
+            Ok(vec![Statement::DropRole {
+                name: name.into(),
+                if_exists,
+            }]),
+            "{sql}",
+        );
+    }
+}
+
+#[test]
+fn security_label_parses_upstream_provider_first_failure_shapes() {
+    use crate::{
+        ast::{Statement, UtilityStatement},
+        command::CommandIdentity,
+    };
+
+    for (sql, provider) in [
+        (
+            "SECURITY LABEL ON TABLE seclabel_tbl1 IS 'classified'",
+            None,
+        ),
+        (
+            "SECURITY LABEL FOR 'dummy' ON TABLE seclabel_tbl1 IS 'classified'",
+            Some("dummy"),
+        ),
+        (
+            "SECURITY LABEL ON TABLE seclabel_tbl1 IS '...invalid label...'",
+            None,
+        ),
+        (
+            "SECURITY LABEL ON TABLE seclabel_tbl3 IS 'unclassified'",
+            None,
+        ),
+        (
+            "SECURITY LABEL ON ROLE regress_seclabel_user1 IS 'classified'",
+            None,
+        ),
+        (
+            "SECURITY LABEL FOR 'dummy' ON ROLE regress_seclabel_user1 IS 'classified'",
+            Some("dummy"),
+        ),
+        (
+            "SECURITY LABEL ON ROLE regress_seclabel_user1 IS '...invalid label...'",
+            None,
+        ),
+        (
+            "SECURITY LABEL ON ROLE regress_seclabel_user3 IS 'unclassified'",
+            None,
+        ),
+        ("SECURITY LABEL ON TABLE public.t IS NULL", None),
+    ] {
+        let expected = Statement::Utility(UtilityStatement::SecurityLabel {
+            provider: provider.map(str::to_owned),
+        });
+        assert_eq!(parse(sql), Ok(vec![expected.clone()]), "{sql}");
+        assert_eq!(
+            parse_with_command_identities(sql),
+            Ok(vec![(expected, CommandIdentity::SecurityLabel)]),
+            "{sql}",
+        );
+    }
+}
+
+#[test]
+fn load_and_c_routine_external_symbols_keep_typed_metadata() {
+    use crate::{
+        ast::{RoutineBody, RoutineOption, Statement, UtilityStatement},
+        command::CommandIdentity,
+    };
+
+    let filename = "/tmp/regress.so";
+    let load = Statement::Utility(UtilityStatement::Load {
+        filename: filename.into(),
+    });
+    assert_eq!(parse("LOAD '/tmp/regress.so'"), Ok(vec![load.clone()]));
+    assert_eq!(
+        parse_with_command_identities("LOAD '/tmp/regress.so'"),
+        Ok(vec![(load, CommandIdentity::Load)]),
+    );
+
+    for (sql, expected) in [
+        (
+            "CREATE FUNCTION test1(int) RETURNS int LANGUAGE C AS 'nosuchfile'",
+            RoutineBody::Source("nosuchfile".into()),
+        ),
+        (
+            "CREATE FUNCTION test1(int) RETURNS int LANGUAGE C AS '/tmp/regress.so', 'nosuchsymbol'",
+            RoutineBody::External {
+                object_file: filename.into(),
+                link_symbol: "nosuchsymbol".into(),
+            },
+        ),
+    ] {
+        let statements = parse(sql).expect(sql);
+        let [Statement::CreateRoutine(routine)] = statements.as_slice() else {
+            panic!("{sql} did not parse as CREATE FUNCTION");
+        };
+        assert_eq!(
+            routine.options.iter().find_map(|option| match option {
+                RoutineOption::Body(body) => Some(body),
+                _ => None,
+            }),
+            Some(&expected),
+            "{sql}",
         );
     }
 }

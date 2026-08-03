@@ -1981,6 +1981,7 @@ impl SqlEngine {
             random: None,
             sequence: Some(Arc::new(crate::clock::SequenceRuntime {
                 kv: Arc::clone(&self.catalog_kv),
+                data: Arc::clone(&self.kv),
                 manager: Arc::clone(&self.seq),
                 currvals: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
                 pending: Arc::clone(pending),

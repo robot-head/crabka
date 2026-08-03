@@ -465,6 +465,7 @@ pub enum Statement {
     },
     /* SQL parity matrix row: DROP ROLE / DROP USER. */ DropRole {
         name: String,
+        if_exists: bool,
     },
     /* SQL parity matrix row: GRANT. */ GrantTablePrivileges {
         privileges: Vec<String>,
@@ -831,6 +832,12 @@ pub enum UtilityStatement {
     Reindex,
     /// `CHECKPOINT`.
     Checkpoint,
+    /// `LOAD 'filename'`.
+    Load { filename: String },
+    /// `SECURITY LABEL [FOR provider] ON { TABLE | ROLE } object IS { label | NULL }`.
+    /// Object and label are intentionally discarded: without a loaded provider,
+    /// PostgreSQL fails before resolving either one.
+    SecurityLabel { provider: Option<String> },
     /// `CREATE TABLESPACE name [OWNER role] LOCATION 'path' [WITH (...)]`.
     CreateTablespace {
         name: String,
@@ -1417,8 +1424,6 @@ pub enum NonGoalCommand {
     DropTextSearchParser,
     DropTextSearchTemplate,
     DropTransform,
-    Load,
-    SecurityLabel,
 }
 
 impl NonGoalCommand {
@@ -1459,8 +1464,6 @@ impl NonGoalCommand {
             Self::DropTextSearchParser => "DROP TEXT SEARCH PARSER",
             Self::DropTextSearchTemplate => "DROP TEXT SEARCH TEMPLATE",
             Self::DropTransform => "DROP TRANSFORM",
-            Self::Load => "LOAD",
-            Self::SecurityLabel => "SECURITY LABEL",
         }
     }
 
@@ -1503,8 +1506,6 @@ impl NonGoalCommand {
             Self::CreateTransform | Self::DropTransform => {
                 "C-bound transform objects are not supported"
             }
-            Self::Load => "C-bound code loading is not supported",
-            Self::SecurityLabel => "C-bound security labels are not supported",
         }
     }
 }
@@ -1592,8 +1593,6 @@ non_goal_specs!(
     (DropTextSearchParser, "DROP TEXT SEARCH PARSER p"),
     (DropTextSearchTemplate, "DROP TEXT SEARCH TEMPLATE t"),
     (DropTransform, "DROP TRANSFORM FOR integer LANGUAGE sql"),
-    (Load, "LOAD 'lib'"),
-    (SecurityLabel, "SECURITY LABEL ON TABLE t IS 'label'"),
 );
 
 /// One `ALTER TABLE` subcommand.
@@ -3436,6 +3435,11 @@ impl RoutineParallel {
 pub enum RoutineBody {
     /// `AS 'text'` / `AS $$ … $$`: the body exactly as written.
     Source(String),
+    /// `AS 'object_file', 'link_symbol'` for a dynamically loaded routine.
+    External {
+        object_file: String,
+        link_symbol: String,
+    },
     /// `PostgreSQL` 14's `BEGIN ATOMIC … END` SQL body, parsed at definition
     /// time. `text` is the source of the statement list, used to render
     /// `pg_get_functiondef`.

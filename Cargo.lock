@@ -3524,8 +3524,7 @@ dependencies = [
  "hex",
  "jiff",
  "md-5 0.11.0",
- "opentelemetry",
- "opentelemetry_sdk",
+ "pglz",
  "regex",
  "rust-stemmers",
  "sha2 0.11.0",
@@ -9819,6 +9818,12 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
 ]
+
+[[package]]
+name = "pglz"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67cbae2e9ce0605b5de065e53f781f82a1b3677ec1c8bbd12a6c3ccfeeeb5d70"
 
 [[package]]
 name = "phf"

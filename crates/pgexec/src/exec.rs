@@ -1061,8 +1061,14 @@ pub(crate) fn execute_ddl(
             )?;
             Ok((command("CREATE ROLE"), ops))
         }
-        Statement::DropRole { name } => {
-            let ops = crabka_pgcatalog::drop_role_ops(kv, name)?;
+        Statement::DropRole { name, if_exists } => {
+            let ops = match crabka_pgcatalog::drop_role_ops(kv, name) {
+                Ok(ops) => ops,
+                Err(crabka_pgcatalog::CatalogError::UndefinedObject(_)) if *if_exists => {
+                    Vec::new()
+                }
+                Err(error) => return Err(error.into()),
+            };
             Ok((command("DROP ROLE"), ops))
         }
         Statement::GrantTablePrivileges {
@@ -1723,17 +1729,19 @@ fn validate_index_expressions(
     if expressions.is_empty() {
         return Ok(());
     }
-    // GiST/SP-GiST are exact-scan metadata today, so expression keys need no
-    // physical entry evaluator. Other methods do maintain/probe stored keys.
+    // Expression indexes are exact-scan metadata today, so they need no
+    // physical entry evaluator. Hash/GIN remain physical-only methods.
     if unique
         || placement != crabka_pgcatalog::IndexPlacement::Local
         || !matches!(
             method,
-            crabka_pgcatalog::IndexMethod::Gist | crabka_pgcatalog::IndexMethod::Spgist
+            crabka_pgcatalog::IndexMethod::Btree
+                | crabka_pgcatalog::IndexMethod::Gist
+                | crabka_pgcatalog::IndexMethod::Spgist
         )
     {
         return Err(ExecError::Unsupported(
-            "expression indexes currently require a non-unique local GiST or SP-GiST index"
+            "expression indexes currently require a non-unique local B-tree, GiST, or SP-GiST index"
                 .into(),
         ));
     }
@@ -6991,6 +6999,13 @@ fn index_entries(
     index: &crabka_pgcatalog::Index,
     row: &[Datum],
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
+    if index
+        .columns
+        .iter()
+        .any(|key| crabka_pgcatalog::index_key_expression(key).is_some())
+    {
+        return Ok(Vec::new());
+    }
     if index.method == crabka_pgcatalog::IndexMethod::Btree {
         return indexed_values(table, index, row).map(|values| vec![values]);
     }
@@ -19452,6 +19467,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn btree_expression_indexes_are_catalog_only_and_never_probed() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        run_s(&mut session, "CREATE TABLE t (a int4)").await;
+        run_s(&mut session, "INSERT INTO t VALUES (1), (2)").await;
+
+        run_s(&mut session, "CREATE INDEX t_expr_idx ON t ((1))").await;
+        let index = crabka_pgcatalog::get_index(
+            engine.catalog_kv(),
+            &RelationName::public("t_expr_idx"),
+        )
+        .expect("expression index");
+        assert!(index.method == crabka_pgcatalog::IndexMethod::Btree);
+        assert!(crabka_pgcatalog::index_key_expression(&index.columns[0]) == Some("(1)"));
+
+        run_s(&mut session, "INSERT INTO t VALUES (3)").await;
+        run_s(&mut session, "UPDATE t SET a = 20 WHERE a = 2").await;
+        run_s(&mut session, "DELETE FROM t WHERE a = 1").await;
+        assert!(
+            text_rows_of(&mut session, "SELECT a FROM t WHERE a = 20").await
+                == vec![text_row(&["20"])]
+        );
+        assert!(
+            engine
+                .kv
+                .scan_prefix(&crabka_pgkv::key::secondary_index_prefix(
+                    index.table_id,
+                    index.id,
+                ))
+                .expect("scan expression index entries")
+                .is_empty()
+        );
+        assert!(
+            crabka_pgcatalog::get_index(
+                engine.catalog_kv(),
+                &RelationName::public("t_expr_idx")
+            )
+            .expect("persisted expression index")
+                == index
+        );
+    }
+
+    #[tokio::test]
     async fn create_index_resolves_and_validates_operator_classes() {
         use assert2::assert;
         let engine = SqlEngine::new();
@@ -21132,6 +21191,25 @@ mod tests {
             .await
             .expect_err("missing table without IF EXISTS");
         assert!(err.code == "42P01");
+    }
+
+    #[tokio::test]
+    async fn drop_role_if_exists_skips_only_a_missing_role() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+
+        let results = run(&engine, "DROP ROLE IF EXISTS missing_role").await;
+        assert!(tag_of(&results[0]) == "DROP ROLE");
+        assert!(sqlstate(&engine, "DROP ROLE missing_role").await == "42704");
+
+        run(&engine, "CREATE ROLE existing_role").await;
+        let results = run(&engine, "DROP ROLE IF EXISTS existing_role").await;
+        assert!(tag_of(&results[0]) == "DROP ROLE");
+        assert!(!crabka_pgcatalog::role_exists(
+            engine.catalog_kv(),
+            "existing_role"
+        )
+        .expect("role lookup"));
     }
 
     #[tokio::test]

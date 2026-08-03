@@ -110,6 +110,7 @@ once_cell = "1"
 # datafusion rev; the renovate rule below holds it to enforce that.
 object_store = { version = "0.13", features = ["aws", "gcp"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+pglz = "=0.1.1"
 multer = "3"
 snap = "1"
 lz4_flex = { version = "0.14", default-features = false, features = ["frame"] }

@@ -105,6 +105,7 @@ enum ScalarFunc {
     PgInputIsValid,
     /// Regression helper exposing PostgreSQL's `IsBinaryCoercible`.
     BinaryCoercible,
+    PgNumaAvailable,
     RangeConstructor(RangeRef),
     MultirangeConstructor(MultirangeRef),
     GenericMultirangeConstructor,
@@ -224,6 +225,7 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "pg_typeof" => ScalarFunc::PgTypeof,
         "pg_input_is_valid" => ScalarFunc::PgInputIsValid,
         "binary_coercible" => ScalarFunc::BinaryCoercible,
+        "pg_numa_available" => ScalarFunc::PgNumaAvailable,
         "isempty" => ScalarFunc::IsEmpty,
         "lower_inc" => ScalarFunc::LowerInc,
         "lower_inf" => ScalarFunc::LowerInf,
@@ -362,8 +364,10 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
     match f {
         ScalarFunc::Length => {
             require_arity(fc, n == 1)?;
-            if crate::eval::infer_type(&args[0], scope)? != ColumnType::TsVector {
-                require_text(&args[0], scope)?;
+            match crate::eval::infer_type(&args[0], scope)? {
+                ColumnType::TsVector => {}
+                ColumnType::Bytea if fc.name == "length" => {}
+                _ => require_text(&args[0], scope)?,
             }
             Ok(ColumnType::Int4)
         }
@@ -661,6 +665,10 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
             require_arity(fc, n == 2)?;
             require_int(&args[0], scope)?;
             require_int(&args[1], scope)?;
+            Ok(ColumnType::Bool)
+        }
+        ScalarFunc::PgNumaAvailable => {
+            require_arity(fc, n == 0)?;
             Ok(ColumnType::Bool)
         }
         ScalarFunc::RangeConstructor(range) => {
@@ -1034,6 +1042,7 @@ fn eval_eager(
             require_arity(fc, vals.len() == 1)?;
             let n = match &vals[0] {
                 Datum::TsVector(vector) => vector.len(),
+                Datum::Bytea(bytes) if fc.name == "length" => bytes.len(),
                 value => text_arg(value)?.chars().count(),
             };
             i32::try_from(n)
@@ -1531,6 +1540,10 @@ fn eval_eager(
             let source = u32::try_from(int_arg(&vals[0])?).unwrap_or(0);
             let target = u32::try_from(int_arg(&vals[1])?).unwrap_or(0);
             Ok(Datum::Bool(crate::catalog_rel::is_binary_coercible(source, target)))
+        }
+        ScalarFunc::PgNumaAvailable => {
+            require_arity(fc, vals.is_empty())?;
+            Ok(Datum::Bool(false))
         }
         ScalarFunc::PgTableIsVisible => {
             require_arity(fc, vals.len() == 1)?;
@@ -2633,8 +2646,10 @@ mod tests {
     #[test]
     fn string_length_upper_lower() {
         assert_eq!(ev("length('hello')"), Datum::Int4(5));
+        assert_eq!(ev(r"length('\x00ff'::bytea)"), Datum::Int4(2));
         assert_eq!(ev("char_length('abc')"), Datum::Int4(3));
         assert_eq!(ev("character_length('')"), Datum::Int4(0));
+        assert_eq!(err_code(r"char_length('\x00ff'::bytea)", None), "42883");
         assert_eq!(ev("upper('aBc')"), Datum::Text("ABC".into()));
         assert_eq!(ev("lower('aBc')"), Datum::Text("abc".into()));
         // strict: NULL argument → NULL.
@@ -2885,6 +2900,17 @@ mod tests {
         );
         assert_eq!(ev("getdatabaseencoding()"), Datum::Text("UTF8".into()));
         assert_eq!(err_code("getdatabaseencoding(1)", None), "42883");
+    }
+
+    #[test]
+    fn numa_availability_is_false() {
+        let expr = pexpr("pg_numa_available()").expect("parse");
+        assert_eq!(
+            crate::eval::infer_type(&expr, &Scope::empty()).expect("type"),
+            ColumnType::Bool
+        );
+        assert_eq!(ev("pg_numa_available()"), Datum::Bool(false));
+        assert_eq!(err_code("pg_numa_available(1)", None), "42883");
     }
 
     #[test]

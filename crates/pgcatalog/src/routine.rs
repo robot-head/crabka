@@ -223,8 +223,12 @@ pub struct Routine {
     pub result: RoutineResult,
     pub language: String,
     /// The body's source text. For [`BodyForm::Return`] this is the expression
-    /// alone. For the other forms it is the whole body.
+    /// alone; for C-language routines this is the `pg_proc.prosrc` link symbol;
+    /// for the other forms it is the whole body.
     pub body: String,
+    /// The C-language object file stored in `pg_proc.probin`; `None` for
+    /// routines in languages that do not load an external object.
+    pub object_file: Option<String>,
     pub body_form: BodyForm,
     /// `pg_proc.provolatile` (`i`/`s`/`v`).
     pub volatility: char,
@@ -397,7 +401,7 @@ pub fn drop_routine_ops(identity: &str) -> Vec<WriteOp> {
     }]
 }
 
-const ROUTINE_VERSION: u8 = 1;
+const ROUTINE_VERSION: u8 = 2;
 
 fn write_routine_type(out: &mut Vec<u8>, ty: &RoutineType) {
     match ty.column {
@@ -494,6 +498,7 @@ pub fn serialize_routine(routine: &Routine) -> Vec<u8> {
     }
     write_str(&mut out, &routine.language);
     write_str(&mut out, &routine.body);
+    write_opt_str(&mut out, routine.object_file.as_deref());
     out.push(match routine.body_form {
         BodyForm::Source => 0,
         BodyForm::Atomic => 1,
@@ -579,6 +584,7 @@ pub fn deserialize_routine(bytes: &[u8]) -> Result<Routine, KvError> {
     };
     let language = read_string(&mut cur)?;
     let body = read_string(&mut cur)?;
+    let object_file = read_opt_str(&mut cur)?;
     let body_form = match take_u8(&mut cur)? {
         0 => BodyForm::Source,
         1 => BodyForm::Atomic,
@@ -623,6 +629,7 @@ pub fn deserialize_routine(bytes: &[u8]) -> Result<Routine, KvError> {
         result,
         language,
         body,
+        object_file,
         body_form,
         volatility,
         parallel,
@@ -668,6 +675,7 @@ mod tests {
             },
             language: "sql".into(),
             body: "SELECT $1 + $2".into(),
+            object_file: None,
             body_form: BodyForm::Source,
             volatility: 'v',
             parallel: 'u',
@@ -691,6 +699,18 @@ mod tests {
     fn round_trips_through_the_catalog_encoding() {
         let mut routine = sample();
         routine.oid = 140_007;
+        let bytes = serialize_routine(&routine);
+        assert!(bytes[0] == ROUTINE_VERSION);
+        assert!(deserialize_routine(&bytes).expect("decodes") == routine);
+    }
+
+    #[test]
+    fn round_trips_c_object_file_separately_from_its_link_symbol() {
+        let mut routine = sample();
+        routine.language = "c".into();
+        routine.body = "binary_coercible".into();
+        routine.object_file = Some("$libdir/regress".into());
+
         let bytes = serialize_routine(&routine);
         assert!(deserialize_routine(&bytes).expect("decodes") == routine);
     }
