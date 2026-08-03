@@ -108,16 +108,37 @@ python3 scripts/gres-pg-regress-baseline.py update \
   --summary-output "$RUN/summary.md"
 ```
 
-The adopted-corpus score (`9323/14272`) remains useful diagnostic evidence, but
-it is not the compatibility headline. Compatibility is the upstream 231-test
-serial and parallel result. The checked-in baseline-eligible serial run is
-`6/231` with 225 semantic failures. The latest infrastructure-clean review run
-is `12/231` with 219 semantic failures after `mvcc`, `euc_kr`, and `async`
-passed. Serial has 169230 changed lines across 4552 hunks; parallel is also
-`12/231`, with 169647 changed lines across 4552 hunks. Certified artifact:
-`target/pg-regress-runs/20260803T091747Z-6393-gres`. It records observed
+The adopted-corpus score (`9323/14272`, 65.3%) remains useful statement-level
+diagnostic evidence, but it is not the compatibility headline. Compatibility
+is the unmodified PostgreSQL 18.4 upstream schedule: 231 whole test files in
+serial and parallel. The checked-in monotone baseline remains `6/231`; it is
+not ratcheted from a non-monotone review.
+
+The latest infrastructure-clean serial certification passes `13/231`, leaving
+218 semantic failures and 179071 canonical changed lines across 4595 hunks.
+Exact tests are `test_setup`, `md5`, `comments`, `mvcc`, `euc_kr`,
+`infinite_recurse`, `async`, `collate.icu.utf8`, `psql_crosstab`,
+`collate.linux.utf8`, `collate.windows.win1252`, `portals_p2`, and `bitmapops`.
+Parallel passes `13/231`, leaving 218 semantic failures and 179251 canonical
+changed lines across 4595 hunks. Both PostgreSQL self-checks pass, all 231 Gres
+tests complete in both modes, and both infrastructure reports are empty.
+Certified artifact:
+`target/pg-regress-runs/20260803T124820Z-certified-gres`. It records observed
 conformance without replacing the monotone baseline. Neither result satisfies
 the 231/231 completion gate.
+
+This review adds a bounded inclusion-exclusion path for two strict top-level
+`OR` branches in scalar `count(*)`, PostgreSQL
+`OPERATOR([pg_catalog.]symbol)` expression wrappers, anonymous-record OID 2249
+storage and query-field mapping, and native `jsonpath`/`jsonpath[]` type,
+catalog, storage, wire, assignment, routine, and domain plumbing. It also
+enforces PostgreSQL ALTER pass ordering, expression-index drop dependencies,
+and default operator-class gates. Legacy frontend Fastpath messages are fully
+consumed and rejected without killing the session; this is protocol
+compatibility, not legacy function execution. Native JSONPath plumbing removes
+the missing-type failures, but the three upstream JSONPath files remain `0/3`
+with 3110 changed lines across 99 hunks because grammar, canonical output, and
+evaluator coverage remain incomplete.
 
 `corpus-regress/` contains PostgreSQL `src/test/regress` SQL files adopted with
 `POSTGRES_TAG=REL_18_4 ../../tools/gres-adopt-regress.sh <name>`. Adopted files

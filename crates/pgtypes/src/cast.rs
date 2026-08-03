@@ -52,6 +52,8 @@ pub fn cast_allowed(from: ColumnType, to: ColumnType) -> bool {
     match (from, to) {
         // Identity (e.g. numeric → numeric, even across differing typmods).
         (a, b) if a == b => true,
+        // jsonpath is a distinct scalar type with text input/output functions.
+        (ColumnType::Text, ColumnType::JsonPath) | (ColumnType::JsonPath, ColumnType::Text) => true,
         // A domain casts exactly as its base type does, in both directions:
         // `PostgreSQL` coerces through the base and then applies the domain's
         // constraints. This arm must come first so a domain never falls into
@@ -287,6 +289,10 @@ pub fn cast_in(
         (Datum::Point(point), ColumnType::Point) => Ok(Datum::Point(*point)),
         (Datum::Path(path), ColumnType::Path) => Ok(Datum::Path(path.clone())),
         (Datum::Text(s), Text) => Ok(Datum::Text(s.clone())),
+        // The executor owns jsonpath parsing/canonicalization. Keeping only
+        // identity here makes it impossible for a raw string to masquerade as
+        // a validated jsonpath through a context-free type-layer call.
+        (Datum::JsonPath(s), ColumnType::JsonPath) => Ok(Datum::JsonPath(s.clone())),
         (Datum::Text(s), ColumnType::Varchar(n)) => {
             crate::string::apply_varchar_typmod(s, n, Coercion::Explicit).map(Datum::Text)
         }

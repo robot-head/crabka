@@ -172,14 +172,17 @@ fn param_types(f: JsonFunc, given: &[ArgType]) -> Result<Vec<Option<ColumnType>>
         JsonFunc::Pretty => vec![jsonb],
         JsonFunc::DeletePath => vec![jsonb, ColumnType::array_of(ColumnType::Text)],
         JsonFunc::Object => vec![ColumnType::array_of(ColumnType::Text); n.max(1)],
-        // `(jsonb, jsonpath [, jsonb vars [, boolean silent]])`. crabka spells
-        // `jsonpath` `text`, so the second parameter takes an `unknown` literal
-        // as text and the path is compiled at evaluation.
+        // `(jsonb, jsonpath [, jsonb vars [, boolean silent]])`.
         JsonFunc::PathExists
         | JsonFunc::PathMatch
         | JsonFunc::PathQueryArray
         | JsonFunc::PathQueryFirst => {
-            vec![jsonb, Some(ColumnType::Text), jsonb, Some(ColumnType::Bool)]
+            vec![
+                jsonb,
+                Some(ColumnType::JsonPath),
+                jsonb,
+                Some(ColumnType::Bool),
+            ]
         }
         JsonFunc::Operator(op) => match op {
             JsonOp::KeyExists => vec![jsonb, Some(ColumnType::Text)],
@@ -302,11 +305,17 @@ pub(crate) fn json_func_result_type(fc: &FuncCall, scope: &Scope) -> Result<Colu
         JsonFunc::PathExists | JsonFunc::PathMatch => {
             require_arity(fc, (2..=4).contains(&n))?;
             require_jsonb_arg(fc, types[0])?;
+            if types[1] != ColumnType::JsonPath {
+                return Err(undefined_function(&fc.name));
+            }
             ColumnType::Bool
         }
         JsonFunc::PathQueryArray | JsonFunc::PathQueryFirst => {
             require_arity(fc, (2..=4).contains(&n))?;
             require_jsonb_arg(fc, types[0])?;
+            if types[1] != ColumnType::JsonPath {
+                return Err(undefined_function(&fc.name));
+            }
             ColumnType::Jsonb
         }
         JsonFunc::Operator(op) => {
@@ -543,7 +552,7 @@ fn path_args(name: &str, args: &[Datum]) -> Result<Option<PathCall>, ExecError> 
         return Ok(None);
     }
     let target = jsonb_operand(&args[0], name)?.into_owned();
-    let path = crate::jsonpath::JsonPath::parse(text_arg(&args[1], name)?)?;
+    let path = crate::jsonpath::JsonPath::parse(jsonpath_arg(&args[1], name)?)?;
     let vars = match args.get(2) {
         None | Some(Datum::Null) => None,
         Some(given) => {
@@ -606,7 +615,7 @@ fn json_path_operator(left: &Datum, right: &Datum, predicate: bool) -> Result<Da
     let Some(target) = jsonb_or_null(left, op)? else {
         return Ok(Datum::Null);
     };
-    let path = crate::jsonpath::JsonPath::parse(text_arg(right, op.spelling())?)?;
+    let path = crate::jsonpath::JsonPath::parse(jsonpath_arg(right, op.spelling())?)?;
     let result = if predicate {
         path.predicate(target.as_ref(), None, true)?
     } else {
@@ -1674,6 +1683,7 @@ fn to_jsonb(d: &Datum, ctx: &EvalCtx) -> Result<JsonbValue, ExecError> {
         // `regclass` joins the stringly group, not the numbers: PostgreSQL's
         // `to_jsonb('pp'::regclass)` is `"pp"`, its output function's text.
         Datum::Text(_)
+        | Datum::JsonPath(_)
         | Datum::Point(_)
         | Datum::Path(_)
         | Datum::Date(_)
@@ -1839,9 +1849,9 @@ pub(crate) fn json_operator_result_type(
         JsonOp::Delete if right.is_string() || integral || right == text_array => {
             Some(ColumnType::Jsonb)
         }
-        // The jsonpath operand is a `jsonpath` in PostgreSQL; crabka spells
-        // that type `text` (see the module divergence note).
-        JsonOp::PathExists | JsonOp::PathMatch if right.is_string() => Some(ColumnType::Bool),
+        JsonOp::PathExists | JsonOp::PathMatch if right == ColumnType::JsonPath => {
+            Some(ColumnType::Bool)
+        }
         _ => None,
     }
 }
@@ -2476,6 +2486,13 @@ fn text_path(d: &Datum, name: &str) -> Result<Vec<String>, ExecError> {
 fn text_arg<'a>(d: &'a Datum, name: &str) -> Result<&'a str, ExecError> {
     match d {
         Datum::Text(s) => Ok(s),
+        other => Err(type_error(name, other)),
+    }
+}
+
+fn jsonpath_arg<'a>(d: &'a Datum, name: &str) -> Result<&'a str, ExecError> {
+    match d {
+        Datum::JsonPath(s) => Ok(s),
         other => Err(type_error(name, other)),
     }
 }

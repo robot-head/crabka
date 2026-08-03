@@ -1610,7 +1610,7 @@ pub(crate) fn eval_plpgsql_scalar_with(
                 &given,
             ) {
                 let mut values = values.into_iter();
-                return crate::func::eval_scalar(call, ctx, |_| {
+                return crate::func::eval_scalar(call, None, ctx, |_| {
                     values.next().ok_or_else(|| {
                         ExecError::Unsupported("binary_coercible argument is missing".into())
                     })
@@ -1683,9 +1683,7 @@ pub(crate) fn eval_plpgsql_scalar_with(
                 crate::plpgsql::eval_scalar_function(&routine, &values, ctx)?
             };
             match resolved_scalar_result_type(&routine, &given) {
-                Some(ty) => {
-                    crabka_pgtypes::cast::cast(&value, ty, &ctx.time_zone).map_err(ExecError::from)
-                }
+                Some(ty) => crate::plpgsql::cast_value(&value, ty, ctx),
                 None if declared_returns_void(&routine) => Ok(Datum::Null),
                 None => Ok(value),
             }

@@ -3482,11 +3482,15 @@ impl SqlSession {
     ) -> Result<(), ExecError> {
         let params = values
             .iter()
-            .map(|(value, ty)| BoundParam {
-                type_oid: Some(ty.oid()),
-                format: 1,
-                value: (!value.is_null())
-                    .then(|| bytes::Bytes::from(crabka_pgtypes::encoding::encode_binary(value))),
+            .map(|(value, ty)| {
+                let value = (!value.is_null()).then(|| {
+                    bytes::Bytes::from(crabka_pgtypes::encoding::encode_binary(value))
+                });
+                BoundParam {
+                    type_oid: Some(ty.oid()),
+                    format: 1,
+                    value,
+                }
             })
             .collect::<Vec<_>>();
         self.bind_extended_statement_params(statement, &params)
@@ -3504,6 +3508,16 @@ impl SqlSession {
         let ty = crate::exec::column_type_from_oid(field.type_oid)?;
         let text = std::str::from_utf8(&cell.text)
             .map_err(|error| ExecError::Syntax(format!("invalid UTF-8 query result: {error}")))?;
+        if matches!(
+            ty,
+            ColumnType::JsonPath | ColumnType::Array(ElemType::JsonPath)
+        ) {
+            return crate::eval::cast_value(
+                &Datum::Text(text.to_string()),
+                ty,
+                &self.eval_ctx().time_zone,
+            );
+        }
         decode_text_bound_param(text, ty, &self.eval_ctx().time_zone).map_err(ExecError::from)
     }
 
@@ -9719,13 +9733,15 @@ impl ParamBinder<'_> {
                 // A lateral item's outer references are substituted for constants
                 // before execution, so parameter binding still sees the arguments
                 // against an empty scope.
-                for arg in functions.iter_mut().flat_map(|call| call.args.iter_mut()) {
-                    self.bind_expr_with_scope_and_ctes(
-                        arg,
-                        None,
-                        &crate::scope::Scope::empty(),
-                        ctes,
-                    )?;
+                for call in functions {
+                    for (index, arg) in call.args.iter_mut().enumerate() {
+                        self.bind_expr_with_scope_and_ctes(
+                            arg,
+                            jsonpath_function_param_type(&call.name, index),
+                            &crate::scope::Scope::empty(),
+                            ctes,
+                        )?;
+                    }
                 }
                 Ok(())
             }
@@ -9870,17 +9886,22 @@ impl ParamBinder<'_> {
                 self.bind_expr_with_scope_and_ctes(expr, None, scope, ctes)?;
             }
             Expr::Binary { op, left, right } => {
-                let left_expected =
-                    binary_param_type(*op, right, scope).or(expected_for_binary(*op));
-                let right_expected =
-                    binary_param_type(*op, left, scope).or(expected_for_binary(*op));
+                let left_expected = binary_param_type(*op, right, true, scope)
+                    .or(expected_for_binary(*op));
+                let right_expected = binary_param_type(*op, left, false, scope)
+                    .or(expected_for_binary(*op));
                 self.bind_expr_with_scope_and_ctes(left, left_expected, scope, ctes)?;
                 self.bind_expr_with_scope_and_ctes(right, right_expected, scope, ctes)?;
             }
             Expr::Func(func) => {
                 if let FuncArgs::Exprs(args) = &mut func.args {
-                    for arg in args {
-                        self.bind_expr_with_scope_and_ctes(arg, None, scope, ctes)?;
+                    for (index, arg) in args.iter_mut().enumerate() {
+                        self.bind_expr_with_scope_and_ctes(
+                            arg,
+                            jsonpath_function_param_type(&func.name, index),
+                            scope,
+                            ctes,
+                        )?;
                     }
                 }
             }
@@ -10016,6 +10037,7 @@ fn expected_for_binary(op: BinaryOp) -> Option<ColumnType> {
 fn binary_param_type(
     op: BinaryOp,
     other: &Expr,
+    param_is_left: bool,
     scope: &crate::scope::Scope,
 ) -> Option<ColumnType> {
     match op {
@@ -10067,14 +10089,26 @@ fn binary_param_type(
         // `->`/`->>` take either a text key or an integer index; the operand
         // alone cannot say which, so leave the parameter at its default.
         BinaryOp::JsonGet | BinaryOp::JsonGetText => None,
-        // `@@` also serves full-text search; a vector sibling resolves the
-        // parameter as the query operand instead of jsonpath text.
-        BinaryOp::JsonPathMatch => match infer_param_context_type(other, scope) {
-            Some(ColumnType::TsVector) => Some(ColumnType::TsQuery),
-            Some(ColumnType::TsQuery) => Some(ColumnType::TsVector),
+        // `@@` is overloaded by JSON path and full-text search. PostgreSQL's
+        // side-sensitive operator search is not symmetric: an unconstrained
+        // pair resolves through the text/text overload, while a typed sibling
+        // selects the corresponding jsonb/jsonpath or tsquery/tsvector shape.
+        BinaryOp::JsonPathMatch => match (param_is_left, infer_param_context_type(other, scope)) {
+            (true, Some(ColumnType::JsonPath)) => Some(ColumnType::Jsonb),
+            (false, Some(ColumnType::Jsonb)) => Some(ColumnType::JsonPath),
+            (true, Some(ColumnType::TsVector))
+            | (false, Some(ColumnType::TsVector)) => Some(ColumnType::TsQuery),
+            (false, Some(ColumnType::TsQuery)) => Some(ColumnType::TsVector),
+            // `text @@ tsquery` is the preferred overload for an unknown left
+            // operand; it parses the document text into a tsvector internally.
+            (true, Some(ColumnType::TsQuery)) => Some(ColumnType::Text),
             _ => Some(ColumnType::Text),
         },
-        BinaryOp::JsonPathExists => Some(ColumnType::Text),
+        BinaryOp::JsonPathExists => Some(if param_is_left {
+            ColumnType::Jsonb
+        } else {
+            ColumnType::JsonPath
+        }),
         // The regex-match, bitwise, exponent and modulo operators and the
         // boolean connectives resolve a parameter from nothing but its own
         // default.
@@ -10094,8 +10128,38 @@ fn binary_param_type(
     }
 }
 
-/// The element type of an array-typed expression. This is how `$1 = ANY(tags)`
-/// types its left operand.
+/// Positional type context for the `jsonb_path_*` family. This is used only by
+/// parameter binding; ordinary literal/function resolution remains in
+/// `json_fn` and `srf`.
+fn jsonpath_function_param_type(name: &str, index: usize) -> Option<ColumnType> {
+    let name = name.rsplit('.').next().unwrap_or(name);
+    if !matches!(
+        name,
+        "jsonb_path_exists"
+            | "jsonb_path_exists_tz"
+            | "jsonb_path_match"
+            | "jsonb_path_match_tz"
+            | "jsonb_path_query"
+            | "jsonb_path_query_tz"
+            | "jsonb_path_query_array"
+            | "jsonb_path_query_array_tz"
+            | "jsonb_path_query_first"
+            | "jsonb_path_query_first_tz"
+    ) {
+        return None;
+    }
+    [
+        ColumnType::Jsonb,
+        ColumnType::JsonPath,
+        ColumnType::Jsonb,
+        ColumnType::Bool,
+    ]
+    .get(index)
+    .copied()
+}
+
+/// The element type of an array-typed expression — how `$1 = ANY(tags)` types
+/// its left operand.
 fn array_element_context_type(expr: &Expr, scope: &crate::scope::Scope) -> Option<ColumnType> {
     match infer_param_context_type(expr, scope) {
         Some(ColumnType::Array(elem)) => Some(elem.column_type()),
@@ -10527,6 +10591,7 @@ fn param_column_type(param: &BoundParam) -> Result<Option<ColumnType>, PgError> 
         Some(crabka_pgtypes::oids::JSON | crabka_pgtypes::oids::JSONB) => {
             Ok(Some(ColumnType::Jsonb))
         }
+        Some(crabka_pgtypes::oids::JSONPATH) => Ok(Some(ColumnType::JsonPath)),
         Some(crabka_pgtypes::oids::TSVECTOR) => Ok(Some(ColumnType::TsVector)),
         Some(crabka_pgtypes::oids::TSQUERY) => Ok(Some(ColumnType::TsQuery)),
         Some(0) | None => Ok(None),
@@ -10551,6 +10616,13 @@ fn decode_bound_param(
     match param.format {
         0 => {
             let text = std::str::from_utf8(value).map_err(invalid_parameter_encoding)?;
+            if matches!(
+                ty,
+                ColumnType::JsonPath | ColumnType::Array(ElemType::JsonPath)
+            ) {
+                return crate::eval::cast_value(&Datum::Text(text.to_string()), ty, time_zone)
+                    .map_err(ExecError::into_pg);
+            }
             decode_text_bound_param(text, ty, time_zone)
                 .map_err(ExecError::from)
                 .map_err(ExecError::into_pg)
@@ -10678,6 +10750,7 @@ fn decode_binary_value(
                 .map_err(ExecError::into_pg)
         }
         ColumnType::Jsonb => decode_jsonb_binary(value),
+        ColumnType::JsonPath => decode_jsonpath_binary(value),
         ColumnType::TsVector | ColumnType::TsQuery => {
             let text = std::str::from_utf8(value).map_err(invalid_parameter_encoding)?;
             decode_text_bound_param(text, ty, time_zone)
@@ -10826,7 +10899,22 @@ fn decode_jsonb_binary(value: &[u8]) -> Result<Datum, PgError> {
         .map_err(ExecError::into_pg)
 }
 
-/// `array_recv` for a one-dimensional array: the layout
+/// `jsonpath_recv`: a version byte followed by canonicalizable UTF-8 text.
+fn decode_jsonpath_binary(value: &[u8]) -> Result<Datum, PgError> {
+    let Some((&version, text)) = value.split_first() else {
+        return Err(PgError::protocol("invalid jsonpath binary representation"));
+    };
+    if version != crabka_pgtypes::encoding::JSONPATH_BINARY_VERSION {
+        return Err(PgError::error(
+            "XX000",
+            format!("unsupported jsonpath version number: {version}"),
+        ));
+    }
+    let text = std::str::from_utf8(text).map_err(invalid_parameter_encoding)?;
+    crate::jsonpath::canonical_datum(text).map_err(ExecError::into_pg)
+}
+
+/// `array_recv` for a one-dimensional array — the layout
 /// `crabka_pgtypes::encoding` writes, read back exactly.
 ///
 /// Both spellings of the empty array must land on the zero-dimensional value:
@@ -12413,8 +12501,8 @@ mod tests {
     use crabka_pgwire::engine::{Engine, QueryResult, Session, TxStatus};
 
     use super::{
-        ColumnType, GucState, PgError, RowLockManager, SqlSession, canonical_guc_value,
-        decode_bound_param, guc_default, guc_vartype,
+        ColumnType, GucState, RowLockManager, SqlSession, canonical_guc_value, decode_bound_param,
+        guc_default, guc_vartype,
     };
     use crate::{ExecError, SqlEngine};
 
@@ -12687,7 +12775,7 @@ mod tests {
             .simple_query(
                 "CREATE SCHEMA app; CREATE ROLE reader; \
                  GRANT CREATE, USAGE ON SCHEMA public, app TO public, reader; \
-                 REVOKE USAGE ON SCHEMA app FROM reader",
+                 REVOKE USAGE ON SCHEMA app FROM public, reader",
             )
             .await
             .expect("schema privilege syntax and targets");
@@ -13583,20 +13671,27 @@ mod tests {
         }
     }
 
-    async fn wait_until_blocked(
-        query: &mut (impl std::future::Future<Output = Result<Vec<QueryResult>, PgError>> + Unpin),
+    async fn wait_until_blocked<F>(
+        query: &mut F,
         lockmgr: &RowLockManager,
-        holder: u64,
-    ) {
-        loop {
-            if lockmgr.waiter_queue_len(holder) != 0 {
-                return;
+        holder: crate::lockmgr::LockOwner,
+    ) where
+        F: std::future::Future + Unpin,
+        F::Output: std::fmt::Debug,
+    {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if lockmgr.waiter_queue_len_as(holder) != 0 {
+                    return;
+                }
+                tokio::select! {
+                    result = &mut *query => panic!("query completed before it blocked: {result:?}"),
+                    () = tokio::task::yield_now() => {}
+                }
             }
-            tokio::select! {
-                result = &mut *query => panic!("query completed before it blocked: {result:?}"),
-                () = tokio::task::yield_now() => {}
-            }
-        }
+        })
+        .await
+        .expect("query did not block on the held row lock");
     }
 
     #[tokio::test]
@@ -13608,7 +13703,7 @@ mod tests {
             .simple_query("BEGIN; SELECT * FROM cancel_pl WHERE id = 1 FOR UPDATE")
             .await
             .expect("hold row lock");
-        let holder = blocker.local_xid().expect("locking select xid");
+        let holder = blocker.lock_owner;
 
         let mut target = engine.connect();
         let lockmgr = Arc::clone(&target.lockmgr);
@@ -13678,7 +13773,7 @@ mod tests {
             .simple_query("BEGIN; SELECT * FROM cancel_pl WHERE id = 1 FOR UPDATE")
             .await
             .expect("hold row lock");
-        let holder = blocker.local_xid().expect("locking select xid");
+        let holder = blocker.lock_owner;
 
         let mut target = engine.connect();
         let lockmgr = Arc::clone(&target.lockmgr);
@@ -13716,7 +13811,7 @@ mod tests {
             .simple_query("BEGIN; SELECT * FROM cancel_pl WHERE id = 1 FOR UPDATE")
             .await
             .expect("hold row lock");
-        let holder = blocker.local_xid().expect("locking select xid");
+        let holder = blocker.lock_owner;
 
         let mut target = engine.connect();
         target
@@ -13733,15 +13828,7 @@ mod tests {
             .expect("bind");
         let lockmgr = Arc::clone(&target.lockmgr);
         let mut execute = Box::pin(target.execute("cancel", 0));
-        loop {
-            if lockmgr.waiter_queue_len(holder) != 0 {
-                break;
-            }
-            tokio::select! {
-                result = &mut execute => panic!("execute completed before it blocked: {result:?}"),
-                () = tokio::task::yield_now() => {}
-            }
-        }
+        wait_until_blocked(&mut execute, lockmgr.as_ref(), holder).await;
         drop(execute);
 
         target.cancel_current_query().await;
@@ -14390,6 +14477,98 @@ mod tests {
             .expect("describe bare parameter select");
 
         assert!(parameter_types == vec![crabka_pgtypes::oids::TEXT]);
+    }
+
+    #[tokio::test]
+    async fn extended_describe_infers_jsonpath_operator_and_function_parameters() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for (sql, expected) in [
+            (
+                "SELECT $1 @? $2",
+                vec![crabka_pgtypes::oids::JSONB, crabka_pgtypes::oids::JSONPATH],
+            ),
+            (
+                "SELECT $1 @@ $2",
+                vec![crabka_pgtypes::oids::TEXT, crabka_pgtypes::oids::TEXT],
+            ),
+            (
+                "SELECT $1::jsonb @@ $2",
+                vec![crabka_pgtypes::oids::JSONB, crabka_pgtypes::oids::JSONPATH],
+            ),
+            (
+                "SELECT $1 @@ $2::jsonpath",
+                vec![crabka_pgtypes::oids::JSONB, crabka_pgtypes::oids::JSONPATH],
+            ),
+            (
+                "SELECT $1::tsquery @@ $2",
+                vec![crabka_pgtypes::oids::TSQUERY, crabka_pgtypes::oids::TSVECTOR],
+            ),
+            (
+                "SELECT $1 @@ $2::tsvector",
+                vec![crabka_pgtypes::oids::TSQUERY, crabka_pgtypes::oids::TSVECTOR],
+            ),
+            (
+                "SELECT $1::text @@ $2",
+                vec![crabka_pgtypes::oids::TEXT, crabka_pgtypes::oids::TEXT],
+            ),
+        ] {
+            let (_, parameter_types) = session
+                .test_describe_prepared(sql, &[])
+                .await
+                .expect("describe jsonpath operator");
+            assert!(parameter_types == expected, "{sql}");
+        }
+        for (sql, expected) in [
+            (
+                "SELECT $1 @@ 'a'::tsquery",
+                vec![crabka_pgtypes::oids::TEXT],
+            ),
+            (
+                "SELECT 'a'::tsvector @@ $1",
+                vec![crabka_pgtypes::oids::TSQUERY],
+            ),
+        ] {
+            let (_, parameter_types) = session
+                .test_describe_prepared(sql, &[])
+                .await
+                .expect("describe text-search operator");
+            assert!(parameter_types == expected, "{sql}");
+        }
+
+        let expected = vec![
+            crabka_pgtypes::oids::JSONB,
+            crabka_pgtypes::oids::JSONPATH,
+            crabka_pgtypes::oids::JSONB,
+            crabka_pgtypes::oids::BOOL,
+        ];
+        for name in [
+            "jsonb_path_exists",
+            "pg_catalog.jsonb_path_exists",
+            "jsonb_path_exists_tz",
+            "jsonb_path_match",
+            "jsonb_path_match_tz",
+            "jsonb_path_query_array",
+            "jsonb_path_query_array_tz",
+            "jsonb_path_query_first",
+            "jsonb_path_query_first_tz",
+        ] {
+            let sql = format!("SELECT {name}($1, $2, $3, $4)");
+            let (_, parameter_types) = session
+                .test_describe_prepared(&sql, &[])
+                .await
+                .expect("describe scalar jsonpath function");
+            assert!(parameter_types == expected, "{sql}");
+        }
+        for name in ["jsonb_path_query", "jsonb_path_query_tz"] {
+            let sql = format!("SELECT * FROM {name}($1, $2, $3, $4)");
+            let (_, parameter_types) = session
+                .test_describe_prepared(&sql, &[])
+                .await
+                .expect("describe set-returning jsonpath function");
+            assert!(parameter_types == expected, "{sql}");
+        }
     }
 
     #[tokio::test]
@@ -15838,6 +16017,8 @@ mod notify_and_binary_parameter_tests {
             (oids::JSONB, ColumnType::Jsonb),
             // `json` is an input alias for `jsonb`, scalar and array alike.
             (oids::JSON, ColumnType::Jsonb),
+            (oids::JSONPATH, ColumnType::JsonPath),
+            (oids::JSONPATHARRAY, ColumnType::Array(ElemType::JsonPath)),
             (oids::INT4ARRAY, ColumnType::Array(ElemType::Int4)),
             (oids::INT8ARRAY, ColumnType::Array(ElemType::Int8)),
             (oids::TEXTARRAY, ColumnType::Array(ElemType::Text)),
@@ -15905,6 +16086,62 @@ mod notify_and_binary_parameter_tests {
         let error = decode(&param(oids::JSONB, 1, b"\x02{}"), ColumnType::Jsonb)
             .expect_err("version 2 is not supported");
         assert!(error.message.contains("unsupported jsonb version number 2"));
+    }
+
+    #[test]
+    fn jsonpath_parameters_are_canonicalized_in_both_wire_formats() {
+        let expected = Datum::JsonPath("$.\"a\"".into());
+        let text = decode(
+            &param(oids::JSONPATH, 0, b"lax $.a"),
+            ColumnType::JsonPath,
+        );
+        assert!(text.expect("text jsonpath") == expected);
+
+        let binary = decode(
+            &param(oids::JSONPATH, 1, b"\x01lax $.a"),
+            ColumnType::JsonPath,
+        );
+        assert!(binary.expect("binary jsonpath") == expected);
+
+        let invalid = decode(
+            &param(oids::JSONPATH, 0, b""),
+            ColumnType::JsonPath,
+        )
+        .expect_err("empty jsonpath");
+        assert!(invalid.code == "22P02");
+
+        let version = decode(
+            &param(oids::JSONPATH, 1, b"\x02$"),
+            ColumnType::JsonPath,
+        )
+        .expect_err("version 2");
+        assert!(version.code == "XX000");
+        assert!(version.message.contains("unsupported jsonpath version number: 2"));
+
+        let empty = decode(&param(oids::JSONPATH, 1, b""), ColumnType::JsonPath)
+            .expect_err("empty binary jsonpath");
+        assert!(empty.code == "08P01");
+    }
+
+    #[test]
+    fn jsonpath_array_parameters_use_native_element_identity_and_wire_format() {
+        let expected = Datum::Array(ArrayValue::new(
+            ElemType::JsonPath,
+            vec![Datum::JsonPath("$.\"a\"".into()), Datum::Null],
+        ));
+        let text = decode(
+            &param(oids::JSONPATHARRAY, 0, br#"{"lax $.a",NULL}"#),
+            ColumnType::Array(ElemType::JsonPath),
+        );
+        assert!(text.expect("text jsonpath array") == expected);
+
+        let encoded = encoding::encode_binary(&expected);
+        assert!(u32::from_be_bytes(encoded[8..12].try_into().expect("oid")) == oids::JSONPATH);
+        let binary = decode(
+            &param(oids::JSONPATHARRAY, 1, &encoded),
+            ColumnType::Array(ElemType::JsonPath),
+        );
+        assert!(binary.expect("binary jsonpath array") == expected);
     }
 
     #[test]

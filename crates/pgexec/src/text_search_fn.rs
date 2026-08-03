@@ -459,7 +459,7 @@ fn query_tree(query: &TsQuery) -> Option<TsQuery> {
     }
 }
 
-fn plain_query(
+pub(crate) fn plain_query(
     config: &str,
     source: &str,
     phrase: bool,

@@ -345,11 +345,13 @@ pub(crate) fn array_func_result_type(
         }
         ArrayFunc::Remove => {
             require_arity(fc, n == 2)?;
-            ColumnType::Array(require_array_type(fc, types[0])?)
+            let elem = require_array_type(fc, types[0])?;
+            ColumnType::Array(elem)
         }
         ArrayFunc::Replace => {
             require_arity(fc, n == 3)?;
-            ColumnType::Array(require_array_type(fc, types[0])?)
+            let elem = require_array_type(fc, types[0])?;
+            ColumnType::Array(elem)
         }
         ArrayFunc::Trim | ArrayFunc::Sample => {
             require_arity(fc, n == 2)?;
@@ -361,7 +363,8 @@ pub(crate) fn array_func_result_type(
         }
         ArrayFunc::Sort => {
             require_arity(fc, (1..=3).contains(&n))?;
-            ColumnType::Array(require_array_type(fc, types[0])?)
+            let elem = require_array_type(fc, types[0])?;
+            ColumnType::Array(elem)
         }
     })
 }
@@ -1244,7 +1247,11 @@ fn assign_slice(
         Datum::Array(a) => a.clone(),
         // `SET a[1:2] = '{1,2}'` — a bare literal on the value side is
         // `unknown`, and the target column's array type resolves it.
-        Datum::Text(_) => match cast::cast(value, ColumnType::Array(array.elem), &ctx.time_zone)? {
+        Datum::Text(_) => match crate::eval::cast_value(
+            value,
+            ColumnType::Array(array.elem),
+            &ctx.time_zone,
+        )? {
             Datum::Array(a) => a,
             other => return Err(not_an_array(&other)),
         },
@@ -1547,7 +1554,7 @@ fn coerce_element(elem: &Datum, to: ElemType, ctx: &EvalCtx) -> Result<Datum, Ex
     // A string element goes through the target type's INPUT function, so a
     // malformed one keeps that function's 22P02 rather than becoming 42804.
     if matches!(elem, Datum::Text(_)) {
-        return cast::cast(elem, to.column_type(), &ctx.time_zone).map_err(ExecError::Type);
+        return crate::eval::cast_value(elem, to.column_type(), &ctx.time_zone);
     }
     cast::cast(elem, to.column_type(), &ctx.time_zone).map_err(|_| {
         ExecError::TypeMismatch(format!(
@@ -1676,6 +1683,7 @@ fn array_position(
         return Ok(Datum::Null);
     }
     let a = require_at_most_one_dimension(array_value(array, name)?, SEARCH_ACTION)?;
+    require_element_equality(a)?;
     let from = match start {
         None => 1,
         Some(Datum::Null) => return Ok(Datum::Null),
@@ -1683,7 +1691,7 @@ fn array_position(
     };
     let skip = usize::try_from(from.max(1)).unwrap_or(1).saturating_sub(1);
     for (i, e) in a.elems.iter().enumerate().skip(skip) {
-        if element_matches(e, needle) {
+        if element_matches(e, needle)? {
             return Ok(Datum::Int4(i32::try_from(i + 1).unwrap_or(i32::MAX)));
         }
     }
@@ -1696,13 +1704,13 @@ fn array_positions(array: &Datum, needle: &Datum, name: &str) -> Result<Datum, E
         return Ok(Datum::Null);
     }
     let a = require_at_most_one_dimension(array_value(array, name)?, SEARCH_ACTION)?;
-    let found: Vec<Datum> = a
-        .elems
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| element_matches(e, needle))
-        .map(|(i, _)| Datum::Int4(i32::try_from(i + 1).unwrap_or(i32::MAX)))
-        .collect();
+    require_element_equality(a)?;
+    let mut found = Vec::new();
+    for (i, element) in a.elems.iter().enumerate() {
+        if element_matches(element, needle)? {
+            found.push(Datum::Int4(i32::try_from(i + 1).unwrap_or(i32::MAX)));
+        }
+    }
     Ok(Datum::Array(ArrayValue::new(ElemType::Int4, found)))
 }
 
@@ -1714,12 +1722,13 @@ fn array_remove(array: &Datum, needle: &Datum, name: &str) -> Result<Datum, Exec
         return Ok(Datum::Null);
     }
     let a = require_at_most_one_dimension(array_value(array, name)?, REMOVE_ACTION)?;
-    let kept: Vec<Datum> = a
-        .elems
-        .iter()
-        .filter(|e| !element_matches(e, needle))
-        .cloned()
-        .collect();
+    require_element_equality(a)?;
+    let mut kept = Vec::with_capacity(a.elems.len());
+    for element in &a.elems {
+        if !element_matches(element, needle)? {
+            kept.push(element.clone());
+        }
+    }
     Ok(Datum::Array(ArrayValue::new(a.elem, kept)))
 }
 
@@ -1730,17 +1739,18 @@ fn array_replace(array: &Datum, from: &Datum, to: &Datum, name: &str) -> Result<
         return Ok(Datum::Null);
     }
     let a = array_value(array, name)?;
+    require_element_equality(a)?;
     let elems = a
         .elems
         .iter()
         .map(|e| {
-            if element_matches(e, from) {
-                to.clone()
+            if element_matches(e, from)? {
+                Ok(to.clone())
             } else {
-                e.clone()
+                Ok(e.clone())
             }
         })
-        .collect();
+        .collect::<Result<Vec<_>, ExecError>>()?;
     Ok(Datum::Array(ArrayValue::with_dims(
         a.elem,
         elems,
@@ -1914,13 +1924,19 @@ fn compare_slices(
                     null_side.reverse()
                 }
             }
-            (false, false) => match crabka_pgtypes::ops::compare(x, y) {
-                Ok(Some(ord)) => ord,
-                Ok(None) => Ordering::Equal,
-                Err(e) => {
-                    failure.get_or_insert(ExecError::Type(e));
+            (false, false) => match crate::eval::require_runtime_comparison(x, y) {
+                Err(error) => {
+                    failure.get_or_insert(error);
                     Ordering::Equal
                 }
+                Ok(()) => match crabka_pgtypes::ops::compare(x, y) {
+                    Ok(Some(ord)) => ord,
+                    Ok(None) => Ordering::Equal,
+                    Err(e) => {
+                        failure.get_or_insert(ExecError::Type(e));
+                        Ordering::Equal
+                    }
+                },
             },
         };
         if ord != Ordering::Equal {
@@ -1980,14 +1996,26 @@ fn require_at_most_one_dimension<'a>(
     Ok(a)
 }
 
-/// Element identity for the search functions is `IS NOT DISTINCT FROM`, so a
-/// NULL needle finds the NULL elements.
-fn element_matches(element: &Datum, needle: &Datum) -> bool {
-    match (element.is_null(), needle.is_null()) {
+/// PostgreSQL initializes an array's element equality function before scanning
+/// a nonempty array, even when both the element and needle are NULL.
+fn require_element_equality(array: &ArrayValue) -> Result<(), ExecError> {
+    if !array.elems.is_empty() {
+        crate::eval::require_equality_operator(array.elem.column_type())?;
+    }
+    Ok(())
+}
+
+/// Element identity for the search functions: `IS NOT DISTINCT FROM`, so a NULL
+/// needle finds the NULL elements.
+fn element_matches(element: &Datum, needle: &Datum) -> Result<bool, ExecError> {
+    Ok(match (element.is_null(), needle.is_null()) {
         (true, true) => true,
         (true, false) | (false, true) => false,
-        (false, false) => element == needle,
-    }
+        (false, false) => {
+            crate::eval::require_runtime_equality(element, needle)?;
+            element == needle
+        }
+    })
 }
 
 /// A non-NULL datum's PostgreSQL text output.

@@ -59,7 +59,7 @@ fn values_to_relation_with_schema(
         let mut out = Vec::with_capacity(row.len());
         for (expr, ty) in row.iter().zip(&schema.types) {
             let value = crate::eval::eval(expr, &Scope::empty(), &[], ctx)?;
-            out.push(crabka_pgtypes::cast::cast(&value, *ty, &ctx.time_zone)?);
+            out.push(crate::eval::cast_value(&value, *ty, &ctx.time_zone)?);
         }
         rows.push(out);
     }
@@ -75,6 +75,18 @@ pub(crate) fn apply_query_order(
     window: crate::exec::RowWindow,
     ctx: &EvalCtx,
 ) -> Result<(), ExecError> {
+    for item in order_by {
+        let ty = if let Some(index) = crate::sql92::output_position(
+            &item.expr,
+            rel.scope.width(),
+            crate::sql92::Sql92Clause::OrderBy,
+        )? {
+            rel.scope.ty_at(index)
+        } else {
+            crate::eval::infer_type(&item.expr, &rel.scope)?
+        };
+        crate::eval::require_ordering_operator(ty)?;
+    }
     let mut keyed: Vec<(Vec<Datum>, Vec<Datum>)> = Vec::with_capacity(rel.rows.len());
     for row in rel.rows.drain(..) {
         let mut keys = Vec::with_capacity(order_by.len());

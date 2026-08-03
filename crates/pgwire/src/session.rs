@@ -1006,6 +1006,34 @@ where
                 }
                 // Every arm write_all()s eagerly, so there is never pending response data; Flush has nothing to drain and TcpStream::flush is a no-op.
                 FrontendMessage::Flush => stream.flush().await?,
+                FrontendMessage::FunctionCall => {
+                    if ext.failed {
+                        continue;
+                    }
+                    let e = if session.tx_status() == TxStatus::Failed {
+                        PgError::error(
+                            sqlstate::IN_FAILED_SQL_TRANSACTION,
+                            "current transaction is aborted, commands ignored until end of \
+                             transaction block",
+                        )
+                    } else {
+                        session.mark_statement_failed();
+                        PgError::error(
+                            sqlstate::FEATURE_NOT_SUPPORTED,
+                            "fastpath function calls are not supported",
+                        )
+                    };
+                    write_notices(&mut out, notices.as_mut());
+                    backend::error_response(&mut out, &e);
+                    write_ready(
+                        &mut out,
+                        &session,
+                        notices.as_mut(),
+                        notifications.as_mut(),
+                    );
+                    stream.write_all(&out).await?;
+                    out.clear();
+                }
                 FrontendMessage::Parse {
                     name,
                     sql,

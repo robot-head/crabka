@@ -305,11 +305,10 @@ fn param_types(plan: &SrfPlan) -> Vec<Option<ColumnType>> {
         | Srf::JsonbObjectKeys
         | Srf::JsonbArrayElements
         | Srf::JsonbArrayElementsText => vec![Some(ColumnType::Jsonb)],
-        // `(jsonb, jsonpath [, jsonb vars [, boolean silent]])`; crabka spells
-        // `jsonpath` `text`.
+        // `(jsonb, jsonpath [, jsonb vars [, boolean silent]])`.
         Srf::JsonbPathQuery => vec![
             Some(ColumnType::Jsonb),
-            text,
+            Some(ColumnType::JsonPath),
             Some(ColumnType::Jsonb),
             Some(ColumnType::Bool),
         ],
@@ -331,13 +330,15 @@ fn input_error_info_rows(vals: &[Datum], ctx: &EvalCtx) -> Result<Vec<Vec<Datum>
         return Ok(vec![vec![Datum::Null; 4]]);
     };
     let detail = error
-        .detail()
-        .map_or(Datum::Null, |detail| Datum::Text(detail.into()));
+        .diagnostics
+        .as_ref()
+        .and_then(|fields| fields.detail.as_ref())
+        .map_or(Datum::Null, |detail| Datum::Text(detail.clone()));
     Ok(vec![vec![
-        Datum::Text(error.to_string()),
+        Datum::Text(error.message),
         detail,
         Datum::Null,
-        Datum::Text(error.sqlstate().into()),
+        Datum::Text(error.code),
     ]])
 }
 

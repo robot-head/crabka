@@ -56,6 +56,7 @@ pub fn encode_text_in(d: &Datum, style: OutputStyle<'_>) -> Vec<u8> {
         Datum::Int4(n) => n.to_string().into_bytes(),
         Datum::Int8(n) => n.to_string().into_bytes(),
         Datum::Text(s) => s.clone().into_bytes(),
+        Datum::JsonPath(s) => s.clone().into_bytes(),
         Datum::Float4(f) => encode_float4_text(*f).into_bytes(),
         Datum::Float8(f) => encode_float8_text(*f).into_bytes(),
         Datum::Point(point) => format!(
@@ -170,6 +171,8 @@ pub fn encode_text_in(d: &Datum, style: OutputStyle<'_>) -> Vec<u8> {
 /// The `jsonb` binary-format version byte. PostgreSQL prefixes `jsonb_send`
 /// output with it; only version 1 is defined.
 pub const JSONB_BINARY_VERSION: u8 = 1;
+/// Version byte used by PostgreSQL's `jsonpath_send`/`jsonpath_recv` format.
+pub const JSONPATH_BINARY_VERSION: u8 = 1;
 
 /// PostgreSQL `float8out` text rendering.
 ///
@@ -235,6 +238,12 @@ pub fn encode_binary(d: &Datum) -> Vec<u8> {
         Datum::Int4(n) => n.to_be_bytes().to_vec(),
         Datum::Int8(n) => n.to_be_bytes().to_vec(),
         Datum::Text(s) => s.clone().into_bytes(),
+        Datum::JsonPath(s) => {
+            let mut out = Vec::with_capacity(s.len() + 1);
+            out.push(JSONPATH_BINARY_VERSION);
+            out.extend_from_slice(s.as_bytes());
+            out
+        }
         Datum::Range(range) => {
             if range.empty {
                 return vec![0x01];
@@ -507,6 +516,10 @@ mod tests {
         assert_eq!(encode_binary(&Datum::Int4(1)), 1i32.to_be_bytes().to_vec());
         assert_eq!(encode_binary(&Datum::Int8(1)), 1i64.to_be_bytes().to_vec());
         assert_eq!(encode_binary(&Datum::Text("hi".into())), b"hi".to_vec());
+        assert_eq!(
+            encode_binary(&Datum::JsonPath("$.\"a\"".into())),
+            b"\x01$.\"a\"".to_vec()
+        );
         // float8 is IEEE-754 big-endian (PG float8send).
         assert_eq!(
             encode_binary(&Datum::Float8(1.5)),

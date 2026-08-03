@@ -111,6 +111,7 @@ mod datum_tag {
     pub const TSQUERY: u8 = 13;
     pub const RANGE: u8 = 14;
     pub const MULTIRANGE: u8 = 15;
+    pub const JSONPATH: u8 = 16;
 }
 
 mod type_tag {
@@ -174,6 +175,8 @@ mod type_tag {
     pub const REGTYPE: u8 = 27;
     /// PostgreSQL `regprocedure`. Append-only — no version bump.
     pub const REGPROCEDURE: u8 = 28;
+    /// PostgreSQL `jsonpath`. Append-only — no version bump.
+    pub const JSONPATH: u8 = 29;
 }
 
 /// Append a column's type: the tag byte, plus the numeric typmod payload.
@@ -231,6 +234,7 @@ pub(crate) fn write_type(out: &mut Vec<u8>, ty: ColumnType) {
         ColumnType::TsVector => out.push(type_tag::TSVECTOR),
         ColumnType::TsQuery => out.push(type_tag::TSQUERY),
         ColumnType::Jsonb => out.push(type_tag::JSONB),
+        ColumnType::JsonPath => out.push(type_tag::JSONPATH),
         ColumnType::Array(elem) => {
             out.push(type_tag::ARRAY);
             // `write_code`, not `code()`: the bare code byte loses the length
@@ -239,9 +243,7 @@ pub(crate) fn write_type(out: &mut Vec<u8>, ty: ColumnType) {
             elem.write_code(out);
         }
         // A user-defined type is stored by oid; the definition is the type
-        // catalog's. The anonymous `record` is a pseudo-type and is refused as
-        // a column type before it reaches here, so its oid stands for "no
-        // registered type" and fails the read back.
+        // catalog's. The anonymous `record` pseudo-type uses its built-in oid.
         ColumnType::Record(named) => {
             out.push(type_tag::USER);
             out.extend_from_slice(
@@ -337,6 +339,7 @@ pub(crate) fn read_type(cur: &mut &[u8]) -> Result<ColumnType, KvError> {
         type_tag::TSVECTOR => ColumnType::TsVector,
         type_tag::TSQUERY => ColumnType::TsQuery,
         type_tag::JSONB => ColumnType::Jsonb,
+        type_tag::JSONPATH => ColumnType::JsonPath,
         type_tag::ARRAY => {
             let elem = crabka_pgtypes::ElemType::read_code(cur)
                 .ok_or_else(|| KvError::CorruptRow("unknown array element type encoding".into()))?;
@@ -345,7 +348,9 @@ pub(crate) fn read_type(cur: &mut &[u8]) -> Result<ColumnType, KvError> {
         type_tag::USER => {
             let raw = take_n(cur, 4)?;
             let oid = u32::from_be_bytes(raw.try_into().expect("4 bytes fit u32"));
-            if let Some(builtin) = crabka_pgtypes::ColumnType::builtin_range(oid)
+            if oid == crabka_pgtypes::oids::RECORD {
+                ColumnType::Record(None)
+            } else if let Some(builtin) = crabka_pgtypes::ColumnType::builtin_range(oid)
                 .or_else(|| crabka_pgtypes::ColumnType::builtin_multirange(oid))
             {
                 builtin
@@ -424,6 +429,10 @@ fn write_default_value(out: &mut Vec<u8>, default: &Datum) {
         }
         Datum::Text(value) => {
             out.push(datum_tag::TEXT);
+            write_str(out, value);
+        }
+        Datum::JsonPath(value) => {
+            out.push(datum_tag::JSONPATH);
             write_str(out, value);
         }
         Datum::Float4(value) => {
@@ -520,6 +529,7 @@ fn read_default_value(cur: &mut &[u8]) -> Result<Datum, KvError> {
         datum_tag::INT4 => Datum::Int4(i32::from_be_bytes(take_n(cur, 4)?.try_into().expect("4"))),
         datum_tag::INT8 => Datum::Int8(i64::from_be_bytes(take_n(cur, 8)?.try_into().expect("8"))),
         datum_tag::TEXT => Datum::Text(read_string(cur)?),
+        datum_tag::JSONPATH => Datum::JsonPath(read_string(cur)?),
         datum_tag::FLOAT4 => {
             let bits = u32::from_be_bytes(take_n(cur, 4)?.try_into().expect("4"));
             Datum::Float4(f32::from_bits(bits))
@@ -1888,6 +1898,25 @@ mod tests {
                 generated: None,
                 identity: None,
             },
+            Column {
+                name: "path".into(),
+                ty: ColumnType::JsonPath,
+                not_null: false,
+                default: Some(ColumnDefault::Value(Datum::JsonPath("$.\"a\"".into()))),
+                generated: None,
+                identity: None,
+            },
+            Column {
+                name: "paths".into(),
+                ty: ColumnType::Array(ElemType::JsonPath),
+                not_null: false,
+                default: Some(ColumnDefault::Value(Datum::Array(ArrayValue::new(
+                    ElemType::JsonPath,
+                    vec![Datum::JsonPath("$.\"a\"".into()), Datum::Null],
+                )))),
+                generated: None,
+                identity: None,
+            },
         ];
 
         let bytes = serialize_schema(31, &columns, TableOptions::default(), None, &[]);
@@ -1996,6 +2025,8 @@ mod tests {
             ColumnType::Uuid,
             ColumnType::Regclass,
             ColumnType::Jsonb,
+            ColumnType::JsonPath,
+            ColumnType::Record(None),
             ColumnType::builtin_range(crabka_pgtypes::oids::INT4RANGE).expect("built-in range"),
         ];
 

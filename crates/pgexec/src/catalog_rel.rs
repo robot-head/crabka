@@ -1674,9 +1674,20 @@ fn pg_amproc_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut procedures = crate::routine::builtin_pg_proc_rows()?
         .into_iter()
         .filter_map(|row| match (&row[0], &row[1], &row[19]) {
-            (Datum::Int4(oid), Datum::Text(name), Datum::Text(arguments)) => {
-                Some(((name.clone(), arguments.clone()), *oid))
-            }
+            (Datum::Int4(oid), Datum::Text(name), Datum::OidVector(arguments)) => Some((
+                (
+                    name.clone(),
+                    arguments
+                        .elems
+                        .iter()
+                        .map(|argument| match argument {
+                            Datum::Int4(oid) => u32::try_from(*oid).ok(),
+                            _ => None,
+                        })
+                        .collect::<Option<Vec<_>>>()?,
+                ),
+                *oid,
+            )),
             _ => None,
         })
         .collect::<BTreeMap<_, _>>();
@@ -1687,14 +1698,7 @@ fn pg_amproc_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             .collect::<Option<Vec<_>>>();
         if let Some(arguments) = arguments {
             procedures.insert(
-                (
-                    routine.name,
-                    arguments
-                        .iter()
-                        .map(u32::to_string)
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                ),
+                (routine.name, arguments),
                 i32::try_from(routine.oid).unwrap_or_default(),
             );
         }
@@ -1719,12 +1723,10 @@ fn pg_amproc_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             continue;
         };
         let name = function.rsplit('.').next().unwrap_or(&function).to_string();
-        let arguments = argument_type_oids
-            .iter()
-            .map(u32::to_string)
-            .collect::<Vec<_>>()
-            .join(" ");
-        let procedure = procedures.get(&(name, arguments)).copied().unwrap_or_default();
+        let procedure = procedures
+            .get(&(name, argument_type_oids))
+            .copied()
+            .unwrap_or_default();
         rows.push(vec![
             int(340_000 + i32::try_from(index).unwrap_or_default()),
             int(i32::try_from(family).unwrap_or_default()),

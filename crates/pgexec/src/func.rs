@@ -23,7 +23,7 @@ use std::cmp::Ordering;
 
 use crabka_pgparser::ast::{Expr, FuncArgs, FuncCall};
 use crabka_pgtypes::{
-    ColumnType, Datum, ops,
+    ColumnType, Datum, ElemType, ops,
     usertype::{MultirangeRef, RangeRef},
 };
 
@@ -462,13 +462,34 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
                 },
             )?;
             let ty = unify_args(f, args, scope)?;
+            match f {
+                ScalarFunc::NullIf if crate::eval::is_scalar_jsonpath(ty) => {
+                    return Err(ExecError::UndefinedFunction(
+                        "operator does not exist: jsonpath = jsonpath".into(),
+                    ));
+                }
+                ScalarFunc::Greatest | ScalarFunc::Least => {
+                    if matches!(
+                        ty.storage_type(),
+                        ColumnType::JsonPath | ColumnType::Array(ElemType::JsonPath)
+                    ) {
+                        return Err(ExecError::UndefinedFunction(format!(
+                            "could not identify a comparison function for type {}",
+                            ty.name()
+                        )));
+                    }
+                }
+                ScalarFunc::NullIf => {}
+                ScalarFunc::Coalesce => {}
+                _ => unreachable!(),
+            }
             // PostgreSQL resolves the common type ignoring `unknown` literals,
             // then coerces each literal to it — at PLAN time, which is why
             // `coalesce(1, 'x')` is 22P02 even though the literal is never the
             // value returned.
             for a in args {
                 if let Expr::StringLiteral(s) = a {
-                    crabka_pgtypes::cast::cast(
+                    crate::eval::cast_value(
                         &Datum::Text(s.clone()),
                         ty,
                         &jiff::tz::TimeZone::UTC,
@@ -748,6 +769,7 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
 /// the lazy ones evaluate arguments only as far as they need to.
 pub(crate) fn eval_scalar(
     fc: &FuncCall,
+    scope: Option<&Scope>,
     ctx: &EvalCtx,
     mut eval_child: impl FnMut(&Expr) -> Result<Datum, ExecError>,
 ) -> Result<Datum, ExecError> {
@@ -770,28 +792,33 @@ pub(crate) fn eval_scalar(
         // (so `coalesce(x, 1/0)` with x non-null never divides by zero).
         ScalarFunc::Coalesce => {
             require_arity(fc, !args.is_empty())?;
+            let target = scope.map(|scope| unify_args(f, args, scope)).transpose()?;
             for a in args {
                 let v = eval_child(a)?;
                 if !v.is_null() {
-                    return Ok(v);
+                    return match target {
+                        Some(target) => crate::eval::cast_value(&v, target, &ctx.time_zone),
+                        None => Ok(v),
+                    };
                 }
             }
             Ok(Datum::Null)
         }
-        // `pg_typeof` reports its argument's resolved type. Crabka resolves that
-        // from the evaluated Datum (plus the cast, when the expression is one),
-        // because the scalar evaluator has no scope to re-infer from: a NULL
-        // value whose type comes from a *column* therefore reports `unknown`
-        // where PostgreSQL reports the column's type. Documented divergence.
+        // `pg_typeof` reports its argument's resolved type. Use the caller's
+        // scope when available because text-backed distinct types (and typed
+        // NULL columns) cannot be recovered from their Datum alone.
         ScalarFunc::PgTypeof => {
             require_arity(fc, args.len() == 1)?;
             let value = eval_child(&args[0])?;
-            Ok(Datum::Text(typeof_name(&args[0], &value)))
+            Ok(Datum::Text(typeof_name(&args[0], &value, scope)))
         }
         ScalarFunc::Greatest | ScalarFunc::Least => {
             require_arity(fc, !args.is_empty())?;
+            if let Some(scope) = scope {
+                crate::eval::require_ordering_operator(unify_args(f, args, scope)?)?;
+            }
             let want_greater = matches!(f, ScalarFunc::Greatest);
-            let vals = resolved_args(args, ctx, &mut eval_child)?;
+            let vals = resolved_args(f, args, scope, ctx, &mut eval_child)?;
             let mut best: Option<Datum> = None;
             for v in vals {
                 if v.is_null() {
@@ -813,11 +840,22 @@ pub(crate) fn eval_scalar(
         }
         ScalarFunc::NullIf => {
             require_arity(fc, args.len() == 2)?;
-            let vals = resolved_args(args, ctx, &mut eval_child)?;
+            if let Some(scope) = scope
+                && crate::eval::is_scalar_jsonpath(unify_args(f, args, scope)?)
+            {
+                return Err(ExecError::UndefinedFunction(
+                    "operator does not exist: jsonpath = jsonpath".into(),
+                ));
+            }
+            let vals = resolved_args(f, args, scope, ctx, &mut eval_child)?;
             let [a, b] = vals.as_slice() else {
                 return Err(undefined_function(&fc.name));
             };
             let (a, b) = (a.clone(), b.clone());
+            if crate::eval::runtime_equality_short_circuit(&a, &b) == Some(false) {
+                return Ok(a);
+            }
+            crate::eval::require_runtime_equality(&a, &b)?;
             // NULLIF(a, b) = NULL when a = b, else a. `compare` is None if either
             // is NULL (so a NULL `a` falls through to `Ok(a)` = NULL).
             match ops::compare(&a, &b)? {
@@ -1541,12 +1579,14 @@ pub(crate) fn input_error(
     input: &str,
     type_name: &str,
     time_zone: &jiff::tz::TimeZone,
-) -> Result<Option<crabka_pgtypes::TypeError>, ExecError> {
+) -> Result<Option<crabka_pgwire::error::PgError>, ExecError> {
     let ty = ColumnType::from_sql_name(type_name).ok_or_else(|| ExecError::FunctionError {
         sqlstate: "42704",
         message: format!("type \"{type_name}\" does not exist"),
     })?;
-    Ok(crabka_pgtypes::cast::cast(&Datum::Text(input.to_string()), ty, time_zone).err())
+    Ok(crate::eval::cast_value(&Datum::Text(input.to_string()), ty, time_zone)
+        .err()
+        .map(ExecError::into_pg))
 }
 
 // ---- argument-type helpers ----
@@ -1671,7 +1711,9 @@ fn is_unknown_literal(e: &Expr) -> bool {
 /// one another, so they need one common type before `ops::compare` runs.
 /// Without it, `greatest(1, '2')` would try to order an integer against text.
 fn resolved_args(
+    f: ScalarFunc,
     args: &[Expr],
+    scope: Option<&Scope>,
     ctx: &EvalCtx,
     mut eval_child: impl FnMut(&Expr) -> Result<Datum, ExecError>,
 ) -> Result<Vec<Datum>, ExecError> {
@@ -1679,21 +1721,24 @@ fn resolved_args(
         .iter()
         .map(&mut eval_child)
         .collect::<Result<Vec<_>, _>>()?;
-    let common = args
-        .iter()
-        .zip(&vals)
-        .filter(|(a, _)| !is_unknown_literal(a))
-        .filter_map(|(_, v)| v.column_type())
-        .try_fold(None, |acc: Option<ColumnType>, t| match acc {
-            None => Ok(Some(t)),
-            Some(a) => crate::eval::unify_types(a, t).map(Some),
-        })?;
+    let common = match scope {
+        Some(scope) => Some(unify_args(f, args, scope)?),
+        None => args
+            .iter()
+            .zip(&vals)
+            .filter(|(a, _)| !is_unknown_literal(a))
+            .filter_map(|(_, v)| v.column_type())
+            .try_fold(None, |acc: Option<ColumnType>, t| match acc {
+                None => Ok(Some(t)),
+                Some(a) => crate::eval::unify_types(a, t).map(Some),
+            })?,
+    };
     let Some(common) = common else {
         return Ok(vals);
     };
     for (a, v) in args.iter().zip(&mut vals) {
         if is_unknown_literal(a) && !v.is_null() {
-            *v = crabka_pgtypes::cast::cast(v, common, &ctx.time_zone)?;
+            *v = crate::eval::cast_value(v, common, &ctx.time_zone)?;
         }
     }
     Ok(vals)
@@ -1702,15 +1747,20 @@ fn resolved_args(
 /// The type name `pg_typeof` reports: the evaluated value's own type. It falls
 /// back to an explicit cast's target when the value is NULL, and to PostgreSQL's
 /// `unknown` for a literal that never acquired one.
-fn typeof_name(arg: &Expr, value: &Datum) -> String {
+fn typeof_name(arg: &Expr, value: &Datum, scope: Option<&Scope>) -> String {
     if is_unknown_literal(arg) {
         return "unknown".into();
+    }
+    if let Some(scope) = scope
+        && let Ok(ty) = crate::eval::infer_type(arg, scope)
+    {
+        return type_display_name(ty);
     }
     // A domain's *value* is a base-type value; only the expression records that
     // it went through the domain, so an explicit cast to one is read off the
     // node ahead of the value.
     if let Expr::Cast {
-        ty: ty @ ColumnType::Domain(_),
+        ty: ty @ (ColumnType::Domain(_) | ColumnType::JsonPath),
         ..
     } = arg
     {

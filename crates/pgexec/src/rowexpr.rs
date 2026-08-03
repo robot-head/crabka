@@ -11,9 +11,59 @@
 use std::cmp::Ordering;
 
 use crabka_pgparser::ast::{BinaryOp, Expr};
-use crabka_pgtypes::{Datum, RecordValue, ops};
+use crabka_pgtypes::{ColumnType, Datum, RecordValue, ops};
 
 use crate::error::ExecError;
+use crate::scope::Scope;
+
+/// Type-check every field operator selected by a row comparison.
+///
+/// The row itself has the anonymous `record` type, so scalar operator analysis
+/// cannot see an unsupported field type unless each pair is checked here.
+pub(crate) fn validate_comparison(
+    op: BinaryOp,
+    left: &Expr,
+    right: &Expr,
+    scope: &Scope,
+) -> Result<(), ExecError> {
+    let (Expr::Row(left), Expr::Row(right)) = (left, right) else {
+        return Ok(());
+    };
+    if !matches!(
+        op,
+        BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::Lt
+            | BinaryOp::Le
+            | BinaryOp::Gt
+            | BinaryOp::Ge
+            | BinaryOp::IsDistinctFrom
+            | BinaryOp::IsNotDistinctFrom
+    ) {
+        return Ok(());
+    }
+    for (left, right) in left.iter().zip(right) {
+        validate_comparison(op, left, right, scope)?;
+        let (left_type, right_type) = (
+            crate::eval::infer_type(left, scope)?,
+            crate::eval::infer_type(right, scope)?,
+        );
+        if left_type.storage_type() != ColumnType::JsonPath
+            && right_type.storage_type() != ColumnType::JsonPath
+        {
+            continue;
+        }
+        crate::eval::infer_type(
+            &Expr::Binary {
+                op,
+                left: Box::new(left.clone()),
+                right: Box::new(right.clone()),
+            },
+            scope,
+        )?;
+    }
+    Ok(())
+}
 
 /// Evaluate a row constructor's fields with the caller's child evaluator.
 fn fields(
@@ -40,17 +90,25 @@ pub(crate) fn eval_row(
 /// decision makes the comparison NULL. That is why `(1,NULL) < (2,2)` is true,
 /// because the first pair already decided, while `(1,2) < (1,NULL)` is NULL.
 ///
-/// `ROW()` has nothing to decide with. `PostgreSQL` refuses to order or equate
-/// two of them, with 0A000, rather than calling them equal. `IS [NOT] DISTINCT
-/// FROM` and `IS [NOT] NULL` still answer for it, and they do not go through
-/// here.
-fn compare(left: &[Datum], right: &[Datum]) -> Result<Option<Ordering>, ExecError> {
+/// `ROW()` has nothing to decide with, and `PostgreSQL` refuses to order or
+/// equate two of them (0A000) rather than calling them equal — even though
+/// `IS [NOT] DISTINCT FROM` and `IS [NOT] NULL`, which do not go through here,
+/// answer for it happily.
+fn compare(left: &[Datum], right: &[Datum], equality: bool) -> Result<Option<Ordering>, ExecError> {
     if left.is_empty() && right.is_empty() {
         return Err(ExecError::Unsupported(
             "cannot compare rows of zero length".into(),
         ));
     }
     for (l, r) in left.iter().zip(right) {
+        if equality {
+            if crate::eval::runtime_equality_short_circuit(l, r) == Some(false) {
+                return Ok(Some(Ordering::Less));
+            }
+            crate::eval::require_runtime_equality(l, r)?;
+        } else {
+            crate::eval::require_runtime_comparison(l, r)?;
+        }
         match ops::compare(l, r)? {
             Some(Ordering::Equal) => {}
             Some(order) => return Ok(Some(order)),
@@ -77,7 +135,13 @@ pub(crate) fn is_distinct(l: &Datum, r: &Datum) -> Result<bool, ExecError> {
     match (l.is_null(), r.is_null()) {
         (true, true) => Ok(false),
         (true, false) | (false, true) => Ok(true),
-        (false, false) => Ok(ops::compare(l, r)? != Some(Ordering::Equal)),
+        (false, false) => {
+            if let Some(equal) = crate::eval::runtime_equality_short_circuit(l, r) {
+                return Ok(!equal);
+            }
+            crate::eval::require_runtime_equality(l, r)?;
+            Ok(ops::compare(l, r)? != Some(Ordering::Equal))
+        }
     }
 }
 
@@ -113,7 +177,10 @@ pub(crate) fn eval_binary(
             distinct ^ (op == BinaryOp::IsNotDistinctFrom),
         )));
     }
-    Ok(Some(crate::eval::cmp_result(op, compare(&lv, &rv)?)))
+    Ok(Some(crate::eval::cmp_result(
+        op,
+        compare(&lv, &rv, matches!(op, BinaryOp::Eq | BinaryOp::Ne))?,
+    )))
 }
 
 /// `row IS [NOT] NULL`, which is field-wise and so not a pair of negations.
@@ -159,7 +226,7 @@ pub(crate) fn eval_in_list(
             ));
         };
         let values = fields(candidate, &mut eval_child)?;
-        match compare(&probe, &values)? {
+        match compare(&probe, &values, true)? {
             Some(Ordering::Equal) => return Ok(Some(Datum::Bool(!negated))),
             Some(_) => {}
             None => saw_null = true,
@@ -229,14 +296,14 @@ mod tests {
             ),
         ];
         for (left, right, expected) in cases {
-            assert!(compare(left, right).expect("comparable") == *expected);
+            assert!(compare(left, right, false).expect("comparable") == *expected);
         }
     }
 
     #[test]
     fn two_zero_length_rows_cannot_be_compared_but_can_be_tested() {
         assert!(
-            compare(&[], &[])
+            compare(&[], &[], false)
                 .expect_err("no fields to decide with")
                 .into_pg()
                 .code

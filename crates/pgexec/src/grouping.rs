@@ -194,6 +194,9 @@ pub(crate) fn aggregate_rows(
         .iter()
         .map(|g| crate::eval::infer_type(g, scope))
         .collect::<Result<Vec<_>, ExecError>>()?;
+    for ty in &key_types {
+        crate::eval::require_equality_operator(*ty)?;
+    }
     let plan = GroupingPlan {
         scope,
         group_by: group_by
@@ -300,6 +303,37 @@ fn empty_input_rows(
     // row, so the tail has to run over the repeated output rather than per set.
     // Identical rows cannot be reordered, so only duplicate elimination and
     // OFFSET/LIMIT are still observable.
+    let (fields, out_exprs, out_types) = crate::exec::resolve_projection(&stmt.projection, scope)?;
+    let require_output = matches!(
+        stmt.distinct,
+        crabka_pgparser::ast::DistinctClause::Distinct
+    );
+    let order_keys = crate::exec::resolve_select_order_keys(
+        &stmt.order_by,
+        scope,
+        &fields,
+        &out_exprs,
+        require_output,
+    )?;
+    if require_output {
+        for ty in &out_types {
+            crate::eval::require_equality_operator(*ty)?;
+        }
+    }
+    if let Some(plan) =
+        crate::exec::distinct_on_plan(&stmt, scope, &fields, &out_exprs, &order_keys)?
+    {
+        for expr in &plan.group {
+            crate::eval::require_equality_operator(crate::eval::infer_type(expr, scope)?)?;
+        }
+    }
+    for key in &order_keys {
+        let ty = match key {
+            crate::exec::SelectOrderKey::Output(index) => out_types[*index],
+            crate::exec::SelectOrderKey::SourceExpr(expr) => crate::eval::infer_type(expr, scope)?,
+        };
+        crate::eval::require_ordering_operator(ty)?;
+    }
     let (distinct, order_by) = (stmt.distinct.clone(), std::mem::take(&mut stmt.order_by));
     stmt.distinct = crabka_pgparser::ast::DistinctClause::All;
     let one = crate::agg::aggregate_rows(&stmt, scope, Vec::new(), ctx)?;

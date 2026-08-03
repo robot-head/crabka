@@ -304,7 +304,11 @@ pub(crate) fn func_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnTyp
         // min/max preserve the argument's type.
         AggFunc::Min | AggFunc::Max => {
             let arg = single_value_arg(fc)?;
-            crate::eval::infer_type(arg, scope)
+            let ty = crate::eval::infer_type(arg, scope)?;
+            if crate::eval::is_scalar_jsonpath(ty) {
+                return Err(undefined_for_arg(&fc.name, ty));
+            }
+            Ok(ty)
         }
         // array_agg(x) -> x[]; an element type crabka has no array type for is 0A000.
         // `array_agg(anyarray)` stacks its inputs as the outer dimension of one
@@ -515,7 +519,7 @@ fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
             }
         }
     }
-    match func {
+    let spec = match func {
         AggFunc::Count => match &fc.args {
             FuncArgs::Star => Ok(AggSpec {
                 func,
@@ -585,6 +589,11 @@ fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
             reject_nested_aggregate(arg)?;
             // Type-check the argument now so RowDescription and folding agree.
             let arg_type = crate::eval::infer_type(arg, scope)?;
+            if matches!(func, AggFunc::Min | AggFunc::Max)
+                && crate::eval::is_scalar_jsonpath(arg_type)
+            {
+                return Err(undefined_for_arg(&fc.name, arg_type));
+            }
             // sum/avg accept only numeric arguments (int4/int8/float8/numeric).
             if matches!(func, AggFunc::Sum | AggFunc::Avg)
                 && !matches!(
@@ -662,7 +671,16 @@ fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
                 filter: fc.filter.as_deref().cloned(),
             })
         }
+    }?;
+    if spec.distinct {
+        if let Some(ty) = spec.arg_type {
+            crate::eval::require_equality_operator(ty)?;
+        }
+        if let Some(value) = &spec.value_arg {
+            crate::eval::require_equality_operator(crate::eval::infer_type(value, scope)?)?;
+        }
     }
+    Ok(spec)
 }
 
 impl AggSpec {
@@ -1222,9 +1240,14 @@ fn eval_grouped_depth(
             operand,
             whens,
             else_result,
-        } => crate::eval::eval_case(operand.as_deref(), whens, else_result.as_deref(), |e| {
-            eval_grouped_depth(e, grouped, d)
-        }),
+        } => crate::eval::eval_case(
+            operand.as_deref(),
+            whens,
+            else_result.as_deref(),
+            crate::eval::infer_case_type(whens, else_result.as_deref(), scope)?,
+            ctx,
+            |e| eval_grouped_depth(e, grouped, d),
+        ),
         // SP29: a scalar function over grouped/aggregate arguments — evaluate it
         // with the grouped evaluator as its child-eval closure.
         Expr::Func(fc)
@@ -1235,7 +1258,9 @@ fn eval_grouped_depth(
             result
         }
         Expr::Func(fc) if crate::func::is_scalar(&fc.name) => {
-            crate::func::eval_scalar(fc, ctx, |e| eval_grouped_depth(e, grouped, d))
+            crate::func::eval_scalar(fc, Some(scope), ctx, |e| {
+                eval_grouped_depth(e, grouped, d)
+            })
         }
         // SP37: a date/time function over grouped/aggregate arguments (e.g.
         // `date_trunc('day', max(ts))`) — same pattern, grouped child-eval closure.
@@ -1263,7 +1288,7 @@ fn eval_grouped_depth(
                 return Ok(empty);
             }
             let v = eval_grouped_depth(expr, grouped, d)?;
-            Ok(crabka_pgtypes::cast::cast(&v, *ty, &ctx.time_zone)?)
+            crate::eval::cast_value(&v, *ty, &ctx.time_zone)
         }
         // The array expression forms in a grouped context — same semantics as
         // scalar `eval`, recursing through the grouped evaluator.
@@ -1275,7 +1300,7 @@ fn eval_grouped_depth(
                 let v = eval_grouped_depth(item, grouped, d)?;
                 parts.push(match item {
                     Expr::ArrayLiteral(_) => v,
-                    _ => crabka_pgtypes::cast::cast(&v, target, &ctx.time_zone)?,
+                    _ => crate::eval::cast_value(&v, target, &ctx.time_zone)?,
                 });
             }
             crate::array_fn::build_constructor(elem, parts)
@@ -1735,6 +1760,7 @@ impl AccState {
                 let take = match best {
                     None => true,
                     Some(cur) => {
+                        crate::eval::require_runtime_comparison(&v, cur)?;
                         let ord = ops::compare(&v, cur)?; // both non-null
                         matches!(
                             (spec.func, ord),
@@ -2308,6 +2334,27 @@ pub(crate) fn aggregate_rows(
     // the canonicalization below, because its own compatibility rule compares the
     // `ON` list against the select list and the ORDER BY as the query spells them.
     let distinct_on = crate::exec::distinct_on_plan(s, scope, &fields, &out_exprs, &order_keys)?;
+
+    for expr in &s.group_by {
+        crate::eval::require_equality_operator(crate::eval::infer_type(expr, scope)?)?;
+    }
+    if matches!(s.distinct, crabka_pgparser::ast::DistinctClause::Distinct) {
+        for expr in &out_exprs {
+            crate::eval::require_equality_operator(crate::eval::infer_type(expr, scope)?)?;
+        }
+    }
+    if let Some(plan) = &distinct_on {
+        for expr in &plan.group {
+            crate::eval::require_equality_operator(crate::eval::infer_type(expr, scope)?)?;
+        }
+    }
+    for key in &order_keys {
+        let expr = match key {
+            crate::exec::SelectOrderKey::Output(index) => &out_exprs[*index],
+            crate::exec::SelectOrderKey::SourceExpr(expr) => expr,
+        };
+        crate::eval::require_ordering_operator(crate::eval::infer_type(expr, scope)?)?;
+    }
 
     // Every clause evaluated above the grouping is matched against the GROUP BY
     // list by the column each reference resolves to, not by how it was spelled,

@@ -83,6 +83,7 @@ fn column_hash(value: &Datum, seed: u64) -> Result<Option<u64>, ExecError> {
         // `char(n)` partition key would need that trim adding here, alongside
         // whatever carries the type distinction.
         Datum::Text(v) => hash_bytes_extended(v.as_bytes(), seed)?,
+        Datum::JsonPath(_) => return Err(unsupported("jsonpath")),
         Datum::Bytea(v) => hash_bytes_extended(v, seed)?,
         // The date/time types hash their internal representation, which the
         // binary send functions already produce: days or microseconds relative

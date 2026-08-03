@@ -387,11 +387,16 @@ impl RowLockManager {
     /// deregistered.
     #[cfg(test)]
     pub(crate) fn waiter_queue_len(&self, holder: u64) -> usize {
+        self.waiter_queue_len_as(LockOwner::Xid(holder))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn waiter_queue_len_as(&self, holder: LockOwner) -> usize {
         self.inner
             .lock()
             .expect("lockmgr")
             .waiters
-            .get(&LockOwner::Xid(holder))
+            .get(&holder)
             .map_or(0, Vec::len)
     }
 

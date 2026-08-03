@@ -38,11 +38,16 @@ use crate::{
 /// frame size on the smallest stack the tests run on.
 const MAX_EVAL_DEPTH: usize = 100;
 
-/// Evaluate `expr` against a row.
-///
-/// `values` is the row, aligned to `scope.columns`. `ctx` carries the session
-/// time zone and the transaction/statement clock. Non-temporal evaluation
-/// ignores `ctx`, and UTC/epoch reproduces prior behavior.
+/// Parser-produced trees stop at depth 50. A deeper tree can only have been
+/// built programmatically, so finish that defense-in-depth evaluation on a
+/// stack large enough to reach [`MAX_EVAL_DEPTH`] even in an unoptimized test
+/// build (where this function's frame is much larger than in production).
+const EVAL_STACK_SWITCH_DEPTH: usize = 51;
+const DEEP_EVAL_STACK_BYTES: usize = 8 * 1024 * 1024;
+
+/// Evaluate `expr` against a row (`values`, aligned to `scope.columns`). `ctx`
+/// carries the session time zone and the transaction/statement clock; non-temporal
+/// evaluation ignores it (UTC/epoch reproduces prior behavior).
 pub(crate) fn eval(
     expr: &Expr,
     scope: &Scope,
@@ -53,13 +58,24 @@ pub(crate) fn eval(
     eval_depth(expr, scope, values, ctx, 0)
 }
 
-/// Depth-tracking core of [`eval`].
-///
-/// `depth` is the current recursion level. Every recursive descent increments
-/// it, so a runaway tree is bounded on every path. This includes direct calls
-/// AND the child-evaluation closures given to the shared `eval_*`/`func::*`
-/// combinators. This function returns `54001` once `depth` exceeds
-/// `MAX_EVAL_DEPTH`.
+/// Executor-level cast, adding the `jsonpath` input function to the pure type
+/// layer's Datum-preserving cast table.
+pub(crate) fn cast_value(
+    value: &Datum,
+    target: ColumnType,
+    time_zone: &jiff::tz::TimeZone,
+) -> Result<Datum, ExecError> {
+    match target.storage_type() {
+        ColumnType::JsonPath => crate::jsonpath::cast_datum(value),
+        ColumnType::Array(ElemType::JsonPath) => crate::jsonpath::cast_array_datum(value),
+        _ => crabka_pgtypes::cast::cast(value, target, time_zone).map_err(ExecError::from),
+    }
+}
+
+/// Depth-tracking core of [`eval`]. `depth` is the current recursion level; every
+/// recursive descent (direct calls AND the child-evaluation closures handed to
+/// the shared `eval_*`/`func::*` combinators) increments it, so a runaway tree is
+/// bounded on every path. Returns `54001` once it exceeds `MAX_EVAL_DEPTH`.
 fn eval_depth(
     expr: &Expr,
     scope: &Scope,
@@ -70,6 +86,29 @@ fn eval_depth(
     if depth > MAX_EVAL_DEPTH {
         return Err(ExecError::StackDepthExceeded);
     }
+    if depth == EVAL_STACK_SWITCH_DEPTH {
+        return std::thread::scope(|thread_scope| {
+            let handle = std::thread::Builder::new()
+                .name("crabka-deep-expression".into())
+                .stack_size(DEEP_EVAL_STACK_BYTES)
+                .spawn_scoped(thread_scope, || eval_depth_inner(expr, scope, values, ctx, depth))
+                .map_err(|_| ExecError::StackDepthExceeded)?;
+            match handle.join() {
+                Ok(result) => result,
+                Err(payload) => std::panic::resume_unwind(payload),
+            }
+        });
+    }
+    eval_depth_inner(expr, scope, values, ctx, depth)
+}
+
+fn eval_depth_inner(
+    expr: &Expr,
+    scope: &Scope,
+    values: &[Datum],
+    ctx: &EvalCtx,
+    depth: usize,
+) -> Result<Datum, ExecError> {
     // One level deeper for every child this frame evaluates.
     let d = depth + 1;
     match expr {
@@ -107,7 +146,7 @@ fn eval_depth(
             if table.is_none()
                 && let Some(call) = crate::func::niladic_keyword_call(name)
             {
-                return crate::func::eval_scalar(&call, ctx, |e| {
+                return crate::func::eval_scalar(&call, Some(scope), ctx, |e| {
                     eval_depth(e, scope, values, ctx, d)
                 });
             }
@@ -147,7 +186,9 @@ fn eval_depth(
             crate::catalog_fn::eval_catalog(fc, ctx, |e| eval_depth(e, scope, values, ctx, d))
         }
         Expr::Func(fc) if crate::func::is_scalar(&fc.name) => {
-            crate::func::eval_scalar(fc, ctx, |e| eval_depth(e, scope, values, ctx, d))
+            crate::func::eval_scalar(fc, Some(scope), ctx, |e| {
+                eval_depth(e, scope, values, ctx, d)
+            })
         }
         // SP37: a date/time function (clock family, extract/date_part, date_trunc,
         // age, timezone). Tried after scalar, before the aggregate-context error.
@@ -194,6 +235,7 @@ fn eval_depth(
             list,
             negated,
         } => {
+            reject_jsonpath_in_list(expr, list, scope)?;
             if let Some(result) = rowexpr::eval_in_list(expr, list, *negated, |e| {
                 eval_depth(e, scope, values, ctx, d)
             })? {
@@ -208,6 +250,8 @@ fn eval_depth(
             high,
             negated,
         } => {
+            reject_jsonpath_comparison(BinaryOp::Ge, expr, low, scope)?;
+            reject_jsonpath_comparison(BinaryOp::Le, expr, high, scope)?;
             let x = eval_depth(expr, scope, values, ctx, d)?;
             let lo = eval_depth(low, scope, values, ctx, d)?;
             let hi = eval_depth(high, scope, values, ctx, d)?;
@@ -232,9 +276,17 @@ fn eval_depth(
             operand,
             whens,
             else_result,
-        } => eval_case(operand.as_deref(), whens, else_result.as_deref(), |e| {
-            eval_depth(e, scope, values, ctx, d)
-        }),
+        } => {
+            reject_jsonpath_simple_case(operand.as_deref(), whens, scope)?;
+            eval_case(
+                operand.as_deref(),
+                whens,
+                else_result.as_deref(),
+                infer_case_type(whens, else_result.as_deref(), scope)?,
+                ctx,
+                |e| eval_depth(e, scope, values, ctx, d),
+            )
+        }
         // SP31: explicit cast — evaluate the operand, then convert. A text-parse
         // failure (22P02), numeric overflow (22003), or undefined cast (42846)
         // surfaces here; NULL casts to NULL. The session zone comes from `ctx`.
@@ -290,7 +342,14 @@ fn eval_depth(
             {
                 return Ok(resolved);
             }
-            let cast = crabka_pgtypes::cast::cast_in(&v, *ty, ctx.output_style())?;
+            let cast = if matches!(
+                ty.storage_type(),
+                ColumnType::JsonPath | ColumnType::Array(ElemType::JsonPath)
+            ) {
+                cast_value(&v, *ty, &ctx.time_zone)?
+            } else {
+                crabka_pgtypes::cast::cast_in(&v, *ty, ctx.output_style())?
+            };
             // A cast to a domain converts through the base type and then has to
             // satisfy the domain's own NOT NULL and CHECK constraints.
             crate::usertype::check_domain(*ty, &cast, ctx)?;
@@ -341,6 +400,7 @@ fn eval_depth(
             all,
             array,
         } => {
+            reject_jsonpath_quantified(*op, expr, array, scope)?;
             let x = eval_depth(expr, scope, values, ctx, d)?;
             let a = eval_depth(array, scope, values, ctx, d)?;
             // `33 = ANY('{1,2,3}')`: a bare literal on the array side is
@@ -405,6 +465,10 @@ pub(crate) fn eval_in_list(
     let mut saw_null = false;
     for item in list {
         let v = eval_child(item)?;
+        if runtime_equality_short_circuit(x, &v) == Some(false) {
+            continue;
+        }
+        require_runtime_equality(x, &v)?;
         match ops::compare(x, &v)? {
             Some(Ordering::Equal) => return Ok(Datum::Bool(!negated)),
             Some(_) => {}
@@ -568,13 +632,18 @@ pub(crate) fn eval_case(
     operand: Option<&Expr>,
     whens: &[(Expr, Expr)],
     else_result: Option<&Expr>,
+    result_type: ColumnType,
+    ctx: &EvalCtx,
     mut eval_child: impl FnMut(&Expr) -> Result<Datum, ExecError>,
 ) -> Result<Datum, ExecError> {
     match operand {
         None => {
             for (cond, result) in whens {
                 match eval_child(cond)? {
-                    Datum::Bool(true) => return eval_child(result),
+                    Datum::Bool(true) => {
+                        let value = eval_child(result)?;
+                        return cast_value(&value, result_type, &ctx.time_zone);
+                    }
                     Datum::Bool(false) | Datum::Null => {}
                     _ => {
                         return Err(ExecError::TypeMismatch(
@@ -588,14 +657,22 @@ pub(crate) fn eval_case(
             let ov = eval_child(op)?;
             for (val, result) in whens {
                 let vv = eval_child(val)?;
+                if runtime_equality_short_circuit(&ov, &vv) == Some(false) {
+                    continue;
+                }
+                require_runtime_equality(&ov, &vv)?;
                 if matches!(ops::compare(&ov, &vv)?, Some(Ordering::Equal)) {
-                    return eval_child(result);
+                    let value = eval_child(result)?;
+                    return cast_value(&value, result_type, &ctx.time_zone);
                 }
             }
         }
     }
     match else_result {
-        Some(e) => eval_child(e),
+        Some(e) => {
+            let value = eval_child(e)?;
+            cast_value(&value, result_type, &ctx.time_zone)
+        }
         None => Ok(Datum::Null),
     }
 }
@@ -1001,6 +1078,7 @@ pub(crate) fn apply_binary_of(
     scope: &Scope,
     ctx: &EvalCtx,
 ) -> Result<Datum, ExecError> {
+    reject_jsonpath_comparison(op, left, right, scope)?;
     let (lc, rc) = coerce_untyped_literal_operands(op, left, right, l, r, ctx)?;
     let (l, r) = (lc.as_ref().unwrap_or(l), rc.as_ref().unwrap_or(r));
     if op == BinaryOp::Concat {
@@ -1137,6 +1215,7 @@ fn coerce_untyped_literal_operands(
             | BinaryOp::Le
             | BinaryOp::Gt
             | BinaryOp::Ge => Some(ColumnType::Jsonb),
+            BinaryOp::JsonPathExists | BinaryOp::JsonPathMatch => Some(ColumnType::JsonPath),
             _ => None,
         }
     };
@@ -1149,7 +1228,7 @@ fn coerce_untyped_literal_operands(
             return Ok(None);
         }
         match target(other, unknown_is_left) {
-            Some(ty) => Ok(Some(crabka_pgtypes::cast::cast(v, ty, &ctx.time_zone)?)),
+            Some(ty) => Ok(Some(cast_value(v, ty, &ctx.time_zone)?)),
             None => Ok(None),
         }
     };
@@ -1318,10 +1397,26 @@ pub(crate) fn apply_binary(
         // Null-safe (in)equality: two NULLs are not distinct, a NULL and a
         // non-NULL are, and the result is never NULL.
         BinaryOp::IsDistinctFrom | BinaryOp::IsNotDistinctFrom => {
+            if let Some(equal) = runtime_equality_short_circuit(l, r) {
+                let distinct = !equal;
+                return Ok(Datum::Bool(
+                    distinct ^ (op == BinaryOp::IsNotDistinctFrom),
+                ));
+            }
+            require_runtime_equality(l, r)?;
             let distinct = rowexpr::is_distinct(l, r)?;
             Ok(Datum::Bool(distinct ^ (op == BinaryOp::IsNotDistinctFrom)))
         }
-        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
+        BinaryOp::Eq | BinaryOp::Ne => {
+            if let Some(equal) = runtime_equality_short_circuit(l, r) {
+                return Ok(Datum::Bool(equal ^ (op == BinaryOp::Ne)));
+            }
+            require_runtime_equality(l, r)?;
+            let ord = ops::compare(l, r)?;
+            Ok(cmp_result(op, ord))
+        }
+        BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
+            require_runtime_comparison(l, r)?;
             let ord = ops::compare(l, r)?;
             Ok(cmp_result(op, ord))
         }
@@ -1581,6 +1676,12 @@ fn adopt_json_operand_types(
     lt: ColumnType,
     rt: ColumnType,
 ) -> (ColumnType, ColumnType) {
+    if lt == ColumnType::Jsonb
+        && matches!(op, BinaryOp::JsonPathExists | BinaryOp::JsonPathMatch)
+        && is_unknown_literal(right)
+    {
+        return (lt, ColumnType::JsonPath);
+    }
     // The array containment/overlap operators have no text overload, so an
     // `unknown` literal on either side adopts the other's array type — which is
     // what makes `array_shuffle(a) <@ '{1,2,3}'` resolve in PostgreSQL.
@@ -1628,6 +1729,7 @@ fn adopt_json_operand_types(
         | BinaryOp::KeyExistsAny
         | BinaryOp::KeyExistsAll => ColumnType::array_of(ColumnType::Text),
         BinaryOp::Contains | BinaryOp::ContainedBy => Some(ColumnType::Jsonb),
+        BinaryOp::JsonPathExists | BinaryOp::JsonPathMatch => Some(ColumnType::JsonPath),
         _ => None,
     };
     (lt, expected.unwrap_or(rt))
@@ -1751,7 +1853,7 @@ pub(crate) fn coerce_unknown_args(
         if v.is_null() || v.column_type() == Some(ty) {
             continue;
         }
-        *v = crabka_pgtypes::cast::cast(v, ty, &ctx.time_zone)?;
+        *v = cast_value(v, ty, &ctx.time_zone)?;
     }
     Ok(())
 }
@@ -1927,6 +2029,14 @@ fn apply_text_search_match(l: &Datum, r: &Datum, ctx: &EvalCtx) -> Result<Datum,
                     .expect("registered GUC has a value");
             crate::text_search_fn::to_tsvector(&config, text, ctx.catalog())?.matches(query)
         }
+        (Datum::Text(document), Datum::Text(query)) => {
+            let config =
+                crate::session::current_setting_runtime("default_text_search_config", false)?
+                    .expect("registered GUC has a value");
+            let vector = crate::text_search_fn::to_tsvector(&config, document, ctx.catalog())?;
+            let query = crate::text_search_fn::plain_query(&config, query, false, ctx.catalog())?;
+            vector.matches(&query)
+        }
         _ => return Err(undefined_operator_for(BinaryOp::JsonPathMatch, l, r)),
     };
     Ok(Datum::Bool(matches))
@@ -2006,9 +2116,92 @@ fn undefined_operator(op: &str, lt: ColumnType, rt: ColumnType) -> ExecError {
     ))
 }
 
-/// The same 42883, reported from the runtime values.
-///
-/// An untyped SQL NULL has no type to name.
+fn jsonpath_has_no_operator_class(ty: ColumnType) -> bool {
+    matches!(
+        ty.storage_type(),
+        ColumnType::JsonPath | ColumnType::Array(ElemType::JsonPath)
+    )
+}
+
+pub(crate) fn is_scalar_jsonpath(ty: ColumnType) -> bool {
+    ty.storage_type() == ColumnType::JsonPath
+}
+
+pub(crate) fn require_runtime_equality(left: &Datum, right: &Datum) -> Result<(), ExecError> {
+    let needs_operator = match (left, right) {
+        (Datum::JsonPath(_), Datum::JsonPath(_)) => true,
+        (Datum::Array(left), Datum::Array(right))
+            if left.elem == ElemType::JsonPath && right.elem == ElemType::JsonPath =>
+        {
+            left.dims == right.dims
+        }
+        _ => false,
+    };
+    if needs_operator {
+        return Err(ExecError::UndefinedFunction(
+            "could not identify an equality operator for type jsonpath".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// `array_eq` compares dimensions before looking up its element equality
+/// operator. Differently-shaped jsonpath arrays are therefore simply unequal,
+/// while equal-shaped ones reach the missing jsonpath operator.
+pub(crate) fn runtime_equality_short_circuit(left: &Datum, right: &Datum) -> Option<bool> {
+    match (left, right) {
+        (Datum::Array(left), Datum::Array(right))
+            if left.elem == ElemType::JsonPath
+                && right.elem == ElemType::JsonPath
+                && left.dims != right.dims =>
+        {
+            Some(false)
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn require_runtime_comparison(left: &Datum, right: &Datum) -> Result<(), ExecError> {
+    if matches!((left, right), (Datum::JsonPath(_), Datum::JsonPath(_)))
+        || matches!(
+            (left, right),
+            (Datum::Array(left), Datum::Array(right))
+                if left.elem == ElemType::JsonPath && right.elem == ElemType::JsonPath
+        )
+    {
+        return Err(ExecError::UndefinedFunction(
+            "could not identify a comparison function for type jsonpath".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Reject operations whose implementation requires a PostgreSQL equality
+/// operator class. `Datum` still implements Rust equality for storage
+/// invariants; SQL must not accidentally expose that internal relation.
+pub(crate) fn require_equality_operator(ty: ColumnType) -> Result<(), ExecError> {
+    if jsonpath_has_no_operator_class(ty) {
+        return Err(ExecError::UndefinedFunction(format!(
+            "could not identify an equality operator for type {}",
+            ty.name()
+        )));
+    }
+    Ok(())
+}
+
+/// Reject ORDER BY and other btree-dependent operations for jsonpath values.
+pub(crate) fn require_ordering_operator(ty: ColumnType) -> Result<(), ExecError> {
+    if jsonpath_has_no_operator_class(ty) {
+        return Err(ExecError::UndefinedFunction(format!(
+            "could not identify an ordering operator for type {}",
+            ty.name()
+        )));
+    }
+    Ok(())
+}
+
+/// The same 42883, reported from the runtime values (an untyped SQL NULL has no
+/// type to name).
 fn undefined_operator_for(op: BinaryOp, l: &Datum, r: &Datum) -> ExecError {
     let name = |d: &Datum| d.column_type().map_or("unknown", ColumnType::name);
     ExecError::UndefinedFunction(format!(
@@ -2299,12 +2492,26 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
         }
         Expr::Func(fc) => crate::agg::func_result_type(fc, scope),
         // SP28: predicates are boolean; CASE unifies its branch result types.
-        Expr::IsNull { .. } | Expr::InList { .. } | Expr::Between { .. } | Expr::Like { .. } => {
+        Expr::IsNull { .. } | Expr::Like { .. } => Ok(ColumnType::Bool),
+        Expr::InList { expr, list, .. } => {
+            reject_jsonpath_in_list(expr, list, scope)?;
+            Ok(ColumnType::Bool)
+        }
+        Expr::Between {
+            expr, low, high, ..
+        } => {
+            reject_jsonpath_comparison(BinaryOp::Ge, expr, low, scope)?;
+            reject_jsonpath_comparison(BinaryOp::Le, expr, high, scope)?;
             Ok(ColumnType::Bool)
         }
         Expr::Case {
-            whens, else_result, ..
-        } => infer_case_type(whens, else_result.as_deref(), scope),
+            operand,
+            whens,
+            else_result,
+        } => {
+            reject_jsonpath_simple_case(operand.as_deref(), whens, scope)?;
+            infer_case_type(whens, else_result.as_deref(), scope)
+        }
         // SP31: a cast's static result type is the target type — but only if the
         // cast is defined; an undefined `(from, to)` pair is 42846 at plan time
         // (so it is rejected before any row is produced). A bare `NULL` infers as
@@ -2331,10 +2538,15 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
         // SP34: EXISTS / IN-subquery / quantified comparison are always boolean
         // (typeable without executing — used by `describe`). The array form of a
         // quantified comparison (`= ANY(arr)`) is boolean for the same reason.
-        Expr::Exists(_)
-        | Expr::InSubquery { .. }
-        | Expr::Quantified { .. }
-        | Expr::QuantifiedArray { .. } => Ok(ColumnType::Bool),
+        Expr::Exists(_) | Expr::InSubquery { .. } | Expr::Quantified { .. } => {
+            Ok(ColumnType::Bool)
+        }
+        Expr::QuantifiedArray {
+            expr, op, array, ..
+        } => {
+            reject_jsonpath_quantified(*op, expr, array, scope)?;
+            Ok(ColumnType::Bool)
+        }
         // `ARRAY[…]` types as an array of its unified element type.
         Expr::ArrayLiteral(items) => Ok(ColumnType::Array(array_literal_elem_type(items, scope)?)),
         // Like a scalar subquery, resolved to `Const` before inference runs.
@@ -2416,6 +2628,7 @@ fn infer_binary_type(
     right: &Expr,
     scope: &Scope,
 ) -> Result<ColumnType, ExecError> {
+    reject_jsonpath_comparison(op, left, right, scope)?;
     match op {
         BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div => {
             let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
@@ -2473,6 +2686,8 @@ fn infer_binary_type(
             let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
             let (lt, rt) = if lt == ColumnType::TsVector && is_unknown_literal(right) {
                 (lt, ColumnType::TsQuery)
+            } else if lt == ColumnType::Jsonb && is_unknown_literal(right) {
+                (lt, ColumnType::JsonPath)
             } else {
                 (lt, rt)
             };
@@ -2480,6 +2695,7 @@ fn infer_binary_type(
                 (lt, rt),
                 (ColumnType::TsVector | ColumnType::Text, ColumnType::TsQuery)
                     | (ColumnType::TsQuery, ColumnType::TsVector | ColumnType::Text)
+                    | (ColumnType::Text, ColumnType::Text)
             ) {
                 return Ok(ColumnType::Bool);
             }
@@ -2591,6 +2807,92 @@ fn infer_binary_type(
         }
         _ => Ok(ColumnType::Bool),
     }
+}
+
+fn reject_jsonpath_comparison(
+    op: BinaryOp,
+    left: &Expr,
+    right: &Expr,
+    scope: &Scope,
+) -> Result<(), ExecError> {
+    if !matches!(
+        op,
+        BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::Lt
+            | BinaryOp::Le
+            | BinaryOp::Gt
+            | BinaryOp::Ge
+            | BinaryOp::IsDistinctFrom
+            | BinaryOp::IsNotDistinctFrom
+    ) {
+        return Ok(());
+    }
+    crate::rowexpr::validate_comparison(op, left, right, scope)?;
+    let (mut left_type, mut right_type) = (infer_type(left, scope)?, infer_type(right, scope)?);
+    if !is_scalar_jsonpath(left_type) && !is_scalar_jsonpath(right_type) {
+        return Ok(());
+    }
+    if is_unknown_literal(left) {
+        left_type = right_type;
+    }
+    if is_unknown_literal(right) {
+        right_type = left_type;
+    }
+    Err(undefined_operator(
+        if matches!(op, BinaryOp::IsDistinctFrom | BinaryOp::IsNotDistinctFrom) {
+            "="
+        } else {
+            op_spelling(op)
+        },
+        left_type,
+        right_type,
+    ))
+}
+
+fn reject_jsonpath_in_list(expr: &Expr, list: &[Expr], scope: &Scope) -> Result<(), ExecError> {
+    for item in list {
+        reject_jsonpath_comparison(BinaryOp::Eq, expr, item, scope)?;
+    }
+    Ok(())
+}
+
+fn reject_jsonpath_simple_case(
+    operand: Option<&Expr>,
+    whens: &[(Expr, Expr)],
+    scope: &Scope,
+) -> Result<(), ExecError> {
+    let Some(operand) = operand else {
+        return Ok(());
+    };
+    for (when, _) in whens {
+        reject_jsonpath_comparison(BinaryOp::Eq, operand, when, scope)?;
+    }
+    Ok(())
+}
+
+fn reject_jsonpath_quantified(
+    op: BinaryOp,
+    expr: &Expr,
+    array: &Expr,
+    scope: &Scope,
+) -> Result<(), ExecError> {
+    let mut left = infer_type(expr, scope)?;
+    let array_type = infer_type(array, scope)?;
+    let mut right = array_type
+        .array_element()
+        .map(ElemType::column_type)
+        .unwrap_or(array_type);
+    if is_unknown_literal(expr) {
+        left = right;
+    }
+    if is_unknown_literal(array) {
+        right = left;
+    }
+    if jsonpath_has_no_operator_class(left) || jsonpath_has_no_operator_class(right) {
+        return Err(undefined_operator(op_spelling(op), left, right));
+    }
+    Ok(())
 }
 
 /// The static result type of a jsonb or array operator, or `None` when the
@@ -2716,7 +3018,7 @@ fn eval_array_constructor(
         let value = eval_depth(item, scope, values, ctx, depth)?;
         parts.push(match item {
             Expr::ArrayLiteral(_) => value,
-            _ => crabka_pgtypes::cast::cast(&value, target, &ctx.time_zone)?,
+            _ => cast_value(&value, target, &ctx.time_zone)?,
         });
     }
     array_fn::build_constructor(elem, parts)
@@ -2827,11 +3129,10 @@ fn indeterminate_type(message: &str) -> ExecError {
     ExecError::IndeterminateType(message.to_string())
 }
 
-/// Infer a `CASE`'s result type from every THEN result and the ELSE.
-///
-/// A bare `NULL` branch imposes no constraint. An all-NULL CASE is `text`,
-/// which is PG's "unknown" → text. Incompatible branch types are 42804.
-fn infer_case_type(
+/// Infer a `CASE`'s result type by unifying every THEN result and the ELSE. A
+/// bare `NULL` branch imposes no constraint; an all-NULL CASE is `text` (PG's
+/// "unknown" → text); incompatible branch types are 42804.
+pub(crate) fn infer_case_type(
     whens: &[(Expr, Expr)],
     else_result: Option<&Expr>,
     scope: &Scope,
@@ -2846,17 +3147,16 @@ fn infer_case_type(
     Ok(acc.unwrap_or(ColumnType::Text))
 }
 
-/// Fold one branch or argument into a running unified type.
-///
-/// A bare `NULL` is type-neutral and imposes no constraint. `CASE` type
-/// inference and SP29's `coalesce`/`greatest`/`least` share this function.
+/// Fold one branch/argument into a running unified type. An untyped string or
+/// `NULL` is type-neutral and adopts the concrete branch type. Shared by `CASE`
+/// type inference and SP29's `coalesce`/`greatest`/`least`.
 pub(crate) fn unify_branch(
     acc: Option<ColumnType>,
     expr: &Expr,
     scope: &Scope,
 ) -> Result<Option<ColumnType>, ExecError> {
-    if matches!(expr, Expr::NullLiteral) {
-        return Ok(acc); // a bare NULL branch is type-neutral
+    if is_unknown_literal(expr) {
+        return Ok(acc);
     }
     let t = infer_type(expr, scope)?;
     match acc {
@@ -3798,13 +4098,20 @@ mod tests {
             .expect("infer"),
             ColumnType::Int4
         );
-        // incompatible branch types -> 42804.
-        let err = infer_type(
-            &pexpr("case when a > 0 then 1 else 'x' end").expect("parse"),
-            &scope,
-        )
-        .expect_err("incompatible");
-        assert_eq!(err.into_pg().code, "42804");
+        // A bare string is `unknown`, adopts int4 from the other branch, and
+        // is parsed only if that branch is selected.
+        assert_eq!(
+            infer_type(
+                &pexpr("case when a > 0 then 1 else 'x' end").expect("parse"),
+                &scope,
+            )
+            .expect("infer"),
+            ColumnType::Int4,
+        );
+        assert_eq!(
+            err_code("case when false then 1 else 'x' end", None, &[]),
+            "22P02"
+        );
     }
 
     // ---- SP37 Task 11: temporal result-type inference + unary-minus interval ----
@@ -4097,13 +4404,17 @@ mod tests {
             eval_jt("ARRAY[]::int[]").expect("eval")
                 == Datum::Array(ArrayValue::new(ElemType::Int4, Vec::new()))
         );
-        // Incompatible elements are the same 42804 `CASE` reports.
+        // A bare string is `unknown` and adopts int4 from the typed element.
         assert2::assert!(
-            infer_jt("ARRAY[1, 'x']")
-                .expect_err("incompatible")
+            infer_jt("ARRAY[1, 'x']").expect("infer") == ColumnType::Array(ElemType::Int4)
+        );
+        assert2::assert!(eval_jt("ARRAY[1, '2']").expect("eval") == int_array(&[1, 2]));
+        assert2::assert!(
+            eval_jt("ARRAY[1, 'x']")
+                .expect_err("invalid integer input")
                 .into_pg()
                 .code
-                == "42804"
+                == "22P02"
         );
     }
 

@@ -68,6 +68,10 @@ pub mod oids {
     pub const JSON: u32 = 114;
     /// PostgreSQL `jsonb`: the decomposed binary JSON type.
     pub const JSONB: u32 = 3802;
+    /// PostgreSQL `jsonpath` — a parsed SQL/JSON path expression.
+    pub const JSONPATH: u32 = 4072;
+    /// PostgreSQL `jsonpath[]`.
+    pub const JSONPATHARRAY: u32 = 4073;
     pub const INT4RANGE: u32 = 3904;
     pub const INT4RANGEARRAY: u32 = 3905;
     pub const NUMRANGE: u32 = 3906;
@@ -162,6 +166,7 @@ pub enum ElemType {
     Bytea,
     Uuid,
     Jsonb,
+    JsonPath,
     Int2,
     Float4,
     Regtype,
@@ -178,7 +183,7 @@ impl ElemType {
     /// Every supported array element type, in `code()` order. The two
     /// length-modified entries stand for their whole family — `from_code`
     /// reconstructs the modifier, and neither the OID nor the name depends on it.
-    pub const ALL: [ElemType; 19] = [
+    pub const ALL: [ElemType; 20] = [
         ElemType::Bool,
         ElemType::Int4,
         ElemType::Int8,
@@ -198,6 +203,7 @@ impl ElemType {
         ElemType::Varchar(None),
         ElemType::Char(None),
         ElemType::Regtype,
+        ElemType::JsonPath,
     ];
 
     /// The element type as a column type (`numeric` is unconstrained, because an
@@ -218,6 +224,7 @@ impl ElemType {
             ElemType::Bytea => ColumnType::Bytea,
             ElemType::Uuid => ColumnType::Uuid,
             ElemType::Jsonb => ColumnType::Jsonb,
+            ElemType::JsonPath => ColumnType::JsonPath,
             ElemType::Int2 => ColumnType::Int2,
             ElemType::Float4 => ColumnType::Float4,
             ElemType::Regtype => ColumnType::Regtype,
@@ -250,6 +257,7 @@ impl ElemType {
             ColumnType::Bytea => ElemType::Bytea,
             ColumnType::Uuid => ElemType::Uuid,
             ColumnType::Jsonb => ElemType::Jsonb,
+            ColumnType::JsonPath => ElemType::JsonPath,
             ColumnType::Int2 => ElemType::Int2,
             ColumnType::Float4 => ElemType::Float4,
             ColumnType::Varchar(n) => ElemType::Varchar(n),
@@ -302,6 +310,7 @@ impl ElemType {
             ElemType::Bytea => oids::BYTEAARRAY,
             ElemType::Uuid => oids::UUIDARRAY,
             ElemType::Jsonb => oids::JSONBARRAY,
+            ElemType::JsonPath => oids::JSONPATHARRAY,
             ElemType::Int2 => oids::INT2ARRAY,
             ElemType::Float4 => oids::FLOAT4ARRAY,
             ElemType::Regtype => oids::REGTYPEARRAY,
@@ -350,6 +359,7 @@ impl ElemType {
             ElemType::Bytea => "bytea[]",
             ElemType::Uuid => "uuid[]",
             ElemType::Jsonb => "jsonb[]",
+            ElemType::JsonPath => "jsonpath[]",
             ElemType::Int2 => "smallint[]",
             ElemType::Float4 => "real[]",
             ElemType::Regtype => "regtype[]",
@@ -412,6 +422,7 @@ impl ElemType {
             ElemType::Range(_) => 18,
             ElemType::Multirange(_) => 19,
             ElemType::Regtype => 20,
+            ElemType::JsonPath => 21,
         }
     }
 
@@ -603,6 +614,9 @@ pub enum ColumnType {
     /// PostgreSQL `jsonb` (OID 3802): decomposed JSON. `json` (114) is accepted
     /// on input as an alias but never reported.
     Jsonb,
+    /// PostgreSQL `jsonpath` (OID 4072). Values use the existing canonical text
+    /// datum; the executor validates and normalizes them at input boundaries.
+    JsonPath,
     /// A one-dimensional PostgreSQL array (OID = the element type's `typarray`).
     Array(ElemType),
     /// A composite type: the anonymous `record` (OID 2249) that a bare `ROW(…)`
@@ -724,6 +738,7 @@ impl ColumnType {
             // `json` is an input alias for `jsonb`: values are stored decomposed
             // and always report OID 3802 (a documented divergence).
             "jsonb" | "json" => Some(ColumnType::Jsonb),
+            "jsonpath" => Some(ColumnType::JsonPath),
             // The anonymous composite type. `SELECT ROW(1,2)` has it, and it is
             // the declared parameter type of `json_populate_record(record, …)`.
             "record" => Some(ColumnType::Record(None)),
@@ -814,6 +829,7 @@ impl ColumnType {
             ColumnType::TsVector => oids::TSVECTOR,
             ColumnType::TsQuery => oids::TSQUERY,
             ColumnType::Jsonb => oids::JSONB,
+            ColumnType::JsonPath => oids::JSONPATH,
             ColumnType::Array(elem) => elem.array_oid(),
             ColumnType::Record(None) => oids::RECORD,
             ColumnType::Record(Some(named)) | ColumnType::Enum(named) => named.oid,
@@ -853,6 +869,7 @@ impl ColumnType {
             ColumnType::TsVector => "tsvector",
             ColumnType::TsQuery => "tsquery",
             ColumnType::Jsonb => "jsonb",
+            ColumnType::JsonPath => "jsonpath",
             ColumnType::Array(elem) => elem.array_name(),
             ColumnType::Record(None) => "record",
             ColumnType::Record(Some(named)) | ColumnType::Enum(named) => named.name,
@@ -888,8 +905,11 @@ impl ColumnType {
             ColumnType::Regprocedure => 4,
             ColumnType::OidVector => -1,
             ColumnType::TsVector | ColumnType::TsQuery => -1,
-            // jsonb, arrays and composites are variable-length.
-            ColumnType::Jsonb | ColumnType::Array(_) | ColumnType::Record(_) => -1,
+            // jsonb, jsonpath, arrays and composites are variable-length.
+            ColumnType::Jsonb
+            | ColumnType::JsonPath
+            | ColumnType::Array(_)
+            | ColumnType::Record(_) => -1,
             // `pg_type.typlen` of an enum is 4 (the oid of its pg_enum row).
             ColumnType::Enum(_) => 4,
             ColumnType::Range(_) | ColumnType::Multirange(_) => -1,
@@ -949,7 +969,9 @@ pub enum Datum {
     Int4(i32),
     Int8(i64),
     Text(String),
-    /// PostgreSQL `real`: single-precision float. Grouping equality and hashing
+    /// PostgreSQL `jsonpath`, stored as its canonical text representation.
+    JsonPath(String),
+    /// PostgreSQL `real` — single-precision float. Grouping equality and hashing
     /// follow the same rules as [`Datum::Float8`] (one NaN, `-0.0 == +0.0`).
     Float4(f32),
     /// SP30: PostgreSQL `double precision`.
@@ -1344,6 +1366,7 @@ impl PartialEq for Datum {
             (Datum::Int4(a), Datum::Int4(b)) => a == b,
             (Datum::Int8(a), Datum::Int8(b)) => a == b,
             (Datum::Text(a), Datum::Text(b)) => a == b,
+            (Datum::JsonPath(a), Datum::JsonPath(b)) => a == b,
             // Grouping equality: `NaN == NaN` (Rust's `==` says false, hence the
             // explicit NaN arm) and `-0.0 == +0.0` (Rust's `==` already says true).
             (Datum::Float4(a), Datum::Float4(b)) => a == b || (a.is_nan() && b.is_nan()),
@@ -1400,6 +1423,7 @@ impl std::hash::Hash for Datum {
             Datum::Int4(n) => n.hash(state),
             Datum::Int8(n) => n.hash(state),
             Datum::Text(s) => s.hash(state),
+            Datum::JsonPath(s) => s.hash(state),
             // Canonicalized exactly like `Float8` below, one width down.
             Datum::Float4(f) => {
                 let bits = if f.is_nan() {
@@ -1465,6 +1489,7 @@ impl Datum {
             Datum::Int4(_) => Some(ColumnType::Int4),
             Datum::Int8(_) => Some(ColumnType::Int8),
             Datum::Text(_) => Some(ColumnType::Text),
+            Datum::JsonPath(_) => Some(ColumnType::JsonPath),
             Datum::Float4(_) => Some(ColumnType::Float4),
             Datum::Float8(_) => Some(ColumnType::Float8),
             Datum::Point(_) => Some(ColumnType::Point),
@@ -2069,6 +2094,17 @@ mod tests {
     }
 
     #[test]
+    fn jsonpath_column_type_reports_postgres_oid_name_and_size() {
+        use assert2::assert;
+        assert!(ColumnType::JsonPath.oid() == oids::JSONPATH);
+        assert!(ColumnType::JsonPath.name() == "jsonpath");
+        assert!(ColumnType::JsonPath.type_size() == -1);
+        assert!(ColumnType::JsonPath.typmod() == -1);
+        assert!(ColumnType::from_sql_name("JSONPATH") == Some(ColumnType::JsonPath));
+        assert!(Datum::JsonPath("$".into()).column_type() == Some(ColumnType::JsonPath));
+    }
+
+    #[test]
     fn array_types_report_the_postgres_typarray_oids() {
         use assert2::assert;
         let expected: &[(ElemType, u32, u32, &str)] = &[
@@ -2096,10 +2132,12 @@ mod tests {
             (ElemType::Interval, 1186, 1187, "interval[]"),
             (ElemType::Uuid, 2950, 2951, "uuid[]"),
             (ElemType::Jsonb, 3802, 3807, "jsonb[]"),
+            (ElemType::JsonPath, 4072, 4073, "jsonpath[]"),
             (ElemType::Int2, 21, 1005, "smallint[]"),
             (ElemType::Float4, 700, 1021, "real[]"),
             (ElemType::Varchar(None), 1043, 1015, "character varying[]"),
             (ElemType::Char(None), 1042, 1014, "character[]"),
+            (ElemType::Regtype, 2206, 2211, "regtype[]"),
         ];
         assert!(expected.len() == ElemType::ALL.len());
         for (elem, elem_oid, array_oid, name) in expected {
@@ -2123,11 +2161,10 @@ mod tests {
     #[test]
     fn element_type_codes_are_stable_and_round_trip() {
         use assert2::assert;
-        for (code, elem) in ElemType::ALL.iter().enumerate() {
-            let code = u8::try_from(code).expect("small");
-            assert!(elem.code() == code, "{elem:?}");
-            assert!(ElemType::from_code(code) == Some(*elem));
+        for elem in ElemType::ALL {
+            assert!(ElemType::from_code(elem.code()) == Some(elem), "{elem:?}");
         }
+        assert!(ElemType::JsonPath.code() == 21);
         assert!(ElemType::from_code(200) == None);
     }
 
