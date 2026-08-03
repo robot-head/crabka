@@ -34,14 +34,14 @@ def _affected(ctx: TaskContext) -> int:
 
     code = _run(ctx, "env", [
         "HOME=" + temp + "/base-home",
-        "BAZELISK_HOME=/root/.cache/bazelisk",
+        "BAZELISK_HOME=" + temp + "/bazelisk",
         bazel_diff,
     ] + [
         "generate-hashes",
         "--includeTargetType",
         "--bazelStartupOptions=--ignore_all_rc_files",
         "--bazelStartupOptions=--output_base=" + temp + "/base-output",
-        "--bazelCommandOptions=--repository_cache=/root/.cache/bazel-repo",
+        "--bazelCommandOptions=--repository_cache=" + temp + "/repository-cache",
         "-w",
         base_workspace,
         starting_hashes,
@@ -49,14 +49,14 @@ def _affected(ctx: TaskContext) -> int:
     if code == 0:
         code = _run(ctx, "env", [
             "HOME=" + temp + "/final-home",
-            "BAZELISK_HOME=/root/.cache/bazelisk",
+            "BAZELISK_HOME=" + temp + "/bazelisk",
             bazel_diff,
         ] + [
             "generate-hashes",
             "--includeTargetType",
             "--bazelStartupOptions=--ignore_all_rc_files",
             "--bazelStartupOptions=--output_base=" + temp + "/final-output",
-            "--bazelCommandOptions=--repository_cache=/root/.cache/bazel-repo",
+            "--bazelCommandOptions=--repository_cache=" + temp + "/repository-cache",
             "-w",
             ctx.std.env.current_dir(),
             final_hashes,
