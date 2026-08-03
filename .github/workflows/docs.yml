@@ -45,7 +45,7 @@ jobs:
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Generate reference markdown
-        run: aspect run //crates/docgen:crabka-docgen__bin -- all --out website/content/docs/reference
+        run: aspect run //crates/docgen:crabka-docgen__bin --bazel-flag=--config=ci -- all --out website/content/docs/reference
       - name: Build rustdoc
         run: |
           targets="$(bazel query 'kind(rust_doc, //...)')"

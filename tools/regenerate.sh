@@ -13,7 +13,7 @@ bazel-bin/crates/protocol-codegen/crabka-protocol-codegen__bin \
 # The codegen binary rustfmts each generated message file (they are include!'d,
 # so the ordinary formatter target never reaches them). Re-run the hermetic
 # rules_rs rustfmt binary over generated and module sources.
-rustfmt="$(bazel info output_base)/$(bazel cquery --output=files //:rustfmt)"
+rustfmt="$(bazel info output_base)/$(bazel cquery --noinstrument_test_targets --output=files //:rustfmt)"
 find crates/protocol/generated crates/protocol/src -name '*.rs' -print0 \
     | xargs -0 "${rustfmt}" --edition 2024 --config-path /dev/null
 

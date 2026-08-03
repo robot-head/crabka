@@ -19,4 +19,8 @@ rust_library(
 rust_package_tests(
     name = "client-consumer",
     crate_label = ":client-consumer",
+    test_sizes = {
+        "headers": "small",
+        "seek": "small",
+    },
 )

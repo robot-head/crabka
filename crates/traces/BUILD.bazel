@@ -6,7 +6,13 @@ rust_package(
     cargo_name = "crabka-traces",
     crate_name = "crabka_traces",
     harnessless = ["traceql_conformance"],
+    lib_test_size = "small",
     test_compile_data = ["//crates/traceql:conformance_data"],
+    test_size = "small",
+    test_sizes = {
+        "grafana_e2e": "medium",
+        "tempo_differential": "medium",
+    },
 )
 
 rust_feature_binary(

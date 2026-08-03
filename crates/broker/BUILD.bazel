@@ -13,6 +13,8 @@ rust_package(
     test_binaries = {"crabka": "//crates/cli:crabka__bin"},
     test_compile_data = ["//crates/security:test_fixtures"],
     test_sizes = {
+        "jvm_acceptance": "large",
+        "jvm_consumer_group_next_gen": "medium",
         "metrics": "small",
         "produce_verbatim_passthrough": "small",
     },

@@ -4,4 +4,6 @@ rust_package(
     name = "admin-ui",
     cargo_name = "crabka-admin-ui",
     crate_name = "crabka_admin_ui",
+    lib_test_size = "small",
+    test_size = "small",
 )

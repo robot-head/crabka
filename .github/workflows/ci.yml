@@ -409,11 +409,9 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
-          # GitHub cache entries are immutable. Reserve the first write for
-          # affected-build so this stage cannot publish an analysis-only disk
-          # cache under the same key as the dependency snapshot.
+          # Planning may restore shared caches, but only affected-build should
+          # publish the isolated dependency snapshot consumed by test shards.
           cache-save: false
-          disk-cache: affected
       - name: Hash head build graph
         if: ${{ steps.head-hash-cache.outputs.cache-hit != 'true' }}
         run: >-
@@ -973,8 +971,7 @@ jobs:
   # `#[ignore]`'d and run only in the scheduled/labeled `traces-differential`
   # job, never in the default `cargo test --workspace`). The `unit` flag's
   # `--lib --bins` walk never descends into this `tests/` binary, so this job is
-  # the only PR-time coverage for the conformance harness. The conformance
-  # report is uploaded as an artifact for inspection.
+  # the only PR-time coverage for the conformance harness.
   traces-conformance:
     needs: [changes, affected-plan]
     if: ${{ needs.changes.outputs.traces == 'true' }}
@@ -989,12 +986,6 @@ jobs:
         run: |
           mkdir -p coverage
           aspect test //crates/traces:all //crates/traceql:all --coverage --coverage-report=coverage/traces-conformance.lcov --bazel-flag=--config=ci --bazel-flag=--test_arg=--nocapture
-      - name: Upload TraceQL conformance report
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: traceql-conformance-report
-          path: target/traceql-conformance-report.txt
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -1320,7 +1311,7 @@ jobs:
           mkdir -p coverage
           aspect test //crates/broker:jvm_acceptance //crates/broker:jvm_consumer_group_next_gen \
             --coverage --coverage-report=coverage/broker-jvm-acceptance.lcov \
-            --bazel-flag=--config=ci --bazel-flag=--local_test_jobs=1 --bazel-flag=--test_timeout=1800 \
+            --bazel-flag=--config=ci --bazel-flag=--local_test_jobs=1 \
             --bazel-flag=--test_arg=--ignored --bazel-flag=--test_arg=--test-threads=1
       - uses: codecov/codecov-action@v7
         with:

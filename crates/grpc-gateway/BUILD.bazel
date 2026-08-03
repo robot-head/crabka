@@ -5,5 +5,10 @@ rust_package(
     build_script = True,
     cargo_name = "crabka-grpc-gateway",
     crate_name = "crabka_grpc_gateway",
+    lib_test_size = "small",
     protoc = True,
+    test_size = "small",
+    test_sizes = {
+        "jvm_differential": "medium",
+    },
 )

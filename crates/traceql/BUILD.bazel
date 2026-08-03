@@ -11,4 +11,6 @@ rust_package(
     cargo_name = "crabka-traceql",
     crate_name = "crabka_traceql",
     harnessless = ["golden_corpus"],
+    lib_test_size = "small",
+    test_size = "small",
 )

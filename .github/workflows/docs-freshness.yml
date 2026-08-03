@@ -37,7 +37,7 @@ jobs:
       # Re-derive the whole reference tree from current code. A failure here
       # means doc generation itself broke against the live APIs.
       - name: Regenerate reference markdown
-        run: aspect run //crates/docgen:crabka-docgen__bin -- all --out website/content/docs/reference
+        run: aspect run //crates/docgen:crabka-docgen__bin --bazel-flag=--config=ci -- all --out website/content/docs/reference
 
       # The doc generators carry assertions about their own output (sectioned
       # config table, protocol spec links, etc.).
@@ -81,7 +81,7 @@ jobs:
               'breaks a generated failure-scenario invariant). Re-run locally with:',
               '',
               '```sh',
-              'aspect run //crates/docgen:crabka-docgen__bin -- all --out website/content/docs/reference',
+              'aspect run //crates/docgen:crabka-docgen__bin --bazel-flag=--config=ci -- all --out website/content/docs/reference',
               'aspect test //crates/docgen:all --bazel-flag=--config=ci',
               'aspect test //crates/raft:all --bazel-flag=--config=ci',
               '(cd website && zola build)',

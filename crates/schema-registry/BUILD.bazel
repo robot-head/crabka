@@ -5,6 +5,15 @@ rust_package(
     cargo_name = "crabka-schema-registry",
     crate_name = "crabka_schema_registry",
     harnessless = ["compat_conformance"],
+    lib_test_size = "small",
+    test_sizes = {
+        "compat_conformance": "small",
+        "ha": "small",
+        "integration": "small",
+        "rest_conformance": "small",
+        "schemas_record": "small",
+        "security": "small",
+    },
 )
 
 rust_feature_binary(

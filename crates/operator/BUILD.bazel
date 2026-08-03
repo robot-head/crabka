@@ -4,4 +4,6 @@ rust_package(
     name = "operator",
     cargo_name = "crabka-operator",
     crate_name = "crabka_operator",
+    lib_test_size = "small",
+    test_size = "small",
 )
