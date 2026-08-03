@@ -1,5 +1,0 @@
-error: ConnectorConfig does not support generic structs
- --> tests/ui/generic_struct.rs:4:11
-  |
-4 | struct Bad<T> {
-  |           ^^^

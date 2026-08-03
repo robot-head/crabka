@@ -44,15 +44,17 @@ def rust_feature_binary(name, crate_root, crate_label = None, features = [], dep
         visibility = ["//visibility:public"],
     )
 
-def rust_package_tests(name, crate_label = None, rustc_env = {}, compile_data = [], harnessless = [], test_binaries = {}, test_sizes = {}):
+def rust_package_tests(name, crate_label = None, rustc_env = {}, compile_data = [], harnessless = [], test_binaries = {}, test_size = "small", test_sizes = {}, test_tags = {}):
     """Declares a package's top-level integration tests for a hand-written library target."""
     metadata = DEP_DATA[native.package_name()]
     srcs = native.glob(["src/**/*.rs"])
     data = depset(native.glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel"], allow_empty = True) + compile_data).to_list()
     for test in native.glob(["tests/*.rs"], allow_empty = True):
         test_name = test.removeprefix("tests/").removesuffix(".rs")
+        test_srcs = [test] + native.glob(["tests/**/*.rs"], exclude = ["tests/*.rs"], allow_empty = True)
         test_rustc_env = dict(rustc_env)
         test_rustc_env.update({"CARGO_BIN_EXE_" + binary: "$(rootpath " + target + ")" for binary, target in test_binaries.items()})
+        tags = test_tags.get(test_name, [])
         rust_test(
             name = test_name,
             aliases = _aliases("deps", "dev_deps"),
@@ -65,8 +67,9 @@ def rust_package_tests(name, crate_label = None, rustc_env = {}, compile_data = 
             env = {"CARGO_MANIFEST_DIR": native.package_name()},
             use_libtest_harness = test_name not in harnessless,
             rustc_env = test_rustc_env,
-            size = test_sizes.get(test_name, "medium"),
-            srcs = srcs + native.glob(["tests/**/*.rs"]),
+            size = test_sizes.get(test_name, "medium" if "manual" in tags else test_size),
+            srcs = test_srcs,
+            tags = tags,
         )
 
 def rust_package_benches(crate_label = None, rustc_env = {}, compile_data = []):
@@ -123,8 +126,8 @@ def rust_package(
         test_env = {},
         test_features = {},
         lib_test_rustc_flags = [],
-        lib_test_size = "medium",
-        test_size = "medium",
+        lib_test_size = "small",
+        test_size = "small",
         test_sizes = {},
         test_tags = {},
         test_binaries = {},
@@ -217,6 +220,7 @@ def rust_package(
 
     for test in native.glob(["tests/*.rs"], allow_empty = True):
         test_name = test.removeprefix("tests/").removesuffix(".rs")
+        test_srcs = [test] + native.glob(["tests/**/*.rs"], exclude = ["tests/*.rs"], allow_empty = True)
         features = test_features.get(test_name, [])
         test_library = ":" + name
         if features:
@@ -243,6 +247,7 @@ def rust_package(
         test_rustc_env.update({"CARGO_BIN_EXE_" + binary: "$(rootpath " + target + ")" for binary, target in test_binaries.items()})
         runtime_env = {"CARGO_MANIFEST_DIR": native.package_name()}
         runtime_env.update(test_env)
+        tags = test_tags.get(test_name, [])
         rust_test(
             name = test_name,
             aliases = _aliases("deps", "dev_deps"),
@@ -254,8 +259,8 @@ def rust_package(
             edition = "2024",
             env = runtime_env,
             rustc_env = test_rustc_env,
-            size = test_sizes.get(test_name, test_size),
-            srcs = srcs + native.glob(["tests/**/*.rs"]),
-            tags = test_tags.get(test_name, []),
+            size = test_sizes.get(test_name, "medium" if "manual" in tags else test_size),
+            srcs = test_srcs,
+            tags = tags,
             use_libtest_harness = test_name not in harnessless,
         )

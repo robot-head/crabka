@@ -10,8 +10,8 @@ rust_package(
     test_compile_data = ["//crates/traceql:conformance_data"],
     test_size = "small",
     test_sizes = {
-        "grafana_e2e": "medium",
-        "tempo_differential": "medium",
+        "grafana_e2e": "small",
+        "tempo_differential": "small",
     },
 )
 

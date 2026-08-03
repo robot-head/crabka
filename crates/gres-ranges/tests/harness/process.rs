@@ -1177,7 +1177,9 @@ async fn write_message(stream: &mut TcpStream, kind: Option<u8>, body: &[u8]) {
 fn gres_binary() -> PathBuf {
     let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let configured = std::env::var_os("CRABKA_GRES_TEST_BINARY")
-        .map_or_else(|| workspace.join("target/debug/crabka-gres"), PathBuf::from);
+        .map(PathBuf::from)
+        .or_else(|| option_env!("CARGO_BIN_EXE_crabka-gres").map(PathBuf::from))
+        .unwrap_or_else(|| workspace.join("target/debug/crabka-gres"));
     let candidate = configured
         .canonicalize()
         .or_else(|_| workspace.join(&configured).canonicalize())

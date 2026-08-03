@@ -9223,7 +9223,8 @@ async fn util_planner_path_matches_interpreter() {
 async fn conformance_corpus_runs_green_through_planner() {
     use crate::conformance::testkit::run_corpus_dir;
 
-    let report = run_corpus_dir("tests/testdata").await;
+    let corpus = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testdata");
+    let report = run_corpus_dir(corpus).await;
     // Sanity: the corpus actually ran (no path/setup error swallowed the run).
     assert2::assert!(!report.files.is_empty());
     assert2::assert!(report.files.iter().all(|file| file.passed));

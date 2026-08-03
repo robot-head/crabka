@@ -24,6 +24,9 @@ required_patterns=(
     'kubectl logs -l app.kubernetes.io/name=crabka-pgdog,app.kubernetes.io/instance=fleet'
     'deployment\.kubernetes\.io/revision'
     'post-grace-pgdog-${iteration}.log'
+    'connection closed by peer'
+    'unexpected eof while reading'
+    'connection to server was lost'
     'timeout '
 )
 for pattern in "${required_patterns[@]}"; do

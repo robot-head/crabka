@@ -5,6 +5,9 @@ target/
 # Bazel convenience symlinks + local user settings
 /bazel-*
 user.bazelrc
+/.aspect/affected-hashes-*.json
+/.aspect/affected-plan/
+/bazel/affected-cache-key/
 .idea/
 .vscode/
 *.iml

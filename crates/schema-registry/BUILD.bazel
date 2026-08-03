@@ -14,6 +14,17 @@ rust_package(
         "schemas_record": "small",
         "security": "small",
     },
+    test_tags = {
+        "capture_admin_fixtures": ["manual"],
+        "capture_auth_fixtures": ["manual"],
+        "capture_compat_fixtures": ["manual"],
+        "capture_election_fixtures": ["manual"],
+        "capture_fixtures": ["manual"],
+        "capture_json_fixtures": ["manual"],
+        "capture_protobuf_fixtures": ["manual"],
+        "capture_references_fixtures": ["manual"],
+        "interop": ["manual"],
+    },
 )
 
 rust_feature_binary(

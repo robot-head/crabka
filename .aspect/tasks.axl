@@ -10,22 +10,125 @@ def _output(ctx, executable, argv = []):
 def _targets(ctx, path):
     return [target for target in ctx.std.fs.read_to_string(path).split("\n") if target]
 
-def _write_affected_plan(ctx, plan_dir, builds, tests, cargo_connect_derive):
+def _matches_prefix(targets, prefixes):
+    return any([target.startswith(prefix) for target in targets for prefix in prefixes])
+
+def _matches_exact(targets, labels):
+    return any([label in targets for label in labels])
+
+_AFFECTED_GLOBAL_INPUTS = [
+    ".aspect/config.axl",
+    ".aspect/tasks.axl",
+    ".aspect/version.axl",
+    ".bazelrc",
+    ".bazelversion",
+    ".github/actions/setup-bazel/action.yml",
+    ".github/workflows/ci.yml",
+    "MODULE.bazel",
+    "MODULE.bazel.lock",
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+]
+
+_PR_MANUAL_TESTS = [
+    "//crates/broker:jvm_acceptance",
+    "//crates/broker:jvm_consumer_group_next_gen",
+    "//crates/compression:differential",
+    "//crates/grpc-gateway:jvm_differential",
+    "//crates/integration-tests:diskless_jepsen",
+    "//crates/metrics-service:diff_prometheus",
+    "//crates/protocol:differential_all",
+    "//crates/protocol:differential_api_versions",
+    "//crates/protocol:differential_describe_groups",
+    "//crates/protocol:differential_metadata",
+    "//crates/protocol:differential_offset_commit",
+    "//crates/protocol:differential_produce",
+    "//crates/protocol:differential_records",
+    "//scripts:gres_kind_lifecycle_test",
+]
+
+def _affected_suites(impacted, tests):
+    grpc_gateway_jvm = _matches_exact(impacted, ["//crates/grpc-gateway:jvm_differential"])
+    gres = _matches_prefix(tests, [
+        "//crates/cli:",
+        "//crates/gres-activator:",
+        "//crates/gres-balancer:",
+        "//crates/gres-conformance:",
+        "//crates/gres-control:",
+        "//crates/gres-fdw:",
+        "//crates/gres-ranges:",
+        "//crates/gres-substrate:",
+        "//crates/gres:",
+        "//crates/pgexec:",
+        "//crates/pgwire:",
+    ]) or _matches_exact(impacted, [
+        "//scripts:gres_kind_lifecycle_structure_test",
+        "//scripts:gres_kind_lifecycle_test",
+        "//scripts:gres_range_scaling_contract_test",
+    ])
+    jvm_oracle = _matches_exact(impacted, [
+        "//crates/compression:differential",
+        "//crates/protocol:differential_all",
+        "//crates/protocol:differential_api_versions",
+        "//crates/protocol:differential_describe_groups",
+        "//crates/protocol:differential_metadata",
+        "//crates/protocol:differential_offset_commit",
+        "//crates/protocol:differential_produce",
+        "//crates/protocol:differential_records",
+    ])
+    return [
+        ("admin_ui", _matches_prefix(tests, ["//crates/admin-ui:"])),
+        ("broker_integration", _matches_prefix(tests, ["//crates/broker:", "//crates/client-admin:"]) or _matches_exact(impacted, ["//crates/integration-tests:diskless_jepsen"])),
+        ("broker_jvm", _matches_exact(impacted, ["//crates/broker:jvm_acceptance", "//crates/broker:jvm_consumer_group_next_gen"])),
+        ("client_consumer", _matches_prefix(tests, ["//crates/client-consumer:"])),
+        ("client_core", _matches_exact(tests, ["//crates/client-core:integration"])),
+        ("client_streams", _matches_prefix(tests, ["//crates/client-streams:"]) or _matches_exact(tests, ["//crates/schema-serde:schema-serde_lib_test"])),
+        ("gres", gres),
+        ("grpc_gateway", _matches_prefix(tests, ["//crates/grpc-gateway:"])),
+        ("grpc_gateway_jvm", grpc_gateway_jvm),
+        ("jvm_differential", grpc_gateway_jvm or jvm_oracle),
+        ("jvm_oracle", jvm_oracle),
+        ("log", _matches_exact(tests, ["//crates/log:integration"])),
+        ("metrics_conformance", _matches_exact(tests, ["//crates/promql:conformance"])),
+        ("metrics_differential", _matches_exact(impacted, ["//crates/metrics-service:diff_prometheus"])),
+        ("operator", _matches_prefix(tests, ["//crates/operator:"])),
+        ("schema_registry", _matches_exact(tests, [
+            "//crates/schema-registry:compat_conformance",
+            "//crates/schema-registry:ha",
+            "//crates/schema-registry:integration",
+            "//crates/schema-registry:rest_conformance",
+            "//crates/schema-registry:schemas_record",
+            "//crates/schema-registry:security",
+        ])),
+        ("traces", _matches_prefix(tests, ["//crates/traceql:", "//crates/traces:"])),
+    ]
+
+def _write_affected_plan(ctx, plan_dir, builds, tests, warm_tests, suites):
     ctx.std.fs.create_dir_all(plan_dir)
     ctx.std.fs.write(plan_dir + "/builds.txt", "\n".join(builds) + ("\n" if builds else ""))
     ctx.std.fs.write(plan_dir + "/tests.txt", "\n".join(tests) + ("\n" if tests else ""))
-    ctx.std.fs.write(plan_dir + "/cargo-connect-derive.txt", "1\n" if cargo_connect_derive else "0\n")
+    ctx.std.fs.write(plan_dir + "/warm-tests.txt", "\n".join(warm_tests) + ("\n" if warm_tests else ""))
+    ctx.std.fs.write(plan_dir + "/suites.txt", "\n".join([
+        "%s=%s" % (name, "true" if affected else "false")
+        for name, affected in suites
+    ]) + "\n")
 
 def _bazel_diff(ctx):
-    code = _run(ctx, "bazel", ["build", "@bazel-diff//:bazel-diff", "--config=ci"])
+    # This is only a small host-side planner. Keep it in Bazel's default
+    # fastbuild configuration so graph detection does not pay for CI-opt code
+    # generation or invalidate the analysis cache before hashing.
+    code = _run(ctx, "bazel", [
+        "build",
+        "@bazel-diff//:bazel-diff",
+        "--noinstrument_test_targets",
+    ])
     if code != 0:
         return (code, "")
     (code, outputs) = _output(ctx, "bazel", [
         "cquery",
         "@bazel-diff//:bazel-diff",
-        "--config=ci",
         "--noinstrument_test_targets",
-        "--strip=sometimes",
         "--output=files",
     ])
     if code != 0:
@@ -40,16 +143,36 @@ def _generate_hashes(ctx, bazel_diff, workspace, hash_file):
     (code, temp) = _output(ctx, "mktemp", ["-d", ctx.std.env.temp_dir() + "/crabka-affected.XXXXXX"])
     if code != 0:
         return code
+    (code, workspace) = _output(ctx, "realpath", [workspace])
+    if code != 0:
+        _run(ctx, "rm", ["-rf", "--", temp])
+        return code
+    # bazel-diff accepts a set of seed paths, whose iteration order is not
+    # stable across the base and head workspace prefixes. Feed it one
+    # deterministic payload instead.
+    seed_content = ""
+    for path in _AFFECTED_GLOBAL_INPUTS:
+        filepath = workspace + "/" + path
+        seed_content += "== " + path + " ==\n"
+        if _run(ctx, "test", ["-f", filepath]) == 0:
+            seed_content += ctx.std.fs.read_to_string(filepath)
+        else:
+            seed_content += "<missing>"
+        seed_content += "\n"
+    seed_payload = temp + "/global-seed.txt"
+    ctx.std.fs.write(seed_payload, seed_content)
+    seed_file = temp + "/seed-filepaths.txt"
+    ctx.std.fs.write(seed_file, seed_payload + "\n")
     (code, repository_cache) = _output(ctx, "bazel", ["info", "repository_cache"])
     if code == 0:
         code = _run(ctx, bazel_diff, [
+            "--jvm_flag=--sun-misc-unsafe-memory-access=allow",
             "generate-hashes",
             "--no-keep_going",
             "--excludeExternalTargets",
             "--includeTargetType",
-            "--bazelStartupOptions=--ignore_all_rc_files",
-            "--bazelStartupOptions=--output_base=" + temp + "/output",
             "--bazelCommandOptions=--repository_cache=" + repository_cache,
+            "--seed-filepaths=" + seed_file,
             "-w",
             workspace,
             hash_file,
@@ -73,7 +196,10 @@ def _affected(ctx: TaskContext) -> int:
         return 2
     if ctx.args.mode == "warm":
         targets = _targets(ctx, plan_dir + "/builds.txt")
-        tests = _targets(ctx, plan_dir + "/tests.txt")
+        # Include suite-owned and manual tests here even though dedicated jobs
+        # run them. Building only their direct dependencies populates one cache
+        # snapshot without executing or compiling the test binaries themselves.
+        tests = _targets(ctx, plan_dir + "/warm-tests.txt")
         if tests:
             test_set = "set(%s)" % " ".join(tests)
             (code, deps_output) = _output(ctx, "bazel", [
@@ -96,15 +222,15 @@ def _affected(ctx: TaskContext) -> int:
     if ctx.args.mode == "test":
         tests = _targets(ctx, plan_dir + "/tests.txt")
         tests = [target for index, target in enumerate(tests) if index % ctx.args.shards == ctx.args.shard]
-        if ctx.args.shard == 0 and ctx.std.fs.read_to_string(plan_dir + "/cargo-connect-derive.txt").strip() == "1":
-            code = _run(ctx, "cargo", ["test", "-p", "crabka-connect-derive", "--test", "derive"])
-            if code != 0:
-                return code
         if not tests:
             return 0
         return _run(ctx, "aspect", ["test"] + tests + [
             "--bazel-flag=--config=ci",
             "--bazel-flag=--nobuild_tests_only",
+            # Loki finishes in Bazel's medium timing band locally but can take
+            # over five minutes on a contended four-core hosted runner.
+            "--bazel-flag=--test_timeout=60,900,900,3600",
+            "--bazel-flag=--test_verbose_timeout_warnings",
         ])
 
     (code, bazel_diff) = _bazel_diff(ctx)
@@ -117,6 +243,7 @@ def _affected(ctx: TaskContext) -> int:
     if code != 0:
         return code
     code = _run(ctx, bazel_diff, [
+        "--jvm_flag=--sun-misc-unsafe-memory-access=allow",
         "get-impacted-targets",
         "-w",
         ctx.std.env.current_dir(),
@@ -138,12 +265,17 @@ def _affected(ctx: TaskContext) -> int:
         return cleanup
     if not impacted:
         if ctx.args.mode == "plan":
-            _write_affected_plan(ctx, plan_dir, [], [], False)
+            _write_affected_plan(ctx, plan_dir, [], [], [], _affected_suites([], []))
         print("No Bazel targets are affected.")
         return 0
 
     target_set = "set(%s)" % " ".join(impacted)
-    (code, tests_output) = _output(ctx, "bazel", ["query", "kind(rust_test, %s)" % target_set])
+    pr_manual_tests = "set(%s)" % " ".join(_PR_MANUAL_TESTS)
+    warm_query = "(kind('.*_test rule', %s) except attr(tags, 'manual', %s)) + (%s intersect %s)" % (target_set, target_set, pr_manual_tests, target_set)
+    (code, warm_tests_output) = _output(ctx, "bazel", ["query", warm_query])
+    if code != 0:
+        return code
+    (code, tests_output) = _output(ctx, "bazel", ["query", "kind('(rust_test|rust_compile_fail_test) rule', %s) except attr(tags, 'manual', %s)" % (target_set, target_set)])
     if code != 0:
         return code
     # Images, packaging, docs, and environment-heavy tests have dedicated CI
@@ -154,20 +286,27 @@ def _affected(ctx: TaskContext) -> int:
     if code != 0:
         return code
 
-    dedicated_prefixes = [
+    dedicated_build_prefixes = [
         "//crates/admin-ui:",
         "//crates/broker:",
+        "//crates/cli:",
+        "//crates/client-admin:",
         "//crates/client-consumer:",
         "//crates/client-core:",
         "//crates/client-streams:",
-        "//crates/connect-derive:",
-        "//crates/gres",
+        "//crates/gres-activator:",
+        "//crates/gres-balancer:",
+        "//crates/gres-conformance:",
+        "//crates/gres-control:",
+        "//crates/gres-fdw:",
+        "//crates/gres-ranges:",
+        "//crates/gres-substrate:",
+        "//crates/gres:",
         "//crates/grpc-gateway:",
         "//crates/log:",
-        "//crates/metrics-service:",
-        "//crates/operator:",
         "//crates/pgexec:",
         "//crates/pgwire:",
+        "//crates/operator:",
         "//crates/promql:",
         "//crates/schema-registry:",
         "//crates/schema-serde:",
@@ -175,10 +314,47 @@ def _affected(ctx: TaskContext) -> int:
         "//crates/traces:",
     ]
     builds = [target for target in builds_output.split("\n") if target and not any([
-        target.startswith(prefix) for prefix in dedicated_prefixes
+        target.startswith(prefix) for prefix in dedicated_build_prefixes
     ]) and ":bench_" not in target and not target.endswith("-heap__bin")]
-    cargo_connect_derive = "//crates/connect-derive:derive" in tests_output.split("\n")
-    tests = [target for target in tests_output.split("\n") if target and not any([target.startswith(prefix) for prefix in dedicated_prefixes])]
+    all_tests = [target for target in tests_output.split("\n") if target]
+    suites = _affected_suites(impacted, all_tests)
+    owned_test_prefixes = [
+        "//crates/admin-ui:",
+        "//crates/broker:",
+        "//crates/cli:",
+        "//crates/client-admin:",
+        "//crates/client-consumer:",
+        "//crates/client-streams:",
+        "//crates/gres-activator:",
+        "//crates/gres-balancer:",
+        "//crates/gres-conformance:",
+        "//crates/gres-control:",
+        "//crates/gres-fdw:",
+        "//crates/gres-ranges:",
+        "//crates/gres-substrate:",
+        "//crates/gres:",
+        "//crates/grpc-gateway:",
+        "//crates/operator:",
+        "//crates/pgexec:",
+        "//crates/pgwire:",
+        "//crates/schema-serde:",
+        "//crates/traceql:",
+        "//crates/traces:",
+    ]
+    owned_tests = [
+        "//crates/client-core:integration",
+        "//crates/log:integration",
+        "//crates/promql:conformance",
+        "//crates/schema-registry:compat_conformance",
+        "//crates/schema-registry:ha",
+        "//crates/schema-registry:integration",
+        "//crates/schema-registry:rest_conformance",
+        "//crates/schema-registry:schemas_record",
+        "//crates/schema-registry:security",
+    ]
+    tests = [target for target in all_tests if target not in owned_tests and not any([
+        target.startswith(prefix) for prefix in owned_test_prefixes
+    ])]
     # Coverage changes the Rust action configuration, so building a target and
     # then testing it compiles its dependency graph twice. Keep only standalone
     # build roots that the selected tests will not compile themselves.
@@ -189,28 +365,9 @@ def _affected(ctx: TaskContext) -> int:
         if code != 0:
             return code
         builds = [target for target in uncovered_output.split("\n") if target]
-    if ctx.args.mode == "plan":
-        _write_affected_plan(ctx, plan_dir, builds, tests, cargo_connect_derive)
-        print("Planned %d builds and %d tests." % (len(builds), len(tests)))
-        return 0
-    if cargo_connect_derive:
-        code = _run(ctx, "cargo", ["test", "-p", "crabka-connect-derive", "--test", "derive"])
-        if code != 0:
-            return code
-    if tests:
-        # A single Bazel configuration shares dependencies between standalone
-        # build roots and tests. Dedicated jobs own coverage reporting.
-        code = _run(ctx, "aspect", ["test"] + builds + tests + [
-            "--bazel-flag=--config=ci",
-            "--bazel-flag=--nobuild_tests_only",
-        ])
-        if code != 0:
-            return code
-    elif builds:
-        code = _run(ctx, "bazel", ["build", "--config=ci"] + builds)
-        if code != 0:
-            return code
-    print("Built %d and tested %d affected targets." % (len(builds), len(tests)))
+    warm_tests = [target for target in warm_tests_output.split("\n") if target]
+    _write_affected_plan(ctx, plan_dir, builds, tests, warm_tests, suites)
+    print("Planned %d builds, %d tests, and %d dependency roots." % (len(builds), len(tests), len(warm_tests)))
     return 0
 
 affected = task(
@@ -225,6 +382,28 @@ affected = task(
         "shards": args.int(default = 1, description = "Number of test shards."),
         "starting_hashes": args.string(default = "", description = "Starting bazel-diff hashes."),
         "workspace": args.string(default = ".", description = "Workspace to hash."),
+    },
+)
+
+def _coverage_report(ctx: TaskContext) -> int:
+    (code, output_path) = _output(ctx, "bazel", ["info", "output_path", "--config=ci"])
+    if code != 0:
+        return code
+    (code, output_dir) = _output(ctx, "dirname", [ctx.args.output])
+    if code != 0:
+        return code
+    ctx.std.fs.create_dir_all(output_dir)
+    source = output_path + "/_coverage/_coverage_report.dat"
+    code = _run(ctx, "cp", ["--", source, ctx.args.output])
+    if code == 0:
+        print("Copied Bazel LCOV report to %s" % ctx.args.output)
+    return code
+
+coverage_report = task(
+    implementation = _coverage_report,
+    summary = "Copy Bazel's combined LCOV report to a stable path.",
+    args = {
+        "output": args.string(default = "lcov.info", description = "Destination LCOV path."),
     },
 )
 
@@ -338,10 +517,25 @@ def _gres(ctx: TaskContext) -> int:
         "range-scaling-ci": ["//scripts:gres_range_scaling_contract_test"],
     }
     if ctx.args.suite in bazel_tests:
-        return _run(ctx, "bazel", [
+        code = _run(ctx, "bazel", [
             "test",
             "--config=ci",
         ] + bazel_tests[ctx.args.suite])
+        if ctx.args.suite != "coldstart":
+            return code
+        (info_code, testlogs) = _output(ctx, "bazel", ["info", "bazel-testlogs", "--config=ci"])
+        if info_code != 0:
+            return code if code != 0 else info_code
+        source = testlogs + "/scripts/gres_kind_lifecycle_test/test.outputs"
+        destination = "target/gres-coldstart-artifacts"
+        if _run(ctx, "test", ["-d", source]) != 0:
+            print("Gres cold-start test outputs not found at %s" % source)
+            return code if code != 0 else 1
+        copy_code = _run(ctx, "rm", ["-rf", "--", destination])
+        if copy_code == 0:
+            ctx.std.fs.create_dir_all(destination)
+            copy_code = _run(ctx, "cp", ["-R", "--", source + "/.", destination])
+        return code if code != 0 else copy_code
     executable = _GRES_SUITES.get(ctx.args.suite)
     if executable == None:
         print("unknown suite %r; choose one of: %s" % (ctx.args.suite, ", ".join(sorted(_GRES_SUITES.keys()))))
@@ -369,7 +563,12 @@ def _gres(ctx: TaskContext) -> int:
         build_targets = ["//crates/cli:crabka__bin"]
         required_binaries = ["crabka"]
     if _run(ctx, "test", ["-x", "target/debug/crabka-gres-driver-smoke"]) != 0:
-        code = _run(ctx, "bazel", ["build", "--config=ci"] + build_targets)
+        code = _run(ctx, "bazel", [
+            "build",
+            "--config=ci",
+            "--instrument_test_targets",
+            "--strip=never",
+        ] + build_targets)
         if code != 0:
             return code
         code = _run(ctx, "mkdir", ["-p", "target/debug"])

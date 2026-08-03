@@ -1,6 +1,12 @@
 name: operator-e2e
 on:
   workflow_call:
+    inputs:
+      affected:
+        description: Run the suite because the caller's Bazel graph marked it affected.
+        required: false
+        type: boolean
+        default: false
   push:
     branches: [main]
 
@@ -27,7 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 1
     outputs:
-      operator: ${{ steps.filter.outputs.operator }}
+      operator: ${{ inputs.affected || steps.filter.outputs.operator == 'true' }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
@@ -66,6 +72,8 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          cache-save: true
+          disk-cache: operator-images
       - name: Build Bazel OCI tarballs
         run: |
           aspect build \
@@ -4269,6 +4277,7 @@ jobs:
       - kind
       - kind-network-policy
       - kind-kafkatopic
+      - kind-schema-registry
       - kind-listener-auth
       - kind-kafkauser-delegation-token
       - kind-opa-authorization

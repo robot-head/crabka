@@ -17,6 +17,12 @@ rust_package(
         "jvm_consumer_group_next_gen": "medium",
         "metrics": "small",
         "produce_verbatim_passthrough": "small",
+        "quorum": "medium",
+        "tiered_storage_multi_broker": "medium",
+    },
+    test_tags = {
+        "jvm_acceptance": ["manual"],
+        "jvm_consumer_group_next_gen": ["manual"],
     },
 )
 

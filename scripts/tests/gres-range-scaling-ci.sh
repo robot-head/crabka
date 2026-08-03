@@ -53,7 +53,7 @@ def validate(source, benchmark=script):
         "'scripts/tests/gres-range-scaling-ci.sh'", "'.github/workflows/ci.yml'",
     ]
     gres_start = source.index('            gres:')
-    gres_filter = source[gres_start:source.index('\n\n  affected-hash-base:', gres_start)]
+    gres_filter = source[gres_start:source.index('\n\n  affected-plan:', gres_start)]
     for needle in dependencies:
         assert needle in gres_filter, f'missing direct dependency path: {needle}'
     required_script = [

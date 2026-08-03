@@ -17,6 +17,10 @@ build --incompatible_strict_action_env
 
 test --test_output=errors
 test --instrument_test_targets
+# Size describes scheduling cost, while this ceiling protects process and
+# coverage suites from a small target's implicit 60-second timeout. The
+# affected sharder supplies tighter per-size limits for its measured targets.
+test --test_timeout=900
 
 build:ci --announce_rc
 build:ci --color=yes

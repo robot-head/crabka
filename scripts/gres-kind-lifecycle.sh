@@ -68,10 +68,11 @@ wait_lifecycle() {
 }
 
 # The wake query, timed. A tenant coming out of suspend can briefly answer
-# `40001 ... not the leader, retry` while range leadership settles; that is a
-# retryable condition the client contract expects a caller to retry, not a
-# failure of the wake. Retrying it here keeps the gate measuring cold-start
-# latency instead of failing on a transient.
+# `40001 ... not the leader, retry` while range leadership settles. PgDog can
+# also close the old leader connection during that same handoff, so the narrow
+# psql reconnect signatures are retryable as well. Retrying them here keeps the
+# gate measuring cold-start latency instead of failing on the transport edge of
+# a successful handoff.
 #
 # The reported latency deliberately spans every attempt: a client that has to
 # retry really did wait that long, so hiding it would defeat the p95 ceiling.
@@ -83,9 +84,15 @@ measure_tls_query_ms() {
 import os, pathlib, subprocess, sys, time
 env = os.environ.copy()
 env["PGPASSWORD"] = os.environ["G5_SQL_PASSWORD"]
-# Only a leadership handoff is retried. Anything else — a wrong answer, a TLS
-# or auth failure, a genuine query error — stays fatal on the first attempt.
-RETRYABLE = ("not the leader", "40001")
+# Only leadership handoff and its narrow reconnect signatures are retried.
+# Anything else — a wrong answer, certificate/auth failure, or genuine query
+# error — stays fatal on the first attempt.
+HANDOFF_MARKERS = ("not the leader", "40001")
+RECONNECT_MARKERS = (
+    "connection closed by peer",
+    "unexpected eof while reading",
+    "connection to server was lost",
+)
 RETRY_BUDGET_S = 30.0
 attempts_path = pathlib.Path(sys.argv[4])
 start = time.monotonic_ns()
@@ -100,18 +107,22 @@ while True:
        timeout=40, check=False)
     if run.returncode == 0 and run.stdout.strip() == "survives":
         break
-    combined = (run.stderr or "") + (run.stdout or "")
-    if not any(marker in combined for marker in RETRYABLE):
+    combined = ((run.stderr or "") + (run.stdout or "")).lower()
+    if any(marker in combined for marker in HANDOFF_MARKERS):
+        retry_reason = "a leadership handoff"
+    elif any(marker in combined for marker in RECONNECT_MARKERS):
+        retry_reason = "a transient handoff reconnect"
+    else:
         sys.stderr.write(run.stderr + "\nstdout=" + repr(run.stdout) + "\n")
         raise SystemExit(run.returncode or 1)
     if time.monotonic() >= deadline:
         sys.stderr.write(
-            f"wake query still reported a leadership handoff after {attempts} attempts "
+            f"wake query still reported {retry_reason} after {attempts} attempts "
             f"across {RETRY_BUDGET_S:.0f}s; treating as a stuck leader\n"
             + run.stderr + "\nstdout=" + repr(run.stdout) + "\n"
         )
         raise SystemExit(run.returncode or 1)
-    sys.stderr.write(f"wake query attempt {attempts} hit a leadership handoff; retrying\n")
+    sys.stderr.write(f"wake query attempt {attempts} hit {retry_reason}; retrying\n")
     time.sleep(0.5)
 with attempts_path.open("a") as handle:
     handle.write(f"{attempts}\n")

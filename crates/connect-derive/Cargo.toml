@@ -24,13 +24,7 @@ quote = { workspace = true }
 syn = { workspace = true }
 
 [dev-dependencies]
-# Dev-only path dependency. Keep the crates.io requirement on the released
-# minor line so `cargo publish` can package this crate before crabka-connect is
-# published at the same workspace version.
-crabka-connect = { version = "0.3", path = "../connect", default-features = false }
-datatest-stable = { workspace = true }
-trybuild = { workspace = true }
-
-[[test]]
-name = "derive"
-harness = false
+# The renamed key verifies that the proc macro resolves Cargo dependency
+# aliases. Keep the crates.io requirement so this crate remains publishable
+# before crabka-connect at the same workspace version.
+renamed-connect = { package = "crabka-connect", version = "0.3", path = "../connect", default-features = false }

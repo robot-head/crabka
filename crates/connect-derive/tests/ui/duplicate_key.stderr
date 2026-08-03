@@ -1,5 +1,0 @@
-error: duplicate connector config key `same`
- --> tests/ui/duplicate_key.rs:8:5
-  |
-8 |     second: String,
-  |     ^^^^^^

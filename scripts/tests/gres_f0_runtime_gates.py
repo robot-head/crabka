@@ -175,7 +175,9 @@ assert "cat extended-parity-standalone.md extended-parity-substrate.md" in summa
 upload = workflow_step("Upload parity report")
 assert all(name in upload for name in ("extended-parity-standalone.json", "extended-parity-substrate.json"))
 pgdog_upload = workflow_step("Upload Gres front-door e2e artifacts")
-assert "if: ${{ !cancelled() }}" in pgdog_upload
+assert "!cancelled()" in pgdog_upload and "hashFiles('target/gres-e2e-artifacts/**')" in pgdog_upload
 assert "extended-parity-pgdog.json" in pgdog_upload and "extended-parity-pgdog.md" in pgdog_upload
+coldstart_upload = workflow_step("Upload Gres cold-start artifacts")
+assert "!cancelled()" in coldstart_upload and "hashFiles('target/gres-coldstart-artifacts/**')" in coldstart_upload
 
 print("PASS: structurally validated F-0 runtime and CI gates")

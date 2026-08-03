@@ -5,28 +5,55 @@ inputs:
     description: Aspect API token.
     required: true
   cache-save:
-    description: Save Bazel caches when the job completes.
+    description: Save Bazel caches when this job is the designated writer.
+    required: false
+    default: "true"
+  cache-snapshot:
+    description: Salt the disk-cache key so jobs in this run share the writer's exact snapshot.
     required: false
     default: "true"
   disk-cache:
     description: Name of the shared Bazel disk-cache namespace, or false to disable it.
     required: false
-    default: "true"
+    default: affected
 runs:
   using: composite
   steps:
+    - name: Key this run's Bazel cache snapshot
+      if: ${{ inputs.cache-snapshot == 'true' }}
+      shell: bash
+      run: |
+        mkdir -p bazel/affected-cache-key
+        printf '# cache snapshot %s-%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
+          > bazel/affected-cache-key/BUILD.bazel
+    - name: Remove an act cache snapshot before graph hashing
+      if: ${{ inputs.cache-snapshot != 'true' }}
+      shell: bash
+      run: |
+        rm -f -- bazel/affected-cache-key/BUILD.bazel
+        rmdir --ignore-fail-on-non-empty bazel/affected-cache-key 2>/dev/null || true
     - uses: bazel-contrib/setup-bazel@8cb04a772ab4c1eb984e9c1b493a182e96c5e425 # 0.19.0
       with:
         bazelisk-cache: true
         disk-cache: ${{ inputs.disk-cache }}
         repository-cache: |
+          - .github/actions/setup-bazel/action.yml
           - .bazelrc
           - .bazelversion
           - MODULE.bazel
           - MODULE.bazel.lock
           - Cargo.lock
           - "**/*.bzl"
-        external-cache: true
+        # Keep manifests stable within an execution namespace so one workflow
+        # cannot freeze another workflow's partial external-repository list.
+        external-cache: |
+          name: crabka-v3-${{ inputs.disk-cache }}
+          manifest:
+            # The crate-universe hub itself is keyed by the Cargo lock; its
+            # generated per-crate repositories retain setup-bazel's defaults.
+            "rules_rs++crate+crates":
+              - Cargo.lock
+              - MODULE.bazel.lock
         cache-save: ${{ inputs.cache-save }}
     - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
       with:

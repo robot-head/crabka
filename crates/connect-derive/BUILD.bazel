@@ -1,19 +1,20 @@
+load("//:bazel/rust_compile_fail_test.bzl", "rust_compile_fail_test")
 load("//:bazel/rust_package.bzl", "rust_package")
-
-filegroup(
-    name = "derive_data",
-    srcs = glob([
-        "tests/pass/**",
-        "tests/ui/**",
-    ]),
-)
 
 rust_package(
     name = "connect-derive",
     cargo_name = "crabka-connect-derive",
     crate_name = "crabka_connect_derive",
-    harnessless = ["derive"],
+    lib_test_size = "small",
     proc_macro = True,
-    test_compile_data = [":derive_data"],
-    test_tags = {"derive": ["manual"]},
+    test_sizes = {"renamed_dependency": "small"},
+)
+
+rust_compile_fail_test(
+    name = "generic_struct_compile_fail",
+    src = "tests/ui/generic_struct.rs",
+    expected = "ConnectorConfig does not support generic structs",
+    proc_macro = ":connect-derive",
+    size = "small",
+    span = ":4:11",
 )

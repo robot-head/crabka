@@ -404,7 +404,7 @@ fn demo_app_image_does_not_enable_conflicting_heap_allocator() {
 #[test]
 fn demo_runtime_image_does_not_ship_full_dwarf_debug_sections() {
     let bazelrc = std::fs::read_to_string(repo_root().join(".bazelrc")).expect("read Bazel config");
-    assert2::assert!(bazelrc.contains("build:ci --strip=always"));
+    assert2::assert!(bazelrc.contains("run:ci --strip=always"));
 }
 
 #[test]

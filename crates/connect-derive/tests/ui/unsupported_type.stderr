@@ -1,5 +1,0 @@
-error: unsupported ConnectorConfig field type
- --> tests/ui/unsupported_type.rs:5:15
-  |
-5 |     endpoint: std::net::SocketAddr,
-  |               ^^^^^^^^^^^^^^^^^^^^

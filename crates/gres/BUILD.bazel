@@ -8,4 +8,5 @@ rust_package(
         "//crates/gres-ranges:test_harness",
         "//crates/security:test_fixtures",
     ],
+    test_sizes = {"runtime": "medium"},
 )

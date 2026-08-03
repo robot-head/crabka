@@ -105,6 +105,7 @@ jobs:
               - 'Cargo.lock'
               - '.config/nextest.toml'
               - '.github/workflows/ci.yml'
+              - '.github/workflows/operator-e2e.yml'
             client_core:
               - 'crates/client-core/**'
               - 'crates/protocol/**'
@@ -339,32 +340,63 @@ jobs:
               - 'scripts/gres-sharded-conformance.sh'
               - 'scripts/tests/gres_sharded_conformance_ci.py'
 
-  affected-hash-base:
+  affected-plan:
     needs: changes
-    timeout-minutes: 15
+    timeout-minutes: 20
     runs-on: ubuntu-latest
+    outputs:
+      affected_work: ${{ steps.suites.outputs.affected_work }}
+      admin_ui: ${{ steps.suites.outputs.admin_ui }}
+      broker_integration: ${{ steps.suites.outputs.broker_integration }}
+      broker_jvm: ${{ steps.suites.outputs.broker_jvm }}
+      client_consumer: ${{ steps.suites.outputs.client_consumer }}
+      client_core: ${{ steps.suites.outputs.client_core }}
+      client_streams: ${{ steps.suites.outputs.client_streams }}
+      gres: ${{ steps.suites.outputs.gres }}
+      grpc_gateway: ${{ steps.suites.outputs.grpc_gateway }}
+      grpc_gateway_jvm: ${{ steps.suites.outputs.grpc_gateway_jvm }}
+      jvm_differential: ${{ steps.suites.outputs.jvm_differential }}
+      jvm_oracle: ${{ steps.suites.outputs.jvm_oracle }}
+      log: ${{ steps.suites.outputs.log }}
+      metrics_conformance: ${{ steps.suites.outputs.metrics_conformance }}
+      metrics_differential: ${{ steps.suites.outputs.metrics_differential }}
+      operator: ${{ steps.suites.outputs.operator }}
+      schema_registry: ${{ steps.suites.outputs.schema_registry }}
+      has_tests: ${{ steps.suites.outputs.has_tests }}
+      test_shards: ${{ steps.suites.outputs.test_shards }}
+      traces: ${{ steps.suites.outputs.traces }}
     permissions:
+      checks: write
       contents: read
       id-token: write
+      issues: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v7
       - id: base-hash-cache
         uses: actions/cache/restore@v5
         with:
           path: .aspect/affected-hashes-${{ github.event.pull_request.base.sha || github.event.before }}.json
-          key: affected-hashes-v2-${{ github.event.pull_request.base.sha || github.event.before }}
+          key: affected-hashes-${{ hashFiles('.aspect/tasks.axl', '.bazelrc', '.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock') }}-${{ github.event.pull_request.base.sha || github.event.before }}
       - uses: actions/checkout@v7
         if: ${{ steps.base-hash-cache.outputs.cache-hit != 'true' }}
         with:
           ref: ${{ github.event.pull_request.base.sha || github.event.before }}
           path: .aspect/base-workspace
+      - id: head-hash-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: .aspect/affected-hashes-${{ github.sha }}.json
+          key: affected-hashes-${{ hashFiles('.aspect/tasks.axl', '.bazelrc', '.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock') }}-${{ github.sha }}
       - uses: ./.github/actions/free-disk-space
-        if: ${{ steps.base-hash-cache.outputs.cache-hit != 'true' }}
+        if: ${{ steps.base-hash-cache.outputs.cache-hit != 'true' || steps.head-hash-cache.outputs.cache-hit != 'true' }}
       - uses: ./.github/actions/setup-bazel
-        if: ${{ steps.base-hash-cache.outputs.cache-hit != 'true' }}
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          # Planning may restore shared caches, but only affected-build should
+          # publish the isolated dependency snapshot consumed by test shards.
           cache-save: false
+          cache-snapshot: false
       - name: Hash base build graph
         if: ${{ steps.base-hash-cache.outputs.cache-hit != 'true' }}
         run: >-
@@ -375,43 +407,7 @@ jobs:
         if: ${{ steps.base-hash-cache.outputs.cache-hit != 'true' }}
         with:
           path: .aspect/affected-hashes-${{ github.event.pull_request.base.sha || github.event.before }}.json
-          key: affected-hashes-v2-${{ github.event.pull_request.base.sha || github.event.before }}
-      - uses: actions/upload-artifact@v7
-        with:
-          name: affected-hashes-base
-          path: .aspect/affected-hashes-${{ github.event.pull_request.base.sha || github.event.before }}.json
-          if-no-files-found: error
-          retention-days: 1
-
-  affected-plan:
-    needs: affected-hash-base
-    timeout-minutes: 20
-    runs-on: ubuntu-latest
-    permissions:
-      checks: write
-      contents: read
-      id-token: write
-      issues: write
-      pull-requests: write
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
-        with:
-          name: affected-hashes-base
-          path: .aspect
-      - id: head-hash-cache
-        uses: actions/cache/restore@v5
-        with:
-          path: .aspect/affected-hashes-${{ github.sha }}.json
-          key: affected-hashes-v2-${{ github.sha }}
-      - uses: ./.github/actions/free-disk-space
-        if: ${{ steps.head-hash-cache.outputs.cache-hit != 'true' }}
-      - uses: ./.github/actions/setup-bazel
-        with:
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
-          # Planning may restore shared caches, but only affected-build should
-          # publish the isolated dependency snapshot consumed by test shards.
-          cache-save: false
+          key: affected-hashes-${{ hashFiles('.aspect/tasks.axl', '.bazelrc', '.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock') }}-${{ github.event.pull_request.base.sha || github.event.before }}
       - name: Hash head build graph
         if: ${{ steps.head-hash-cache.outputs.cache-hit != 'true' }}
         run: >-
@@ -422,7 +418,7 @@ jobs:
         if: ${{ steps.head-hash-cache.outputs.cache-hit != 'true' }}
         with:
           path: .aspect/affected-hashes-${{ github.sha }}.json
-          key: affected-hashes-v2-${{ github.sha }}
+          key: affected-hashes-${{ hashFiles('.aspect/tasks.axl', '.bazelrc', '.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock') }}-${{ github.sha }}
       - name: Plan affected targets
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -430,6 +426,31 @@ jobs:
           aspect affected --mode plan
           --starting-hashes ".aspect/affected-hashes-${{ github.event.pull_request.base.sha || github.event.before }}.json"
           --final-hashes ".aspect/affected-hashes-${{ github.sha }}.json"
+      - name: Export affected suites
+        id: suites
+        run: |
+          cat .aspect/affected-plan/suites.txt >> "$GITHUB_OUTPUT"
+          build_count=$(grep -c . .aspect/affected-plan/builds.txt || true)
+          test_count=$(grep -c . .aspect/affected-plan/tests.txt || true)
+          warm_count=$(grep -c . .aspect/affected-plan/warm-tests.txt || true)
+          if ((build_count > 0 || warm_count > 0)); then
+            echo 'affected_work=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'affected_work=false' >> "$GITHUB_OUTPUT"
+          fi
+          if ((test_count > 0)); then
+            echo 'has_tests=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'has_tests=false' >> "$GITHUB_OUTPUT"
+          fi
+          shard_count=$test_count
+          if ((shard_count > 4)); then shard_count=4; fi
+          case "$shard_count" in
+            0|1) echo 'test_shards=[0]' >> "$GITHUB_OUTPUT" ;;
+            2) echo 'test_shards=[0,1]' >> "$GITHUB_OUTPUT" ;;
+            3) echo 'test_shards=[0,1,2]' >> "$GITHUB_OUTPUT" ;;
+            4) echo 'test_shards=[0,1,2,3]' >> "$GITHUB_OUTPUT" ;;
+          esac
       - uses: actions/upload-artifact@v7
         with:
           name: affected-plan
@@ -437,7 +458,10 @@ jobs:
           retention-days: 1
 
   affected-build:
-    needs: affected-plan
+    needs: [changes, affected-plan]
+    if: >-
+      ${{ needs.affected-plan.outputs.affected_work == 'true' ||
+          needs.changes.outputs.gres == 'true' }}
     timeout-minutes: 120
     runs-on: ubuntu-latest
     steps:
@@ -450,12 +474,16 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          # The warmer is the sole immutable GitHub cache writer. All other
+          # jobs restore caches without racing to publish partial snapshots.
+          cache-save: true
           disk-cache: affected
       - name: Build affected dependencies
         run: aspect affected --mode warm
 
   affected-test:
-    needs: affected-build
+    needs: [affected-plan, affected-build]
+    if: ${{ needs.affected-plan.outputs.has_tests == 'true' }}
     timeout-minutes: 30
     runs-on: ubuntu-latest
     permissions:
@@ -467,7 +495,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: ${{ fromJSON(needs.affected-plan.outputs.test_shards) }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -482,11 +510,16 @@ jobs:
       - name: Test affected targets
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: aspect affected --mode test --shard "${{ matrix.shard }}" --shards 4
+        run: aspect affected --mode test --shard "${{ matrix.shard }}" --shards "${{ strategy.job-total }}"
 
   docs:
-    needs: [changes, affected-plan]
-    if: ${{ github.event_name == 'pull_request' && needs.changes.outputs.docs == 'true' }}
+    needs: [changes, affected-plan, affected-build]
+    if: >-
+      ${{ always() && github.event_name == 'pull_request' &&
+          needs.changes.outputs.docs == 'true' &&
+          needs.changes.result == 'success' &&
+          needs.affected-plan.result == 'success' &&
+          (needs.affected-build.result == 'success' || needs.affected-build.result == 'skipped') }}
     permissions:
       contents: read
       id-token: write
@@ -496,8 +529,13 @@ jobs:
     secrets: inherit
 
   codegen-check:
-    needs: [changes, affected-plan]
-    if: ${{ github.event_name == 'pull_request' && needs.changes.outputs.codegen == 'true' }}
+    needs: [changes, affected-plan, affected-build]
+    if: >-
+      ${{ always() && github.event_name == 'pull_request' &&
+          needs.changes.outputs.codegen == 'true' &&
+          needs.changes.result == 'success' &&
+          needs.affected-plan.result == 'success' &&
+          (needs.affected-build.result == 'success' || needs.affected-build.result == 'skipped') }}
     permissions:
       contents: read
       id-token: write
@@ -505,8 +543,13 @@ jobs:
     secrets: inherit
 
   codspeed:
-    needs: [changes, affected-plan]
-    if: ${{ github.event_name == 'pull_request' && needs.changes.outputs.codspeed == 'true' }}
+    needs: [changes, affected-plan, affected-build]
+    if: >-
+      ${{ always() && github.event_name == 'pull_request' &&
+          needs.changes.outputs.codspeed == 'true' &&
+          needs.changes.result == 'success' &&
+          needs.affected-plan.result == 'success' &&
+          (needs.affected-build.result == 'success' || needs.affected-build.result == 'skipped') }}
     permissions:
       contents: read
       id-token: write
@@ -514,12 +557,22 @@ jobs:
     secrets: inherit
 
   operator-e2e:
-    needs: affected-plan
-    if: ${{ github.event_name == 'pull_request' }}
+    needs: [changes, affected-plan, affected-build]
+    if: >-
+      ${{ always() && github.event_name == 'pull_request' &&
+          needs.changes.result == 'success' &&
+          needs.affected-plan.result == 'success' &&
+          (needs.affected-build.result == 'success' || needs.affected-build.result == 'skipped') &&
+          (needs.changes.outputs.helm_lint == 'true' ||
+           needs.affected-plan.outputs.operator == 'true' ||
+           contains(github.event.pull_request.labels.*.name, 'e2e-oauth') ||
+           contains(github.event.pull_request.labels.*.name, 'e2e-oauth-introspection')) }}
     permissions:
       contents: read
       id-token: write
     uses: ./.github/workflows/operator-e2e.yml
+    with:
+      affected: ${{ needs.affected-plan.outputs.operator == 'true' }}
     secrets: inherit
 
   gatekeeper-operator:
@@ -533,8 +586,8 @@ jobs:
         run: exit 1
 
   jvm-differential:
-    needs: [changes, affected-plan]
-    if: ${{ needs.changes.outputs.jvm_differential == 'true' }}
+    needs: [affected-plan, affected-build]
+    if: ${{ needs.affected-plan.outputs.jvm_differential == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -543,21 +596,52 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          cache-save: false
+      - name: Preload gRPC gateway JVM image
+        if: ${{ needs.affected-plan.outputs.grpc_gateway_jvm == 'true' }}
+        run: docker pull mirror.gcr.io/confluentinc/cp-kafka:7.5.0
       # Select the JVM-oracle targets explicitly. A workspace-wide
       # `--include-ignored` sweep also runs thousands of ordinary tests and
       # Docker- or PostgreSQL-gated suites that belong to dedicated jobs.
-      - name: JVM differential coverage
+      - name: Protocol JVM differential coverage
+        if: ${{ needs.affected-plan.outputs.jvm_oracle == 'true' }}
         run: |
           mkdir -p coverage
-          aspect test //crates/compression:differential //crates/protocol:differential_all \
-            --coverage --coverage-report=coverage/jvm-differential.lcov \
+          aspect test \
+            //crates/compression:differential \
+            //crates/protocol:differential_all \
+            //crates/protocol:differential_api_versions \
+            //crates/protocol:differential_describe_groups \
+            //crates/protocol:differential_metadata \
+            //crates/protocol:differential_offset_commit \
+            //crates/protocol:differential_produce \
+            //crates/protocol:differential_records \
+            --coverage \
             --bazel-flag=--config=ci --bazel-flag=--test_arg=--include-ignored
+          aspect coverage-report --output coverage/jvm-oracle-differential.lcov
       - uses: codecov/codecov-action@v7
+        if: ${{ needs.affected-plan.outputs.jvm_oracle == 'true' }}
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          files: coverage/jvm-differential.lcov
+          files: coverage/jvm-oracle-differential.lcov
           disable_search: true
-          flags: jvm-differential
+          flags: jvm-oracle-differential
+          fail_ci_if_error: false
+      - name: gRPC gateway JVM differential coverage
+        if: ${{ needs.affected-plan.outputs.grpc_gateway_jvm == 'true' }}
+        run: |
+          mkdir -p coverage
+          aspect test //crates/grpc-gateway:jvm_differential \
+            --coverage \
+            --bazel-flag=--config=ci --bazel-flag=--test_arg=--include-ignored
+          aspect coverage-report --output coverage/grpc-gateway-jvm-differential.lcov
+      - uses: codecov/codecov-action@v7
+        if: ${{ needs.affected-plan.outputs.grpc_gateway_jvm == 'true' }}
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage/grpc-gateway-jvm-differential.lcov
+          disable_search: true
+          flags: grpc-gateway-jvm-differential
           fail_ci_if_error: false
 
   cargo-deny:
@@ -601,8 +685,8 @@ jobs:
             "cargo creusot --replay -p crabka-verified && cargo creusot --replay -p crabka-throttle"
 
   gres-range-scaling:
-    needs: [changes, affected-plan]
-    if: ${{ needs.changes.outputs.gres == 'true' }}
+    needs: [changes, affected-plan, affected-build]
+    if: ${{ needs.changes.outputs.gres == 'true' || needs.affected-plan.outputs.gres == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -610,6 +694,7 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          cache-save: false
       - name: Install PostgreSQL client
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
       - name: Verify Gres scaling CI contract
@@ -663,8 +748,8 @@ jobs:
           retention-days: 30
 
   gres-topology-process-nemesis:
-    needs: [changes, affected-plan]
-    if: ${{ needs.changes.outputs.gres == 'true' }}
+    needs: [changes, affected-plan, affected-build]
+    if: ${{ needs.changes.outputs.gres == 'true' || needs.affected-plan.outputs.gres == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -672,6 +757,7 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          cache-save: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
@@ -690,8 +776,8 @@ jobs:
           retention-days: 30
 
   gres-sharded-conformance:
-    needs: [changes, affected-plan]
-    if: ${{ needs.changes.outputs.gres == 'true' }}
+    needs: [changes, affected-plan, affected-build]
+    if: ${{ needs.changes.outputs.gres == 'true' || needs.affected-plan.outputs.gres == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -713,6 +799,7 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          cache-save: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
@@ -776,8 +863,8 @@ jobs:
 
   # Real-broker integration smoke test against testcontainers-spawned Kafka.
   client-core-integration:
-    needs: [changes, affected-plan]
-    if: ${{ needs.changes.outputs.client_core == 'true' }}
+    needs: [affected-plan, affected-build]
+    if: ${{ needs.affected-plan.outputs.client_core == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -786,10 +873,12 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          cache-save: false
       - name: Client core integration coverage
         run: |
           mkdir -p coverage
-          aspect test //crates/client-core:integration --coverage --coverage-report=coverage/client-core-integration.lcov --bazel-flag=--config=ci --bazel-flag=--test_arg=--ignored --bazel-flag=--test_arg=--nocapture
+          aspect test //crates/client-core:integration --coverage --bazel-flag=--config=ci --bazel-flag=--test_arg=--ignored --bazel-flag=--test_arg=--nocapture
+          aspect coverage-report --output coverage/client-core-integration.lcov
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -801,8 +890,8 @@ jobs:
   # crabka-log integration: docker cp a JVM-produced partition dir out of
   # a Kafka container and re-read it with crabka-log.
   log-integration:
-    needs: [changes, affected-plan]
-    if: ${{ needs.changes.outputs.log == 'true' }}
+    needs: [affected-plan, affected-build]
+    if: ${{ needs.affected-plan.outputs.log == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -811,10 +900,12 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          cache-save: false
       - name: Log integration coverage
         run: |
           mkdir -p coverage
-          aspect test //crates/log:integration --coverage --coverage-report=coverage/log-integration.lcov --bazel-flag=--config=ci --bazel-flag=--test_arg=--ignored --bazel-flag=--test_arg=--nocapture
+          aspect test //crates/log:integration --coverage --bazel-flag=--config=ci --bazel-flag=--test_arg=--ignored --bazel-flag=--test_arg=--nocapture
+          aspect coverage-report --output coverage/log-integration.lcov
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -828,8 +919,8 @@ jobs:
   # `--lib --bins` walk never descends into these `tests/` binaries, so the
   # consumer's close()/coordinator-lifecycle code is only exercised here.
   client-consumer-integration:
-    needs: [changes, affected-plan]
-    if: ${{ needs.changes.outputs.client_consumer == 'true' }}
+    needs: [affected-plan, affected-build]
+    if: ${{ needs.affected-plan.outputs.client_consumer == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -838,10 +929,12 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          cache-save: false
       - name: Client consumer integration coverage
         run: |
           mkdir -p coverage
-          aspect test //crates/client-consumer:all --coverage --coverage-report=coverage/client-consumer-integration.lcov --bazel-flag=--config=ci --bazel-flag=--test_arg=--nocapture
+          aspect test //crates/client-consumer:all --coverage --bazel-flag=--config=ci --bazel-flag=--test_arg=--nocapture
+          aspect coverage-report --output coverage/client-consumer-integration.lcov
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -856,8 +949,8 @@ jobs:
   # never descends into these `tests/` binaries, so StreamsMembership::start and
   # the heartbeat-coordinator lifecycle are only exercised here.
   client-streams-integration:
-    needs: [changes, affected-plan]
-    if: ${{ needs.changes.outputs.client_streams == 'true' }}
+    needs: [affected-plan, affected-build]
+    if: ${{ needs.affected-plan.outputs.client_streams == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -866,13 +959,15 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          cache-save: false
       - name: Client streams integration coverage
         run: |
           mkdir -p coverage
           # Includes the Avro/Protobuf/JSON bridge tests + byte-exact Confluent
           # golden tests (schema serdes are always-on; goldens use checked-in
           # bytes, no broker/registry needed).
-          aspect test //crates/client-streams:all --coverage --coverage-report=coverage/client-streams-integration.lcov --bazel-flag=--config=ci --bazel-flag=--test_arg=--nocapture
+          aspect test //crates/client-streams:all --coverage --bazel-flag=--config=ci --bazel-flag=--test_arg=--nocapture
+          aspect coverage-report --output coverage/client-streams-integration.lcov
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -882,7 +977,8 @@ jobs:
           fail_ci_if_error: false
       - name: Schema-serde unit coverage
         run: |
-          aspect test //crates/schema-serde:schema-serde_lib_test --coverage --coverage-report=coverage/schema-serde-unit.lcov --bazel-flag=--config=ci
+          aspect test //crates/schema-serde:schema-serde_lib_test --coverage --bazel-flag=--config=ci
+          aspect coverage-report --output coverage/schema-serde-unit.lcov
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -895,8 +991,12 @@ jobs:
   # website snippets are in sync with their source (doc-drift guard). See
   # the Aspect docs task.
   doc-examples:
-    needs: [changes, affected-plan]
-    if: ${{ needs.changes.outputs.doc_examples == 'true' }}
+    needs: [changes, affected-plan, affected-build]
+    if: >-
+      ${{ always() && needs.changes.outputs.doc_examples == 'true' &&
+          needs.changes.result == 'success' &&
+          needs.affected-plan.result == 'success' &&
+          (needs.affected-build.result == 'success' || needs.affected-build.result == 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -905,6 +1005,8 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          cache-save: true
+          disk-cache: doc-examples
       - name: Build & run documented examples + snippet drift guard
         run: aspect docs --task:name=doc-examples
 
@@ -914,8 +1016,8 @@ jobs:
   # `tests/` binaries, so the `unit` flag's `--lib --bins` walk never covers it.
   # (The Docker-only `jvm_differential` test is `#[ignore]` and skipped here.)
   grpc-gateway-integration:
-    needs: [changes, affected-plan]
-    if: ${{ needs.changes.outputs.grpc_gateway == 'true' }}
+    needs: [affected-plan, affected-build]
+    if: ${{ needs.affected-plan.outputs.grpc_gateway == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -924,10 +1026,12 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          cache-save: false
       - name: gRPC gateway integration coverage
         run: |
           mkdir -p coverage
-          aspect test //crates/grpc-gateway:all --coverage --coverage-report=coverage/grpc-gateway-integration.lcov --bazel-flag=--config=ci --bazel-flag=--test_arg=--nocapture
+          aspect test //crates/grpc-gateway:all --coverage --bazel-flag=--config=ci --bazel-flag=--test_arg=--nocapture
+          aspect coverage-report --output coverage/grpc-gateway-integration.lcov
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -943,8 +1047,8 @@ jobs:
   # `--lib --bins` walk never descends into `tests/` binaries, so this job
   # provides the only line-level coverage for those paths.
   schema-registry-integration:
-    needs: [changes, affected-plan]
-    if: ${{ needs.changes.outputs.schema_registry == 'true' }}
+    needs: [affected-plan, affected-build]
+    if: ${{ needs.affected-plan.outputs.schema_registry == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -953,10 +1057,12 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          cache-save: false
       - name: Schema registry integration coverage
         run: |
           mkdir -p coverage
-          aspect test //crates/schema-registry:integration //crates/schema-registry:rest_conformance //crates/schema-registry:schemas_record //crates/schema-registry:compat_conformance //crates/schema-registry:ha //crates/schema-registry:security --coverage --coverage-report=coverage/schema-registry-integration.lcov --bazel-flag=--config=ci --bazel-flag=--test_arg=--nocapture
+          aspect test //crates/schema-registry:integration //crates/schema-registry:rest_conformance //crates/schema-registry:schemas_record //crates/schema-registry:compat_conformance //crates/schema-registry:ha //crates/schema-registry:security --coverage --bazel-flag=--config=ci --bazel-flag=--test_arg=--nocapture
+          aspect coverage-report --output coverage/schema-registry-integration.lcov
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -973,8 +1079,8 @@ jobs:
   # `--lib --bins` walk never descends into this `tests/` binary, so this job is
   # the only PR-time coverage for the conformance harness.
   traces-conformance:
-    needs: [changes, affected-plan]
-    if: ${{ needs.changes.outputs.traces == 'true' }}
+    needs: [affected-plan, affected-build]
+    if: ${{ needs.affected-plan.outputs.traces == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -982,10 +1088,12 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          cache-save: false
       - name: TraceQL conformance gate coverage
         run: |
           mkdir -p coverage
-          aspect test //crates/traces:all //crates/traceql:all --coverage --coverage-report=coverage/traces-conformance.lcov --bazel-flag=--config=ci --bazel-flag=--test_arg=--nocapture
+          aspect test //crates/traces:all //crates/traceql:all --coverage --bazel-flag=--config=ci --bazel-flag=--test_arg=--nocapture
+          aspect coverage-report --output coverage/traces-conformance.lcov
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -998,8 +1106,8 @@ jobs:
   # run psql smoke coverage, then diff against a postgres:18 oracle with the
   # checked-in parity baseline. The parity reports are uploaded for triage.
   gres-conformance:
-    needs: [changes, affected-plan]
-    if: ${{ needs.changes.outputs.gres == 'true' }}
+    needs: [changes, affected-plan, affected-build]
+    if: ${{ needs.changes.outputs.gres == 'true' || needs.affected-plan.outputs.gres == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     services:
@@ -1017,6 +1125,7 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          cache-save: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
@@ -1148,24 +1257,21 @@ jobs:
             --extended-summary extended-parity-substrate.md \
             --out parity-substrate.json --summary parity-substrate.md
       - name: Publish parity summary
-        if: ${{ !cancelled() }}
         run: cat parity.md >> "$GITHUB_STEP_SUMMARY"
       - name: Publish pg_regress adoption summary
-        if: ${{ !cancelled() }}
         run: cat regress-parity.md >> "$GITHUB_STEP_SUMMARY"
       - name: Publish substrate parity summary
-        if: ${{ !cancelled() }}
         run: cat parity-substrate.md >> "$GITHUB_STEP_SUMMARY"
       - name: Publish extended parity summaries
-        if: ${{ !cancelled() }}
         run: cat extended-parity-standalone.md extended-parity-substrate.md >> "$GITHUB_STEP_SUMMARY"
       - name: Generate Gres end-to-end coverage
-        if: ${{ !cancelled() }}
         run: |
           mkdir -p coverage
-          aspect test //crates/gres-conformance:all --coverage --coverage-report=coverage/gres-conformance.lcov --bazel-flag=--config=ci
+          test_status=0
+          aspect test //crates/gres-conformance:all --coverage --bazel-flag=--config=ci || test_status=$?
+          aspect coverage-report --output coverage/gres-conformance.lcov
+          exit "$test_status"
       - uses: codecov/codecov-action@v7
-        if: ${{ !cancelled() }}
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/gres-conformance.lcov
@@ -1173,7 +1279,7 @@ jobs:
           flags: gres-conformance
           fail_ci_if_error: false
       - name: Upload parity report
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && hashFiles('parity.json', 'regress-parity.json', 'parity-substrate.json', 'extended-parity-standalone.json', 'extended-parity-substrate.json') != '' }}
         uses: actions/upload-artifact@v7
         with:
           name: gres-parity-report
@@ -1188,9 +1294,9 @@ jobs:
             extended-parity-standalone.md
             extended-parity-substrate.json
             extended-parity-substrate.md
-          if-no-files-found: warn
+          if-no-files-found: error
       - name: Upload Gres front-door e2e artifacts
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && hashFiles('target/gres-e2e-artifacts/**') != '' }}
         uses: actions/upload-artifact@v7
         with:
           name: gres-front-door-e2e-artifacts
@@ -1198,21 +1304,21 @@ jobs:
             target/gres-e2e-artifacts
             target/gres-e2e-artifacts/extended-parity-pgdog.json
             target/gres-e2e-artifacts/extended-parity-pgdog.md
-          if-no-files-found: warn
+          if-no-files-found: error
       - name: Upload Gres cold-start artifacts
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && hashFiles('target/gres-coldstart-artifacts/**') != '' }}
         uses: actions/upload-artifact@v7
         with:
           name: gres-coldstart-artifacts
           path: target/gres-coldstart-artifacts
-          if-no-files-found: warn
+          if-no-files-found: error
 
   # Gres integration coverage: the engine, range/control plane, lifecycle
   # services, and CLI have most behavior behind tests/ targets rather than
   # unit tests.
   gres-integration:
-    needs: [changes, affected-plan]
-    if: ${{ needs.changes.outputs.gres == 'true' }}
+    needs: [changes, affected-plan, affected-build]
+    if: ${{ needs.changes.outputs.gres == 'true' || needs.affected-plan.outputs.gres == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -1220,6 +1326,7 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          cache-save: false
       - name: Gres engine integration coverage
         run: |
           aspect test \
@@ -1227,7 +1334,8 @@ jobs:
             //crates/gres-substrate:all //crates/gres:all //crates/gres-ranges:all \
             //crates/gres-control:all //crates/gres-conformance:all //crates/cli:all \
             //crates/gres-activator:all //crates/gres-balancer:all \
-            --coverage --coverage-report=lcov.info --bazel-flag=--config=ci
+            --coverage --bazel-flag=--config=ci
+          aspect coverage-report --output lcov.info
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -1241,8 +1349,8 @@ jobs:
   # integration suite on a dedicated runner; the Playwright E2E remains
   # ignored unless explicitly requested with its feature and environment.
   admin-ui-integration:
-    needs: [changes, affected-plan]
-    if: ${{ needs.changes.outputs.rust == 'true' }}
+    needs: [affected-plan, affected-build]
+    if: ${{ needs.affected-plan.outputs.admin_ui == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -1251,10 +1359,12 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          cache-save: false
       - name: Admin UI integration coverage
         run: |
           mkdir -p coverage
-          aspect test //crates/admin-ui:all --coverage --coverage-report=coverage/admin-ui-integration.lcov --bazel-flag=--config=ci
+          aspect test //crates/admin-ui:all --coverage --bazel-flag=--config=ci
+          aspect coverage-report --output coverage/admin-ui-integration.lcov
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -1274,8 +1384,8 @@ jobs:
   # made a hung test waste >1.5h before surfacing. If a single test stalls
   # for more than half an hour something is wedged — fail fast and re-run.
   broker-jvm-acceptance:
-    needs: [changes, affected-plan]
-    if: ${{ needs.changes.outputs.broker_jvm == 'true' }}
+    needs: [affected-plan, affected-build]
+    if: ${{ needs.affected-plan.outputs.broker_jvm == 'true' }}
     runs-on: ubuntu-latest
     # 45-minute budget: the suite grew (next-gen consumer-group + KIP-595
     # multi-voter cases) and runs serially via a nextest test group under `llvm-cov`
@@ -1293,6 +1403,7 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          cache-save: false
       # The Rust producer in `rust_producer_to_console_consumer` runs on
       # the host (not inside a container) and dials `host.docker.internal`
       # because that's the broker's advertised listener (cp-kafka tools
@@ -1310,9 +1421,10 @@ jobs:
         run: |
           mkdir -p coverage
           aspect test //crates/broker:jvm_acceptance //crates/broker:jvm_consumer_group_next_gen \
-            --coverage --coverage-report=coverage/broker-jvm-acceptance.lcov \
+            --coverage \
             --bazel-flag=--config=ci --bazel-flag=--local_test_jobs=1 \
             --bazel-flag=--test_arg=--ignored --bazel-flag=--test_arg=--test-threads=1
+          aspect coverage-report --output coverage/broker-jvm-acceptance.lcov
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -1330,8 +1442,8 @@ jobs:
   # in the patch view. Two `--no-report` runs share a profraw set,
   # then a single `report` produces the lcov.
   broker-integration:
-    needs: [changes, affected-plan]
-    if: ${{ needs.changes.outputs.broker_integration == 'true' }}
+    needs: [affected-plan, affected-build]
+    if: ${{ needs.affected-plan.outputs.broker_integration == 'true' }}
     runs-on: ubuntu-latest
     # 30-minute budget: this runs the whole non-ignored broker suite (plus
     # client-admin) twice under llvm-cov instrumentation (~2-3x slowdown), and
@@ -1349,12 +1461,14 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          cache-save: false
       - name: Broker + client-admin integration coverage
         run: |
           mkdir -p coverage
           aspect test //crates/broker:all //crates/client-admin:all \
-            --coverage --coverage-report=coverage/broker-integration.lcov \
+            --coverage \
             --bazel-flag=--config=ci
+          aspect coverage-report --output coverage/broker-integration.lcov
           aspect build //crates/integration-tests:diskless_jepsen --bazel-flag=--config=ci
       - uses: codecov/codecov-action@v7
         with:
@@ -1368,8 +1482,8 @@ jobs:
   # Each tests/<name>.rs file must be listed with `--test <name>` so that
   # the codecov/patch check sees coverage for newly added test files.
   operator-integration:
-    needs: [changes, affected-plan]
-    if: ${{ needs.changes.outputs.helm_lint == 'true' }}
+    needs: [affected-plan, affected-build]
+    if: ${{ needs.affected-plan.outputs.operator == 'true' }}
     timeout-minutes: 45
     runs-on: ubuntu-latest
     steps:
@@ -1377,12 +1491,14 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          cache-save: false
       - name: Operator reconcile integration coverage
         run: |
           mkdir -p coverage
           aspect test //crates/operator:all \
-            --coverage --coverage-report=coverage/operator-integration.lcov \
+            --coverage \
             --bazel-flag=--config=ci --bazel-flag=--test_arg=--nocapture
+          aspect coverage-report --output coverage/operator-integration.lcov
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -1392,12 +1508,11 @@ jobs:
           fail_ci_if_error: false
 
   # PromQL `.test` conformance gate (no Docker): runs the vendored Prometheus
-  # `.test` corpus through the engine and writes a per-file pass/fail report.
+  # `.test` corpus through the engine.
   # Runs on every PR as a gate (a regression flips a `.test` file to failing).
-  # The `target/promql-conformance-report.txt` artifact is uploaded for triage.
   metrics-conformance:
-    needs: [changes, affected-plan]
-    if: ${{ needs.changes.outputs.metrics == 'true' }}
+    needs: [affected-plan, affected-build]
+    if: ${{ needs.affected-plan.outputs.metrics_conformance == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -1405,15 +1520,9 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          cache-save: false
       - name: PromQL conformance gate
         run: aspect test //crates/promql:conformance --bazel-flag=--config=ci
-      - name: Upload conformance report
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: promql-conformance-report
-          path: target/promql-conformance-report.txt
-          if-no-files-found: warn
 
   # Real-Prometheus byte/semantic differential gate (Docker). The PromQL/metrics
   # wire-format compat constraint (Prometheus/Mimir exactness, incl. NaN/±Inf and
@@ -1426,8 +1535,8 @@ jobs:
   # `cargo test` never touches Docker). Mirrors the metrics-differential nightly
   # job's runner/setup/caching.
   metrics-differential-prometheus:
-    needs: [changes, affected-plan]
-    if: ${{ needs.changes.outputs.metrics == 'true' }}
+    needs: [affected-plan, affected-build]
+    if: ${{ needs.affected-plan.outputs.metrics_differential == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -1440,17 +1549,17 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          cache-save: false
       - name: Preload Docker image
         run: docker pull mirror.gcr.io/prom/prometheus:v3.8.0
-      # `--ignored` opts the Docker-gated tests in (they're skipped everywhere
-      # else). Only the Prometheus suite runs here; Mimir + Grafana stay nightly.
-      - name: Prometheus differential suite (Docker, ignored)
-        run: aspect test //crates/metrics-service:diff_prometheus --bazel-flag=--config=ci --bazel-flag=--test_arg=--ignored --bazel-flag=--test_arg=--nocapture
+      # The target contains one host-only endpoint test and one Docker-gated
+      # differential. Own both here so the generic shards do not run it again.
+      - name: Prometheus differential suite (host and Docker)
+        run: aspect test //crates/metrics-service:diff_prometheus --bazel-flag=--config=ci --bazel-flag=--test_arg=--include-ignored --bazel-flag=--test_arg=--nocapture
 
   gatekeeper-ci:
     needs:
       - changes
-      - affected-hash-base
       - affected-plan
       - affected-build
       - affected-test
@@ -1470,6 +1579,9 @@ jobs:
       - grpc-gateway-integration
       - schema-registry-integration
       - traces-conformance
+      - gres-range-scaling
+      - gres-topology-process-nemesis
+      - gres-sharded-conformance
       - gres-conformance
       - gres-integration
       - admin-ui-integration

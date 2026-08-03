@@ -456,4 +456,65 @@ mod tests {
             assert2::assert!(validate_field_attrs(&attrs, ty).is_err());
         }
     }
+
+    #[test]
+    fn invalid_derives_preserve_diagnostic_messages() {
+        let cases = [
+            (
+                r#"
+                struct Bad {
+                    #[config(name = "same")]
+                    first: String,
+                    #[config(name = "same")]
+                    second: String,
+                }
+                "#,
+                "duplicate connector config key `same`",
+            ),
+            (
+                "struct Bad<T> { value: T }",
+                "ConnectorConfig does not support generic structs",
+            ),
+            (
+                "struct Bad { password: Option<SecretString> }",
+                "SecretString fields must be marked #[config(secret)]",
+            ),
+            (
+                r#"
+                struct Bad {
+                    #[config(secret, default = "password")]
+                    password: SecretString,
+                }
+                "#,
+                "secret fields cannot declare defaults",
+            ),
+            (
+                r#"
+                struct Bad {
+                    #[config(secret)]
+                    password: String,
+                }
+                "#,
+                "#[config(secret)] fields must have type SecretString or Option<SecretString>",
+            ),
+            (
+                "struct Bad { password: SecretString }",
+                "SecretString fields must be marked #[config(secret)]",
+            ),
+            (
+                "struct Bad(String);",
+                "ConnectorConfig can only be derived for structs with named fields",
+            ),
+            (
+                "struct Bad { endpoint: std::net::SocketAddr }",
+                "unsupported ConnectorConfig field type",
+            ),
+        ];
+
+        for (input, expected) in cases {
+            let input: DeriveInput = syn::parse_str(input).unwrap();
+            let actual = expand_connector_config(input).unwrap_err().to_string();
+            assert2::assert!(actual == expected);
+        }
+    }
 }

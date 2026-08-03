@@ -5,6 +5,11 @@ rust_package(
     cargo_name = "crabka-metrics-service",
     crate_name = "crabka_metrics_service",
     test_compile_data = ["//crates/metrics:test_support"],
+    test_tags = {
+        "diff_prometheus": ["manual"],
+        "diff_mimir": ["manual"],
+        "grafana_integration": ["manual"],
+    },
 )
 
 rust_feature_binary(

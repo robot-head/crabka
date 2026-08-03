@@ -43,8 +43,20 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          cache-save: true
+          disk-cache: nightly-protocol-differential
       - name: Run parameterised differential sweep (release profile)
-        run: aspect test //crates/protocol:differential_all --bazel-flag=--config=ci --bazel-flag=--test_arg=--ignored
+        run: >-
+          aspect test
+          //crates/protocol:differential_all
+          //crates/protocol:differential_api_versions
+          //crates/protocol:differential_describe_groups
+          //crates/protocol:differential_metadata
+          //crates/protocol:differential_offset_commit
+          //crates/protocol:differential_produce
+          //crates/protocol:differential_records
+          --bazel-flag=--config=ci
+          --bazel-flag=--test_arg=--ignored
       - name: Create issue on failure
         if: failure()
         uses: actions/github-script@v9
@@ -84,8 +96,17 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          cache-save: true
+          disk-cache: nightly-traces-differential
       - name: Run traces differential-vs-Tempo + Grafana suites (Docker)
-        run: aspect test //crates/traces:tempo_differential --bazel-flag=--config=ci --bazel-flag=--test_arg=--ignored --bazel-flag=--test_arg=--nocapture
+        run: >-
+          aspect test
+          //crates/traces:tempo_differential
+          //crates/traces:grafana_e2e
+          --bazel-flag=--config=ci
+          --bazel-flag=--test_timeout=900
+          --bazel-flag=--test_arg=--ignored
+          --bazel-flag=--test_arg=--nocapture
       - name: Create issue on failure
         if: ${{ failure() && github.event_name != 'pull_request' }}
         uses: actions/github-script@v9

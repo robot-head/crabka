@@ -30,4 +30,6 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          cache-save: true
+          disk-cache: codegen
       - run: aspect codegen --task:name=codegen-drift

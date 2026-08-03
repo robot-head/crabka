@@ -11,4 +11,7 @@ rust_package(
     cargo_name = "crabka-gres-ranges",
     compile_data = ["//crates/security:test_fixtures"],
     crate_name = "crabka_gres_ranges",
+    lib_test_size = "small",
+    test_binaries = {"crabka-gres": "//crates/gres:crabka-gres__bin"},
+    test_sizes = {"tso_monotonicity_model": "medium"},
 )

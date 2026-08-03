@@ -228,7 +228,6 @@ proc-macro-crate = "3"
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "3", features = ["full", "extra-traits"] }
-trybuild = "1"
 # Slice 53: bounded decision cache for the OPA authorizer. `lru` provides
 # an O(1) LRU with a non-zero capacity invariant; pair it with our own
 # TTL field on the value (no built-in expiry).

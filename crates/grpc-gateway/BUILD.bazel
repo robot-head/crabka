@@ -11,4 +11,7 @@ rust_package(
     test_sizes = {
         "jvm_differential": "medium",
     },
+    test_tags = {
+        "jvm_differential": ["manual"],
+    },
 )

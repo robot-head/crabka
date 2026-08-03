@@ -5,4 +5,9 @@ rust_package(
     cargo_name = "crabka-integration-tests",
     crate_name = "crabka_integration_tests",
     test_compile_data = ["//crates/broker:test_support"],
+    test_sizes = {
+        "grafana_e2e": "medium",
+        "loki_differential": "medium",
+    },
+    test_tags = {"diskless_jepsen": ["manual"]},
 )

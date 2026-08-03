@@ -1,5 +1,0 @@
-error: ConnectorConfig can only be derived for structs with named fields
- --> tests/ui/tuple_struct.rs:4:8
-  |
-4 | struct TupleConfig(String);
-  |        ^^^^^^^^^^^
