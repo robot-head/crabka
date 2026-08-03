@@ -24,6 +24,13 @@ env:
   AFFECTED_HASH_SCHEMA: v1-bazel-diff-27.0.0-seed1
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  # actions/checkout initializes an empty repository before fetching.
+  GIT_CONFIG_COUNT: 1
+  GIT_CONFIG_KEY_0: init.defaultBranch
+  GIT_CONFIG_VALUE_0: main
+  # download-artifact v8 still bundles a legacy Buffer() call under Node 24.
+  # Suppress only that upstream deprecation code, not Node warnings generally.
+  NODE_OPTIONS: --disable-warning=DEP0005
 
 jobs:
   changes:
@@ -482,8 +489,8 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
-          # The warmer is the sole immutable GitHub cache writer. All other
-          # jobs restore caches without racing to publish partial snapshots.
+          # The warmer is the sole writer for this run's immutable `affected`
+          # disk-cache snapshot. Its consumers only restore that snapshot.
           cache-save: true
           disk-cache: affected
       - name: Build affected dependencies
@@ -663,6 +670,7 @@ jobs:
         with:
           rust-version: "1.97.1"
           command: check advisories bans sources licenses
+          command-arguments: --hide-inclusion-graph
 
   creusot-verify:
     needs: changes
@@ -847,10 +855,28 @@ jobs:
           grep -q "kind: Service" /tmp/rendered.yaml
           grep -q "kind: ClusterRole" /tmp/rendered.yaml
       - name: Install helm-unittest plugin
-        # Helm 4 verifies plugin provenance by default and aborts when the source
-        # has no signature ("plugin source does not support verification"). The
-        # helm-unittest release is unsigned, so opt out of verification.
-        run: helm plugin install https://github.com/helm-unittest/helm-unittest --version v0.6.0 --verify=false
+        run: |
+          set -euo pipefail
+          HELM_UNITTEST_VERSION=1.1.2
+          HELM_UNITTEST_FINGERPRINT=853008CD0B0A5A2DA04FF8A5616AD47F65B54AC7
+          helm_unittest_gnupg="$(mktemp -d)"
+          trap 'rm -rf -- "$helm_unittest_gnupg"' EXIT
+          export GNUPGHOME="$helm_unittest_gnupg"
+
+          curl --fail --location --retry 3 --silent --show-error \
+            --output "$GNUPGHOME/public-key.asc" \
+            "https://raw.githubusercontent.com/helm-unittest/helm-unittest/v${HELM_UNITTEST_VERSION}/public-key.asc"
+          actual_fingerprint="$(gpg --batch --show-keys --with-colons "$GNUPGHOME/public-key.asc" | awk -F: '$1 == "fpr" { print $10; exit }')"
+          if [[ "$actual_fingerprint" != "$HELM_UNITTEST_FINGERPRINT" ]]; then
+            echo "unexpected helm-unittest signing key: $actual_fingerprint" >&2
+            exit 1
+          fi
+
+          gpg --batch --import "$GNUPGHOME/public-key.asc"
+          gpg --batch --export "$HELM_UNITTEST_FINGERPRINT" > "$GNUPGHOME/pubring.gpg"
+          helm plugin install \
+            "https://github.com/helm-unittest/helm-unittest/releases/download/v${HELM_UNITTEST_VERSION}/unittest-${HELM_UNITTEST_VERSION}.tgz" \
+            --keyring "$GNUPGHOME/pubring.gpg"
       - name: helm lint rebalancer chart
         run: helm lint charts/crabka-rebalancer --set bootstrapServers=test:9092
       - name: helm template rebalancer chart (sanity)

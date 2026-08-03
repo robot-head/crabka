@@ -8,5 +8,6 @@ version: 0.1.1
 # local/dev default — no need to hand-edit it on release.
 appVersion: "0.3.6"
 home: https://github.com/robot-head/crabka
+icon: https://raw.githubusercontent.com/robot-head/crabka/main/docs/crabka-square.png
 sources:
   - https://github.com/robot-head/crabka/tree/main/crates/rebalancer

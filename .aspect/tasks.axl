@@ -1,10 +1,16 @@
 """Crabka's non-Bazel orchestration tasks."""
 
-def _run(ctx, executable, argv = []):
-    return ctx.std.process.command(executable).args(argv).spawn().wait().code
+def _run(ctx, executable, argv = [], current_dir = ""):
+    command = ctx.std.process.command(executable).args(argv)
+    if current_dir:
+        command = command.current_dir(current_dir)
+    return command.spawn().wait().code
 
-def _output(ctx, executable, argv = []):
-    result = ctx.std.process.command(executable).args(argv).stdout("piped").spawn().wait_with_output()
+def _output(ctx, executable, argv = [], current_dir = ""):
+    command = ctx.std.process.command(executable).args(argv)
+    if current_dir:
+        command = command.current_dir(current_dir)
+    result = command.stdout("piped").spawn().wait_with_output()
     return (result.status.code, result.stdout.strip())
 
 def _targets(ctx, path):
@@ -189,7 +195,7 @@ def _generate_hashes(ctx, bazel_diff, workspace, hash_file):
     ctx.std.fs.write(seed_payload, seed_content)
     seed_file = temp + "/seed-filepaths.txt"
     ctx.std.fs.write(seed_file, seed_payload + "\n")
-    (code, repository_cache) = _output(ctx, "bazel", ["info", "repository_cache"])
+    (code, repository_cache) = _output(ctx, "bazel", ["info", "repository_cache"], workspace)
     if code == 0:
         code = _run(ctx, "java", _bazel_diff_jvm_flags(ctx) + [
             "-jar",
@@ -205,7 +211,14 @@ def _generate_hashes(ctx, bazel_diff, workspace, hash_file):
             hash_file,
         ])
     cleanup = _run(ctx, "rm", ["-rf", "--", temp])
-    return code if code != 0 else cleanup
+    shutdown = 0
+    if workspace != ctx.std.env.current_dir():
+        # The next hash uses the head workspace. Stop this server explicitly so
+        # Bazel does not warn and restart it when the workspace path changes.
+        shutdown = _run(ctx, "bazel", ["shutdown"], workspace)
+    if code != 0:
+        return code
+    return cleanup if cleanup != 0 else shutdown
 
 def _affected(ctx: TaskContext) -> int:
     plan_dir = ctx.args.plan_dir
@@ -229,10 +242,11 @@ def _affected(ctx: TaskContext) -> int:
         tests = _targets(ctx, plan_dir + "/warm-tests.txt")
         if tests:
             test_set = "set(%s)" % " ".join(tests)
+            direct_deps = "deps(%s, 1)" % test_set
             (code, deps_output) = _output(ctx, "bazel", [
                 "query",
                 "--noimplicit_deps",
-                "kind('rule|generated file', deps(%s, 1) except %s)" % (test_set, test_set),
+                "kind('rule|generated file', %s except %s) except kind('.*_test rule|test_suite rule', %s)" % (direct_deps, test_set, direct_deps),
             ])
             if code != 0:
                 return code

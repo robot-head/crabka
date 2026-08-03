@@ -99,7 +99,7 @@ tests:
   - it: passes brokerCapacityFile env when brokerCapacities is set
     set:
       brokerCapacities:
-        1:
+        "1":
           max_replicas: 4096
     asserts:
       - contains:
