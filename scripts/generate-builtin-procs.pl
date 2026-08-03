@@ -17,6 +17,21 @@ die "usage: $0 [--check] POSTGRES_CATALOG_DIR [FIXTURE_DIR]\n" if @ARGV;
 unshift @INC, "$catalog_dir/../../backend/catalog";
 require Catalog;
 
+my $type_header = Catalog::ParseHeader("$catalog_dir/pg_type.h");
+my $type_rows = Catalog::ParseData(
+    "$catalog_dir/pg_type.dat", $type_header->{columns}, 0);
+my (%type_oids, %type_names);
+for my $row (@$type_rows)
+{
+    my ($oid, $name) = @{$row}{qw(oid typname)};
+    die "pg_type.dat row has invalid oid\n"
+      unless defined $oid && $oid =~ /^\d+$/;
+    die "pg_type.dat oid $oid has no typname\n" unless defined $name;
+    die "duplicate pg_type.dat oid $oid\n" if $type_oids{$oid}++;
+    die "duplicate pg_type.dat typname $name\n" if exists $type_names{$name};
+    $type_names{$name} = $oid;
+}
+
 my $header = Catalog::ParseHeader("$catalog_dir/pg_proc.h");
 my $catalog_rows = Catalog::ParseData(
     "$catalog_dir/pg_proc.dat", $header->{columns}, 0);
@@ -49,9 +64,8 @@ for my $index (0 .. $#fixture_paths)
     {
         chomp $line;
         my @fields = split /\t/, $line, -1;
-        die "$path has " . scalar(@fields) . " fields, expected 15 or 16\n"
-          unless @fields == 15 || @fields == 16;
-        @fields = @fields[0 .. 14];
+        die "$path has " . scalar(@fields) . " fields, expected 19\n"
+          unless @fields == 19;
         my $oid = $fields[0];
         die "$path has invalid oid $oid\n" unless $oid =~ /^\d+$/;
         die "duplicate fixture oid $oid\n" if $fixture_oids{$oid}++;
@@ -59,7 +73,41 @@ for my $index (0 .. $#fixture_paths)
           // die "fixture oid $oid is absent from pg_proc.dat\n";
         die "fixture oid $oid name mismatch: $fields[1] != $catalog->{proname}\n"
           unless $fields[1] eq $catalog->{proname};
-        push @rows, join("\t", @fields, $catalog->{prosrc}) . "\n";
+        die "fixture oid $oid prosrc mismatch: $fields[15] != $catalog->{prosrc}\n"
+          unless $fields[15] eq $catalog->{prosrc};
+        my $arg_modes = $catalog->{proargmodes};
+        $arg_modes = '-' if !defined $arg_modes || $arg_modes eq '_null_';
+        die "pg_proc.dat oid $oid has unsafe proargmodes\n"
+          if $arg_modes =~ /[\t\n]/;
+        die "fixture oid $oid proargmodes mismatch: $fields[16] != $arg_modes\n"
+          unless $fields[16] eq $arg_modes;
+        my $all_arg_types = $catalog->{proallargtypes};
+        if (!defined $all_arg_types || $all_arg_types eq '_null_')
+        {
+            $all_arg_types = '-';
+        }
+        else
+        {
+            die "pg_proc.dat oid $oid has invalid proallargtypes\n"
+              unless $all_arg_types =~ /^\{[a-zA-Z0-9_]+(?:,[a-zA-Z0-9_]+)*\}$/;
+            my @names = split /,/, substr($all_arg_types, 1, -1);
+            my @oids = map {
+                $type_names{$_}
+                  // die "pg_proc.dat oid $oid has unknown proallargtype $_\n"
+            } @names;
+            $all_arg_types = '{' . join(',', @oids) . '}';
+        }
+        my $arg_names = $catalog->{proargnames};
+        $arg_names = '-'
+          if !defined $arg_names || $arg_names eq '_null_';
+        die "pg_proc.dat oid $oid has invalid proargnames\n"
+          unless $arg_names eq '-' || $arg_names =~ /^\{.*\}$/;
+        die "pg_proc.dat oid $oid has unsafe proargnames\n"
+          if $arg_names =~ /[\t\n]/;
+        die "fixture oid $oid proargnames mismatch: $fields[18] != $arg_names\n"
+          unless $fields[18] eq $arg_names;
+        $fields[17] = $all_arg_types;
+        push @rows, join("\t", @fields) . "\n";
         $chunk_rows++;
     }
     close $input or die "zstd failed while reading $path\n";
