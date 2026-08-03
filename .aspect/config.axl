@@ -1,0 +1,4 @@
+load("@aspect//feature/github_lint_comments.axl", "GithubLintComments")
+
+def config(ctx: ConfigContext):
+    ctx.features[GithubLintComments].enabled = False
