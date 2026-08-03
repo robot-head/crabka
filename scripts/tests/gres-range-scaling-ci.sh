@@ -23,7 +23,7 @@ def validate(source, benchmark=script):
     job = job_block(source)
     required_job = [
         'runs-on: ubuntu-latest', 'timeout-minutes: 30',
-        'dtolnay/rust-toolchain@stable', 'Swatinem/rust-cache@v2',
+        './.github/actions/setup-bazel',
         'postgresql-client', 'aspect gres --task:name=gres-range-scaling-contract --suite range-scaling-ci',
         'CRABKA_GRES_RANGE_SCALING_MODE=fast',
         'CRABKA_GRES_RANGE_SCALING_FLOOR=2.1',
@@ -37,7 +37,10 @@ def validate(source, benchmark=script):
     ]
     for needle in required_job:
         assert needle in job, f'missing live scaling job contract: {needle!r}'
-    forbidden = ['continue-on-error:', '|| true', 'if: false', 'if: ${{ false }}']
+    forbidden = [
+        'continue-on-error:', '|| true', 'if: false', 'if: ${{ false }}',
+        'dtolnay/rust-toolchain', 'Swatinem/rust-cache',
+    ]
     for needle in forbidden:
         assert needle not in job, f'non-gating scaling job token: {needle}'
     invocation_lines = [line.strip() for line in job.splitlines() if '--suite range-scaling' in line and '--suite range-scaling-ci' not in line and not line.lstrip().startswith('#')]

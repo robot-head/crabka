@@ -5,4 +5,5 @@ rust_package(
     cargo_name = "crabka-compression",
     crate_name = "crabka_compression",
     test_binaries = {"crabka-oracle": "//tools/oracle:oracle"},
+    test_sizes = {"differential": "small"},
 )

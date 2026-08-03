@@ -20,7 +20,14 @@ def _bazel_diff(ctx):
     code = _run(ctx, "bazel", ["build", "@bazel-diff//:bazel-diff", "--config=ci"])
     if code != 0:
         return (code, "")
-    (code, outputs) = _output(ctx, "bazel", ["cquery", "@bazel-diff//:bazel-diff", "--config=ci", "--output=files"])
+    (code, outputs) = _output(ctx, "bazel", [
+        "cquery",
+        "@bazel-diff//:bazel-diff",
+        "--config=ci",
+        "--noinstrument_test_targets",
+        "--strip=sometimes",
+        "--output=files",
+    ])
     if code != 0:
         return (code, "")
     executables = [path for path in outputs.split("\n") if path and not path.endswith(".jar")]
@@ -322,7 +329,6 @@ def _gres(ctx: TaskContext) -> int:
         return _run(ctx, "bazel", [
             "test",
             "--config=ci",
-            "--test_output=streamed",
         ] + bazel_tests[ctx.args.suite])
     executable = _GRES_SUITES.get(ctx.args.suite)
     if executable == None:

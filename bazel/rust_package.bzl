@@ -44,7 +44,7 @@ def rust_feature_binary(name, crate_root, crate_label = None, features = [], dep
         visibility = ["//visibility:public"],
     )
 
-def rust_package_tests(name, crate_label = None, rustc_env = {}, compile_data = [], harnessless = [], test_binaries = {}):
+def rust_package_tests(name, crate_label = None, rustc_env = {}, compile_data = [], harnessless = [], test_binaries = {}, test_sizes = {}):
     """Declares a package's top-level integration tests for a hand-written library target."""
     metadata = DEP_DATA[native.package_name()]
     srcs = native.glob(["src/**/*.rs"])
@@ -65,6 +65,7 @@ def rust_package_tests(name, crate_label = None, rustc_env = {}, compile_data = 
             env = {"CARGO_MANIFEST_DIR": native.package_name()},
             use_libtest_harness = test_name not in harnessless,
             rustc_env = test_rustc_env,
+            size = test_sizes.get(test_name, "medium"),
             srcs = srcs + native.glob(["tests/**/*.rs"]),
         )
 
@@ -123,6 +124,7 @@ def rust_package(
         test_features = {},
         lib_test_rustc_flags = [],
         lib_test_size = "medium",
+        test_sizes = {},
         test_tags = {},
         test_binaries = {},
         harnessless = [],
@@ -251,6 +253,7 @@ def rust_package(
             edition = "2024",
             env = runtime_env,
             rustc_env = test_rustc_env,
+            size = test_sizes.get(test_name, "medium"),
             srcs = srcs + native.glob(["tests/**/*.rs"]),
             tags = test_tags.get(test_name, []),
             use_libtest_harness = test_name not in harnessless,

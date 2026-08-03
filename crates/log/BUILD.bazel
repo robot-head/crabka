@@ -4,4 +4,5 @@ rust_package(
     name = "log",
     cargo_name = "crabka-log",
     crate_name = "crabka_log",
+    test_sizes = {"integration": "small"},
 )

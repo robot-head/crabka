@@ -18,14 +18,11 @@ bazel_dep(name = "rules_oci", version = "2.3.0")
 bazel_dep(name = "rules_pkg", version = "1.2.0")
 
 apko = use_extension("@rules_apko//apko:extensions.bzl", "apko")
-apko.toolchain(apko_version = "v1.2.25")
 apko.translate_lock(
     name = "crabka_runtime",
     lock = "//packaging/apko:runtime-base.lock.json",
 )
-use_repo(apko, "apko_toolchains", "crabka_runtime")
-
-register_toolchains("@apko_toolchains//:all")
+use_repo(apko, "crabka_runtime")
 
 maven = use_extension("@rules_jvm_external//:extensions.bzl", "maven")
 maven.install(

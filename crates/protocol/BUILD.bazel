@@ -70,4 +70,5 @@ rust_package_tests(
         "CARGO_MANIFEST_DIR": "$${pwd}/crates/protocol",
     },
     test_binaries = {"crabka-oracle": "//tools/oracle:oracle"},
+    test_sizes = {"differential_all": "small"},
 )

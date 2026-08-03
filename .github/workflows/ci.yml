@@ -619,12 +619,6 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: gres-range-scaling
       - name: Install PostgreSQL client
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
       - name: Verify Gres scaling CI contract
@@ -798,12 +792,6 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: client-core-integration
       - name: Client core integration coverage
         run: |
           mkdir -p coverage
@@ -829,12 +817,6 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: log-integration
       - name: Log integration coverage
         run: |
           mkdir -p coverage
@@ -862,12 +844,6 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: client-consumer-integration
       - name: Client consumer integration coverage
         run: |
           mkdir -p coverage
@@ -896,12 +872,6 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: client-streams-integration
       - name: Client streams integration coverage
         run: |
           mkdir -p coverage
@@ -941,12 +911,6 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: doc-examples
       - name: Build & run documented examples + snippet drift guard
         run: aspect docs --task:name=doc-examples
 
@@ -966,12 +930,6 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: grpc-gateway-integration
       - name: gRPC gateway integration coverage
         run: |
           mkdir -p coverage
@@ -1001,12 +959,6 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: schema-registry-integration
       - name: Schema registry integration coverage
         run: |
           mkdir -p coverage
@@ -1037,12 +989,6 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: traces-conformance
       - name: TraceQL conformance gate coverage
         run: |
           mkdir -p coverage
@@ -1287,12 +1233,6 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: gres-integration
       - name: Gres engine integration coverage
         run: |
           aspect test \
@@ -1324,12 +1264,6 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: admin-ui-integration
       - name: Admin UI integration coverage
         run: |
           mkdir -p coverage
@@ -1372,12 +1306,6 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: broker-jvm-acceptance
       # The Rust producer in `rust_producer_to_console_consumer` runs on
       # the host (not inside a container) and dials `host.docker.internal`
       # because that's the broker's advertised listener (cp-kafka tools
@@ -1434,12 +1362,6 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: broker-integration
       - name: Broker + client-admin integration coverage
         run: |
           mkdir -p coverage
@@ -1468,12 +1390,6 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: operator-integration
       - name: Operator reconcile integration coverage
         run: |
           mkdir -p coverage
@@ -1502,12 +1418,6 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: metrics-conformance
       - name: PromQL conformance gate
         run: aspect test //crates/promql:conformance --bazel-flag=--config=ci
       - name: Upload conformance report
@@ -1543,12 +1453,6 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: metrics-differential-prometheus
       - name: Preload Docker image
         run: docker pull mirror.gcr.io/prom/prometheus:v3.8.0
       # `--ignored` opts the Docker-gated tests in (they're skipped everywhere
