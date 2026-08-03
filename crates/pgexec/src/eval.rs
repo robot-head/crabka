@@ -3657,6 +3657,10 @@ mod tests {
         assert_eq!(ev("3 / 2.0", None, &[]), num("1.5000000000000000"));
         assert_eq!(ev("- 2.5", None, &[]), num("-2.5"));
         assert_eq!(
+            ev("-1 * 11528652096115048448::numeric", None, &[]),
+            num("-11528652096115048448")
+        );
+        assert_eq!(
             infer_type(&pexpr("a + 1.0").expect("parse"), &scope_of(Some(&table())))
                 .expect("infer"),
             ColumnType::Numeric(None)

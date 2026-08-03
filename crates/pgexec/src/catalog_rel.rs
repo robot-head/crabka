@@ -139,6 +139,7 @@ const PG_CATALOG_RELATIONS: &[&str] = &[
     "pg_rewrite",
     "pg_sequence",
     "pg_shdescription",
+    "pg_shmem_allocations_numa",
     "pg_statistic_ext",
     "pg_stat_activity",
     "pg_tables",
@@ -196,6 +197,7 @@ static RELATION_NAMES: &[&str] = &[
     "pg_rewrite",
     "pg_sequence",
     "pg_shdescription",
+    "pg_shmem_allocations_numa",
     "pg_statistic_ext",
     "pg_stat_activity",
     "pg_tables",
@@ -268,6 +270,7 @@ fn system_view_oid(name: &str) -> i32 {
         "pg_stat_activity" => 120_004,
         "pg_tables" => 120_005,
         "pg_views" => 120_006,
+        "pg_shmem_allocations_numa" => 120_007,
         "information_schema.applicable_roles" => 120_010,
         "information_schema.column_privileges" => 120_011,
         "information_schema.constraint_column_usage" => 120_012,
@@ -589,6 +592,9 @@ pub(crate) fn rows(
         "pg_indexes" => pg_indexes_rows(kv),
         "pg_rewrite" => pg_rewrite_rows(kv),
         "pg_sequence" => pg_sequence_rows(kv),
+        "pg_shmem_allocations_numa" => Err(ExecError::Unsupported(
+            "libnuma initialization failed or NUMA is not supported on this platform".into(),
+        )),
         "pg_stat_activity" => Ok(pg_stat_activity_rows(backend_pid)),
         "pg_tables" => pg_tables_rows(kv),
         "pg_tablespace" => pg_tablespace_rows(kv),
@@ -1163,6 +1169,11 @@ fn pg_catalog_columns_rest(name: &str) -> Vec<Column> {
             ("waitstart", Timestamptz),
         ]),
         "pg_replication_slots" => pg_replication_slots_columns(),
+        "pg_shmem_allocations_numa" => cols(&[
+            ("name", Text),
+            ("numa_node", Int4),
+            ("size", Int8),
+        ]),
         "pg_stat_activity" => pg_stat_activity_columns(),
         "pg_indexes" => cols(&[
             ("schemaname", Text),
@@ -2860,6 +2871,32 @@ mod tests {
             assert!(oid != 0, "{name} has no oid");
             assert!(oids.insert(oid), "{name} reuses oid {oid}");
         }
+    }
+
+    #[test]
+    fn numa_allocations_relation_exists_but_reports_unsupported() {
+        const RELATION: &str = "pg_shmem_allocations_numa";
+        assert!(catalog_relation(RELATION) == Some(RELATION));
+        assert!(catalog_relation("pg_catalog.pg_shmem_allocations_numa") == Some(RELATION));
+        assert!(relation_names().contains(&RELATION));
+        assert!(relation_oid(RELATION) != 0);
+        assert!(
+            columns(RELATION)
+                == vec![
+                    Column::new("name", ColumnType::Text),
+                    Column::new("numa_node", ColumnType::Int4),
+                    Column::new("size", ColumnType::Int8),
+                ]
+        );
+
+        let error = rows(&MemKv::default(), RELATION, 0)
+            .expect_err("NUMA allocations require platform support")
+            .into_pg();
+        assert!(error.code == "0A000");
+        assert!(
+            error.message
+                == "libnuma initialization failed or NUMA is not supported on this platform"
+        );
     }
 
     #[test]

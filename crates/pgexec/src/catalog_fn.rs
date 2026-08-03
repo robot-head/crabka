@@ -75,10 +75,14 @@ enum CatalogFunc {
     RoutineDef(RoutineDefKind),
     IsVisible,
     RelationSize,
+    TableSize,
+    IndexesSize,
+    TotalRelationSize,
     /// A size over a whole database or tablespace, whose argument is a name or
     /// oid of that object rather than a relation.
     ClusterSize,
     SizePretty,
+    SizeBytes,
     ObjDescription,
     ColDescription,
     ShobjDescription,
@@ -102,10 +106,10 @@ enum CatalogFunc {
 fn catalog_func(name: &str) -> Option<CatalogFunc> {
     use CatalogFunc::{
         BackendPid, CharToEncoding, ClusterSize, ColDescription, ConstraintDef, CurrentSchemas,
-        EncodingToChar, Expr as ExprDef, HasPrivilege, HasRole, InRecovery, IndexDef,
+        EncodingToChar, Expr as ExprDef, HasPrivilege, HasRole, InRecovery, IndexDef, IndexesSize,
         IsPublishable, IsVisible, NullDef, ObjDescription, RelationSize, RoutineDef,
-        SerialSequence, ShobjDescription, SizePretty, StartTime, TablespaceLocation, TriggerDef,
-        TriggerDepth, UserById, ViewDef,
+        SerialSequence, ShobjDescription, SizeBytes, SizePretty, StartTime, TableSize,
+        TablespaceLocation, TotalRelationSize, TriggerDef, TriggerDepth, UserById, ViewDef,
     };
     Some(match name {
         "pg_get_viewdef" => ViewDef,
@@ -128,11 +132,13 @@ fn catalog_func(name: &str) -> Option<CatalogFunc> {
         | "pg_conversion_is_visible"
         | "pg_statistics_obj_is_visible"
         | "pg_ts_config_is_visible" => IsVisible,
-        "pg_relation_size" | "pg_total_relation_size" | "pg_table_size" | "pg_indexes_size" => {
-            RelationSize
-        }
+        "pg_relation_size" => RelationSize,
+        "pg_table_size" => TableSize,
+        "pg_indexes_size" => IndexesSize,
+        "pg_total_relation_size" => TotalRelationSize,
         "pg_database_size" | "pg_tablespace_size" => ClusterSize,
         "pg_size_pretty" => SizePretty,
+        "pg_size_bytes" => SizeBytes,
         "obj_description" => ObjDescription,
         "col_description" => ColDescription,
         "shobj_description" => ShobjDescription,
@@ -188,18 +194,47 @@ pub(crate) fn is_catalog_func(name: &str) -> bool {
 /// 42883 for an unknown name or a bad arity.
 pub(crate) fn catalog_func_result_type(
     fc: &FuncCall,
-    _scope: &Scope,
+    scope: &Scope,
 ) -> Result<ColumnType, ExecError> {
     use CatalogFunc::{
         BackendPid, CharToEncoding, ClusterSize, CurrentSchemas, HasPrivilege, HasRole, InRecovery,
-        IsPublishable, IsVisible, RelationSize, StartTime,
+        IndexesSize, IsPublishable, IsVisible, RelationSize, SizeBytes, SizePretty, StartTime,
+        TableSize, TotalRelationSize,
     };
     let f = catalog_func(&fc.name).ok_or_else(|| undefined_function(&fc.name))?;
-    let n = crate::func::checked_args(fc)?.len();
-    require_arity(fc, arity_ok(f, n))?;
+    let args = crate::func::checked_args(fc)?;
+    require_arity(fc, arity_ok(f, args.len()))?;
+    if f == SizeBytes
+        && !crate::func::is_unknown_arg(&args[0])
+        && !crate::eval::infer_type(&args[0], scope)?.is_string()
+    {
+        return Err(crate::func::undefined_function_spelled(
+            &fc.name, args, scope,
+        ));
+    }
+    if f == SizePretty {
+        if crate::func::is_unknown_arg(&args[0]) {
+            return Err(crate::func::ambiguous_function(&fc.name, 1));
+        }
+        let ty = crate::eval::infer_type(&args[0], scope)?;
+        let resolved = ty.storage_type();
+        if matches!(resolved, ColumnType::Int2 | ColumnType::Int4) {
+            return Err(ExecError::FunctionError {
+                sqlstate: "42725",
+                message: format!("function {}({}) is not unique", fc.name, ty.name()),
+            });
+        }
+        if !matches!(resolved, ColumnType::Int8 | ColumnType::Numeric(_)) {
+            return Err(crate::func::undefined_function_spelled(
+                &fc.name, args, scope,
+            ));
+        }
+    }
     Ok(match f {
         IsVisible | HasPrivilege | HasRole | IsPublishable | InRecovery => ColumnType::Bool,
-        RelationSize | ClusterSize => ColumnType::Int8,
+        RelationSize | TableSize | IndexesSize | TotalRelationSize | ClusterSize | SizeBytes => {
+            ColumnType::Int8
+        }
         BackendPid
         | CharToEncoding
         | CatalogFunc::TriggerDepth
@@ -217,16 +252,18 @@ fn arity_ok(f: CatalogFunc, n: usize) -> bool {
     use CatalogFunc::{
         BackendPid, CharToEncoding, ClusterSize, ColDescription, ConstraintDef, CurrentSchemas,
         EncodingToChar, Expr as ExprDef, HasPrivilege, HasRole, InRecovery, IndexDef,
-        IsPublishable, IsVisible, NullDef, ObjDescription, RelationSize, SerialSequence,
-        ShobjDescription, SizePretty, StartTime, TablespaceLocation, UserById, ViewDef,
+        IndexesSize, IsPublishable, IsVisible, NullDef, ObjDescription, RelationSize,
+        SerialSequence, ShobjDescription, SizeBytes, SizePretty, StartTime, TableSize,
+        TablespaceLocation, TotalRelationSize, UserById, ViewDef,
     };
     match f {
         ViewDef | ConstraintDef | CatalogFunc::TriggerDef | NullDef => n == 1 || n == 2,
         CatalogFunc::RoutineDef(_) => n == 1,
         IndexDef => n == 1 || n == 3,
         ExprDef => n == 2 || n == 3,
-        UserById | IsVisible | SizePretty | CurrentSchemas | EncodingToChar | CharToEncoding
-        | IsPublishable | TablespaceLocation => n == 1,
+        UserById | IsVisible | SizePretty | SizeBytes | CurrentSchemas | EncodingToChar
+        | CharToEncoding | IsPublishable | TablespaceLocation | TableSize | IndexesSize
+        | TotalRelationSize => n == 1,
         SerialSequence | ColDescription | ShobjDescription | HasRole => n == 2 || n == 3,
         ObjDescription | RelationSize => n == 1 || n == 2,
         ClusterSize => n == 1,
@@ -268,7 +305,7 @@ fn eval_resolved(
 ) -> Result<Datum, ExecError> {
     use CatalogFunc::{
         BackendPid, CharToEncoding, ClusterSize, CurrentSchemas, EncodingToChar, HasPrivilege,
-        HasRole, InRecovery, IsPublishable, IsVisible, NullDef, SizePretty, StartTime,
+        HasRole, InRecovery, IsPublishable, IsVisible, NullDef, SizeBytes, SizePretty, StartTime,
         TablespaceLocation,
     };
     match f {
@@ -308,6 +345,7 @@ fn eval_resolved(
         EncodingToChar => Ok(encoding_to_char(&vals[0])),
         CharToEncoding => Ok(char_to_encoding(&vals[0])),
         SizePretty => size_pretty(&vals[0]),
+        SizeBytes => size_bytes(&vals[0]),
         HasPrivilege => has_privilege(name, vals, ctx),
         HasRole => Ok(Datum::Bool(true)),
         _ => eval_catalog_reading(f, vals, ctx),
@@ -348,10 +386,12 @@ fn tablespace_location(value: &Datum, ctx: &EvalCtx) -> Result<Datum, ExecError>
 /// The half of the family that reads the catalog.
 fn eval_catalog_reading(f: CatalogFunc, vals: &[Datum], ctx: &EvalCtx) -> Result<Datum, ExecError> {
     use CatalogFunc::{
-        ColDescription, ConstraintDef, Expr as ExprDef, IndexDef, ObjDescription, RelationSize,
-        SerialSequence, ShobjDescription, UserById, ViewDef,
+        ColDescription, ConstraintDef, Expr as ExprDef, IndexDef, IndexesSize, ObjDescription,
+        RelationSize, SerialSequence, ShobjDescription, TableSize, TotalRelationSize, UserById,
+        ViewDef,
     };
     let kv = ctx.catalog().ok_or_else(catalog_unavailable)?;
+    let data_kv = ctx.data().unwrap_or(kv);
     // Every function here that takes a relation *name* resolves it the way the
     // session resolves one, so `pg_get_viewdef('v')` sees what `SELECT … FROM v`
     // sees.
@@ -366,7 +406,10 @@ fn eval_catalog_reading(f: CatalogFunc, vals: &[Datum], ctx: &EvalCtx) -> Result
         ExprDef => Ok(vals[0].clone()),
         UserById => user_by_id(kv, &vals[0]),
         SerialSequence => serial_sequence(kv, scope, vals),
-        RelationSize => relation_size(kv, scope, &vals[0]),
+        RelationSize => relation_size_with_fork(kv, data_kv, scope, vals),
+        TableSize => table_size(kv, data_kv, scope, &vals[0]),
+        IndexesSize => indexes_size(kv, data_kv, scope, &vals[0]),
+        TotalRelationSize => total_relation_size(kv, data_kv, scope, &vals[0]),
         ObjDescription => description(kv, scope, &vals[0], 0),
         ColDescription => {
             let subid = i32::try_from(int_arg(&vals[1])?)
@@ -678,20 +721,30 @@ pub(crate) fn encoding_id(name: &str) -> Option<i32> {
 }
 
 /// `pg_size_pretty(bigint)`, byte for byte as PostgreSQL formats it: the value
-/// is shifted one unit at a time, keeping one extra bit so the final halving
+/// is divided one unit at a time, keeping one extra bit so the final halving
 /// rounds rather than truncates.
 fn size_pretty(size: &Datum) -> Result<Datum, ExecError> {
-    if matches!(size, Datum::Null) {
-        return Ok(Datum::Null);
-    }
-    let mut value = int_arg(size)?;
+    let mut value = match size {
+        Datum::Null => return Ok(Datum::Null),
+        Datum::Numeric(value) => return size_pretty_numeric(value),
+        Datum::Int8(value) => *value,
+        Datum::Int2(_) | Datum::Int4(_) => {
+            return Err(crate::func::ambiguous_function("pg_size_pretty", 1));
+        }
+        _ => {
+            return Err(ExecError::UndefinedFunction(format!(
+                "function pg_size_pretty({}) does not exist",
+                size.column_type().map_or("unknown", ColumnType::name)
+            )));
+        }
+    };
     let limit = 10 * 1024;
     let limit2 = limit * 2 - 1;
     if value.unsigned_abs() < limit {
         return Ok(Datum::Text(format!("{value} bytes")));
     }
     for unit in ["kB", "MB", "GB", "TB", "PB"] {
-        value >>= if unit == "kB" { 9 } else { 10 };
+        value /= if unit == "kB" { 1 << 9 } else { 1 << 10 };
         if value.unsigned_abs() < limit2 || unit == "PB" {
             // PostgreSQL's `half_rounded`: the extra bit is halved away with
             // ties rounded AWAY from zero, so -20 half-units is -10, not -9.
@@ -700,6 +753,155 @@ fn size_pretty(size: &Datum) -> Result<Datum, ExecError> {
         }
     }
     Ok(Datum::Text(format!("{value} bytes")))
+}
+
+fn size_pretty_numeric(value: &crabka_pgtypes::numeric::NumericValue) -> Result<Datum, ExecError> {
+    use crabka_pgtypes::numeric;
+
+    let mut value = value.clone();
+    let zero = numeric::from_i64(0);
+    let one = numeric::from_i64(1);
+    let two = numeric::from_i64(2);
+    let units = [
+        ("bytes", 10 * 1024_i64, false, 512_i64),
+        ("kB", 20 * 1024 - 1, true, 1024),
+        ("MB", 20 * 1024 - 1, true, 1024),
+        ("GB", 20 * 1024 - 1, true, 1024),
+        ("TB", 20 * 1024 - 1, true, 1024),
+        ("PB", 20 * 1024 - 1, true, 1),
+    ];
+    for (index, (unit, limit, round, divisor)) in units.into_iter().enumerate() {
+        if index + 1 == units.len() || numeric::abs(&value) < numeric::from_i64(limit) {
+            if round {
+                value = if value >= zero {
+                    numeric::add(&value, &one)
+                } else {
+                    numeric::sub(&value, &one)
+                };
+                value = numeric::div_trunc(&value, &two)?;
+            }
+            return Ok(Datum::Text(format!(
+                "{} {unit}",
+                numeric::to_text(&value)
+            )));
+        }
+        value = numeric::div_trunc(&value, &numeric::from_i64(divisor))?;
+    }
+    unreachable!("the final size unit always returns")
+}
+
+/// `pg_size_bytes(text)`: scan the same decimal grammar as PostgreSQL, apply
+/// its case-insensitive binary unit, then use the numeric layer's half-away-
+/// from-zero bigint conversion.
+fn size_bytes(size: &Datum) -> Result<Datum, ExecError> {
+    let input = match size {
+        Datum::Null => return Ok(Datum::Null),
+        Datum::Text(input) => input,
+        other => {
+            let ty = other.column_type().map_or("unknown", ColumnType::name);
+            return Err(ExecError::UndefinedFunction(format!(
+                "function pg_size_bytes({ty}) does not exist"
+            )));
+        }
+    };
+    let bytes = input.as_bytes();
+    let mut number_start = 0;
+    while bytes.get(number_start).is_some_and(u8::is_ascii_whitespace) {
+        number_start += 1;
+    }
+
+    let mut number_end = number_start;
+    if matches!(bytes.get(number_end), Some(b'+' | b'-')) {
+        number_end += 1;
+    }
+    let mut have_digits = false;
+    while bytes.get(number_end).is_some_and(u8::is_ascii_digit) {
+        have_digits = true;
+        number_end += 1;
+    }
+    if bytes.get(number_end) == Some(&b'.') {
+        number_end += 1;
+        while bytes.get(number_end).is_some_and(u8::is_ascii_digit) {
+            have_digits = true;
+            number_end += 1;
+        }
+    }
+    if !have_digits {
+        return Err(invalid_size(input));
+    }
+
+    // PostgreSQL treats `E` as the start of an exponent only when at least one
+    // exponent digit follows; otherwise it remains part of the unit text.
+    if matches!(bytes.get(number_end), Some(b'e' | b'E')) {
+        let mut exponent_end = number_end + 1;
+        if matches!(bytes.get(exponent_end), Some(b'+' | b'-')) {
+            exponent_end += 1;
+        }
+        let exponent_start = exponent_end;
+        while bytes.get(exponent_end).is_some_and(u8::is_ascii_digit) {
+            exponent_end += 1;
+        }
+        if exponent_end > exponent_start {
+            number_end = exponent_end;
+        }
+    }
+
+    let number = &input[number_start..number_end];
+    let Some(mut value) = crabka_pgtypes::numeric::parse(number) else {
+        return Err(ExecError::Type(crabka_pgtypes::TypeError::OutOfRange {
+            message: "value overflows numeric format".into(),
+        }));
+    };
+
+    let mut unit_start = number_end;
+    while bytes.get(unit_start).is_some_and(u8::is_ascii_whitespace) {
+        unit_start += 1;
+    }
+    let mut unit_end = bytes.len();
+    while unit_end > unit_start && bytes[unit_end - 1].is_ascii_whitespace() {
+        unit_end -= 1;
+    }
+    let unit = &input[unit_start..unit_end];
+    let unit_bits = if unit.is_empty()
+        || unit.eq_ignore_ascii_case("bytes")
+        || unit.eq_ignore_ascii_case("b")
+    {
+        0
+    } else if unit.eq_ignore_ascii_case("kb") {
+        10
+    } else if unit.eq_ignore_ascii_case("mb") {
+        20
+    } else if unit.eq_ignore_ascii_case("gb") {
+        30
+    } else if unit.eq_ignore_ascii_case("tb") {
+        40
+    } else if unit.eq_ignore_ascii_case("pb") {
+        50
+    } else {
+        return Err(invalid_size_unit(input, unit));
+    };
+    if unit_bits > 0 {
+        let multiplier = crabka_pgtypes::numeric::from_i64(1_i64 << unit_bits);
+        value = crabka_pgtypes::numeric::mul(&value, &multiplier);
+    }
+    Ok(Datum::Int8(crabka_pgtypes::numeric::to_i64(&value)?))
+}
+
+fn invalid_size(input: &str) -> ExecError {
+    ExecError::FunctionError {
+        sqlstate: "22023",
+        message: format!("invalid size: \"{input}\""),
+    }
+}
+
+fn invalid_size_unit(input: &str, unit: &str) -> ExecError {
+    ExecError::Remote(
+        crabka_pgwire::error::PgError::error("22023", format!("invalid size: \"{input}\""))
+            .with_detail(format!("Invalid size unit: \"{unit}\"."))
+            .with_hint(
+                "Valid units are \"bytes\", \"B\", \"kB\", \"MB\", \"GB\", \"TB\", and \"PB\".",
+            ),
+    )
 }
 
 /// The `has_*_privilege` family. crabka's single bootstrap role owns every
@@ -757,15 +959,148 @@ fn recognized_privilege(privilege: &str) -> bool {
         .any(|known| known.eq_ignore_ascii_case(privilege))
 }
 
-/// crabka has no physical storage accounting: every relation reports zero
-/// bytes rather than a fabricated page count. The functions still resolve their
-/// relation argument, so a missing relation is 42P01 as in PostgreSQL.
-fn relation_size(kv: &dyn Kv, scope: &ResolutionScope, object: &Datum) -> Result<Datum, ExecError> {
+/// Report the bytes physically stored for a secondary index. Other relation
+/// kinds still report zero rather than a fabricated PostgreSQL page count.
+fn relation_size_with_fork(
+    catalog_kv: &dyn Kv,
+    data_kv: &dyn Kv,
+    scope: &ResolutionScope,
+    vals: &[Datum],
+) -> Result<Datum, ExecError> {
+    let object = &vals[0];
     if matches!(object, Datum::Null) {
         return Ok(Datum::Null);
     }
-    resolve_relation_oid(kv, scope, object)?;
-    Ok(Datum::Int8(0))
+    let oid = resolve_relation_oid(catalog_kv, scope, object)?;
+    if relation_name_by_oid(catalog_kv, oid)?.is_none() {
+        return Ok(Datum::Null);
+    }
+    let fork = match vals.get(1) {
+        None => "main",
+        Some(Datum::Null) => return Ok(Datum::Null),
+        Some(Datum::Text(fork)) if fork == "main" => "main",
+        Some(Datum::Text(fork)) if matches!(fork.as_str(), "fsm" | "vm" | "init") => {
+            fork.as_str()
+        }
+        Some(Datum::Text(_)) => {
+            return Err(ExecError::Remote(
+                crabka_pgwire::error::PgError::error(
+                    "22023",
+                    "invalid fork name",
+                )
+                .with_hint("Valid fork names are \"main\", \"fsm\", \"vm\", and \"init\"."),
+            ));
+        }
+        Some(_) => {
+            return Err(ExecError::TypeMismatch(
+                "pg_relation_size fork name must be text".into(),
+            ));
+        }
+    };
+    Ok(Datum::Int8(if fork == "main" {
+        relation_size_bytes(catalog_kv, data_kv, oid)?
+    } else {
+        0
+    }))
+}
+
+fn relation_size(
+    catalog_kv: &dyn Kv,
+    data_kv: &dyn Kv,
+    scope: &ResolutionScope,
+    object: &Datum,
+) -> Result<Datum, ExecError> {
+    relation_size_with_fork(catalog_kv, data_kv, scope, std::slice::from_ref(object))
+}
+
+fn table_size(
+    catalog_kv: &dyn Kv,
+    data_kv: &dyn Kv,
+    scope: &ResolutionScope,
+    object: &Datum,
+) -> Result<Datum, ExecError> {
+    relation_size(catalog_kv, data_kv, scope, object)
+}
+
+fn indexes_size(
+    catalog_kv: &dyn Kv,
+    data_kv: &dyn Kv,
+    scope: &ResolutionScope,
+    object: &Datum,
+) -> Result<Datum, ExecError> {
+    if matches!(object, Datum::Null) {
+        return Ok(Datum::Null);
+    }
+    let oid = resolve_relation_oid(catalog_kv, scope, object)?;
+    if relation_name_by_oid(catalog_kv, oid)?.is_none() {
+        return Ok(Datum::Null);
+    }
+    Ok(Datum::Int8(indexes_size_bytes(catalog_kv, data_kv, oid)?))
+}
+
+fn total_relation_size(
+    catalog_kv: &dyn Kv,
+    data_kv: &dyn Kv,
+    scope: &ResolutionScope,
+    object: &Datum,
+) -> Result<Datum, ExecError> {
+    if matches!(object, Datum::Null) {
+        return Ok(Datum::Null);
+    }
+    let oid = resolve_relation_oid(catalog_kv, scope, object)?;
+    if relation_name_by_oid(catalog_kv, oid)?.is_none() {
+        return Ok(Datum::Null);
+    }
+    let bytes = relation_size_bytes(catalog_kv, data_kv, oid)?
+        .checked_add(indexes_size_bytes(catalog_kv, data_kv, oid)?)
+        .ok_or_else(|| ExecError::Unsupported("relation size exceeds int8".into()))?;
+    Ok(Datum::Int8(bytes))
+}
+
+fn relation_size_bytes(catalog_kv: &dyn Kv, data_kv: &dyn Kv, oid: i32) -> Result<i64, ExecError> {
+    let indexes = crabka_pgcatalog::list_indexes(catalog_kv)?;
+    let Some(index) = indexes
+        .iter()
+        .find(|index| {
+            crate::catalog_rel::index_relation_oid(index.id).is_ok_and(|index_oid| index_oid == oid)
+        })
+    else {
+        return Ok(0);
+    };
+    secondary_index_size(data_kv, index)
+}
+
+fn indexes_size_bytes(catalog_kv: &dyn Kv, data_kv: &dyn Kv, oid: i32) -> Result<i64, ExecError> {
+    let Some(table_id) = crabka_pgcatalog::list_tables(catalog_kv)?
+        .into_iter()
+        .find_map(|table| (i32::try_from(table.id).ok() == Some(oid)).then_some(table.id))
+    else {
+        return Ok(0);
+    };
+    crabka_pgcatalog::list_indexes(catalog_kv)?
+        .iter()
+        .filter(|index| index.table_id == table_id)
+        .try_fold(0_i64, |total, index| {
+            total
+                .checked_add(secondary_index_size(data_kv, index)?)
+                .ok_or_else(|| ExecError::Unsupported("relation size exceeds int8".into()))
+        })
+}
+
+fn secondary_index_size(kv: &dyn Kv, index: &crabka_pgcatalog::Index) -> Result<i64, ExecError> {
+    let prefix = crabka_pgkv::key::secondary_index_prefix(index.table_id, index.id);
+    kv.scan_prefix(&prefix)?
+        .into_iter()
+        .try_fold(0_i64, |total, (key, value)| {
+            let entry = key
+                .len()
+                .checked_add(value.len())
+                .and_then(|bytes| i64::try_from(bytes).ok())
+                .ok_or_else(|| ExecError::Unsupported("relation size exceeds int8".into()))?;
+            total
+                .checked_add(entry)
+                .ok_or_else(|| ExecError::Unsupported("relation size exceeds int8".into()))
+        })
 }
 
 /// `pg_database_size`/`pg_tablespace_size`. crabka keeps no storage accounting,
@@ -1419,14 +1754,19 @@ pub(crate) fn quote_identifier(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use assert2::assert;
-    use crabka_pgcatalog::{ForeignKey, MatchType, ReferentialAction, RelationName};
+    use crabka_pgcatalog::{
+        Column, ForeignKey, IndexPlacement, MatchType, ReferentialAction, RelationName, Table,
+    };
     use crabka_pgkv::{Kv, MemKv};
-    use crabka_pgtypes::Datum;
+    use crabka_pgparser::parser::parse_expr_for_test as pexpr;
+    use crabka_pgtypes::{ColumnType, Datum};
 
     use super::{
-        catalog_func, char_to_encoding, constraint_def, encoding_to_char,
-        foreign_key_definition, is_catalog_func, quote_identifier, size_pretty,
+        catalog_func, char_to_encoding, constraint_def, encoding_to_char, foreign_key_definition,
+        indexes_size, is_catalog_func, quote_identifier, relation_size, relation_size_with_fork,
+        size_bytes, size_pretty, table_size, total_relation_size,
     };
+    use crate::error::ExecError;
 
     // One case: how it differs from `sample_foreign_key`, and the definition
     // PostgreSQL prints for the result.
@@ -1477,6 +1817,7 @@ mod tests {
             "pg_relation_size",
             "pg_total_relation_size",
             "pg_size_pretty",
+            "pg_size_bytes",
             "obj_description",
             "col_description",
             "shobj_description",
@@ -1533,6 +1874,281 @@ mod tests {
         for (input, expected) in cases {
             let got = size_pretty(&Datum::Int8(input)).expect("size_pretty");
             assert!(got == Datum::Text(expected.into()), "{input}");
+        }
+
+        for (input, expected) in [
+            ("10.5", "10.5 bytes"),
+            ("1000000.5", "977 kB"),
+            ("-1000000000000.5", "-931 GB"),
+            ("11528652096115048447", "10239 PB"),
+            ("11528652096115048448", "10240 PB"),
+            ("-11528652096115048448", "-10240 PB"),
+            ("NaN", "NaN PB"),
+            ("Infinity", "Infinity PB"),
+            ("-Infinity", "-Infinity PB"),
+        ] {
+            let value = crabka_pgtypes::numeric::parse(input).expect("numeric size");
+            let got = size_pretty(&Datum::Numeric(value)).expect("numeric size_pretty");
+            assert!(got == Datum::Text(expected.into()), "{input}");
+        }
+    }
+
+    #[test]
+    fn size_pretty_resolves_domains_through_their_base_type() {
+        let domain = |oid, name, base| {
+            ColumnType::Domain(crabka_pgtypes::usertype::DomainRef {
+                oid,
+                name,
+                base: Box::leak(Box::new(base)),
+            })
+        };
+        for ty in [
+            domain(900_101, "size_int8_domain", ColumnType::Int8),
+            domain(900_102, "size_numeric_domain", ColumnType::Numeric(None)),
+        ] {
+            let table = Table {
+                id: 1,
+                name: RelationName::public("size_domains"),
+                columns: vec![Column::new("v", ty)],
+                sharded: false,
+                sharding: None,
+                foreign: None,
+                checks: Vec::new(),
+            };
+            let expression = pexpr("pg_size_pretty(v)").expect("parse size call");
+            assert!(
+                crate::eval::infer_type(
+                    &expression,
+                    &crate::scope::Scope::single(&table, "size_domains"),
+                )
+                .expect("domain overload")
+                    == ColumnType::Text
+            );
+        }
+
+        let int4_domain = domain(900_103, "size_int4_domain", ColumnType::Int4);
+        let table = Table {
+            id: 1,
+            name: RelationName::public("size_domains"),
+            columns: vec![Column::new("v", int4_domain)],
+            sharded: false,
+            sharding: None,
+            foreign: None,
+            checks: Vec::new(),
+        };
+        let error = crate::eval::infer_type(
+            &pexpr("pg_size_pretty(v)").expect("parse size call"),
+            &crate::scope::Scope::single(&table, "size_domains"),
+        )
+        .expect_err("int4 domain is ambiguous")
+        .into_pg();
+        assert!(error.code == "42725");
+        assert!(error.message == "function pg_size_pretty(size_int4_domain) is not unique");
+    }
+
+    #[test]
+    fn size_bytes_matches_postgres_inputs() {
+        let cases = [
+            ("1", 1_i64),
+            ("123bytes", 123),
+            ("256 B", 256),
+            ("128kB", 131_072),
+            ("1MB", 1_048_576),
+            (" 1 GB", 1_073_741_824),
+            ("1.5 gB ", 1_610_612_736),
+            ("1TB", 1_099_511_627_776),
+            ("3000 tb", 3_298_534_883_328_000),
+            ("1e6 MB", 1_048_576_000_000),
+            ("99 PB", 111_464_090_777_419_776),
+            ("-10e-1 MB", -1_048_576),
+            ("-1. kb", -1_024),
+            ("-.1kb", -102),
+        ];
+        for (input, expected) in cases {
+            let got = size_bytes(&Datum::Text(input.into())).expect("size_bytes");
+            assert!(got == Datum::Int8(expected), "{input}");
+        }
+        assert!(size_bytes(&Datum::Null).expect("NULL") == Datum::Null);
+        assert!(size_bytes(&Datum::Int4(1)).expect_err("wrong overload").into_pg().code == "42883");
+    }
+
+    #[test]
+    fn size_bytes_reports_postgres_errors() {
+        let cases = [
+            ("", "22023", "invalid size: \"\""),
+            ("kb", "22023", "invalid size: \"kb\""),
+            ("-.", "22023", "invalid size: \"-.\""),
+            ("9223372036854775807.9", "22003", "bigint out of range"),
+            ("1e100", "22003", "bigint out of range"),
+            (
+                "1e1000000000000000000",
+                "22003",
+                "value overflows numeric format",
+            ),
+        ];
+        for (input, expected_sqlstate, expected_message) in cases {
+            let error = size_bytes(&Datum::Text(input.into())).expect_err("invalid size");
+            let (sqlstate, message) = match error {
+                ExecError::FunctionError { sqlstate, message } => (sqlstate, message),
+                ExecError::Type(error) => (error.sqlstate(), error.to_string()),
+                other => panic!("unexpected error for {input}: {other:?}"),
+            };
+            assert!(sqlstate == expected_sqlstate, "{input}");
+            assert!(message == expected_message, "{input}");
+        }
+
+        let error = size_bytes(&Datum::Text("1 AB A    ".into()))
+            .expect_err("invalid size unit")
+            .into_pg();
+        assert!(error.code == "22023");
+        assert!(error.message == "invalid size: \"1 AB A    \"");
+        let diagnostics = error.diagnostics.expect("unit diagnostics");
+        assert!(diagnostics.detail.as_deref() == Some("Invalid size unit: \"AB A\"."));
+        assert!(
+            diagnostics.hint.as_deref()
+                == Some(
+                    "Valid units are \"bytes\", \"B\", \"kB\", \"MB\", \"GB\", \"TB\", and \"PB\"."
+                )
+        );
+    }
+
+    #[test]
+    fn relation_size_counts_physical_index_entries_only() {
+        let catalog = MemKv::new();
+        let data = MemKv::new();
+        let table = RelationName::public("size_probe");
+        let table_id =
+            crabka_pgcatalog::create_table(&catalog, &table, vec![Column::new("a", ColumnType::Int4)])
+                .expect("table");
+        let (ordinary_id, ops) = crabka_pgcatalog::create_index_ops(
+            &catalog,
+            "size_probe_a_idx",
+            &table,
+            vec!["a".into()],
+            false,
+            IndexPlacement::Local,
+        )
+        .expect("ordinary index");
+        catalog.write_batch(&ops).expect("write ordinary index");
+        let (expression_id, ops) = crabka_pgcatalog::create_index_ops(
+            &catalog,
+            "size_probe_expr_idx",
+            &table,
+            vec![crabka_pgcatalog::expression_index_key("(1)")],
+            false,
+            IndexPlacement::Local,
+        )
+        .expect("expression index");
+        catalog.write_batch(&ops).expect("write expression index");
+
+        let key = crabka_pgkv::key::secondary_index_entry_key(
+            table_id,
+            ordinary_id,
+            &[Datum::Int4(7)],
+            1,
+        );
+        let value = vec![1, 2, 3];
+        let expected = key
+            .len()
+            .checked_add(value.len())
+            .and_then(|bytes| i64::try_from(bytes).ok())
+            .expect("entry size");
+        data.write_batch(&[crabka_pgkv::WriteOp::Put { key, value }])
+            .expect("write index entry");
+
+        let scope = crate::relname::ResolutionScope::default();
+        let ordinary_oid = crate::catalog_rel::index_relation_oid(ordinary_id).expect("index oid");
+        let expression_oid =
+            crate::catalog_rel::index_relation_oid(expression_id).expect("expression index oid");
+        let table_oid = i32::try_from(table_id).expect("table oid");
+        assert!(
+            relation_size(&catalog, &data, &scope, &Datum::Int4(ordinary_oid))
+                .expect("ordinary size")
+                == Datum::Int8(expected)
+        );
+        assert!(
+            relation_size(&catalog, &data, &scope, &Datum::Int4(expression_oid))
+                .expect("expression size")
+                == Datum::Int8(0)
+        );
+        assert!(
+            relation_size(
+                &catalog,
+                &data,
+                &scope,
+                &Datum::Int4(table_oid),
+            )
+            .expect("table size")
+                == Datum::Int8(0)
+        );
+        assert!(
+            table_size(&catalog, &data, &scope, &Datum::Int4(ordinary_oid))
+                .expect("index table size")
+                == Datum::Int8(expected)
+        );
+        assert!(
+            indexes_size(&catalog, &data, &scope, &Datum::Int4(table_oid))
+                .expect("indexes size")
+                == Datum::Int8(expected)
+        );
+        assert!(
+            indexes_size(&catalog, &data, &scope, &Datum::Int4(ordinary_oid))
+                .expect("index indexes size")
+                == Datum::Int8(0)
+        );
+        assert!(
+            total_relation_size(&catalog, &data, &scope, &Datum::Int4(table_oid))
+                .expect("table total size")
+                == Datum::Int8(expected)
+        );
+        assert!(
+            total_relation_size(&catalog, &data, &scope, &Datum::Int4(ordinary_oid))
+                .expect("index total size")
+                == Datum::Int8(expected)
+        );
+        assert!(
+            relation_size_with_fork(
+                &catalog,
+                &data,
+                &scope,
+                &[Datum::Int4(ordinary_oid), Datum::Text("fsm".into())],
+            )
+            .expect("index fsm size")
+                == Datum::Int8(0)
+        );
+        assert!(
+            relation_size_with_fork(
+                &catalog,
+                &data,
+                &scope,
+                &[Datum::Int4(ordinary_oid), Datum::Null],
+            )
+            .expect("null fork")
+                == Datum::Null
+        );
+        let invalid_fork = relation_size_with_fork(
+            &catalog,
+            &data,
+            &scope,
+            &[Datum::Int4(ordinary_oid), Datum::Text("toast".into())],
+        )
+        .expect_err("invalid fork")
+        .into_pg();
+        assert!(invalid_fork.code == "22023");
+        assert!(invalid_fork.message == "invalid fork name");
+        assert!(
+            invalid_fork
+                .diagnostics
+                .and_then(|diagnostics| diagnostics.hint)
+                .as_deref()
+                == Some("Valid fork names are \"main\", \"fsm\", \"vm\", and \"init\".")
+        );
+        for size in [
+            relation_size(&catalog, &data, &scope, &Datum::Int4(i32::MAX)),
+            indexes_size(&catalog, &data, &scope, &Datum::Int4(i32::MAX)),
+            total_relation_size(&catalog, &data, &scope, &Datum::Int4(i32::MAX)),
+        ] {
+            assert!(size.expect("missing oid") == Datum::Null);
         }
     }
 

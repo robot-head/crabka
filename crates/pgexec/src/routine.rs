@@ -31,7 +31,6 @@ use crabka_pgparser::ast::{
 };
 use crabka_pgtypes::{ColumnType, Datum};
 use crabka_pgwire::engine::QueryResult;
-
 use crate::{error::ExecError, eval::ArgType};
 
 pub(crate) struct ScalarFunctionRequest {
@@ -311,6 +310,127 @@ pub(crate) fn undefined_routine(message: impl Into<String>) -> ExecError {
     ExecError::UndefinedFunction(message.into())
 }
 
+const STATIC_REGRESS_ENTRYPOINTS: &[&str] = &[
+    "binary_coercible",
+    "get_environ",
+    "int44in",
+    "int44out",
+    "interpt_pp",
+    "is_catalog_text_unique_index_oid",
+    "make_tuple_indirect",
+    "overpaid",
+    "pt_in_widget",
+    "regress_setenv",
+    "reverse_name",
+    "test_atomic_ops",
+    "test_bytea_to_text",
+    "test_canonicalize_path",
+    "test_enc_conversion",
+    "test_enc_setup",
+    "test_fdw_handler",
+    "test_mblen_func",
+    "test_opclass_options_func",
+    "test_pglz_compress",
+    "test_pglz_decompress",
+    "test_relpath",
+    "test_support_func",
+    "test_text_to_bytea",
+    "test_text_to_wchars",
+    "test_valid_server_encoding",
+    "test_wchars_to_text",
+    "trigger_return_old",
+    "wait_pid",
+    "widget_in",
+    "widget_out",
+];
+const MAX_PGLZ_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
+
+fn is_static_regress_object(object_file: &str) -> bool {
+    object_file == "regress"
+        || std::env::var_os("CRABKA_PG_REGRESS_LIBRARY")
+            .is_some_and(|configured| configured == std::ffi::OsStr::new(object_file))
+}
+
+fn static_regress_symbol(symbol: &str) -> bool {
+    symbol == "Pg_magic_func"
+        || STATIC_REGRESS_ENTRYPOINTS.contains(&symbol)
+        || symbol
+            .strip_prefix("pg_finfo_")
+            .is_some_and(|entrypoint| STATIC_REGRESS_ENTRYPOINTS.contains(&entrypoint))
+}
+
+fn inaccessible_c_object(object_file: &str) -> ExecError {
+    ExecError::FunctionError {
+        sqlstate: "58P01",
+        message: format!(
+            "could not access file \"{object_file}\": No such file or directory"
+        ),
+    }
+}
+
+fn unsupported_c_object(object_file: &str) -> ExecError {
+    ExecError::Unsupported(format!(
+        "loading C object file \"{object_file}\" is supported only for PostgreSQL modules"
+    ))
+}
+
+fn unavailable_c_object(object_file: &str) -> ExecError {
+    let path = std::path::Path::new(object_file);
+    let library_name = path.extension().is_some_and(|extension| {
+        extension == "so" || extension == "dylib" || extension == "dll"
+    });
+    if !path.is_absolute() || library_name {
+        inaccessible_c_object(object_file)
+    } else {
+        unsupported_c_object(object_file)
+    }
+}
+
+/// Resolve a `LOAD` target to one of the modules compiled into Gres.
+///
+/// The pinned regression module and PL/pgSQL runtime are static compatibility
+/// modules. Unknown relative names behave like missing dynamic libraries.
+/// Absolute paths are rejected without reading server-side files.
+pub(crate) fn validate_load_target(object_file: &str) -> Result<(), ExecError> {
+    if is_static_regress_object(object_file) || object_file == "plpgsql" {
+        Ok(())
+    } else {
+        Err(unavailable_c_object(object_file))
+    }
+}
+
+fn validate_c_routine(routine: &Routine) -> Result<(), ExecError> {
+    let object_file = routine
+        .object_file
+        .as_deref()
+        .ok_or_else(|| invalid_definition("C language function must specify an object file"))?;
+    if !is_static_regress_object(object_file) {
+        return Err(unavailable_c_object(object_file));
+    }
+    if !static_regress_symbol(&routine.body) {
+        return Err(undefined_routine(format!(
+            "could not find function \"{}\" in file \"{object_file}\"",
+            routine.body
+        )));
+    }
+    Ok(())
+}
+
+fn validate_internal_routine(routine: &Routine) -> Result<(), ExecError> {
+    let found = builtin_pg_proc_rows()?.iter().any(|row| {
+        row[4] == Datum::Int4(12)
+            && matches!(&row[25], Datum::Text(source) if source == &routine.body)
+    });
+    if found {
+        Ok(())
+    } else {
+        Err(undefined_routine(format!(
+            "there is no built-in function named \"{}\"",
+            routine.body
+        )))
+    }
+}
+
 /// 42725 — a routine name that more than one routine carries.
 fn ambiguous_routine(name: &str) -> ExecError {
     ExecError::FunctionError {
@@ -432,12 +552,32 @@ impl Options {
     }
 }
 
-/// The body text and form a routine record stores.
-fn body_text(body: &RoutineBody) -> (String, BodyForm) {
+/// The source, external object, and form a routine record stores.
+fn body_parts(
+    body: &RoutineBody,
+    language: &str,
+    routine_name: &str,
+) -> Result<(String, Option<String>, BodyForm), ExecError> {
     match body {
-        RoutineBody::Source(text) => (text.clone(), BodyForm::Source),
-        RoutineBody::Atomic { text, .. } => (text.clone(), BodyForm::Atomic),
-        RoutineBody::Return { text, .. } => (text.clone(), BodyForm::Return),
+        RoutineBody::Source(object_file) if language == "c" => Ok((
+            routine_name.to_string(),
+            Some(object_file.clone()),
+            BodyForm::Source,
+        )),
+        RoutineBody::External {
+            object_file,
+            link_symbol,
+        } if language == "c" => Ok((
+            link_symbol.clone(),
+            Some(object_file.clone()),
+            BodyForm::Source,
+        )),
+        RoutineBody::External { .. } => Err(invalid_definition(format!(
+            "only one AS item needed for language \"{language}\""
+        ))),
+        RoutineBody::Source(text) => Ok((text.clone(), None, BodyForm::Source)),
+        RoutineBody::Atomic { text, .. } => Ok((text.clone(), None, BodyForm::Atomic)),
+        RoutineBody::Return { text, .. } => Ok((text.clone(), None, BodyForm::Return)),
     }
 }
 
@@ -497,7 +637,7 @@ fn build_routine(kv: &dyn Kv, stmt: &CreateRoutineStmt, owner: &str) -> Result<R
     if kind == RoutineKind::Procedure && !matches!(result, RoutineResult::Unspecified) {
         return Err(invalid_definition("procedures cannot have a return value"));
     }
-    let (body, body_form) = body_text(&body);
+    let (body, object_file, body_form) = body_parts(&body, &language, &stmt.name)?;
     let volatility = options.volatility.unwrap_or('v');
     Ok(Routine {
         oid: 0,
@@ -507,6 +647,7 @@ fn build_routine(kv: &dyn Kv, stmt: &CreateRoutineStmt, owner: &str) -> Result<R
         result,
         language,
         body,
+        object_file,
         body_form,
         volatility,
         parallel: options.parallel.unwrap_or('u'),
@@ -606,6 +747,11 @@ pub(crate) fn create(
             return Err(duplicate_routine(&routine.name));
         }
         check_replaceable(&existing, &routine)?;
+    }
+    match routine.language.as_str() {
+        "c" => validate_c_routine(&routine)?,
+        "internal" => validate_internal_routine(&routine)?,
+        _ => {}
     }
     // A SQL body is checked at definition time, exactly as `PostgreSQL` does
     // with the default `check_function_bodies`.
@@ -1374,12 +1520,20 @@ fn known_builtin(name: &str) -> bool {
         || crate::window::is_window_only_function(name)
 }
 
+fn is_regression_c_entrypoint(routine: &Routine, symbol: &str) -> bool {
+    routine.language == "c"
+        && routine
+            .object_file
+            .as_deref()
+            .map(std::path::Path::new)
+            .and_then(std::path::Path::file_stem)
+            .is_some_and(|stem| stem == "regress")
+        && routine.body == symbol
+}
+
 fn is_regression_binary_coercible(routine: &Routine) -> bool {
     routine.name.eq_ignore_ascii_case("binary_coercible")
-        && routine.language == "c"
-        && std::path::Path::new(&routine.body)
-            .file_stem()
-            .is_some_and(|stem| stem == "regress")
+        && is_regression_c_entrypoint(routine, "binary_coercible")
         && routine
             .input_params()
             .map(|param| type_oid(&param.ty))
@@ -1389,6 +1543,96 @@ fn is_regression_binary_coercible(routine: &Routine) -> bool {
             RoutineResult::Type { ty, setof: false }
                 if type_oid(ty) == 16
         )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegressionCAdapter {
+    PglzCompress,
+    PglzDecompress,
+}
+
+fn has_exact_regression_c_signature(routine: &Routine, name: &str, params: &[ColumnType]) -> bool {
+    routine.kind == RoutineKind::Function
+        && routine.name.eq_ignore_ascii_case(name)
+        && is_regression_c_entrypoint(routine, name)
+        && routine.strict
+        && routine.params.len() == params.len()
+        && routine.params.iter().zip(params).all(|(param, ty)| {
+            param.mode == ParamMode::In && param.default.is_none() && param.ty.column == Some(*ty)
+        })
+        && matches!(
+            &routine.result,
+            RoutineResult::Type { ty, setof: false }
+                if ty.column == Some(ColumnType::Bytea)
+        )
+}
+
+fn regression_c_adapter(routine: &Routine) -> Option<RegressionCAdapter> {
+    if has_exact_regression_c_signature(routine, "test_pglz_compress", &[ColumnType::Bytea]) {
+        Some(RegressionCAdapter::PglzCompress)
+    } else if has_exact_regression_c_signature(
+        routine,
+        "test_pglz_decompress",
+        &[ColumnType::Bytea, ColumnType::Int4, ColumnType::Bool],
+    ) {
+        Some(RegressionCAdapter::PglzDecompress)
+    } else {
+        None
+    }
+}
+
+fn pglz_internal_error(message: &'static str) -> ExecError {
+    ExecError::FunctionError {
+        sqlstate: "XX000",
+        message: message.into(),
+    }
+}
+
+fn pglz_output_limit_error() -> ExecError {
+    ExecError::FunctionError {
+        sqlstate: "54000",
+        message: format!(
+            "requested PGLZ output exceeds the {} MiB safety limit",
+            MAX_PGLZ_OUTPUT_BYTES / (1024 * 1024)
+        ),
+    }
+}
+
+fn eval_regression_c_adapter(
+    adapter: RegressionCAdapter,
+    values: &[Datum],
+) -> Result<Datum, ExecError> {
+    match (adapter, values) {
+        (RegressionCAdapter::PglzCompress, [Datum::Bytea(source)]) => {
+            Ok(pglz::compress(source, &pglz::Strategy::ALWAYS).map_or(Datum::Null, Datum::Bytea))
+        }
+        (
+            RegressionCAdapter::PglzDecompress,
+            [
+                Datum::Bytea(source),
+                Datum::Int4(rawsize),
+                Datum::Bool(check_complete),
+            ],
+        ) => {
+            let rawsize = usize::try_from(*rawsize)
+                .map_err(|_| pglz_internal_error("rawsize must not be negative"))?;
+            if rawsize > MAX_PGLZ_OUTPUT_BYTES {
+                return Err(pglz_output_limit_error());
+            }
+            let mut output = Vec::new();
+            output
+                .try_reserve_exact(rawsize)
+                .map_err(|_| pglz_output_limit_error())?;
+            output.resize(rawsize, 0);
+            let written = pglz::decompress_into(source, &mut output, *check_complete)
+                .ok_or_else(|| pglz_internal_error("pglz_decompress failed"))?;
+            output.truncate(written);
+            Ok(Datum::Bytea(output))
+        }
+        _ => Err(ExecError::TypeMismatch(
+            "regression C adapter received values outside its pinned signature".into(),
+        )),
+    }
 }
 
 fn falls_back_to_regression_binary_coercible(
@@ -1445,10 +1689,15 @@ pub(crate) fn inline_scalar(kv: &dyn Kv, call: &FuncCall) -> Result<Option<Expr>
         return Ok(None);
     }
     let given = best_effort_arg_types(args);
-    // PL/pgSQL is executed by the scalar runtime rather than inlined. Keeping
-    // the call node intact is what lets its arguments vary with each input row.
+    // PL/pgSQL and the pinned regression-C adapters are executed by the scalar
+    // runtime rather than inlined. Keeping the call node intact is what lets
+    // their arguments vary with each input row.
     match resolve_call(kv, &call.name, &given) {
-        Ok(Some(routine)) if routine.language == "plpgsql" => return Ok(None),
+        Ok(Some(routine))
+            if routine.language == "plpgsql" || regression_c_adapter(&routine).is_some() =>
+        {
+            return Ok(None);
+        }
         Err(_)
             if routines_named(kv, &call.name)?
                 .iter()
@@ -1479,12 +1728,18 @@ pub(crate) fn plpgsql_declared_call_type(
     }
     let given = best_effort_arg_types(args);
     let routine = match resolve_call(kv, &call.name, &given) {
-        Ok(Some(routine)) if routine.language == "plpgsql" => routine,
+        Ok(Some(routine))
+            if routine.language == "plpgsql" || regression_c_adapter(&routine).is_some() =>
+        {
+            routine
+        }
         Ok(_) => return Ok(None),
         Err(_) if known_builtin(&call.name) => return Ok(None),
         Err(error) => return Err(error),
     };
-    validate_plpgsql_scalar(&routine)?;
+    if routine.language == "plpgsql" {
+        validate_plpgsql_scalar(&routine)?;
+    }
     resolved_scalar_result_type(&routine, &given)
         .ok_or_else(|| {
             ExecError::Unsupported(format!(
@@ -1528,13 +1783,16 @@ pub(crate) fn plpgsql_scalar_result_type(
                     call.name
                 )));
             };
-            if routine.language != "plpgsql" {
+            let adapter = regression_c_adapter(&routine);
+            if routine.language != "plpgsql" && adapter.is_none() {
                 return Err(undefined_routine(format!(
                     "function {} does not exist",
                     call.name
                 )));
             }
-            validate_plpgsql_scalar(&routine)?;
+            if routine.language == "plpgsql" {
+                validate_plpgsql_scalar(&routine)?;
+            }
             resolved_scalar_result_type(&routine, &given).ok_or_else(|| {
                 ExecError::Unsupported(format!(
                     "function {} has no scalar result type",
@@ -1558,8 +1816,11 @@ pub(crate) fn is_plpgsql_scalar_runtime(call: &FuncCall, scope: &crate::scope::S
         let Ok(given) = crate::eval::static_arg_types(args, scope) else {
             return false;
         };
-        resolve_call(runtime.catalog.as_ref(), &call.name, &given)
-            .is_ok_and(|routine| routine.is_some_and(|routine| routine.language == "plpgsql"))
+        resolve_call(runtime.catalog.as_ref(), &call.name, &given).is_ok_and(|routine| {
+            routine.is_some_and(|routine| {
+                routine.language == "plpgsql" || regression_c_adapter(&routine).is_some()
+            })
+        })
     })
 }
 
@@ -1624,13 +1885,16 @@ pub(crate) fn eval_plpgsql_scalar_with(
                     call.name
                 )));
             };
-            if routine.language != "plpgsql" {
+            let adapter = regression_c_adapter(&routine);
+            if routine.language != "plpgsql" && adapter.is_none() {
                 return Err(undefined_routine(format!(
                     "function {} does not exist",
                     call.name
                 )));
             }
-            validate_plpgsql_scalar(&routine)?;
+            if routine.language == "plpgsql" {
+                validate_plpgsql_scalar(&routine)?;
+            }
             for default in &bound_args[values.len()..] {
                 values.push(eval_arg(default)?);
             }
@@ -1641,6 +1905,9 @@ pub(crate) fn eval_plpgsql_scalar_with(
             crate::eval::coerce_unknown_args(&bound_args, &mut values, &params, ctx)?;
             if routine.strict && values.iter().any(Datum::is_null) {
                 return Ok(Datum::Null);
+            }
+            if let Some(adapter) = adapter {
+                return eval_regression_c_adapter(adapter, &values);
             }
             let _guard = enter_plpgsql_call()?;
             let value = if crate::plpgsql::scalar_function_requires_session(
@@ -2857,24 +3124,37 @@ pub(crate) fn render_functiondef(routine: &Routine) -> String {
     for entry in &routine.config {
         let _ = writeln!(out, " SET {entry}");
     }
-    match routine.body_form {
-        BodyForm::Source => {
-            // PostgreSQL tags the quote with the routine's kind.
-            let tag = if routine.kind == RoutineKind::Procedure {
-                "procedure"
-            } else {
-                "function"
-            };
-            let _ = writeln!(out, "AS ${tag}${}${tag}$", routine.body);
-        }
-        BodyForm::Atomic => {
-            let _ = writeln!(out, "BEGIN ATOMIC\n {};\nEND", routine.body);
-        }
-        BodyForm::Return => {
-            let _ = writeln!(out, "RETURN {}", routine.body);
+    if let Some(object_file) = &routine.object_file {
+        let _ = writeln!(
+            out,
+            "AS {}, {}",
+            routine_literal(object_file),
+            routine_literal(&routine.body)
+        );
+    } else {
+        match routine.body_form {
+            BodyForm::Source => {
+                // PostgreSQL tags the quote with the routine's kind.
+                let tag = if routine.kind == RoutineKind::Procedure {
+                    "procedure"
+                } else {
+                    "function"
+                };
+                let _ = writeln!(out, "AS ${tag}${}${tag}$", routine.body);
+            }
+            BodyForm::Atomic => {
+                let _ = writeln!(out, "BEGIN ATOMIC\n {};\nEND", routine.body);
+            }
+            BodyForm::Return => {
+                let _ = writeln!(out, "RETURN {}", routine.body);
+            }
         }
     }
     out
+}
+
+fn routine_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 /// A `COST`/`ROWS` value the way `PostgreSQL` prints it: whole numbers with no
@@ -3016,11 +3296,7 @@ pub(crate) fn pg_proc_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 BodyForm::Source => Datum::Text(routine.body.clone()),
                 BodyForm::Atomic | BodyForm::Return => Datum::Text(String::new()),
             },
-            if routine.language == "c" {
-                Datum::Text(routine.body.clone())
-            } else {
-                Datum::Null
-            },
+            routine.object_file.clone().map_or(Datum::Null, Datum::Text),
             match routine.body_form {
                 BodyForm::Source => Datum::Null,
                 BodyForm::Atomic | BodyForm::Return => Datum::Text(routine.body.clone()),
@@ -3657,6 +3933,109 @@ mod tests {
     }
 
     #[test]
+    fn external_definition_errors_leave_no_catalog_residue() {
+        let kv = MemKv::default();
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let missing = directory.path().join("missing.so");
+        let cases = [
+            (
+                format!(
+                    "CREATE FUNCTION test1(int) RETURNS int AS '{}' LANGUAGE C",
+                    missing.display()
+                ),
+                "58P01",
+                format!(
+                    "could not access file \"{}\": No such file or directory",
+                    missing.display()
+                ),
+            ),
+            (
+                "CREATE FUNCTION test1(int) RETURNS int AS 'regress', 'nosuchsymbol' LANGUAGE C"
+                    .to_string(),
+                "42883",
+                "could not find function \"nosuchsymbol\" in file \"regress\"".to_string(),
+            ),
+            (
+                "CREATE FUNCTION test1(int) RETURNS int AS 'nosuch' LANGUAGE internal".to_string(),
+                "42883",
+                "there is no built-in function named \"nosuch\"".to_string(),
+            ),
+        ];
+
+        for (sql, state, message) in cases {
+            let error = define(&kv, &sql).expect_err(&sql);
+            let error = error.into_pg();
+            assert!(error.code == state, "{sql}");
+            assert!(error.message == message, "{sql}");
+            assert!(
+                list_routines(&kv)
+                    .expect("catalog remains readable")
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn external_sources_project_link_symbol_and_object_file_separately() {
+        let kv = MemKv::default();
+        define(
+            &kv,
+            "CREATE FUNCTION public.binary_coercible(oid, oid) RETURNS bool \
+             AS 'regress' LANGUAGE C",
+        )
+        .expect("one-string C definition");
+        define(
+            &kv,
+            "CREATE FUNCTION c_alias(oid, oid) RETURNS bool \
+             AS 'regress', 'pg_finfo_binary_coercible' LANGUAGE C",
+        )
+        .expect("two-string C definition");
+        define(
+            &kv,
+            "CREATE FUNCTION nth_value(anyelement, int4) RETURNS anyelement \
+             AS 'window_nth_value' LANGUAGE internal",
+        )
+        .expect("pinned internal definition");
+
+        let routines = list_routines(&kv).expect("catalog");
+        let binary = routines
+            .iter()
+            .find(|routine| routine.name == "binary_coercible")
+            .expect("binary_coercible");
+        assert!(binary.name == "binary_coercible");
+        assert!(binary.body == "binary_coercible");
+        assert!(binary.object_file == Some("regress".into()));
+
+        let alias = routines
+            .iter()
+            .find(|routine| routine.name == "c_alias")
+            .expect("alias");
+        assert!(alias.body == "pg_finfo_binary_coercible");
+        assert!(alias.object_file == Some("regress".into()));
+        assert!(render_functiondef(alias).contains("AS 'regress', 'pg_finfo_binary_coercible'"));
+
+        let internal = routines
+            .iter()
+            .find(|routine| routine.name == "nth_value")
+            .expect("internal");
+        assert!(internal.body == "window_nth_value");
+        assert!(internal.object_file.is_none());
+
+        let rows = pg_proc_rows(&kv).expect("pg_proc");
+        for (name, source, binary) in [
+            ("binary_coercible", "binary_coercible", "regress"),
+            ("c_alias", "pg_finfo_binary_coercible", "regress"),
+        ] {
+            let row = rows
+                .iter()
+                .find(|row| row[1] == Datum::Text(name.into()))
+                .expect("projected C routine");
+            assert!(row[25] == Datum::Text(source.into()));
+            assert!(row[26] == Datum::Text(binary.into()));
+        }
+    }
+
+    #[test]
     fn or_replace_keeps_the_oid_and_swaps_the_body() {
         let kv = seeded();
         let before = get_routine(&kv, "add2(integer,integer)")
@@ -4108,7 +4487,8 @@ mod tests {
         let kv = Arc::new(MemKv::default());
         define(
             &kv,
-            "CREATE FUNCTION md5(text) RETURNS text AS 'custom' LANGUAGE C",
+            "CREATE FUNCTION md5(text) RETURNS text \
+             AS 'regress', 'binary_coercible' LANGUAGE C",
         )
         .expect("C helper definition");
         let catalog: Arc<dyn Kv> = kv;
@@ -4122,6 +4502,227 @@ mod tests {
         with_scalar_runtime(&catalog, None, || {
             assert!(crate::eval::infer_type(&call, &crate::scope::Scope::empty()).is_err());
         });
+    }
+
+    #[test]
+    fn pglz_regression_c_adapters_are_exactly_metadata_gated() {
+        let compress = defined(
+            &MemKv::default(),
+            "CREATE FUNCTION test_pglz_compress(bytea) RETURNS bytea \
+             AS 'regress' LANGUAGE C STRICT",
+        );
+        assert!(regression_c_adapter(&compress) == Some(RegressionCAdapter::PglzCompress));
+
+        for sql in [
+            "CREATE FUNCTION test_pglz_compress(bytea) RETURNS bytea AS 'regress' LANGUAGE C",
+            "CREATE FUNCTION test_pglz_compress(text) RETURNS bytea AS 'regress' LANGUAGE C STRICT",
+            "CREATE FUNCTION test_pglz_compress(bytea) RETURNS text AS 'regress' LANGUAGE C STRICT",
+            "CREATE FUNCTION pglz_alias(bytea) RETURNS bytea \
+             AS 'regress', 'test_pglz_compress' LANGUAGE C STRICT",
+        ] {
+            let routine = defined(&MemKv::default(), sql);
+            assert!(regression_c_adapter(&routine).is_none(), "{sql}");
+        }
+    }
+
+    fn pglz_regression_catalog() -> Arc<dyn Kv> {
+        let kv = Arc::new(MemKv::default());
+        define(
+            &kv,
+            "CREATE FUNCTION test_pglz_compress(bytea) RETURNS bytea \
+             AS 'regress' LANGUAGE C STRICT",
+        )
+        .expect("compression helper");
+        define(
+            &kv,
+            "CREATE FUNCTION test_pglz_decompress(bytea, int4, bool) RETURNS bytea \
+             AS 'regress' LANGUAGE C STRICT",
+        )
+        .expect("decompression helper");
+        kv
+    }
+
+    fn call_regression_c_adapter(
+        catalog: &Arc<dyn Kv>,
+        name: &str,
+        types: &[ColumnType],
+        values: Vec<Datum>,
+    ) -> Result<Datum, ExecError> {
+        let call = FuncCall {
+            name: name.into(),
+            distinct: false,
+            args: FuncArgs::Exprs(
+                types
+                    .iter()
+                    .map(|ty| Expr::Cast {
+                        expr: Box::new(Expr::NullLiteral),
+                        ty: *ty,
+                    })
+                    .collect(),
+            ),
+            filter: None,
+        };
+        assert!(inline_scalar(catalog.as_ref(), &call)?.is_none());
+        assert!(plpgsql_declared_call_type(catalog.as_ref(), &call)? == Some(ColumnType::Bytea));
+        let ctx = crate::clock::EvalCtx::test_default();
+        with_scalar_runtime(catalog, None, || {
+            assert!(is_plpgsql_scalar_runtime(
+                &call,
+                &crate::scope::Scope::empty()
+            ));
+            let mut values = values.into_iter();
+            eval_plpgsql_scalar_with(&call, &ctx, |_| {
+                values.next().ok_or_else(|| {
+                    ExecError::Unsupported("test adapter argument is missing".into())
+                })
+            })
+            .expect("the pinned C adapter owns the call")
+        })
+    }
+
+    fn assert_pglz_error(result: Result<Datum, ExecError>, state: &str, message: &str) {
+        let error = result.expect_err(message).into_pg();
+        assert!(error.code == state);
+        assert!(error.message == message);
+    }
+
+    #[test]
+    fn pglz_regression_c_adapters_match_upstream_roundtrips_and_failures() {
+        let catalog = pglz_regression_catalog();
+        let input = b"abcd".repeat(100);
+        let compressed = call_regression_c_adapter(
+            &catalog,
+            "test_pglz_compress",
+            &[ColumnType::Bytea],
+            vec![Datum::Bytea(input.clone())],
+        )
+        .expect("compresses");
+        let Datum::Bytea(compressed) = compressed else {
+            panic!("compressor returned {compressed:?}");
+        };
+
+        for check_complete in [false, true] {
+            assert!(
+                call_regression_c_adapter(
+                    &catalog,
+                    "test_pglz_decompress",
+                    &[ColumnType::Bytea, ColumnType::Int4, ColumnType::Bool],
+                    vec![
+                        Datum::Bytea(compressed.clone()),
+                        Datum::Int4(400),
+                        Datum::Bool(check_complete),
+                    ],
+                )
+                .expect("roundtrip")
+                    == Datum::Bytea(input.clone())
+            );
+        }
+
+        for rawsize in [500, 100] {
+            assert_pglz_error(
+                call_regression_c_adapter(
+                    &catalog,
+                    "test_pglz_decompress",
+                    &[ColumnType::Bytea, ColumnType::Int4, ColumnType::Bool],
+                    vec![
+                        Datum::Bytea(compressed.clone()),
+                        Datum::Int4(rawsize),
+                        Datum::Bool(true),
+                    ],
+                ),
+                "XX000",
+                "pglz_decompress failed",
+            );
+        }
+
+        assert!(
+            call_regression_c_adapter(
+                &catalog,
+                "test_pglz_decompress",
+                &[ColumnType::Bytea, ColumnType::Int4, ColumnType::Bool],
+                vec![
+                    Datum::Bytea(vec![0x01]),
+                    Datum::Int4(1024),
+                    Datum::Bool(false),
+                ],
+            )
+            .expect("permissive control-only stream")
+                == Datum::Bytea(Vec::new())
+        );
+
+        let nested = crabka_pgparser::parser::parse_expression(
+            r"length(test_pglz_decompress('\x01'::bytea, 1024, false))",
+        )
+        .expect("upstream nested expression parses");
+        let ctx = crate::clock::EvalCtx::test_default();
+        with_scalar_runtime(&catalog, None, || {
+            assert!(
+                crate::eval::infer_type(&nested, &crate::scope::Scope::empty()).expect("type")
+                    == ColumnType::Int4
+            );
+            assert!(
+                crate::eval::eval(
+                    &nested,
+                    &crate::scope::Scope::empty(),
+                    &[],
+                    &ctx,
+                )
+                .expect("nested PGLZ call")
+                    == Datum::Int4(0)
+            );
+        });
+
+        for (source, check_complete) in [
+            (vec![0x01], true),
+            (vec![0x01, 0xff], false),
+            (vec![0x01, 0xff], true),
+            (vec![0x01, 0x0f, 0x01], false),
+            (vec![0x01, 0x0f, 0x01], true),
+        ] {
+            assert_pglz_error(
+                call_regression_c_adapter(
+                    &catalog,
+                    "test_pglz_decompress",
+                    &[ColumnType::Bytea, ColumnType::Int4, ColumnType::Bool],
+                    vec![
+                        Datum::Bytea(source),
+                        Datum::Int4(1024),
+                        Datum::Bool(check_complete),
+                    ],
+                ),
+                "XX000",
+                "pglz_decompress failed",
+            );
+        }
+    }
+
+    #[test]
+    fn pglz_regression_c_decompress_rejects_negative_and_unbounded_outputs() {
+        assert_pglz_error(
+            eval_regression_c_adapter(
+                RegressionCAdapter::PglzDecompress,
+                &[
+                    Datum::Bytea(Vec::new()),
+                    Datum::Int4(-1),
+                    Datum::Bool(false),
+                ],
+            ),
+            "XX000",
+            "rawsize must not be negative",
+        );
+
+        let error = eval_regression_c_adapter(
+            RegressionCAdapter::PglzDecompress,
+            &[
+                Datum::Bytea(Vec::new()),
+                Datum::Int4(i32::try_from(MAX_PGLZ_OUTPUT_BYTES + 1).expect("test bound fits")),
+                Datum::Bool(false),
+            ],
+        )
+        .expect_err("oversized output is rejected")
+        .into_pg();
+        assert!(error.code == "54000");
+        assert!(error.message.contains("64 MiB safety limit"));
     }
 
     #[test]

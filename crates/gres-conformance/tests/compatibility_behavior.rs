@@ -208,8 +208,8 @@ async fn every_resolved_behavior_probe_reaches_the_session_contract() {
         );
         refused += 1;
     }
-    assert!(executed == 112);
-    assert!(refused == 45);
+    assert!(executed == 113);
+    assert!(refused == 44);
 }
 
 #[tokio::test]

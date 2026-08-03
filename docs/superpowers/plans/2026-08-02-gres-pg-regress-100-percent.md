@@ -2,19 +2,21 @@
 
 **Goal:** Make the unmodified PostgreSQL 18.4 core regression schedule pass against Gres, replacing the partial adopted-corpus percentage with a literal upstream `pg_regress` result.
 
-**Current state:** The authoritative serial result is `13/231` whole
+**Current state:** The authoritative serial result is `20/231` whole
 upstream test files, not the adopted corpus's `9323/14272` statement matches
 (65.3%). The checked-in monotone floor remains `6/231`; this non-monotone
 review does not ratchet it. Serial completes all 231 files with zero
-infrastructure failures, leaving 218 semantic failures and 179071 canonical
-changed lines across 4595 hunks. Exact tests are `test_setup`, `md5`,
-`comments`, `mvcc`, `euc_kr`, `infinite_recurse`, `async`,
-`collate.icu.utf8`, `psql_crosstab`, `collate.linux.utf8`,
-`collate.windows.win1252`, `portals_p2`, and `bitmapops`. Parallel passes
-`13/231`, leaving 218 semantic failures and 179251 canonical changed lines
-across 4595 hunks. Both PostgreSQL self-check modes pass, all 231 Gres files
-complete in both modes, and both infrastructure reports are empty. Certified artifact:
-`target/pg-regress-runs/20260803T124820Z-certified-gres`.
+infrastructure failures, leaving 211 semantic failures and 178550 canonical
+changed lines across 4574 hunks. Exact tests are `test_setup`, `md5`,
+`comments`, `mvcc`, `euc_kr`, `create_function_c`, `infinite_recurse`,
+`delete`, `security_label`, `async`, `dbsize`, `collate.icu.utf8`,
+`psql_crosstab`, `collate.linux.utf8`, `collate.windows.win1252`,
+`vacuum_parallel`, `portals_p2`, `bitmapops`, `numa`, and
+`compression_pglz`. Parallel passes `20/231`, leaving 211 semantic failures
+and 178708 canonical changed lines across 4575 hunks. Both PostgreSQL
+self-check modes pass, all 231 Gres files complete in both modes, and both
+infrastructure reports are empty. Certified artifact:
+`target/pg-regress-runs/20260803T161026Z-certified-current-gres`.
 
 The branch now includes PL/pgSQL, triggers, foreign keys, real schema
 namespaces, and full-text-search surfaces. Their serial owner diffs are
@@ -30,6 +32,14 @@ is implemented; grammar, canonicalization, and evaluator compatibility remain.
 `largeobject` remains 468/5, but Fastpath rejection no longer loses the
 connection. The pinned `REL_18_4` schedule fingerprint is
 `63419f82d4a5faaf711658608a3b7b6b45ccc5c2a64e1b4e5c111ed9de648118`.
+
+The current certification also makes `create_function_c`, `delete`,
+`security_label`, `dbsize`, `vacuum_parallel`, `numa`, and `compression_pglz`
+exact. `dbsize` now covers exact size parsing/formatting and physical local
+secondary-index key/value bytes; heap, TOAST, PostgreSQL page and auxiliary-fork
+storage, and database/tablespace totals remain zero, and cluster-size names/OIDs
+are not validated. The metadata-gated PGLZ decompressor deliberately caps its
+declared output at 64 MiB and returns `54000` above that bound.
 
 **Review history:** The checked task entries below retain point-in-time
 implementation and artifact evidence. Only the current-state paragraphs above
@@ -123,6 +133,13 @@ and their certified artifact describe current conformance.
 - [x] Run ALTER actions in PostgreSQL pass order, retain expression-index dependencies during column drops, and apply the shared default-operator-class checks to ALTER-added unique and primary-key constraints.
 - [x] Fully consume legacy frontend Fastpath (`F`) messages and reject them nonfatally with `0A000`, or `25P02` in a failed transaction, while preserving extended-protocol ignore-until-Sync behavior. `largeobject` remains 468 / 5, but `psql \lo_unlink` no longer terminates the connection; legacy functions are not executed.
 - [x] Re-run the upstream owners for the implemented PL/pgSQL, trigger, foreign-key, schema, and full-text-search surfaces. Serial results are `create_schema` 54/1, `triggers` 1272/88, `foreign_key` 1515/78, `tsearch` 1510/73, `tsdicts` 741/8, `tstypes` 480/23, and `plpgsql` 2047/173 changed lines/hunks.
+- [x] Match PostgreSQL's hidden-target DELETE diagnostic for the uniquely provable outer alias case, including `42P01`, alias hint, and source position. `delete` becomes exact; broader DML alias diagnostics remain pending.
+- [x] Admit non-unique local B-tree expression indexes through the existing catalog-only GiST/SP-GiST path. These indexes retain definitions and dependencies but deliberately have no physical entries or expression evaluator; unique, partial, and executable expression indexes remain pending.
+- [x] Implement exact `pg_size_bytes(text)` parsing/diagnostics and PostgreSQL's bigint/numeric `pg_size_pretty` overloads, including values above `int8` and symmetric negative rounding. Count physical local-secondary-index main-fork key/value bytes through split catalog/data engines; `pg_indexes_size` sums a table's indexes and `pg_total_relation_size` includes them. Heap, TOAST, PostgreSQL page and auxiliary-fork storage remain zero. `pg_database_size` and `pg_tablespace_size` return zero for non-NULL inputs without validating names/OIDs. `dbsize` becomes exact.
+- [x] Add the platform-independent NUMA fallback (`pg_numa_available() = false` and the exact unsupported `pg_shmem_allocations_numa` surface). `vacuum_parallel` and `numa` become exact.
+- [x] Retain SECURITY LABEL's regression TABLE/ROLE target forms and return the exact no-provider/named-provider `22023` errors before target resolution. Provider registration and label persistence remain pending; `security_label` becomes exact.
+- [x] Preserve C routine object files separately from link symbols, validate the explicitly configured static regression module and pinned internal symbols before catalog writes, and project `pg_proc.prosrc`/`probin` plus `pg_get_functiondef` correctly. Arbitrary server files are never read or executed, and general C execution remains pending; `create_function_c` becomes exact.
+- [x] Execute only the metadata-gated regression `test_pglz_compress`/`test_pglz_decompress` signatures through a bounded safe-Rust PGLZ codec and add the exact `length(bytea)` overload. The decompressor deliberately caps declared output at 64 MiB and returns `54000` above it; `compression_pglz` is exact within that safety bound, not a general C ABI.
 - [x] Encode PostgreSQL's optional one-based `P` source-position field without changing errors that do not carry a known position. Full-suite review rejected unconditional parser attachment because unsupported valid SQL would gain additional wrong output.
 - [ ] Match remaining exact wire-visible diagnostics.
 - [ ] Eliminate nondeterministic unordered results rather than weakening comparisons.
@@ -140,14 +157,23 @@ For each item, first add one focused test at the shared layer that fails before 
 
 - [ ] Reclassify the fresh artifact by semantic root and fix the largest coherent family first; do not carry forward the stale 1089 wrong-row count.
 - [ ] Fix the earliest error in each transaction-abort cascade before touching its downstream `25P02` statements.
-- [ ] Review the latest result against the monotone baseline before ratcheting: there are no new failures; 21 retain exact baseline signatures, 71 worsen, 21 retain their mismatch size with a changed fingerprint, 105 improve, and 7 failures disappear. Keep the checked-in `6/231` floor until each non-monotone change is explained.
+- [ ] Review the latest result against the monotone baseline before ratcheting: there are no new failures; 18 retain exact baseline signatures, 66 worsen, 21 retain their mismatch size with a changed fingerprint, 106 improve, and 14 failures disappear. Keep the checked-in `6/231` floor until each non-monotone change is explained.
 - [ ] Finish JSONPath grammar and canonicalization: recursive-descent bounds, escape and surrogate handling, context-sensitive `last` and `@`, numeric methods, and exact output formatting.
 - [ ] Finish JSONPath evaluator gaps, especially datetime/template behavior and remaining strict/lax path semantics.
-- [ ] Complete operator-definition DDL separately from the now-supported `OPERATOR(...)` expression wrapper.
+- [ ] Implement durable user-defined operator objects and `CREATE`/`ALTER`/`DROP OPERATOR` in Q4, separately from the supported `OPERATOR(...)` expression wrapper: implementation-routine/type linkage, unary `NONE` signatures, commutator/negator links and cleanup, `pg_operator` projection/dependencies, signature-based drop, `IF EXISTS`, and schema/type diagnostics. The bounded representatives currently refuse with `0A000`.
+- [ ] Implement correlated `EXISTS`/`NOT EXISTS` outer-column binding and execution. The `drop_operator` orphan checks currently fail while resolving their `fk` outer references.
+- [ ] Implement native `tid`/`tid[]` identity and input diagnostics, stable `ctid` system-column projection, `currtid2`, `WHERE CURRENT OF`, and TID/TID-range access semantics. The KV row identity is not a PostgreSQL heap page/offset TID, so `tid`, `tidscan`, and `tidrangescan` remain storage-semantic blockers rather than EXPLAIN-only mismatches.
 - [ ] Complete bit strings, remaining named composite/record semantics, `bytea`, `reg*` object identifiers, and exact float special-value behavior. Anonymous-record OID 2249 plumbing is only the shared foundation.
 - [ ] Implement aggregate `ORDER BY`, ordered-set aggregates, record-returning function column definitions, and recursive CTE `SEARCH`/`CYCLE`.
 - [ ] Burn down the measured residuals in the PL/pgSQL, trigger, foreign-key, schema, and full-text-search owner files.
 - [ ] Complete expression/partial indexes next, then stored views over general queries, sequence lifecycle, array-slice assignment, and partitioned-table update semantics.
+- [ ] Implement real ANALYZE target parsing and durable TableId-keyed `reltuples` statistics. Preserve PostgreSQL's nontransactional row-count updates, target preflight, inheritance/partition counting, and stale-after-DML behavior. Keep `relhassubclass` separate: it is a persisted, potentially stale hint with different rollback semantics, not a projection of the current child graph.
+- [ ] Finish source-aware `bpchar` to text coercion, input-independent scalar-HAVING scan elision, and clause-aware error positions. The measured `select_having` and `select_implicit` residuals otherwise already match.
+- [ ] Implement full `name` type identity plus executable unique/partial expression indexes and hash-index entries/options before claiming `hash_index`; catalog-only expression metadata is insufficient.
+- [ ] Implement schema element transformation/execution atomically, `CURRENT_ROLE` authorization resolution, ColId relation components, and DROP CASCADE notices before claiming `create_schema` exactness.
+- [ ] Treat `unicode.out`, not the non-UTF8 skip alternate, as the UTF8 authority; finish U& strings/identifiers, UESCAPE, normalization syntax/predicates, and Unicode catalog helpers.
+- [ ] Preserve typed COPY query/TO, CSV/file, and encoding-conversion semantics as one coherent COPY wave; `copyencoding` is not a one-error fix.
+- [ ] Implement database lifecycle/routing and `pg_database` metadata as one coherent database wave; a canned CREATE DATABASE success cannot satisfy reconnect/isolation tests.
 - [ ] Finish catalog descriptions and dependency rows required by upstream sanity and introspection queries.
 
 **Gate:** The adopted corpus reaches 100% for every already-vendored file, and the upstream serial failure list strictly shrinks in each reviewed wave.
@@ -159,7 +185,7 @@ Literal 231 / 231 is incompatible with retaining PostgreSQL-visible exclusions e
 - [ ] Multiple databases and reconnect behavior.
 - [ ] Roles, privileges, ownership, and row-level security.
 - [ ] Tablespaces, large objects, prepared transactions, publications, and subscriptions.
-- [ ] Access methods, operator classes/families, casts, collations, and encoding variants.
+- [ ] Access methods, user-defined operators, operator classes/families, casts, collations, and encoding variants.
 - [ ] C-language regression functions or a production-grade compatible execution mechanism.
 - [ ] Planner and `EXPLAIN` details asserted by upstream expected output.
 

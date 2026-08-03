@@ -55,6 +55,9 @@ allow = [
     "CDLA-Permissive-2.0",
 ]
 exceptions = [
+    # pglz is a direct, safe Rust port of PostgreSQL's PGLZ codec. Keep the
+    # permissive PostgreSQL License allowance scoped to that crate.
+    { allow = ["PostgreSQL"], crate = "pglz" },
     # portpicker is public-domain-equivalent (The Unlicense, OSI-approved and
     # FSF Free/Libre). Pulled in transitively via the vendored `sspi` crate's
     # `network_client` feature, which we need for KDC communication.
