@@ -16,13 +16,50 @@ def _write_affected_plan(ctx, plan_dir, builds, tests, cargo_connect_derive):
     ctx.std.fs.write(plan_dir + "/tests.txt", "\n".join(tests) + ("\n" if tests else ""))
     ctx.std.fs.write(plan_dir + "/cargo-connect-derive.txt", "1\n" if cargo_connect_derive else "0\n")
 
+def _bazel_diff(ctx):
+    code = _run(ctx, "bazel", ["build", "@bazel-diff//:bazel-diff", "--config=ci"])
+    if code != 0:
+        return (code, "")
+    (code, outputs) = _output(ctx, "bazel", ["cquery", "@bazel-diff//:bazel-diff", "--config=ci", "--output=files"])
+    if code != 0:
+        return (code, "")
+    executables = [path for path in outputs.split("\n") if path and not path.endswith(".jar")]
+    if len(executables) != 1:
+        print("expected one bazel-diff executable, got: %s" % outputs)
+        return (1, "")
+    return (0, executables[0])
+
+def _generate_hashes(ctx, bazel_diff, workspace, hash_file):
+    (code, temp) = _output(ctx, "mktemp", ["-d", ctx.std.env.temp_dir() + "/crabka-affected.XXXXXX"])
+    if code != 0:
+        return code
+    (code, repository_cache) = _output(ctx, "bazel", ["info", "repository_cache"])
+    if code == 0:
+        code = _run(ctx, bazel_diff, [
+            "generate-hashes",
+            "--no-keep_going",
+            "--excludeExternalTargets",
+            "--includeTargetType",
+            "--bazelStartupOptions=--ignore_all_rc_files",
+            "--bazelStartupOptions=--output_base=" + temp + "/output",
+            "--bazelCommandOptions=--repository_cache=" + repository_cache,
+            "-w",
+            workspace,
+            hash_file,
+        ])
+    cleanup = _run(ctx, "rm", ["-rf", "--", temp])
+    return code if code != 0 else cleanup
+
 def _affected(ctx: TaskContext) -> int:
     plan_dir = ctx.args.plan_dir
-    if ctx.args.mode not in ["run", "plan", "warm", "test"]:
-        print("mode must be run, plan, warm, or test")
+    if ctx.args.mode not in ["hash", "plan", "warm", "test"]:
+        print("mode must be hash, plan, warm, or test")
         return 2
-    if ctx.args.mode in ["run", "plan"] and not ctx.args.base:
-        print("--base is required in run and plan modes")
+    if ctx.args.mode == "hash" and not ctx.args.hash_file:
+        print("--hash-file is required in hash mode")
+        return 2
+    if ctx.args.mode == "plan" and (not ctx.args.starting_hashes or not ctx.args.final_hashes):
+        print("--starting-hashes and --final-hashes are required in plan mode")
         return 2
     if ctx.args.shards < 1 or ctx.args.shard < 0 or ctx.args.shard >= ctx.args.shards:
         print("shard must be between zero and shards minus one")
@@ -51,88 +88,33 @@ def _affected(ctx: TaskContext) -> int:
             "--bazel-flag=--nobuild_tests_only",
         ])
 
-    (code, temp) = _output(ctx, "mktemp", ["-d", ctx.std.env.current_dir() + "/.aspect/affected-tmp.XXXXXX"])
+    (code, bazel_diff) = _bazel_diff(ctx)
     if code != 0:
         return code
-    base_workspace = temp + "/base"
-    starting_hashes = temp + "/starting-hashes.json"
-    final_hashes = temp + "/final-hashes.json"
-    impacted_path = temp + "/impacted.txt"
+    if ctx.args.mode == "hash":
+        return _generate_hashes(ctx, bazel_diff, ctx.args.workspace, ctx.args.hash_file)
 
-    (code, repository_cache) = _output(ctx, "bazel", ["info", "repository_cache"])
+    (code, impacted_path) = _output(ctx, "mktemp", [ctx.std.env.temp_dir() + "/crabka-impacted.XXXXXX"])
     if code != 0:
         return code
-
-    code = _run(ctx, "bazel", ["build", "@bazel-diff//:bazel-diff", "--config=ci"])
-    if code != 0:
-        return code
-    (code, outputs) = _output(ctx, "bazel", ["cquery", "@bazel-diff//:bazel-diff", "--config=ci", "--output=files"])
-    if code != 0:
-        return code
-    executables = [path for path in outputs.split("\n") if path and not path.endswith(".jar")]
-    if len(executables) != 1:
-        print("expected one bazel-diff executable, got: %s" % outputs)
-        return 1
-    bazel_diff = executables[0]
-
-    code = _run(ctx, "git", ["worktree", "add", "--detach", base_workspace, ctx.args.base])
-    if code != 0:
-        return code
-
-    code = _run(ctx, "env", [
-        bazel_diff,
-    ] + [
-        "generate-hashes",
-        "--no-keep_going",
-        "--excludeExternalTargets",
-        "--includeTargetType",
-        "--bazelStartupOptions=--ignore_all_rc_files",
-        "--bazelStartupOptions=--output_base=" + temp + "/base-output",
-        "--bazelCommandOptions=--repository_cache=" + repository_cache,
+    code = _run(ctx, bazel_diff, [
+        "get-impacted-targets",
         "-w",
-        base_workspace,
-        starting_hashes,
+        ctx.std.env.current_dir(),
+        "-sh",
+        ctx.args.starting_hashes,
+        "-fh",
+        ctx.args.final_hashes,
+        "-tt",
+        "Rule",
+        "-o",
+        impacted_path,
     ])
-    if code == 0:
-        code = _run(ctx, "env", [
-            bazel_diff,
-        ] + [
-            "generate-hashes",
-            "--no-keep_going",
-            "--excludeExternalTargets",
-            "--includeTargetType",
-            "--bazelStartupOptions=--ignore_all_rc_files",
-            "--bazelStartupOptions=--output_base=" + temp + "/final-output",
-            "--bazelCommandOptions=--repository_cache=" + repository_cache,
-            "-w",
-            ctx.std.env.current_dir(),
-            final_hashes,
-        ])
-    if code == 0:
-        code = _run(ctx, bazel_diff, [
-            "get-impacted-targets",
-            "-w",
-            ctx.std.env.current_dir(),
-            "-sh",
-            starting_hashes,
-            "-fh",
-            final_hashes,
-            "-tt",
-            "Rule",
-            "-o",
-            impacted_path,
-        ])
-
-    cleanup = _run(ctx, "git", ["worktree", "remove", "--force", base_workspace])
     if code != 0:
-        _run(ctx, "rm", ["-rf", "--", temp])
+        _run(ctx, "rm", ["-f", "--", impacted_path])
         return code
-    if cleanup != 0:
-        _run(ctx, "rm", ["-rf", "--", temp])
-        return cleanup
-
     impacted = [target for target in ctx.std.fs.read_to_string(impacted_path).split("\n") if target]
-    cleanup = _run(ctx, "rm", ["-rf", "--", temp])
+    cleanup = _run(ctx, "rm", ["-f", "--", impacted_path])
     if cleanup != 0:
         return cleanup
     if not impacted:
@@ -214,13 +196,16 @@ def _affected(ctx: TaskContext) -> int:
 
 affected = task(
     implementation = _affected,
-    summary = "Build and test targets affected since a base revision.",
+    summary = "Hash, plan, build, or test affected Bazel targets.",
     args = {
-        "base": args.string(default = "", description = "Base Git revision."),
-        "mode": args.string(default = "run", description = "Run, plan, warm, or test affected targets."),
+        "final_hashes": args.string(default = "", description = "Final bazel-diff hashes."),
+        "hash_file": args.string(default = "", description = "Hash output path."),
+        "mode": args.string(default = "plan", description = "Hash, plan, warm, or test affected targets."),
         "plan_dir": args.string(default = ".aspect/affected-plan", description = "Affected plan directory."),
         "shard": args.int(default = 0, description = "Zero-based test shard."),
         "shards": args.int(default = 1, description = "Number of test shards."),
+        "starting_hashes": args.string(default = "", description = "Starting bazel-diff hashes."),
+        "workspace": args.string(default = ".", description = "Workspace to hash."),
     },
 )
 

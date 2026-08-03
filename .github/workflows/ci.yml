@@ -339,9 +339,62 @@ jobs:
               - 'scripts/gres-sharded-conformance.sh'
               - 'scripts/tests/gres_sharded_conformance_ci.py'
 
-  affected-plan:
+  affected-hash-base:
     needs: changes
     timeout-minutes: 15
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.event.before }}
+          path: .aspect/base-workspace
+      - uses: ./.github/actions/free-disk-space
+      - uses: ./.github/actions/setup-bazel
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          cache-save: false
+      - name: Hash base build graph
+        run: >-
+          aspect affected --mode hash
+          --workspace "${{ github.workspace }}/.aspect/base-workspace"
+          --hash-file .aspect/base-hashes.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: affected-hashes-base
+          path: .aspect/base-hashes.json
+          retention-days: 1
+
+  affected-hash-head:
+    needs: changes
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/free-disk-space
+      - uses: ./.github/actions/setup-bazel
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+      - name: Hash head build graph
+        run: >-
+          aspect affected --mode hash
+          --workspace "${{ github.workspace }}"
+          --hash-file .aspect/head-hashes.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: affected-hashes-head
+          path: .aspect/head-hashes.json
+          retention-days: 1
+
+  affected-plan:
+    needs: [affected-hash-base, affected-hash-head]
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     permissions:
       checks: write
@@ -351,16 +404,24 @@ jobs:
       pull-requests: write
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
-          fetch-depth: 0
-      - uses: ./.github/actions/free-disk-space
+          name: affected-hashes-base
+          path: .aspect/hashes
+      - uses: actions/download-artifact@v8
+        with:
+          name: affected-hashes-head
+          path: .aspect/hashes
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Plan affected targets
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: aspect affected --mode plan --base "${{ github.event.pull_request.base.sha || github.event.before }}"
+        run: >-
+          aspect affected --mode plan
+          --starting-hashes .aspect/hashes/base-hashes.json
+          --final-hashes .aspect/hashes/head-hashes.json
       - uses: actions/upload-artifact@v7
         with:
           name: affected-plan
@@ -1479,6 +1540,8 @@ jobs:
   gatekeeper-ci:
     needs:
       - changes
+      - affected-hash-base
+      - affected-hash-head
       - affected-plan
       - affected-build
       - affected-test
