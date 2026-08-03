@@ -72,12 +72,24 @@ def _affected(ctx: TaskContext) -> int:
         print("shard must be between zero and shards minus one")
         return 2
     if ctx.args.mode == "warm":
-        targets = _targets(ctx, plan_dir + "/builds.txt") + _targets(ctx, plan_dir + "/tests.txt")
+        targets = _targets(ctx, plan_dir + "/builds.txt")
+        tests = _targets(ctx, plan_dir + "/tests.txt")
+        if tests:
+            test_set = "set(%s)" % " ".join(tests)
+            (code, deps_output) = _output(ctx, "bazel", [
+                "query",
+                "--noimplicit_deps",
+                "kind('rule|generated file', deps(%s, 1) except %s)" % (test_set, test_set),
+            ])
+            if code != 0:
+                return code
+            targets.extend([target for target in deps_output.split("\n") if target])
         if not targets:
             return 0
         return _run(ctx, "bazel", [
             "build",
             "--config=ci",
+            "--instrument_test_targets",
             "--strip=never",
             "--nobuild_tests_only",
         ] + targets)

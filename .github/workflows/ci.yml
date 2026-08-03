@@ -461,7 +461,7 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
-      - name: Build affected targets and tests
+      - name: Build affected dependencies
         run: aspect affected --mode warm
 
   affected-test:
