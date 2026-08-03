@@ -348,20 +348,34 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v7
+      - id: base-hash-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: .aspect/base-hashes.json
+          key: affected-hashes-${{ github.event.pull_request.base.sha || github.event.before }}
       - uses: actions/checkout@v7
+        if: ${{ steps.base-hash-cache.outputs.cache-hit != 'true' }}
         with:
           ref: ${{ github.event.pull_request.base.sha || github.event.before }}
           path: .aspect/base-workspace
       - uses: ./.github/actions/free-disk-space
+        if: ${{ steps.base-hash-cache.outputs.cache-hit != 'true' }}
       - uses: ./.github/actions/setup-bazel
+        if: ${{ steps.base-hash-cache.outputs.cache-hit != 'true' }}
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
           cache-save: false
       - name: Hash base build graph
+        if: ${{ steps.base-hash-cache.outputs.cache-hit != 'true' }}
         run: >-
           aspect affected --mode hash
           --workspace "${{ github.workspace }}/.aspect/base-workspace"
           --hash-file .aspect/base-hashes.json
+      - uses: actions/cache/save@v5
+        if: ${{ steps.base-hash-cache.outputs.cache-hit != 'true' }}
+        with:
+          path: .aspect/base-hashes.json
+          key: affected-hashes-${{ github.event.pull_request.base.sha || github.event.before }}
       - uses: actions/upload-artifact@v7
         with:
           name: affected-hashes-base
@@ -391,6 +405,11 @@ jobs:
           name: affected-hashes-head
           path: .aspect/head-hashes.json
           retention-days: 1
+      - uses: actions/cache/save@v5
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        with:
+          path: .aspect/head-hashes.json
+          key: affected-hashes-${{ github.sha }}
 
   affected-plan:
     needs: [affected-hash-base, affected-hash-head]
