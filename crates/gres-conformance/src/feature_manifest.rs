@@ -454,7 +454,7 @@ pub const FEATURE_PROBES: &[FeatureProbe] = &[
     FeatureProbe {
         item: "`reg*` object-identifier types",
         sql: "SELECT 'int4'::regtype",
-        behavior: FeatureBehavior::ParserRejectPending,
+        behavior: FeatureBehavior::SessionExecute,
         setup: NONE,
         sqlstate: None,
         message_fragment: None,

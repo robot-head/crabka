@@ -44,6 +44,7 @@ if grep -F -- '--data-dir' "$tmp/fresh-gres/server-command.txt" >/dev/null; then
     exit 1
 fi
 grep -F 'TOKIO_WORKER_THREADS=1' "$tmp/fresh-gres/server-command.txt" >/dev/null
+grep -F -- '--pgexec-blocking-query-memory=20MiB' "$tmp/fresh-gres/server-command.txt" >/dev/null
 stop_gres "$tmp/fresh-gres"
 
 mkdir "$tmp/fresh-gres-parallel"
@@ -52,6 +53,7 @@ if grep -F 'TOKIO_WORKER_THREADS=' "$tmp/fresh-gres-parallel/server-command.txt"
     echo "parallel Gres unexpectedly forced a Tokio worker count" >&2
     exit 1
 fi
+grep -F -- '--pgexec-blocking-query-memory=20MiB' "$tmp/fresh-gres-parallel/server-command.txt" >/dev/null
 stop_gres "$tmp/fresh-gres-parallel"
 
 if run_pg_regress gres serial "$tmp/gres"; then

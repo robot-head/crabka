@@ -42,6 +42,22 @@ impl ForeignScanner for EmptyImporter {
 /// probe may also need its object present to reach the refusal at all.
 fn probe_setup(command: &str) -> &'static [&'static str] {
     match command {
+        "ALTER INDEX" => &[
+            "CREATE TABLE parser_commands_probe (id int4)",
+            "CREATE INDEX parser_commands_idx ON parser_commands_probe (id)",
+        ],
+        "ALTER OPERATOR CLASS" | "DROP OPERATOR CLASS" => &[
+            "CREATE OPERATOR CLASS parser_commands_ops FOR TYPE uuid USING hash AS STORAGE uuid",
+        ],
+        "ALTER OPERATOR FAMILY" | "DROP OPERATOR FAMILY" => &[
+            "CREATE OPERATOR FAMILY parser_commands_family USING hash",
+        ],
+        "ALTER TABLESPACE" | "DROP TABLESPACE" => &[
+            "CREATE TABLESPACE parser_commands_space LOCATION '/tmp/parser_commands_space'",
+        ],
+        "CREATE TABLE INHERITS" => &[
+            "CREATE TABLE parser_commands_parent (id int4)",
+        ],
         "ALTER TABLE" | "COMMENT" | "CREATE INDEX" | "CREATE TABLE AS" | "DELETE"
         | "DROP INDEX" | "DROP TABLE" | "INSERT" | "MERGE" | "SELECT INTO" | "TABLE"
         | "TRUNCATE" | "UPDATE" => &["CREATE TABLE parser_commands_probe (id int4)"],
@@ -156,7 +172,7 @@ async fn execute_probe(command: &str, sql: &str) {
 #[tokio::test]
 async fn every_resolved_behavior_probe_reaches_the_session_contract() {
     let report = parser_command_report().expect("behavior manifest parses");
-    assert!(report.probes.len() == 155);
+    assert!(report.probes.len() == 157);
     let mut executed = 0;
     let mut refused = 0;
     for probe in report.probes {
@@ -192,8 +208,8 @@ async fn every_resolved_behavior_probe_reaches_the_session_contract() {
         );
         refused += 1;
     }
-    assert!(executed == 101);
-    assert!(refused == 54);
+    assert!(executed == 112);
+    assert!(refused == 45);
 }
 
 #[tokio::test]

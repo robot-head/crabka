@@ -74,7 +74,8 @@ logs, diffs, and exit status under `target/pg-regress-runs/`; set
 `./scripts/gres-pg-regress.sh --help` for binary, port, timeout, and job-count
 overrides.
 
-The serial Gres test process uses one Tokio worker plus explicit
+The authoritative Gres test process uses a 20 MiB blocking-query memory budget.
+The serial process uses one Tokio worker plus explicit
 backend-process and initial random seeds so progressive diff fingerprints are
 reproducible. Parallel mode uses the runtime's normal worker count. These
 controls do not normalize captured output, and production defaults stay
@@ -111,8 +112,10 @@ The adopted-corpus score (`9323/14272`) remains useful diagnostic evidence, but
 it is not the compatibility headline. Compatibility is the upstream 231-test
 serial and parallel result. The checked-in baseline-eligible serial run is
 `6/231` with 225 semantic failures. The latest infrastructure-clean review run
-is `8/231` with 223 semantic failures after `portals_p2`
-passed, with 154984 changed lines across 4501 hunks. It records observed
+is `9/231` with 222 semantic failures after `test_setup` passed under that
+20 MiB policy. Serial has 169365 changed lines across 4554 hunks; parallel is
+also `9/231`, with 170119 changed lines across 4555 hunks. Certified artifact:
+`target/pg-regress-runs/20260803T064530Z-3296344-gres`. It records observed
 conformance without replacing the monotone baseline. Neither result satisfies
 the 231/231 completion gate.
 

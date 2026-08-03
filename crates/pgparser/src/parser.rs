@@ -4245,7 +4245,17 @@ impl Parser {
             _ if self.statement_has_top_level_as() => {
                 emitted(I::CreateTableAs, self.create_table_as())
             }
-            _ => emitted(I::CreateTable, self.create_table()),
+            _ => self.create_table().map(|statement| {
+                let command_identity = match &statement {
+                    crate::ast::Statement::CreateTable { inherits, .. }
+                        if !inherits.is_empty() => I::CreateTableInherits,
+                    _ => I::CreateTable,
+                };
+                ParsedStatement {
+                    statement,
+                    command_identity,
+                }
+            }),
         }
     }
 
