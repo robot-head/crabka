@@ -388,15 +388,15 @@ jobs:
         with:
           path: .aspect/affected-hashes-${{ github.sha }}.json
           key: affected-hashes-${{ hashFiles('.aspect/tasks.axl', '.bazelrc', '.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock') }}-${{ github.sha }}
-      - uses: ./.github/actions/free-disk-space
-        if: ${{ steps.base-hash-cache.outputs.cache-hit != 'true' || steps.head-hash-cache.outputs.cache-hit != 'true' }}
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
-          # Planning may restore shared caches, but only affected-build should
-          # publish the isolated dependency snapshot consumed by test shards.
-          cache-save: false
+          # Graph hashing only builds the small bazel-diff host tool. Keep its
+          # cache separate so planning neither restores the large test cache
+          # nor spends minutes reclaiming disk that it will not use.
+          cache-save: true
           cache-snapshot: false
+          disk-cache: planner
       - name: Hash base build graph
         if: ${{ steps.base-hash-cache.outputs.cache-hit != 'true' }}
         run: >-
