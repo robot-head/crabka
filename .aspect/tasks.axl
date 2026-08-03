@@ -105,7 +105,9 @@ def _affected(ctx: TaskContext) -> int:
         "//crates/traceql:",
         "//crates/traces:",
     ]
-    builds = [target for target in builds_output.split("\n") if target and not any([target.startswith(prefix) for prefix in dedicated_prefixes])]
+    builds = [target for target in builds_output.split("\n") if target and not any([
+        target.startswith(prefix) for prefix in dedicated_prefixes
+    ]) and ":bench_" not in target and not target.endswith("-heap__bin")]
     cargo_connect_derive = "//crates/connect-derive:derive" in tests_output.split("\n")
     tests = [target for target in tests_output.split("\n") if target and not any([target.startswith(prefix) for prefix in dedicated_prefixes])]
     # Coverage changes the Rust action configuration, so building a target and
