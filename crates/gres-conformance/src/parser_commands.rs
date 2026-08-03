@@ -584,7 +584,7 @@ const COMMAND_PROBES: &[CommandProbe] = &[
     },
     CommandProbe {
         command: "CREATE TABLESPACE",
-        sql: "CREATE TABLESPACE parser_commands_space LOCATION ''",
+        sql: "CREATE TABLESPACE parser_commands_space LOCATION '/tmp/parser_commands_space'",
         expected_statement: "CreateTablespace",
         refusal: None,
     },
@@ -604,6 +604,12 @@ const COMMAND_PROBES: &[CommandProbe] = &[
         command: "CREATE OPERATOR CLASS",
         sql: "CREATE OPERATOR CLASS parser_commands_ops FOR TYPE uuid USING hash AS STORAGE uuid",
         expected_statement: "CreateOperatorClass",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "CREATE TABLE INHERITS",
+        sql: "CREATE TABLE parser_commands_child (extra int4) INHERITS (parser_commands_parent)",
+        expected_statement: "CreateTable",
         refusal: None,
     },
     CommandProbe {

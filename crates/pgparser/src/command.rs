@@ -81,6 +81,7 @@ command_identities!(
     (CreateSubscription, "CREATE SUBSCRIPTION"),
     (CreateTable, "CREATE TABLE"),
     (CreateTableAs, "CREATE TABLE AS"),
+    (CreateTableInherits, "CREATE TABLE INHERITS"),
     (CreateTablespace, "CREATE TABLESPACE"),
     (
         CreateTextSearchConfiguration,
