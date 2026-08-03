@@ -8,13 +8,17 @@ inputs:
     description: Save Bazel caches when the job completes.
     required: false
     default: "true"
+  disk-cache:
+    description: Name of the shared Bazel disk-cache namespace, or false to disable it.
+    required: false
+    default: "true"
 runs:
   using: composite
   steps:
     - uses: bazel-contrib/setup-bazel@8cb04a772ab4c1eb984e9c1b493a182e96c5e425 # 0.19.0
       with:
         bazelisk-cache: true
-        disk-cache: true
+        disk-cache: ${{ inputs.disk-cache }}
         repository-cache: |
           - .bazelrc
           - .bazelversion

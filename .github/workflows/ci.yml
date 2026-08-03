@@ -413,6 +413,7 @@ jobs:
           # affected-build so this stage cannot publish an analysis-only disk
           # cache under the same key as the dependency snapshot.
           cache-save: false
+          disk-cache: affected
       - name: Hash head build graph
         if: ${{ steps.head-hash-cache.outputs.cache-hit != 'true' }}
         run: >-
@@ -451,6 +452,7 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          disk-cache: affected
       - name: Build affected dependencies
         run: aspect affected --mode warm
 
@@ -478,6 +480,7 @@ jobs:
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
           cache-save: false
+          disk-cache: affected
       - name: Test affected targets
         env:
           GITHUB_TOKEN: ${{ github.token }}
