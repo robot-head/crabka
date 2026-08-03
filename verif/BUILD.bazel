@@ -1,0 +1,27 @@
+load("//:bazel/creusot_test.bzl", "creusot_replay_test")
+
+creusot_replay_test(
+    name = "creusot_replay",
+    config = [
+        "//:.creusot-version",
+        "//:Cargo.lock",
+        "//:Cargo.toml",
+        "//:why3find.json",
+    ],
+    crates = [
+        "//crates/throttle",
+        "//crates/verified",
+    ],
+    packages = [
+        "crabka-verified",
+        "crabka-throttle",
+    ],
+    proofs = glob(["**"], exclude = ["BUILD.bazel"]),
+    size = "medium",
+    tags = [
+        "local",
+        "manual",
+        "requires-docker",
+        "requires-network",
+    ],
+)

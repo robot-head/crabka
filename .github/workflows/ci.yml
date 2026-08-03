@@ -47,7 +47,6 @@ jobs:
       rust: ${{ steps.filter.outputs.rust }}
       jvm_differential: ${{ steps.filter.outputs.jvm_differential }}
       cargo_deny: ${{ steps.filter.outputs.cargo_deny }}
-      creusot: ${{ steps.filter.outputs.creusot }}
       helm_lint: ${{ steps.filter.outputs.helm_lint }}
       client_core: ${{ steps.filter.outputs.client_core }}
       log: ${{ steps.filter.outputs.log }}
@@ -104,15 +103,6 @@ jobs:
               - 'Cargo.lock'
               - 'crates/**/Cargo.toml'
               - '.github/workflows/ci.yml'
-            creusot:
-              - 'crates/verified/**'
-              - 'crates/throttle/**'
-              - 'packaging/melange/creusot-toolchain.yaml'
-              - 'packaging/apko/creusot-toolchain.yaml'
-              - '.creusot-version'
-              - '.github/workflows/ci.yml'
-              - 'verif/**'
-              - 'why3find.json'
             helm_lint:
               - 'charts/**'
               - 'deploy/**'
@@ -369,6 +359,7 @@ jobs:
       client_consumer: ${{ steps.suites.outputs.client_consumer }}
       client_core: ${{ steps.suites.outputs.client_core }}
       client_streams: ${{ steps.suites.outputs.client_streams }}
+      creusot: ${{ steps.suites.outputs.creusot }}
       gres: ${{ steps.suites.outputs.gres }}
       grpc_gateway: ${{ steps.suites.outputs.grpc_gateway }}
       grpc_gateway_jvm: ${{ steps.suites.outputs.grpc_gateway_jvm }}
@@ -567,11 +558,11 @@ jobs:
           # disk-cache snapshot. Its consumers only restore that snapshot.
           cache-save: true
           disk-cache: affected
-          disk-cache-artifact-restore: if-empty
+          disk-cache-artifact-restore: if-no-snapshot
       - id: trusted-disk-cache
         if: >-
           ${{ needs.affected-plan.outputs.affected_work == 'true' &&
-              steps.bazel.outputs.disk-cache-populated != 'true' }}
+              steps.bazel.outputs.disk-cache-complete != 'true' }}
         continue-on-error: true
         uses: ./.github/actions/restore-run-artifact
         with:
@@ -793,32 +784,25 @@ jobs:
           command-arguments: --hide-inclusion-graph
 
   creusot-verify:
-    needs: changes
-    if: ${{ needs.changes.outputs.creusot == 'true' }}
+    needs: affected-plan
+    if: ${{ needs.affected-plan.outputs.creusot == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-bazel
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          cache-save: false
+          cache-snapshot: false
+          disk-cache: false
+          external-cache: planner
       - name: Replay Creusot proof sessions
-        run: |
-          set -euo pipefail
-          PIN="$(cat .creusot-version)"
-          if [[ -z "${PIN}" ]]; then
-            echo "::error::.creusot-version is empty" >&2
-            exit 1
-          fi
-
-          IMAGE="ghcr.io/robot-head/crabka-creusot:${PIN}"
-          docker pull "${IMAGE}"
-
-          # Replay only: this must fail if checked-in proof sessions do not replay.
-          # Keep build artifacts inside the container instead of the host checkout.
-          docker run --rm \
-            -e CARGO_TARGET_DIR=/tmp/creusot-target \
-            -v "${PWD}:/workspace" \
-            -w /workspace \
-            "${IMAGE}" \
-            "cargo creusot --replay -p crabka-verified && cargo creusot --replay -p crabka-throttle"
+        run: >-
+          aspect test //verif:creusot_replay
+          --bazel-flag=--config=ci
+          --bazel-flag=--nocache_test_results
+          --bazel-flag=--test_env=CRABKA_SOURCE_ROOT="$GITHUB_WORKSPACE"
 
   gres-range-scaling:
     needs: [changes, affected-plan, affected-build]

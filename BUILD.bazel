@@ -10,6 +10,7 @@ load("@rules_rust//rust:toolchain.bzl", "current_rustfmt_toolchain")
 package(default_visibility = ["//visibility:public"])
 
 exports_files([
+    ".creusot-version",
     "Cargo.lock",
     "Cargo.toml",
     ".github/workflows/ci.yml",
@@ -18,6 +19,7 @@ exports_files([
     "deploy/crds/crabka.io_grestenants.yaml",
     "deploy/crds/crabka.io_kafkanodepools.yaml",
     "deploy/crds/crabka.io_kafkas.yaml",
+    "why3find.json",
 ])
 
 current_rustfmt_toolchain(name = "rustfmt")

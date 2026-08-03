@@ -60,6 +60,7 @@ _PR_MANUAL_TESTS = [
 ]
 
 def _affected_suites(impacted, tests):
+    creusot = _matches_exact(impacted, ["//verif:creusot_replay"])
     grpc_gateway_jvm = _matches_exact(impacted, ["//crates/grpc-gateway:jvm_differential"])
     gres = _matches_prefix(tests, [
         "//crates/cli:",
@@ -95,6 +96,7 @@ def _affected_suites(impacted, tests):
         ("client_consumer", _matches_prefix(tests, ["//crates/client-consumer:"])),
         ("client_core", _matches_exact(tests, ["//crates/client-core:integration"])),
         ("client_streams", _matches_prefix(tests, ["//crates/client-streams:"]) or _matches_exact(tests, ["//crates/schema-serde:schema-serde_lib_test"])),
+        ("creusot", creusot),
         ("gres", gres),
         ("grpc_gateway", _matches_prefix(tests, ["//crates/grpc-gateway:"])),
         ("grpc_gateway_jvm", grpc_gateway_jvm),

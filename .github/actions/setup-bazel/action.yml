@@ -21,13 +21,13 @@ inputs:
     required: false
     default: ""
   disk-cache-artifact-restore:
-    description: Restore mode for the scoped artifact; require-current, if-empty, or false.
+    description: Restore mode for the scoped artifact; require-current, if-no-snapshot, or false.
     required: false
     default: require-current
 outputs:
-  disk-cache-populated:
-    description: Whether the disk cache contains any reusable entries.
-    value: ${{ steps.disk-cache-final.outputs.populated }}
+  disk-cache-complete:
+    description: Whether the disk cache contains a completed warmer snapshot.
+    value: ${{ steps.disk-cache-final.outputs.complete }}
 runs:
   using: composite
   steps:
@@ -80,19 +80,17 @@ runs:
       run: |
         marker="$HOME/.cache/bazel-disk/.crabka-snapshot-v1"
         exact_hit=false
+        complete=false
         if [[ -f "$marker" ]]; then
+          complete=true
           IFS= read -r snapshot < "$marker"
           if [[ "$snapshot" == "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" ]]; then
             exact_hit=true
           fi
         fi
-        populated=false
-        if [[ -n "$(find "$HOME/.cache/bazel-disk" -type f -print -quit 2>/dev/null)" ]]; then
-          populated=true
-        fi
         {
+          echo "complete=$complete"
           echo "exact-hit=$exact_hit"
-          echo "populated=$populated"
         } >> "$GITHUB_OUTPUT"
     - name: Find the completed cache for this affected scope
       id: disk-cache-artifact
@@ -101,8 +99,8 @@ runs:
             env.AFFECTED_ARTIFACT_SCOPE != '' &&
             ((inputs.disk-cache-artifact-restore == 'require-current' &&
               steps.disk-cache-state.outputs.exact-hit != 'true') ||
-             (inputs.disk-cache-artifact-restore == 'if-empty' &&
-              steps.disk-cache-state.outputs.populated != 'true')) }}
+             (inputs.disk-cache-artifact-restore == 'if-no-snapshot' &&
+              steps.disk-cache-state.outputs.complete != 'true')) }}
       continue-on-error: true
       uses: ./.github/actions/restore-run-artifact
       with:
@@ -124,8 +122,8 @@ runs:
       if: ${{ inputs.disk-cache != 'false' }}
       shell: bash
       run: |
-        populated=false
-        if [[ -n "$(find "$HOME/.cache/bazel-disk" -type f -print -quit 2>/dev/null)" ]]; then
-          populated=true
+        complete=false
+        if [[ -f "$HOME/.cache/bazel-disk/.crabka-snapshot-v1" ]]; then
+          complete=true
         fi
-        echo "populated=$populated" >> "$GITHUB_OUTPUT"
+        echo "complete=$complete" >> "$GITHUB_OUTPUT"
