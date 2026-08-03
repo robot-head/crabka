@@ -299,7 +299,7 @@ fn write_json_string(s: &str, out: &mut String) {
 ///
 /// Returns 22P02 for malformed JSON (bad syntax, a duplicate escape, trailing
 /// garbage, `NaN`/`Infinity`, a leading zero), 22003 for a number that overflows
-/// the `numeric` format, and 54001 when nesting exceeds [`MAX_DEPTH`].
+/// the `numeric` format, and 54001 when nesting exceeds `MAX_DEPTH`.
 pub fn parse(input: &str) -> Result<JsonbValue, TypeError> {
     parse_with_options(input, false).map(|(value, _)| value)
 }

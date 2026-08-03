@@ -1,7 +1,7 @@
 //! Poll-style counters for timestamp-oracle load observation.
 //!
 //! Both stat structs follow the substrate's hand-rolled counter pattern
-//! (shared through an [`Arc`], recorded at the seam, snapshotted by a
+//! (shared through an [`std::sync::Arc`], recorded at the seam, snapshotted by a
 //! poller), but use relaxed atomics instead of a mutex so recording never
 //! reintroduces a lock on the oracle's lock-free grant fast path. A snapshot
 //! reads each counter independently and may therefore be momentarily torn

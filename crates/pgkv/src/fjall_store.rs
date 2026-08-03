@@ -31,7 +31,7 @@ use crate::{Kv, KvError, KvPair, KvSnapshot, RestoreKv, SnapshotKv, WriteOp, sto
 /// same transactional database also share that fsync (a single `persist`
 /// flushes all pending writes).
 ///
-/// Sustained writes rotate the active memtable every [`KeyspaceKv::rotate_after`]
+/// Sustained writes rotate the active memtable every `KeyspaceKv::rotate_after`
 /// committed ops (on top of fjall's byte-based trigger), so fjall's worker
 /// pool keeps flushing sstables and compacting instead of letting shadowed
 /// entries pile up on hot key prefixes.

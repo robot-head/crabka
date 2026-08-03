@@ -166,7 +166,7 @@ impl TokenBucket {
         self.set_token_rate_with_burst(rate_to_bytes_per_sec(new_rate), burst.bytes_u64());
     }
 
-    /// The configured byte throughput. [`ByteRateExt::ZERO`] means no limit.
+    /// The configured byte throughput. `ByteRateExt::ZERO` means no limit.
     #[must_use]
     pub fn byte_rate(&self) -> ByteRate {
         rate_from_bytes_per_sec(self.token_rate())

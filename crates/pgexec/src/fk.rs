@@ -39,7 +39,7 @@
 //! its declared deferrability and its referential-action triggers non-deferrable,
 //! so a `DEFERRABLE INITIALLY DEFERRED ON DELETE CASCADE` still deletes its
 //! children inside the `DELETE` statement and only the "does this row have a
-//! parent" checks wait for `COMMIT`. [`PendingCheck::is_check`] is that rule and
+//! parent" checks wait for `COMMIT`. `PendingCheck::is_check` is that rule and
 //! [`DeferredConstraints::defer`] is the only thing that applies it, which is
 //! what leaves the commit-time drain with no referential action of its own to
 //! run.
@@ -1083,7 +1083,7 @@ impl DeferredConstraints {
     /// Take an entry that should wait for `COMMIT`, or hand it straight back to
     /// be run now.
     ///
-    /// Only a check ever waits — see [`PendingCheck::is_check`] — so a
+    /// Only a check ever waits — see `PendingCheck::is_check` — so a
     /// `DEFERRABLE INITIALLY DEFERRED` constraint carrying `CASCADE`,
     /// `SET NULL`, `SET DEFAULT` or `RESTRICT` still performs it inside the
     /// statement, and `RESTRICT` versus `NO ACTION` is the visible edge of that

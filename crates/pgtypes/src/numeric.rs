@@ -725,7 +725,7 @@ pub fn ceil(value: &NumericValue) -> NumericValue {
 /// `numeric_round`). `n` may be negative (round to tens/hundreds/…). The result
 /// carries scale `max(n, 0)`. `n` is clamped to `MAX_DSCALE` so an adversarial
 /// huge scale can't materialize billions of fractional digits and OOM — the same
-/// format-limit discipline [`within_format_limits`] enforces on `parse`.
+/// format-limit discipline `within_format_limits` enforces on `parse`.
 /// A special is returned unchanged, at every `n`.
 pub fn round(value: &NumericValue, n: i64) -> NumericValue {
     match value.as_finite() {
@@ -2192,7 +2192,7 @@ fn power_rscale(rweight: i64, base: &BigDecimal, exp: &BigDecimal) -> i64 {
 ///
 /// The running state is the row count `n`, `sum` = Σx and `sum2` = Σx². The
 /// variance is `(n·Σx² − (Σx)²) / d` with `d = n²` (population) or `n·(n−1)`
-/// (sample), computed at [`select_div_scale`]'s display scale, and the standard
+/// (sample), computed at `select_div_scale`'s display scale, and the standard
 /// deviation is that value's square root *at the same scale* — which is why
 /// this cannot be composed from the public `div` and `num_sqrt`, whose scales
 /// are chosen independently.

@@ -11,7 +11,7 @@
 //! and the on-disk `crabka-log`, re-exporting these modules under
 //! `crabka_raft::kraft`. Because the core itself is a clean leaf — no tokio, no
 //! filesystem, no crypto — it compiles for `wasm32-unknown-unknown`, which is
-//! what lets the [`sim`] module (behind the `sim` feature) drive an interactive
+//! what lets the `sim` module (behind the `sim` feature) drive an interactive
 //! consensus simulation in the browser playground.
 
 #![doc(html_root_url = "https://docs.rs/crabka-kraft-core/0.3.9")]

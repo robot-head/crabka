@@ -537,7 +537,7 @@ impl Topology {
     ///
     /// Like [`add_state_store`] but for windowed stores. The changelog topic
     /// carries `compact,delete` configs and a `retention.ms` derived from
-    /// `size + grace +` [`CHANGELOG_ADDITIONAL_RETENTION`].
+    /// `size + grace + CHANGELOG_ADDITIONAL_RETENTION`.
     ///
     /// [`add_state_store`]: Topology::add_state_store
     ///
@@ -603,7 +603,7 @@ impl Topology {
     ///
     /// Like [`add_window_store`] but for join window stores (retainDuplicates).
     /// The changelog topic carries `delete`-only configs and a `retention.ms`
-    /// derived from `before + after + grace + `[`CHANGELOG_ADDITIONAL_RETENTION`].
+    /// derived from `before + after + grace + CHANGELOG_ADDITIONAL_RETENTION`.
     /// Compaction is not applicable because the store retains duplicates.
     ///
     /// [`add_window_store`]: Topology::add_window_store
@@ -654,7 +654,7 @@ impl Topology {
     ///
     /// Like [`add_window_store`] but for session stores. Reuses the windowed
     /// (`compact,delete`) changelog config; the `retention.ms` is derived from
-    /// `gap + grace + `[`CHANGELOG_ADDITIONAL_RETENTION`]. The store holds the
+    /// `gap + grace + CHANGELOG_ADDITIONAL_RETENTION`. The store holds the
     /// raw aggregate (`SessionBytesStore`).
     ///
     /// [`add_window_store`]: Topology::add_window_store
@@ -703,7 +703,7 @@ impl Topology {
 
     /// Register a versioned state store (KIP-889) connected to the given
     /// processors. The changelog topic carries `compact` + `min.compaction.lag.ms
-    /// = history_retention + `[`CHANGELOG_ADDITIONAL_RETENTION`]. The
+    /// = history_retention + CHANGELOG_ADDITIONAL_RETENTION`. The
     /// version-chain store is self-contained in memory; the supplied byte backend
     /// is unused.
     pub fn add_versioned_store<K, V, KS, VS>(

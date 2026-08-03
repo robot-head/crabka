@@ -2,7 +2,7 @@
 //! encoding; framing + id resolution are shared here.
 //!
 //! Serdes are **topic-aware** (matching JVM Kafka's `serialize(topic, data)`):
-//! a serde carries its key/value [`Role`] but derives its registry subject
+//! a serde carries its key/value [`crate::Role`] but derives its registry subject
 //! (`<topic>-key` / `<topic>-value`) from the topic passed at call time, so one
 //! serde instance works across topics.
 

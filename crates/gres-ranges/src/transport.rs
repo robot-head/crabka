@@ -1011,7 +1011,7 @@ pub enum TransportError {
     ///
     /// Both counts stay raw: they are measured buffer lengths, and one site
     /// reports a result-index overflow against `u32::MAX` rather than a byte
-    /// magnitude. The dimensioned limit is [`MAX_FRAME`].
+    /// magnitude. The dimensioned limit is `MAX_FRAME`.
     #[error("range frame too large: {actual} bytes exceeds {limit}")]
     FrameTooLarge { actual: usize, limit: usize },
     /// JSON payload was invalid.

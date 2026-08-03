@@ -14,7 +14,7 @@
 //! would climb with load — so it paces its stride against wall time instead,
 //! widening it under grant pressure and narrowing it when idle to hold the
 //! persist rate near a handful per second regardless of grant volume (see
-//! [`TsoOracle::persist_stride`]).
+//! `TsoOracle::persist_stride`).
 
 use std::{
     num::NonZeroU64,
@@ -264,7 +264,7 @@ struct RecoverySettings {
 /// through it — so `AcqRel` on its compare-exchange is already stronger than
 /// it needs.
 ///
-/// The [`GrantReservation`] arm decides the timestamp *domain* — dense
+/// The `GrantReservation` arm decides the timestamp *domain* — dense
 /// logical integers or wall-anchored packed HLC stamps — while everything
 /// durable and fencing-related is identical across both.
 pub struct TsoOracle<C, H> {

@@ -3187,7 +3187,7 @@ pub struct RoutineArg {
 /// P2: a type written in a routine signature.
 ///
 /// A routine may name a composite type by naming a relation, which the parser
-/// cannot resolve; those names are carried through as [`RoutineType::Named`]
+/// cannot resolve; those names are carried through in [`RoutineType::name`]
 /// and resolved against the catalog when the routine is created.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RoutineType {

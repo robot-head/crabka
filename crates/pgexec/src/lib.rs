@@ -2014,7 +2014,7 @@ impl SqlEngine {
     }
 
     /// Allocate a write lease for a single-shard transaction confined to this
-    /// range from the range's [`local_sequence`](Self::local_sequence), bypassing
+    /// range from the range's `local_sequence`, bypassing
     /// the global timestamp source. The durable horizon is folded in first (the
     /// Lamport receive rule), so the allocated `start_ts` and hidden rowids
     /// strictly exceed every global stamp this range has already applied.
@@ -2049,7 +2049,7 @@ impl SqlEngine {
     }
 
     /// Allocate a single-shard commit timestamp from this range's
-    /// [`local_sequence`](Self::local_sequence), preserving `commit_ts > start_ts`
+    /// `local_sequence`, preserving `commit_ts > start_ts`
     /// and the durable-horizon floor (folded in first).
     ///
     /// # Errors

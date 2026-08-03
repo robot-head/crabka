@@ -157,7 +157,7 @@ fn proto_kind_to_column_type(kind: &Kind) -> ColumnType {
 ///
 /// Repeated and map fields are mapped to `Text` (JSON-serialised), because
 /// there is no native array or map `ColumnType` in this codebase.  All other
-/// fields use the scalar mapping from [`proto_kind_to_column_type`].
+/// fields use the scalar mapping from `proto_kind_to_column_type`.
 #[must_use]
 pub fn protobuf_message_to_columns(descriptor: &prost_reflect::MessageDescriptor) -> Vec<Column> {
     descriptor

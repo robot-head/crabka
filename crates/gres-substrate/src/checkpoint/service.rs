@@ -353,7 +353,7 @@ where
     ///
     /// This is the ungated variant: the caller is responsible for `snapshot`
     /// matching the KV state this service will read. Prefer
-    /// [`Self::checkpoint_from_source`], which holds the writer's group gate
+    /// `Self::checkpoint_from_source`, which holds the writer's group gate
     /// while it captures both, whenever a live committer can be running.
     ///
     /// # Errors

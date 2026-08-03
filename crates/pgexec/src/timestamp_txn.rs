@@ -1087,7 +1087,7 @@ pub fn timestamp_txn_descriptors(
 /// and range-0 transaction descriptors on this store.
 ///
 /// This is a full store scan. Per-statement paths use the cached
-/// [`TimestampHorizonSource`] instead and fall back to this scan only to seed
+/// `TimestampHorizonSource` instead and fall back to this scan only to seed
 /// the cache (engine open/recovery) or when the store is applied externally.
 /// # Errors
 ///
@@ -1503,7 +1503,7 @@ impl TimestampTxnParticipant {
 
     /// Attach timestamp-version GC state: commit resolutions then fold
     /// opportunistic dead-version prune ops into their batches (see
-    /// [`crate::ts_gc::TsVersionGc::prune_batch_ops`]).
+    /// `crate::ts_gc::TsVersionGc::prune_batch_ops`).
     #[must_use]
     pub fn with_ts_gc(mut self, ts_gc: std::sync::Arc<crate::ts_gc::TsVersionGc>) -> Self {
         self.ts_gc = Some(ts_gc);

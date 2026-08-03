@@ -70,7 +70,7 @@ pub struct SecurityCliInput {
     /// Super-user principal names that bypass ACL checks.
     pub super_users: Vec<String>,
     /// ACL-cache refresh interval. `None` uses
-    /// [`DEFAULT_ACL_REFRESH`](crate::config::DEFAULT_ACL_REFRESH).
+    /// [`DEFAULT_ACL_REFRESH`].
     pub acl_refresh: Option<Time>,
     /// Kafka client protocol: `PLAINTEXT` | `SSL` | `SASL_PLAINTEXT` | `SASL_SSL`.
     pub kafka_security_protocol: String,

@@ -61,7 +61,7 @@ static PROCESS_TOKEN: LazyLock<i32> =
 /// The id is **not** only a session label: `pg_temp_<backend id>` names this
 /// session's temporary namespace in a catalog every gateway of a cluster
 /// shares, so a bare per-process counter would have two gateways name one
-/// namespace. Folding [`PROCESS_TOKEN`] into the high bits keeps the id inside
+/// namespace. Folding `PROCESS_TOKEN` into the high bits keeps the id inside
 /// `int4` — the width `BackendKeyData` and `CancelRequest` fix — while making
 /// it a cluster-wide name rather than a process-local one.
 ///

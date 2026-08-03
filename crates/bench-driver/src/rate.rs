@@ -17,7 +17,7 @@ pub struct Pacer {
 }
 
 impl Pacer {
-    /// Paces at `rate`, clamped up to [`MIN_RATE`] when the scenario asks for
+    /// Paces at `rate`, clamped up to `MIN_RATE` when the scenario asks for
     /// less than one message a second.
     #[must_use]
     pub fn new(rate: Frequency) -> Self {

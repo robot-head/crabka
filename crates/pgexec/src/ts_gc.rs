@@ -25,7 +25,7 @@
 //!   watermark every served read has reconciled against — so reclamation
 //!   only ever runs below timestamps the range's readers have moved past;
 //! - the floor is published durably (in the same batch as the deletes) under
-//!   [`TS_GC_FLOOR_KEY`], and every read pin and prewrite admission first
+//!   `TS_GC_FLOOR_KEY`, and every read pin and prewrite admission first
 //!   folds the durable value in and refuses timestamps below it. A read or
 //!   write that lost the race (allocated long ago, arriving after
 //!   reclamation passed it) fails with a retryable serialization error

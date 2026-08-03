@@ -187,7 +187,7 @@ pub enum ExtendedParamType {
 /// The variants are untagged, so the JSON shape picks the variant: a `jsonb`
 /// parameter carries its text in [`ExtendedParamValue::Text`], and both array
 /// types carry a JSON array whose elements are checked against the declared
-/// [`ExtendedParamType`] in [`owned_param`].
+/// [`ExtendedParamType`] in `owned_param`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(untagged)]
 pub enum ExtendedParamValue {

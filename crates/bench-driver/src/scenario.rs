@@ -16,7 +16,7 @@
 //! Epoch timestamps (`wallclock_*_unix_ms`, `Disturbance::kill_at_ms`) stay raw
 //! integers: they are coordinates, not magnitudes.
 //!
-//! Every input magnitude is also range-checked as it is read — see [`bounded`]
+//! Every input magnitude is also range-checked as it is read — see `bounded`
 //! — so a scenario file that asks for something unrunnable fails at load rather
 //! than at the far end of the driver.
 

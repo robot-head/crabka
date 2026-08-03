@@ -438,7 +438,7 @@ pub trait RangeTransferCapability: Send + Sync {
     ///
     /// This is the cancellation-safe counterpart to [`Self::resume`]. Implementations
     /// must make the source writable before returning; errors cannot be reported from
-    /// [`Drop`](std::ops::Drop) and should be recorded by the implementation.
+    /// [`Drop`] and should be recorded by the implementation.
     fn resume_after_drop(&self, operation_id: &str, barrier: RangeTransferBarrier);
 
     /// Stage a checkpoint and bounded tail into an empty, unhosted target range.
