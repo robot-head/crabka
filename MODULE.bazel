@@ -6,7 +6,6 @@ module(
 )
 
 bazel_dep(name = "llvm", version = "0.8.9")
-bazel_dep(name = "bazel-diff", version = "27.0.0")
 bazel_dep(name = "openssl", version = "3.5.5.bcr.0")
 bazel_dep(name = "platforms", version = "1.1.0")
 bazel_dep(name = "protobuf", version = "34.0.bcr.1")
@@ -16,6 +15,13 @@ bazel_dep(name = "rules_java", version = "9.3.0")
 bazel_dep(name = "rules_jvm_external", version = "6.10")
 bazel_dep(name = "rules_oci", version = "2.3.0")
 bazel_dep(name = "rules_pkg", version = "1.2.0")
+
+# Bazel 9 removed legacy built-in providers still referenced by the older
+# transitive versions otherwise selected here. Keep the smallest compatible
+# toolchain graph without making bazel-diff a build dependency.
+single_version_override(module_name = "rules_android", version = "0.7.1")
+single_version_override(module_name = "rules_go", version = "0.59.0")
+single_version_override(module_name = "rules_kotlin", version = "2.3.0")
 
 apko = use_extension("@rules_apko//apko:extensions.bzl", "apko")
 apko.translate_lock(

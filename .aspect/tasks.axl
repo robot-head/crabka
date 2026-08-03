@@ -20,6 +20,7 @@ _AFFECTED_GLOBAL_INPUTS = [
     ".aspect/config.axl",
     ".aspect/tasks.axl",
     ".aspect/version.axl",
+    ".bazelignore",
     ".bazelrc",
     ".bazelversion",
     ".github/actions/setup-bazel/action.yml",
@@ -30,6 +31,9 @@ _AFFECTED_GLOBAL_INPUTS = [
     "Cargo.lock",
     "rust-toolchain.toml",
 ]
+
+_BAZEL_DIFF_SHA256 = "69ab1fd00f0ba0f15bb36ded659a58040b41957f712461aa46d98b7e58869aa3"
+_BAZEL_DIFF_URL = "https://github.com/Tinder/bazel-diff/releases/download/v27.0.0/bazel-diff_deploy.jar"
 
 _PR_MANUAL_TESTS = [
     "//crates/broker:jvm_acceptance",
@@ -115,29 +119,39 @@ def _write_affected_plan(ctx, plan_dir, builds, tests, warm_tests, suites):
     ]) + "\n")
 
 def _bazel_diff(ctx):
-    # This is only a small host-side planner. Keep it in Bazel's default
-    # fastbuild configuration so graph detection does not pay for CI-opt code
-    # generation or invalidate the analysis cache before hashing.
-    code = _run(ctx, "bazel", [
-        "build",
-        "@bazel-diff//:bazel-diff",
-        "--noinstrument_test_targets",
-    ])
-    if code != 0:
-        return (code, "")
-    (code, outputs) = _output(ctx, "bazel", [
-        "cquery",
-        "@bazel-diff//:bazel-diff",
-        "--noinstrument_test_targets",
-        "--output=files",
-    ])
-    if code != 0:
-        return (code, "")
-    executables = [path for path in outputs.split("\n") if path and not path.endswith(".jar")]
-    if len(executables) != 1:
-        print("expected one bazel-diff executable, got: %s" % outputs)
+    # Building the planner through the main module graph adds a cold Kotlin /
+    # protobuf build before Bazel can even inspect the repository. Use the
+    # official release artifact instead, pinned and verified like a toolchain.
+    cache_dir = ctx.std.env.current_dir() + "/.aspect/cache"
+    ctx.std.fs.create_dir_all(cache_dir)
+    jar = cache_dir + "/bazel-diff-v27.0.0.jar"
+    if _run(ctx, "test", ["-f", jar]) == 0:
+        (code, digest) = _output(ctx, "sha256sum", [jar])
+        if code == 0 and digest.split(" ")[0] == _BAZEL_DIFF_SHA256:
+            return (0, jar)
+
+    download = jar + ".download"
+    code = _run(ctx, "rm", ["-f", "--", jar, download])
+    if code == 0:
+        code = _run(ctx, "curl", [
+            "--fail",
+            "--location",
+            "--retry",
+            "3",
+            "--show-error",
+            "--silent",
+            "--output",
+            download,
+            _BAZEL_DIFF_URL,
+        ])
+    if code == 0:
+        (code, digest) = _output(ctx, "sha256sum", [download])
+    if code != 0 or digest.split(" ")[0] != _BAZEL_DIFF_SHA256:
+        _run(ctx, "rm", ["-f", "--", download])
+        print("bazel-diff v27.0.0 failed SHA-256 verification")
         return (1, "")
-    return (0, executables[0])
+    code = _run(ctx, "mv", ["--", download, jar])
+    return (code, jar if code == 0 else "")
 
 def _bazel_diff_jvm_flags(ctx):
     # JDK 24+ warns when bazel-diff's protobuf runtime uses sun.misc.Unsafe;
@@ -149,7 +163,7 @@ def _bazel_diff_jvm_flags(ctx):
     if len(fields) < 2:
         return []
     major = int(fields[1].split(".")[0])
-    return ["--jvm_flag=--sun-misc-unsafe-memory-access=allow"] if major >= 24 else []
+    return ["--sun-misc-unsafe-memory-access=allow"] if major >= 24 else []
 
 def _generate_hashes(ctx, bazel_diff, workspace, hash_file):
     (code, temp) = _output(ctx, "mktemp", ["-d", ctx.std.env.temp_dir() + "/crabka-affected.XXXXXX"])
@@ -177,7 +191,9 @@ def _generate_hashes(ctx, bazel_diff, workspace, hash_file):
     ctx.std.fs.write(seed_file, seed_payload + "\n")
     (code, repository_cache) = _output(ctx, "bazel", ["info", "repository_cache"])
     if code == 0:
-        code = _run(ctx, bazel_diff, _bazel_diff_jvm_flags(ctx) + [
+        code = _run(ctx, "java", _bazel_diff_jvm_flags(ctx) + [
+            "-jar",
+            bazel_diff,
             "generate-hashes",
             "--no-keep_going",
             "--excludeExternalTargets",
@@ -253,7 +269,9 @@ def _affected(ctx: TaskContext) -> int:
     (code, impacted_path) = _output(ctx, "mktemp", [ctx.std.env.temp_dir() + "/crabka-impacted.XXXXXX"])
     if code != 0:
         return code
-    code = _run(ctx, bazel_diff, _bazel_diff_jvm_flags(ctx) + [
+    code = _run(ctx, "java", _bazel_diff_jvm_flags(ctx) + [
+        "-jar",
+        bazel_diff,
         "get-impacted-targets",
         "-w",
         ctx.std.env.current_dir(),
@@ -365,16 +383,9 @@ def _affected(ctx: TaskContext) -> int:
     tests = [target for target in all_tests if target not in owned_tests and not any([
         target.startswith(prefix) for prefix in owned_test_prefixes
     ])]
-    # Coverage changes the Rust action configuration, so building a target and
-    # then testing it compiles its dependency graph twice. Keep only standalone
-    # build roots that the selected tests will not compile themselves.
-    if builds and tests:
-        build_set = "set(%s)" % " ".join(builds)
-        test_set = "set(%s)" % " ".join(tests)
-        (code, uncovered_output) = _output(ctx, "bazel", ["query", "%s except deps(%s)" % (build_set, test_set)])
-        if code != 0:
-            return code
-        builds = [target for target in uncovered_output.split("\n") if target]
+    # The warmer submits build roots and test dependencies in one Bazel
+    # invocation, so Bazel deduplicates any overlap without another full graph
+    # traversal here.
     warm_tests = [target for target in warm_tests_output.split("\n") if target]
     _write_affected_plan(ctx, plan_dir, builds, tests, warm_tests, suites)
     print("Planned %d builds, %d tests, and %d dependency roots." % (len(builds), len(tests), len(warm_tests)))

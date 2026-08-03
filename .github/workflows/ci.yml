@@ -20,6 +20,8 @@ concurrency:
 # NOT DWARF, so dropping to line tables roughly halves the binaries without
 # changing coverage results. (`line-tables-only` keeps file:line in backtraces.)
 env:
+  # Bump when bazel-diff, its flags, or the global seed algorithm changes.
+  AFFECTED_HASH_SCHEMA: v1-bazel-diff-27.0.0-seed1
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
@@ -59,6 +61,7 @@ jobs:
               - '**/BUILD.bazel'
               - '**/*.bzl'
               - '.aspect/**'
+              - '.bazelignore'
               - '.bazelrc'
               - 'MODULE.bazel'
               - 'MODULE.bazel.lock'
@@ -377,7 +380,7 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: .aspect/affected-hashes-${{ github.event.pull_request.base.sha || github.event.before }}.json
-          key: affected-hashes-${{ hashFiles('.aspect/tasks.axl', '.bazelrc', '.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock') }}-${{ github.event.pull_request.base.sha || github.event.before }}
+          key: affected-hashes-${{ env.AFFECTED_HASH_SCHEMA }}-${{ github.event.pull_request.base.sha || github.event.before }}
       - uses: actions/checkout@v7
         if: ${{ steps.base-hash-cache.outputs.cache-hit != 'true' }}
         with:
@@ -387,16 +390,21 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: .aspect/affected-hashes-${{ github.sha }}.json
-          key: affected-hashes-${{ hashFiles('.aspect/tasks.axl', '.bazelrc', '.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock') }}-${{ github.sha }}
+          key: affected-hashes-${{ env.AFFECTED_HASH_SCHEMA }}-${{ github.sha }}
+      - uses: actions/cache@v5
+        with:
+          path: .aspect/cache/bazel-diff-v27.0.0.jar
+          key: bazel-diff-v27.0.0-69ab1fd00f0ba0f15bb36ded659a58040b41957f712461aa46d98b7e58869aa3
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
-          # Graph hashing only builds the small bazel-diff host tool. Keep its
-          # cache separate so planning neither restores the large test cache
-          # nor spends minutes reclaiming disk that it will not use.
+          # Graph hashing runs the cached bazel-diff release JAR and Bazel
+          # queries only. Skip the action cache, but write the repository and
+          # generated-external caches that make the next graph scan cheaper.
           cache-save: true
           cache-snapshot: false
-          disk-cache: planner
+          disk-cache: false
+          external-cache: planner
       - name: Hash base build graph
         if: ${{ steps.base-hash-cache.outputs.cache-hit != 'true' }}
         run: >-
@@ -407,7 +415,7 @@ jobs:
         if: ${{ steps.base-hash-cache.outputs.cache-hit != 'true' }}
         with:
           path: .aspect/affected-hashes-${{ github.event.pull_request.base.sha || github.event.before }}.json
-          key: affected-hashes-${{ hashFiles('.aspect/tasks.axl', '.bazelrc', '.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock') }}-${{ github.event.pull_request.base.sha || github.event.before }}
+          key: affected-hashes-${{ env.AFFECTED_HASH_SCHEMA }}-${{ github.event.pull_request.base.sha || github.event.before }}
       - name: Hash head build graph
         if: ${{ steps.head-hash-cache.outputs.cache-hit != 'true' }}
         run: >-
@@ -418,7 +426,7 @@ jobs:
         if: ${{ steps.head-hash-cache.outputs.cache-hit != 'true' }}
         with:
           path: .aspect/affected-hashes-${{ github.sha }}.json
-          key: affected-hashes-${{ hashFiles('.aspect/tasks.axl', '.bazelrc', '.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock') }}-${{ github.sha }}
+          key: affected-hashes-${{ env.AFFECTED_HASH_SCHEMA }}-${{ github.sha }}
       - name: Plan affected targets
         env:
           GITHUB_TOKEN: ${{ github.token }}

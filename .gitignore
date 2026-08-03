@@ -7,6 +7,8 @@ target/
 user.bazelrc
 /.aspect/affected-hashes-*.json
 /.aspect/affected-plan/
+/.aspect/base-workspace/
+/.aspect/cache/
 /bazel/affected-cache-key/
 .idea/
 .vscode/

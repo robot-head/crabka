@@ -16,6 +16,10 @@ inputs:
     description: Name of the shared Bazel disk-cache namespace, or false to disable it.
     required: false
     default: affected
+  external-cache:
+    description: Generated external-repository cache namespace; defaults to disk-cache.
+    required: false
+    default: ""
 runs:
   using: composite
   steps:
@@ -47,7 +51,7 @@ runs:
         # Keep manifests stable within an execution namespace so one workflow
         # cannot freeze another workflow's partial external-repository list.
         external-cache: |
-          name: crabka-v3-${{ inputs.disk-cache }}
+          name: crabka-v3-${{ inputs.external-cache || inputs.disk-cache }}
           manifest:
             # The crate-universe hub itself is keyed by the Cargo lock; its
             # generated per-crate repositories retain setup-bazel's defaults.
