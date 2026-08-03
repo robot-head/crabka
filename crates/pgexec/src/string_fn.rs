@@ -416,7 +416,7 @@ fn convert_encoding(bytes: &[u8], source: &str, target: &str) -> Result<Vec<u8>,
     }
     // ponytail: ASCII is invariant across PostgreSQL's built-in encodings;
     // add a converter backend when non-ASCII conversion becomes an owning test.
-    if bytes.is_ascii() || source.eq_ignore_ascii_case(target) {
+    if bytes.is_ascii() || source_id == target_id || target_id == 0 {
         return Ok(bytes.to_vec());
     }
     Err(ExecError::FunctionError {

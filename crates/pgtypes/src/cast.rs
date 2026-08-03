@@ -1052,25 +1052,32 @@ fn text_to_bytea(s: &str) -> Result<Vec<u8>, TypeError> {
         value: s.to_string(),
     };
     if let Some(hex) = s.strip_prefix("\\x") {
-        if hex.len() % 2 != 0 {
-            return Err(invalid());
+        let digit = |byte: u8| match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        };
+        let bytes = hex.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len() / 2);
+        let mut index = 0;
+        while index < bytes.len() {
+            while matches!(bytes[index], b' ' | b'\t' | b'\r' | b'\n') {
+                index += 1;
+                if index == bytes.len() {
+                    return Ok(out);
+                }
+            }
+            let Some(low) = bytes.get(index + 1) else {
+                return Err(invalid());
+            };
+            let Some((high, low)) = digit(bytes[index]).zip(digit(*low)) else {
+                return Err(invalid());
+            };
+            out.push(high * 16 + low);
+            index += 2;
         }
-        return hex
-            .as_bytes()
-            .chunks_exact(2)
-            .map(|pair| {
-                let digit = |byte: u8| match byte {
-                    b'0'..=b'9' => Some(byte - b'0'),
-                    b'a'..=b'f' => Some(byte - b'a' + 10),
-                    b'A'..=b'F' => Some(byte - b'A' + 10),
-                    _ => None,
-                };
-                digit(pair[0])
-                    .zip(digit(pair[1]))
-                    .map(|(high, low)| high * 16 + low)
-                    .ok_or_else(|| invalid())
-            })
-            .collect();
+        return Ok(out);
     }
 
     let bytes = s.as_bytes();
@@ -1181,6 +1188,9 @@ mod tests {
         };
         assert_eq!(cast("ABC"), Datum::Bytea(b"ABC".to_vec()));
         assert_eq!(cast("\\x414243"), Datum::Bytea(b"ABC".to_vec()));
+        assert_eq!(cast("\\x 41 42 43 "), Datum::Bytea(b"ABC".to_vec()));
+        assert!(super::cast(&Datum::Text("\\x4 1".into()), ColumnType::Bytea, &utc()).is_err());
+        assert!(super::cast(&Datum::Text("\\x\x0b41".into()), ColumnType::Bytea, &utc()).is_err());
         assert_eq!(cast("A\\\\B\\103"), Datum::Bytea(b"A\\BC".to_vec()));
         assert!(super::cast(&Datum::Text("\\400".into()), ColumnType::Bytea, &utc()).is_err());
     }

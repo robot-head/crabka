@@ -329,4 +329,6 @@ fn convert_preserves_ascii_across_known_encodings() {
     assert!(text_of("convert('\\x41', 'KOI8R', 'UTF8')") == "\\x41");
     assert!(result_type("convert('ABC'::bytea, 'KOI8R', 'UTF8')") == ColumnType::Bytea);
     assert!(sqlstate("convert('ABC'::bytea, 'MULE_INTERNAL', 'UTF8')") == "42883");
+    assert!(text_of("convert('\\xc3a9'::bytea, 'UTF8', 'UNICODE')") == "\\xc3a9");
+    assert!(text_of("convert('\\xc3a9'::bytea, 'UTF8', 'SQL_ASCII')") == "\\xc3a9");
 }

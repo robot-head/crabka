@@ -3011,8 +3011,24 @@ pub(crate) fn builtin_pg_proc_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
         .map(|line| {
             let line = std::str::from_utf8(line).map_err(|_| corrupt())?;
             let fields = line.split('\t').collect::<Vec<_>>();
-            let [oid, name, language, cost, result_rows, variadic, support, kind, flags, volatility, parallel, argument_count, default_count, result_type, argument_types] =
-                fields.as_slice()
+            let [
+                oid,
+                name,
+                language,
+                cost,
+                result_rows,
+                variadic,
+                support,
+                kind,
+                flags,
+                volatility,
+                parallel,
+                argument_count,
+                default_count,
+                result_type,
+                argument_types,
+                source,
+            ] = fields.as_slice()
             else {
                 return Err(corrupt());
             };
@@ -3068,7 +3084,7 @@ pub(crate) fn builtin_pg_proc_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
                 Datum::Null,
                 Datum::Null,
                 Datum::Null,
-                Datum::Text((*name).to_string()),
+                Datum::Text((*source).to_string()),
                 if int(language)? == 13 {
                     Datum::Text((*name).to_string())
                 } else {
@@ -3300,6 +3316,23 @@ mod tests {
             .expect("starts_with row");
         assert!(starts_with[8] == Datum::Int4(6242));
         assert!(rows.iter().all(|row| matches!(row[8], Datum::Int4(_))));
+    }
+
+    #[test]
+    fn builtin_routines_preserve_catalog_sources() {
+        let rows = builtin_pg_proc_rows().expect("built-in pg_proc rows");
+        for (oid, source) in [
+            (77, "chartoi4"),
+            (313, "i2toi4"),
+            (668, "bpchar"),
+            (1242, "boolin"),
+        ] {
+            let row = rows
+                .iter()
+                .find(|row| row[0] == Datum::Int4(oid))
+                .expect("catalog routine");
+            assert!(row[25] == Datum::Text(source.to_string()));
+        }
     }
 
     /// Run `sql` as a definition against `kv`, returning the completion tag.
