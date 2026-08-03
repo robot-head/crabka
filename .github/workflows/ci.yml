@@ -548,10 +548,10 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/free-disk-space
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
-      - uses: ./.github/actions/free-disk-space
       # Select the JVM-oracle targets explicitly. A workspace-wide
       # `--include-ignored` sweep also runs thousands of ordinary tests and
       # Docker- or PostgreSQL-gated suites that belong to dedicated jobs.
@@ -794,10 +794,10 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/free-disk-space
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
-      - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
@@ -825,10 +825,10 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/free-disk-space
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
-      - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
@@ -858,10 +858,10 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/free-disk-space
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
-      - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
@@ -892,10 +892,10 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/free-disk-space
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
-      - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
@@ -937,10 +937,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/free-disk-space
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
-      - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
@@ -962,10 +962,10 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/free-disk-space
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
-      - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
@@ -997,10 +997,10 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/free-disk-space
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
-      - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
@@ -1364,14 +1364,14 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-bazel
-        with:
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       # llvm-cov profraw + two preloaded Kafka images + the cargo target dir
       # exhaust the ~14 GB free on the default runner; reclaim ~25-30 GB of
       # unused preinstalled SDKs (the shared action leaves the JDK + Docker
       # images intact for the testcontainers acceptance suite).
       - uses: ./.github/actions/free-disk-space
+      - uses: ./.github/actions/setup-bazel
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
@@ -1426,14 +1426,14 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-bazel
-        with:
-          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       # `llvm-cov clean` + two instrumented `--no-report` runs generate a large
       # profraw set on top of the cargo target dir, which exhausted the runner's
       # ~14 GB free disk ("No space left on device", then a SIGBUS in the
       # linker). The shared action reclaims ~25-30 GB of unused preinstalled SDKs.
       - uses: ./.github/actions/free-disk-space
+      - uses: ./.github/actions/setup-bazel
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
