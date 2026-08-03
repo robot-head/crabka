@@ -137,7 +137,11 @@ driver_goldens = workflow_step("Captured driver startup replay")
 assert "timeout 30s aspect gres --task:name=gres-driver-goldens --suite driver-goldens" in driver_goldens
 
 workflow = source(".github/workflows/ci.yml")
-gres_filter = re.search(r"^\s{12}gres:\n(?P<body>.*?)(?=^\s{2}affected:)", workflow, re.MULTILINE | re.DOTALL)
+gres_filter = re.search(
+    r"^\s{12}gres:\n(?P<body>(?:^\s{14,}.*\n)+)",
+    workflow,
+    re.MULTILINE,
+)
 assert gres_filter, "missing Gres changed-files filter"
 for path in (
     "tools/capture-gres-driver-goldens.py",
