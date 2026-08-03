@@ -5622,17 +5622,13 @@ fn writable_local_indexes(
     Ok(local_indexes)
 }
 
-/// Whether a DML statement must hold the engine's `unique_index_lock` SHARED
-/// for its duration (until COMMIT/ROLLBACK in an explicit transaction).
-///
-/// Shared mode never blocks other DML. It only lets unique-index DDL (CREATE
-/// UNIQUE INDEX backfill, CREATE TABLE with a unique constraint), which takes
-/// the same lock EXCLUSIVELY, wait out in-flight writers and block new ones
-/// while it scans. Same-key DML conflicts serialize through per-key locks in
-/// the `RowLockManager` instead (see `enforce_unique_local_index`).
+/// The relation whose unique-index gate a DML statement must hold SHARED for
+/// its duration (until COMMIT/ROLLBACK in an explicit transaction). Unique-index
+/// DDL takes that relation's gate EXCLUSIVELY while it backfills. Same-key DML
+/// conflicts serialize through per-key locks in the `RowLockManager` instead.
 pub(crate) enum UniqueLocalSerialization {
     None,
-    Shared,
+    Shared(crabka_pgcatalog::TableId),
 }
 
 pub(crate) fn write_requires_unique_local_serialization(
@@ -5870,19 +5866,23 @@ pub(crate) fn ddl_table_id_demand(stmt: &Statement) -> TableIdDemand {
     }
 }
 
-pub(crate) fn ddl_requires_unique_local_serialization(stmt: &Statement) -> bool {
+pub(crate) fn ddl_unique_local_relation(
+    stmt: &Statement,
+) -> Option<&crabka_pgparser::ast::RelationRef> {
     match stmt {
         Statement::CreateIndex {
             unique: true,
             placement: crabka_pgparser::ast::IndexPlacement::Local,
+            table,
             ..
         }
         // ADD PRIMARY KEY / ADD UNIQUE back-validates and backfills a local
         // unique index, so it must wait out in-flight writers exactly like
         // CREATE UNIQUE INDEX does.
-        => true,
-        Statement::AlterTable { actions, .. } => actions.iter().any(|action| {
-            matches!(
+        => Some(table),
+        Statement::AlterTable { table, actions, .. }
+            if actions.iter().any(|action| {
+                matches!(
                 action,
                 crabka_pgparser::ast::AlterTableAction::AddConstraint(
                     crabka_pgparser::ast::TableConstraint {
@@ -5891,14 +5891,11 @@ pub(crate) fn ddl_requires_unique_local_serialization(stmt: &Statement) -> bool 
                         ..
                     }
                 )
-            )
-        }),
-        Statement::CreateTable {
-            columns,
-            constraints,
-            ..
-        } => create_table_has_unique_constraint(columns, constraints),
-        _ => false,
+                )
+            }) => Some(table),
+        // A relation is not visible to DML until CREATE TABLE's catalog batch
+        // lands, so its inline unique-index backfill has no concurrent writer.
+        _ => None,
     }
 }
 
@@ -5921,27 +5918,6 @@ pub(crate) fn inheritance_merge_notices(
         }
     }
     Ok(notices)
-}
-
-fn create_table_has_unique_constraint(
-    columns: &[crabka_pgparser::ast::ColumnDef],
-    constraints: &[crabka_pgparser::ast::TableConstraint],
-) -> bool {
-    columns.iter().any(|column| {
-        column.constraints.iter().any(|constraint| {
-            matches!(
-                constraint.kind,
-                crabka_pgparser::ast::ColumnConstraintKind::PrimaryKey
-                    | crabka_pgparser::ast::ColumnConstraintKind::Unique { .. }
-            )
-        })
-    }) || constraints.iter().any(|constraint| {
-        matches!(
-            constraint.kind,
-            crabka_pgparser::ast::TableConstraintKind::PrimaryKey(_)
-                | crabka_pgparser::ast::TableConstraintKind::Unique { .. }
-        )
-    })
 }
 
 fn table_requires_unique_local_serialization(
@@ -5968,7 +5944,7 @@ fn table_requires_unique_local_serialization(
             ));
         }
     }
-    Ok(UniqueLocalSerialization::Shared)
+    Ok(UniqueLocalSerialization::Shared(table.id))
 }
 
 fn reject_unwritable_local_index(table: &Table) -> Result<(), ExecError> {
