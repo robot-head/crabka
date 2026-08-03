@@ -339,10 +339,16 @@ jobs:
               - 'scripts/gres-sharded-conformance.sh'
               - 'scripts/tests/gres_sharded_conformance_ci.py'
 
-  affected:
+  affected-plan:
     needs: changes
-    timeout-minutes: 90
+    timeout-minutes: 15
     runs-on: ubuntu-latest
+    permissions:
+      checks: write
+      contents: read
+      id-token: write
+      issues: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -351,11 +357,64 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
-      - name: Build and test affected targets
-        run: aspect affected --base "${{ github.event.pull_request.base.sha || github.event.before }}"
+      - name: Plan affected targets
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: aspect affected --mode plan --base "${{ github.event.pull_request.base.sha || github.event.before }}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: affected-plan
+          path: .aspect/affected-plan
+          retention-days: 1
+
+  affected-build:
+    needs: affected-plan
+    timeout-minutes: 120
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: affected-plan
+          path: .aspect/affected-plan
+      - uses: ./.github/actions/free-disk-space
+      - uses: ./.github/actions/setup-bazel
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+      - name: Build affected targets and tests
+        run: aspect affected --mode warm
+
+  affected-test:
+    needs: affected-build
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+      contents: read
+      id-token: write
+      issues: write
+      pull-requests: write
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: affected-plan
+          path: .aspect/affected-plan
+      - uses: ./.github/actions/setup-bazel
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          cache-save: false
+      - name: Test affected targets
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: aspect affected --mode test --shard "${{ matrix.shard }}" --shards 4
 
   docs:
-    needs: [changes, affected]
+    needs: [changes, affected-plan]
     if: ${{ github.event_name == 'pull_request' && needs.changes.outputs.docs == 'true' }}
     permissions:
       contents: read
@@ -366,7 +425,7 @@ jobs:
     secrets: inherit
 
   codegen-check:
-    needs: [changes, affected]
+    needs: [changes, affected-plan]
     if: ${{ github.event_name == 'pull_request' && needs.changes.outputs.codegen == 'true' }}
     permissions:
       contents: read
@@ -375,7 +434,7 @@ jobs:
     secrets: inherit
 
   codspeed:
-    needs: [changes, affected]
+    needs: [changes, affected-plan]
     if: ${{ github.event_name == 'pull_request' && needs.changes.outputs.codspeed == 'true' }}
     permissions:
       contents: read
@@ -384,7 +443,7 @@ jobs:
     secrets: inherit
 
   operator-e2e:
-    needs: affected
+    needs: affected-plan
     if: ${{ github.event_name == 'pull_request' }}
     permissions:
       contents: read
@@ -403,7 +462,7 @@ jobs:
         run: exit 1
 
   jvm-differential:
-    needs: [changes, affected]
+    needs: [changes, affected-plan]
     if: ${{ needs.changes.outputs.jvm_differential == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -471,7 +530,7 @@ jobs:
             "cargo creusot --replay -p crabka-verified && cargo creusot --replay -p crabka-throttle"
 
   gres-range-scaling:
-    needs: [changes, affected]
+    needs: [changes, affected-plan]
     if: ${{ needs.changes.outputs.gres == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -536,7 +595,7 @@ jobs:
           retention-days: 30
 
   gres-topology-process-nemesis:
-    needs: [changes, affected]
+    needs: [changes, affected-plan]
     if: ${{ needs.changes.outputs.gres == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -563,7 +622,7 @@ jobs:
           retention-days: 30
 
   gres-sharded-conformance:
-    needs: [changes, affected]
+    needs: [changes, affected-plan]
     if: ${{ needs.changes.outputs.gres == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -649,7 +708,7 @@ jobs:
 
   # Real-broker integration smoke test against testcontainers-spawned Kafka.
   client-core-integration:
-    needs: [changes, affected]
+    needs: [changes, affected-plan]
     if: ${{ needs.changes.outputs.client_core == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -680,7 +739,7 @@ jobs:
   # crabka-log integration: docker cp a JVM-produced partition dir out of
   # a Kafka container and re-read it with crabka-log.
   log-integration:
-    needs: [changes, affected]
+    needs: [changes, affected-plan]
     if: ${{ needs.changes.outputs.log == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -713,7 +772,7 @@ jobs:
   # `--lib --bins` walk never descends into these `tests/` binaries, so the
   # consumer's close()/coordinator-lifecycle code is only exercised here.
   client-consumer-integration:
-    needs: [changes, affected]
+    needs: [changes, affected-plan]
     if: ${{ needs.changes.outputs.client_consumer == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -747,7 +806,7 @@ jobs:
   # never descends into these `tests/` binaries, so StreamsMembership::start and
   # the heartbeat-coordinator lifecycle are only exercised here.
   client-streams-integration:
-    needs: [changes, affected]
+    needs: [changes, affected-plan]
     if: ${{ needs.changes.outputs.client_streams == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -792,7 +851,7 @@ jobs:
   # website snippets are in sync with their source (doc-drift guard). See
   # the Aspect docs task.
   doc-examples:
-    needs: [changes, affected]
+    needs: [changes, affected-plan]
     if: ${{ needs.changes.outputs.doc_examples == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -817,7 +876,7 @@ jobs:
   # `tests/` binaries, so the `unit` flag's `--lib --bins` walk never covers it.
   # (The Docker-only `jvm_differential` test is `#[ignore]` and skipped here.)
   grpc-gateway-integration:
-    needs: [changes, affected]
+    needs: [changes, affected-plan]
     if: ${{ needs.changes.outputs.grpc_gateway == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -852,7 +911,7 @@ jobs:
   # `--lib --bins` walk never descends into `tests/` binaries, so this job
   # provides the only line-level coverage for those paths.
   schema-registry-integration:
-    needs: [changes, affected]
+    needs: [changes, affected-plan]
     if: ${{ needs.changes.outputs.schema_registry == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -889,7 +948,7 @@ jobs:
   # the only PR-time coverage for the conformance harness. The conformance
   # report is uploaded as an artifact for inspection.
   traces-conformance:
-    needs: [changes, affected]
+    needs: [changes, affected-plan]
     if: ${{ needs.changes.outputs.traces == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -926,7 +985,7 @@ jobs:
   # run psql smoke coverage, then diff against a postgres:18 oracle with the
   # checked-in parity baseline. The parity reports are uploaded for triage.
   gres-conformance:
-    needs: [changes, affected]
+    needs: [changes, affected-plan]
     if: ${{ needs.changes.outputs.gres == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -1139,7 +1198,7 @@ jobs:
   # services, and CLI have most behavior behind tests/ targets rather than
   # unit tests.
   gres-integration:
-    needs: [changes, affected]
+    needs: [changes, affected-plan]
     if: ${{ needs.changes.outputs.gres == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -1175,7 +1234,7 @@ jobs:
   # integration suite on a dedicated runner; the Playwright E2E remains
   # ignored unless explicitly requested with its feature and environment.
   admin-ui-integration:
-    needs: [changes, affected]
+    needs: [changes, affected-plan]
     if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -1214,7 +1273,7 @@ jobs:
   # made a hung test waste >1.5h before surfacing. If a single test stalls
   # for more than half an hour something is wedged — fail fast and re-run.
   broker-jvm-acceptance:
-    needs: [changes, affected]
+    needs: [changes, affected-plan]
     if: ${{ needs.changes.outputs.broker_jvm == 'true' }}
     runs-on: ubuntu-latest
     # 45-minute budget: the suite grew (next-gen consumer-group + KIP-595
@@ -1276,7 +1335,7 @@ jobs:
   # in the patch view. Two `--no-report` runs share a profraw set,
   # then a single `report` produces the lcov.
   broker-integration:
-    needs: [changes, affected]
+    needs: [changes, affected-plan]
     if: ${{ needs.changes.outputs.broker_integration == 'true' }}
     runs-on: ubuntu-latest
     # 30-minute budget: this runs the whole non-ignored broker suite (plus
@@ -1320,7 +1379,7 @@ jobs:
   # Each tests/<name>.rs file must be listed with `--test <name>` so that
   # the codecov/patch check sees coverage for newly added test files.
   operator-integration:
-    needs: [changes, affected]
+    needs: [changes, affected-plan]
     if: ${{ needs.changes.outputs.helm_lint == 'true' }}
     timeout-minutes: 45
     runs-on: ubuntu-latest
@@ -1354,7 +1413,7 @@ jobs:
   # Runs on every PR as a gate (a regression flips a `.test` file to failing).
   # The `target/promql-conformance-report.txt` artifact is uploaded for triage.
   metrics-conformance:
-    needs: [changes, affected]
+    needs: [changes, affected-plan]
     if: ${{ needs.changes.outputs.metrics == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -1390,7 +1449,7 @@ jobs:
   # `cargo test` never touches Docker). Mirrors the metrics-differential nightly
   # job's runner/setup/caching.
   metrics-differential-prometheus:
-    needs: [changes, affected]
+    needs: [changes, affected-plan]
     if: ${{ needs.changes.outputs.metrics == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -1420,7 +1479,9 @@ jobs:
   gatekeeper-ci:
     needs:
       - changes
-      - affected
+      - affected-plan
+      - affected-build
+      - affected-test
       - docs
       - codegen-check
       - codspeed

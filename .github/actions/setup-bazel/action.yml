@@ -4,6 +4,10 @@ inputs:
   aspect-api-token:
     description: Aspect API token.
     required: true
+  cache-save:
+    description: Save Bazel caches when the job completes.
+    required: false
+    default: "true"
 runs:
   using: composite
   steps:
@@ -16,7 +20,7 @@ runs:
           - MODULE.bazel.lock
           - Cargo.lock
         external-cache: true
-        cache-save: true
+        cache-save: ${{ inputs.cache-save }}
     - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
       with:
         aspect-api-token: ${{ inputs.aspect-api-token }}

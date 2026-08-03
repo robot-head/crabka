@@ -121,6 +121,8 @@ def rust_package(
         test_compile_data = [],
         test_env = {},
         test_features = {},
+        lib_test_rustc_flags = [],
+        lib_test_size = "medium",
         test_tags = {},
         test_binaries = {},
         harnessless = [],
@@ -177,6 +179,8 @@ def rust_package(
             deps = all_crate_deps(normal_dev = True),
             env = runtime_env,
             rustc_env = lib_test_rustc_env,
+            rustc_flags = lib_test_rustc_flags,
+            size = lib_test_size,
         )
 
         rust_doc(

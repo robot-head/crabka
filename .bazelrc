@@ -23,10 +23,11 @@ build:ci --color=yes
 build:ci --curses=no
 build:ci --show_timestamps
 build:ci --compilation_mode=opt
-build:ci --strip=always
 build:ci --repo_env=ANDROID_HOME=
 build:ci --repo_env=ANDROID_SDK_ROOT=
 test:ci --build_tests_only
+test:ci --strip=never
+run:ci --strip=always
 
 # codspeed-criterion-compat selects its instrumented implementation with this cfg.
 build:codspeed --@rules_rust//rust/settings:extra_rustc_flag=--cfg=codspeed

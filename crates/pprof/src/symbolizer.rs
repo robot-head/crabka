@@ -654,7 +654,7 @@ mod tests {
         if is_llvm_cov_run() {
             return;
         }
-        let _ = object_symbol_anchor();
+        std::hint::black_box(object_symbol_anchor());
         let bytes = std::fs::read(std::env::current_exe().unwrap()).unwrap();
         let address = {
             let object = object::File::parse(bytes.as_slice()).unwrap();
@@ -704,7 +704,7 @@ mod tests {
         if is_llvm_cov_run() {
             return;
         }
-        let _ = object_symbol_anchor();
+        std::hint::black_box(object_symbol_anchor());
         let bytes = std::fs::read(std::env::current_exe().unwrap()).unwrap();
         let address = {
             let object = object::File::parse(bytes.as_slice()).unwrap();
@@ -757,7 +757,7 @@ mod tests {
         if is_llvm_cov_run() {
             return;
         }
-        let _ = object_symbol_anchor();
+        std::hint::black_box(object_symbol_anchor());
         let bytes = std::fs::read(std::env::current_exe().unwrap()).unwrap();
         let address = {
             let object = object::File::parse(bytes.as_slice()).unwrap();
@@ -862,7 +862,7 @@ mod tests {
         if is_llvm_cov_run() {
             return;
         }
-        let _ = object_symbol_anchor();
+        std::hint::black_box(object_symbol_anchor());
         let exe = std::env::current_exe().unwrap();
         let bytes = std::fs::read(&exe).unwrap();
         let address = object_symbol_anchor_address(&bytes);
@@ -887,7 +887,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn nearest_symbol_name_handles_zero_size_and_end_boundaries() {
-        let _ = object_symbol_anchor();
+        std::hint::black_box(object_symbol_anchor());
         let bytes = std::fs::read(std::env::current_exe().unwrap()).unwrap();
         let object = object::File::parse(bytes.as_slice()).unwrap();
         let symbols = object
@@ -1110,7 +1110,8 @@ mod tests {
     // Anchor symbol the Linux-only DWARF tests locate in the test binary.
     #[cfg(target_os = "linux")]
     #[inline(never)]
-    fn object_symbol_anchor() -> u64 {
+    #[unsafe(no_mangle)]
+    pub extern "C" fn object_symbol_anchor() -> u64 {
         42
     }
 }
