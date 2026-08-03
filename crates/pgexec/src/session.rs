@@ -97,12 +97,9 @@ pub(crate) struct TxnCtx {
     /// BEGIN). `now()`/`current_timestamp` are PG transaction-stable, so every
     /// statement in this block evaluates them against this single instant.
     pub(crate) txn_now: jiff::Timestamp,
-    /// Held (SHARED) by explicit transactions that have written local tables,
-    /// until COMMIT/ROLLBACK. Never blocks other DML — it lets unique-index
-    /// DDL (which takes the same lock exclusively) wait out this transaction's
-    /// writes before backfilling. Same-key unique conflicts serialize through
-    /// per-key locks in the `RowLockManager` instead.
-    pub(crate) unique_index_guard: Option<UniqueIndexGuard>,
+    /// One SHARED gate per relation an explicit transaction has written, held
+    /// until COMMIT/ROLLBACK so a backfill on that relation waits out the write.
+    pub(crate) unique_index_guards: HashMap<crabka_pgcatalog::TableId, UniqueIndexGuard>,
     /// Held after the first ordinary write until COMMIT/ROLLBACK so conversion
     /// cannot rewrite an in-progress xid version out from under its commit.
     pub(crate) table_write_guard: Option<TableWriteGuard>,
@@ -122,7 +119,7 @@ pub(crate) enum TableWriteGuard {
     Shared { _guard: OwnedRwLockReadGuard<()> },
 }
 
-/// A DML statement's SHARED hold on the engine's `unique_index_lock`. Unique
+/// A DML statement's SHARED hold on its relation's unique-index gate. Unique
 /// CREATE INDEX backfill (and CREATE TABLE with a unique constraint) takes the
 /// same lock exclusively, so it waits for in-flight writers and blocks new
 /// ones while it scans.
@@ -2408,7 +2405,7 @@ pub struct SqlSession {
     writer_fence: Arc<crate::WriterFence>,
     /// Retains the registry entry while this session can hold a writer lease.
     _coordination: Arc<crate::EngineCoordination>,
-    unique_index_lock: Arc<tokio::sync::RwLock<()>>,
+    unique_index_gates: Arc<crate::UniqueIndexGates>,
     committer: Arc<dyn crate::commit::Committer>,
     linearizer: Arc<dyn crate::read_gate::Linearizer>,
     persist_mode: crate::PersistMode,
@@ -2628,7 +2625,7 @@ pub(crate) struct SqlSessionConfig {
     pub table_write_gate: Arc<tokio::sync::RwLock<()>>,
     pub writer_fence: Arc<crate::WriterFence>,
     pub coordination: Arc<crate::EngineCoordination>,
-    pub unique_index_lock: Arc<tokio::sync::RwLock<()>>,
+    pub unique_index_gates: Arc<crate::UniqueIndexGates>,
     pub committer: Arc<dyn crate::commit::Committer>,
     pub linearizer: Arc<dyn crate::read_gate::Linearizer>,
     pub persist_mode: crate::PersistMode,
@@ -2888,7 +2885,7 @@ impl SqlSession {
             table_write_gate,
             writer_fence,
             coordination,
-            unique_index_lock,
+            unique_index_gates,
             committer,
             linearizer,
             persist_mode,
@@ -2937,7 +2934,7 @@ impl SqlSession {
             table_write_gate,
             writer_fence,
             _coordination: coordination,
-            unique_index_lock,
+            unique_index_gates,
             committer,
             linearizer,
             persist_mode,
@@ -6159,7 +6156,7 @@ impl SqlSession {
             written_rows: Vec::new(),
             // PG transaction-stable `now()`/`current_timestamp`: fix it once at BEGIN.
             txn_now: self.clock.now(),
-            unique_index_guard: None,
+            unique_index_guards: HashMap::new(),
             table_write_guard: None,
             writer_fence_guard: None,
             activity_started: false,
@@ -7450,26 +7447,48 @@ impl SqlSession {
         {
             context.table_write_guard = None;
         }
-        // The unique-index gate excludes OTHER sessions' in-flight writes from a
-        // backfill; a transaction never has to wait out its own, which are
-        // already complete and which the all-committed backfill snapshot sees.
-        // Dropping this session's shared hold first is therefore what keeps
-        // `BEGIN; INSERT …; CREATE UNIQUE INDEX …` from deadlocking against
-        // itself. A later write in the same transaction re-takes the hold.
-        //
         // The exclusive hold is taken BEFORE the catalog lock so that a DDL
         // statement waiting on a concurrent writer cannot also block unrelated
-        // DDL: `unique_index_lock` before `catalog_lock` is the one order any
+        // DDL: unique-index gate before `catalog_lock` is the one order any
         // path that wants both uses.
-        let _unique_guard = if crate::exec::ddl_requires_unique_local_serialization(stmt) {
-            if let TxnState::InTransaction(context) = &mut self.state {
-                context.unique_index_guard = None;
-            }
-            Some(Arc::clone(&self.unique_index_lock).write_owned().await)
+        let unique_target = crate::exec::ddl_unique_local_relation(stmt)
+            .map(|table| {
+                let relation = crate::relname::resolve_relation(
+                    self.catalog_kv.as_ref(),
+                    &self.resolution_scope(),
+                    table,
+                    crate::relname::SchemaDisposition::Reference,
+                )?;
+                let id = crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &relation)?.id;
+                Ok::<_, ExecError>((relation, id))
+            })
+            .transpose()?;
+        if unique_target.is_some()
+            && matches!(
+                &self.state,
+                TxnState::InTransaction(context) if !context.unique_index_guards.is_empty()
+            )
+        {
+            return Err(ExecError::Unsupported(
+                "unique-index DDL after writes in the same transaction is not supported".into(),
+            ));
+        }
+        let _unique_guard = if let Some((_, table)) = &unique_target {
+            Some(
+                self.unique_index_gates
+                    .for_table(*table)
+                    .write_owned()
+                    .await,
+            )
         } else {
             None
         };
         let _g = self.catalog_lock.lock().await;
+        if let Some((relation, table)) = &unique_target
+            && crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), relation)?.id != *table
+        {
+            return Err(ExecError::SerializationFailure);
+        }
         let resolution = self.resolution_scope();
         // SP40: IMPORT FOREIGN SCHEMA needs the registered scanner + current user
         // to discover foreign tables; the rest of DDL ignores the ForeignCtx.
@@ -7609,18 +7628,22 @@ impl SqlSession {
     }
 
     async fn ensure_unique_index_guard(&mut self, mode: UniqueLocalSerialization) {
-        if matches!(mode, UniqueLocalSerialization::None) {
+        let UniqueLocalSerialization::Shared(table) = mode else {
             return;
-        }
+        };
         match &self.state {
-            TxnState::InTransaction(ctx) if ctx.unique_index_guard.is_none() => {}
+            TxnState::InTransaction(ctx) if !ctx.unique_index_guards.contains_key(&table) => {}
             _ => return,
         }
         let guard = UniqueIndexGuard {
-            _guard: Arc::clone(&self.unique_index_lock).read_owned().await,
+            _guard: self
+                .unique_index_gates
+                .for_table(table)
+                .read_owned()
+                .await,
         };
         if let TxnState::InTransaction(ctx) = &mut self.state {
-            ctx.unique_index_guard = Some(guard);
+            ctx.unique_index_guards.insert(table, guard);
         }
     }
 
@@ -8038,8 +8061,12 @@ impl SqlSession {
                     stmt,
                 )? {
                     UniqueLocalSerialization::None => None,
-                    UniqueLocalSerialization::Shared => Some(UniqueIndexGuard {
-                        _guard: Arc::clone(&self.unique_index_lock).read_owned().await,
+                    UniqueLocalSerialization::Shared(table) => Some(UniqueIndexGuard {
+                        _guard: self
+                            .unique_index_gates
+                            .for_table(table)
+                            .read_owned()
+                            .await,
                     }),
                 };
                 // Autocommit UPDATE/DELETE's eval_plan_qual re-check reads range 0's
@@ -8249,8 +8276,12 @@ impl SqlSession {
                     copy,
                 )? {
                     UniqueLocalSerialization::None => None,
-                    UniqueLocalSerialization::Shared => Some(UniqueIndexGuard {
-                        _guard: Arc::clone(&self.unique_index_lock).read_owned().await,
+                    UniqueLocalSerialization::Shared(table) => Some(UniqueIndexGuard {
+                        _guard: self
+                            .unique_index_gates
+                            .for_table(table)
+                            .read_owned()
+                            .await,
                     }),
                 };
                 let xid = self.procarray.begin_write()?;

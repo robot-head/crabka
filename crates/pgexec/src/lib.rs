@@ -156,6 +156,7 @@ struct EngineCoordination {
     table_id_lock: Arc<tokio::sync::Mutex<()>>,
     table_write_gate: Arc<tokio::sync::RwLock<()>>,
     writer_fence: Arc<WriterFence>,
+    unique_index_gates: Arc<UniqueIndexGates>,
 }
 
 impl EngineCoordination {
@@ -165,7 +166,29 @@ impl EngineCoordination {
             table_id_lock: Arc::new(tokio::sync::Mutex::new(())),
             table_write_gate: Arc::new(tokio::sync::RwLock::new(())),
             writer_fence: Arc::new(WriterFence::new()),
+            unique_index_gates: Arc::new(UniqueIndexGates::default()),
         }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct UniqueIndexGates {
+    gates: Mutex<HashMap<crabka_pgcatalog::TableId, Weak<tokio::sync::RwLock<()>>>>,
+}
+
+impl UniqueIndexGates {
+    pub(crate) fn for_table(
+        &self,
+        table: crabka_pgcatalog::TableId,
+    ) -> Arc<tokio::sync::RwLock<()>> {
+        let mut gates = self.gates.lock().expect("unique-index gates");
+        gates.retain(|_, gate| gate.strong_count() != 0);
+        if let Some(gate) = gates.get(&table).and_then(Weak::upgrade) {
+            return gate;
+        }
+        let gate = Arc::new(tokio::sync::RwLock::new(()));
+        gates.insert(table, Arc::downgrade(&gate));
+        gate
     }
 }
 
@@ -450,12 +473,11 @@ pub struct SqlEngine {
     /// additionally retain `writer_fence` through their terminal outcome.
     pub(crate) table_write_gate: Arc<tokio::sync::RwLock<()>>,
     pub(crate) writer_fence: Arc<WriterFence>,
-    /// DML on local tables holds this SHARED (per statement, or until
-    /// COMMIT/ROLLBACK in an explicit transaction); unique-index DDL (CREATE
-    /// UNIQUE INDEX backfill, CREATE TABLE with a unique constraint) holds it
-    /// EXCLUSIVELY so its backfill scan cannot race in-flight writers.
+    /// DML on a local table holds that relation's gate SHARED (per statement,
+    /// or until COMMIT/ROLLBACK in an explicit transaction); unique-index DDL
+    /// holds the same relation's gate EXCLUSIVELY while it backfills.
     /// Same-key DML conflicts serialize through per-key locks in `lockmgr`.
-    pub(crate) unique_index_lock: Arc<tokio::sync::RwLock<()>>,
+    pub(crate) unique_index_gates: Arc<UniqueIndexGates>,
     pub(crate) committer: Arc<dyn crate::commit::Committer>,
     pub(crate) linearizer: Arc<dyn crate::read_gate::Linearizer>,
     pub(crate) persist_mode: PersistMode,
@@ -868,7 +890,7 @@ impl SqlEngine {
             table_id_lock: Arc::clone(&coordination.table_id_lock),
             table_write_gate: Arc::clone(&coordination.table_write_gate),
             writer_fence: Arc::clone(&coordination.writer_fence),
-            unique_index_lock: Arc::new(tokio::sync::RwLock::new(())),
+            unique_index_gates: Arc::clone(&coordination.unique_index_gates),
             committer,
             linearizer: Arc::new(crate::read_gate::LocalLinearizer),
             persist_mode: PersistMode::Durable,
@@ -1479,7 +1501,7 @@ impl SqlEngine {
             table_id_lock: Arc::clone(&coordination.table_id_lock),
             table_write_gate: Arc::clone(&coordination.table_write_gate),
             writer_fence: Arc::clone(&coordination.writer_fence),
-            unique_index_lock: Arc::new(tokio::sync::RwLock::new(())),
+            unique_index_gates: Arc::clone(&coordination.unique_index_gates),
             // Replicated engines never vacuum locally, so no demand-observing
             // wrapper and the sweep committer is the ordinary one.
             sweep_committer: Arc::clone(&committer),
@@ -1554,7 +1576,7 @@ impl SqlEngine {
             table_id_lock: Arc::clone(&self.table_id_lock),
             table_write_gate: Arc::clone(&self.table_write_gate),
             writer_fence: Arc::clone(&self.writer_fence),
-            unique_index_lock: Arc::clone(&self.unique_index_lock),
+            unique_index_gates: Arc::clone(&self.unique_index_gates),
             committer: Arc::clone(&self.committer),
             linearizer: Arc::clone(&self.linearizer),
             persist_mode: self.persist_mode,
@@ -3341,7 +3363,7 @@ impl Engine for SqlEngine {
             table_write_gate: Arc::clone(&self.table_write_gate),
             writer_fence: Arc::clone(&self.writer_fence),
             coordination: Arc::clone(&self.coordination),
-            unique_index_lock: Arc::clone(&self.unique_index_lock),
+            unique_index_gates: Arc::clone(&self.unique_index_gates),
             committer: Arc::clone(&self.committer),
             linearizer: Arc::clone(&self.linearizer),
             persist_mode: self.persist_mode,

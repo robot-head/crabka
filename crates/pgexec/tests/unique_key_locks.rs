@@ -268,16 +268,15 @@ async fn unique_index_backfill_waits_for_inflight_dml() {
     assert!(err_code(&mut s, "INSERT INTO t VALUES (1, 'dup')").await == "23505");
 }
 
-/// (e2) The gate excludes OTHER sessions' writes, never the DDL's own. A
-/// transaction that has already written holds the gate SHARED; running unique
-/// DDL from that same transaction must release that hold before taking the
-/// exclusive one, or the statement waits on a lock only it could ever free.
+/// (e2) A transaction cannot safely upgrade its retained shared gate while a
+/// competing backfill may already be queued. Reject that unsupported shape
+/// promptly instead of self-deadlocking or allowing an invalid backfill.
 ///
 /// `pg_regress`'s `join` corpus is exactly this shape — `BEGIN; CREATE TABLE
 /// fkest …; INSERT INTO fkest SELECT … generate_series(1,1000); CREATE UNIQUE
 /// INDEX ON fkest(…)` — and it must answer, not hang.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn unique_ddl_inside_its_own_writing_transaction_does_not_self_deadlock() {
+async fn unique_ddl_after_a_write_is_rejected_instead_of_self_deadlocking() {
     let engine = Arc::new(SqlEngine::new());
     let mut t1 = engine.connect();
     run(&mut t1, "BEGIN").await;
@@ -289,17 +288,13 @@ async fn unique_ddl_inside_its_own_writing_transaction_does_not_self_deadlock() 
     )
     .await;
 
-    tokio::time::timeout(
+    let code = tokio::time::timeout(
         Duration::from_secs(30),
-        run(&mut t1, "CREATE UNIQUE INDEX ON fkest (x, x10)"),
+        err_code(&mut t1, "CREATE UNIQUE INDEX ON fkest (x, x10)"),
     )
     .await
     .expect("unique DDL deadlocked against its own transaction's shared hold");
-
-    // The backfill saw this transaction's own uncommitted rows, so the finished
-    // index enforces against them, and a further write re-takes the released
-    // shared hold rather than running ungated.
-    assert!(err_code(&mut t1, "INSERT INTO fkest VALUES (1, 0)").await == "23505");
+    assert!(code == "0A000");
     run(&mut t1, "ROLLBACK").await;
 }
 
@@ -340,6 +335,146 @@ async fn a_blocked_backfill_does_not_stall_unrelated_ddl() {
         .await
         .expect("backfill did not hang")
         .expect("ddl join");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_blocked_backfill_does_not_stall_unrelated_dml() {
+    let engine = Arc::new(SqlEngine::new());
+    let mut setup = engine.connect();
+    run(
+        &mut setup,
+        "CREATE TABLE t (id int); CREATE TABLE u (id int)",
+    )
+    .await;
+
+    let mut writer = engine.connect();
+    run(&mut writer, "BEGIN; INSERT INTO t VALUES (1)").await;
+
+    let ddl_engine = Arc::clone(&engine);
+    let ddl = tokio::spawn(async move {
+        let mut session = ddl_engine.connect();
+        run(&mut session, "CREATE UNIQUE INDEX ON t (id)").await;
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!ddl.is_finished());
+
+    let mut unrelated = engine.connect();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        run(&mut unrelated, "INSERT INTO u VALUES (1)"),
+    )
+    .await
+    .expect("unrelated DML blocked behind another relation's backfill");
+
+    run(&mut writer, "COMMIT").await;
+    tokio::time::timeout(Duration::from_secs(10), ddl)
+        .await
+        .expect("backfill did not finish")
+        .expect("ddl join");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_transaction_gates_each_relation_it_writes() {
+    let engine = Arc::new(SqlEngine::new());
+    let mut setup = engine.connect();
+    run(
+        &mut setup,
+        "CREATE TABLE t (id int); CREATE TABLE u (id int)",
+    )
+    .await;
+
+    let mut writer = engine.connect();
+    run(
+        &mut writer,
+        "BEGIN; INSERT INTO t VALUES (1); INSERT INTO u VALUES (1)",
+    )
+    .await;
+
+    let mut backfills = Vec::new();
+    for table in ["t", "u"] {
+        let engine = Arc::clone(&engine);
+        backfills.push(tokio::spawn(async move {
+            let mut session = engine.connect();
+            run(
+                &mut session,
+                &format!("CREATE UNIQUE INDEX ON {table} (id)"),
+            )
+            .await;
+        }));
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(backfills.iter().all(|backfill| !backfill.is_finished()));
+
+    run(&mut writer, "COMMIT").await;
+    for backfill in backfills {
+        tokio::time::timeout(Duration::from_secs(10), backfill)
+            .await
+            .expect("backfill did not finish")
+            .expect("ddl join");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn crossed_transactional_backfills_are_rejected_without_deadlock() {
+    let engine = Arc::new(SqlEngine::new());
+    let mut setup = engine.connect();
+    run(
+        &mut setup,
+        "CREATE TABLE a (id int); CREATE TABLE b (id int)",
+    )
+    .await;
+
+    let mut t1 = engine.connect();
+    let mut t2 = engine.connect();
+    run(&mut t1, "BEGIN; INSERT INTO a VALUES (1)").await;
+    run(&mut t2, "BEGIN; INSERT INTO b VALUES (1)").await;
+
+    let first = tokio::spawn(async move {
+        err_code(&mut t1, "CREATE UNIQUE INDEX b_id_idx ON b (id)").await
+    });
+    let second = tokio::spawn(async move {
+        err_code(&mut t2, "CREATE UNIQUE INDEX a_id_idx ON a (id)").await
+    });
+
+    let codes = tokio::time::timeout(Duration::from_secs(10), async {
+        [first.await.expect("first join"), second.await.expect("second join")]
+    })
+    .await
+    .expect("crossed transactional backfills deadlocked");
+    assert!(codes == ["0A000", "0A000"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn prequeued_backfill_remains_blocked_when_transactional_ddl_is_rejected() {
+    let engine = Arc::new(SqlEngine::new());
+    let mut setup = engine.connect();
+    run(&mut setup, "CREATE TABLE t (id int)").await;
+
+    let mut writer = engine.connect();
+    run(&mut writer, "BEGIN; INSERT INTO t VALUES (1)").await;
+    let other_engine = Arc::clone(&engine);
+    let other = tokio::spawn(async move {
+        let mut session = other_engine.connect();
+        run(
+            &mut session,
+            "CREATE UNIQUE INDEX t_id_idx ON t (id)",
+        )
+        .await;
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!other.is_finished());
+
+    assert!(
+        err_code(&mut writer, "CREATE UNIQUE INDEX t_id_idx_2 ON t (id)").await == "0A000"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!other.is_finished());
+
+    run(&mut writer, "ROLLBACK").await;
+    tokio::time::timeout(Duration::from_secs(10), other)
+        .await
+        .expect("competing backfill stayed blocked after commit")
+        .expect("other join");
 }
 
 /// (f) An UPDATE that leaves every unique-indexed column unchanged takes NO

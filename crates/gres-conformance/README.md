@@ -111,9 +111,8 @@ The adopted-corpus score (`9323/14272`) remains useful diagnostic evidence, but
 it is not the compatibility headline. Compatibility is the upstream 231-test
 serial and parallel result. The checked-in baseline-eligible serial run is
 `6/231` with 225 semantic failures. The latest infrastructure-clean review run
-is `8/231` with 223 semantic failures after `test_setup` and `portals_p2`
-passed; it improves 84 other tests, but complete fixture loading also enlarges
-14 diffs and changes 19 equal-sized fingerprints. It therefore records observed
+is `8/231` with 223 semantic failures after `portals_p2`
+passed, with 154980 changed lines across 4499 hunks. It records observed
 conformance without replacing the monotone baseline. Neither result satisfies
 the 231/231 completion gate.
 
