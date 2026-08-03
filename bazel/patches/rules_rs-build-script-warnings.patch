@@ -1,0 +1,14 @@
+diff --git a/rs/rust_crate.bzl b/rs/rust_crate.bzl
+--- a/rs/rust_crate.bzl
++++ b/rs/rust_crate.bzl
+@@ -91,6 +91,10 @@ def rust_crate(
+             build_script_env_files = ["cargo_toml_env_vars.env"],
+             toolchains = build_script_toolchains,
+             tools = build_script_tools,
++            # Match Cargo and rules_rust: registry and git dependency build
++            # scripts stay quiet, while first-party cargo_build_script targets
++            # retain their default warning behavior.
++            emit_warnings = False,
+             edition = edition,
+             pkg_name = crate_name,
+             rustc_env = rustc_env,

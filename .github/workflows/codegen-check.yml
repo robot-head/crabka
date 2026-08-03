@@ -1,25 +1,27 @@
 name: codegen-check
 on:
   workflow_call:
-  push:
-    branches: [main]
-    paths:
-      - 'crates/protocol/**'
-      - 'crates/protocol-codegen/**'
-      - 'deploy/crds/**'
-      - 'tools/regenerate.sh'
-      - 'tools/regen-crds.sh'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.github/workflows/codegen-check.yml'
+    inputs:
+      affected_cache:
+        description: Restore the root CI dependency warmer cache read-only.
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: codegen-check-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
+  actions: read
   contents: read
   id-token: write
+
+env:
+  AFFECTED_ARTIFACT_SCOPE: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'main' }}
+  AFFECTED_ARTIFACT_BRANCH: ${{ github.head_ref || github.ref_name }}
+  AFFECTED_ARTIFACT_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id || github.repository_id }}
+  NODE_OPTIONS: --disable-warning=DEP0005 --disable-warning=DEP0040
 
 jobs:
   drift:
@@ -30,6 +32,6 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
-          cache-save: true
-          disk-cache: codegen
+          cache-save: ${{ !inputs.affected_cache }}
+          disk-cache: ${{ inputs.affected_cache && 'affected' || 'codegen' }}
       - run: aspect codegen --task:name=codegen-drift

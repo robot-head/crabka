@@ -25,7 +25,6 @@ spec:
             properties:
               clientDispatchQueueCapacity:
                 description: Kafka client request-dispatch queue capacity.
-                format: uint
                 minimum: 1.0
                 nullable: true
                 type: integer
@@ -39,14 +38,12 @@ spec:
                 type: string
               nodeIdStart:
                 description: First node id. Pod ordinal `i` -> `node_id = nodeIdStart + i`.
-                format: int32
                 maximum: 999999.0
                 minimum: 0.0
                 type: integer
               replicas:
                 default: 1
                 description: 'Number of pods. Validation: must equal 1.'
-                format: int32
                 maximum: 1.0
                 minimum: 1.0
                 type: integer
@@ -121,7 +118,8 @@ spec:
                         class:
                           type: string
                         id:
-                          format: int32
+                          maximum: 2147483647.0
+                          minimum: -2147483648.0
                           type: integer
                         size:
                           type: string
@@ -197,7 +195,8 @@ spec:
                                   type: object
                                 weight:
                                   description: Weight associated with matching the corresponding nodeSelectorTerm, in the range 1-100.
-                                  format: int32
+                                  maximum: 2147483647.0
+                                  minimum: -2147483648.0
                                   type: integer
                               required:
                               - preference
@@ -354,7 +353,8 @@ spec:
                                   type: object
                                 weight:
                                   description: weight associated with matching the corresponding podAffinityTerm, in the range 1-100.
-                                  format: int32
+                                  maximum: 2147483647.0
+                                  minimum: -2147483648.0
                                   type: integer
                               required:
                               - podAffinityTerm
@@ -543,7 +543,8 @@ spec:
                                   type: object
                                 weight:
                                   description: weight associated with matching the corresponding podAffinityTerm, in the range 1-100.
-                                  format: int32
+                                  maximum: 2147483647.0
+                                  minimum: -2147483648.0
                                   type: integer
                               required:
                               - podAffinityTerm
@@ -674,7 +675,6 @@ spec:
                           type: string
                         tolerationSeconds:
                           description: TolerationSeconds represents the period of time the toleration (which must be of effect NoExecute, otherwise this field is ignored) tolerates the taint. By default, it is not set, which means tolerate the taint forever (do not evict). Zero and negative values will be treated as 0 (evict immediately) by the system.
-                          format: int64
                           type: integer
                         value:
                           description: Value is the taint value the toleration matches to. If the operator is Exists, the value should be empty, otherwise just a regular string.
@@ -719,12 +719,14 @@ spec:
                 type: array
               readyReplicas:
                 description: Mirrors `StatefulSet.status.readyReplicas`.
-                format: int32
+                maximum: 2147483647.0
+                minimum: -2147483648.0
                 nullable: true
                 type: integer
               replicas:
                 description: Mirrors `StatefulSet.status.replicas`.
-                format: int32
+                maximum: 2147483647.0
+                minimum: -2147483648.0
                 nullable: true
                 type: integer
             type: object

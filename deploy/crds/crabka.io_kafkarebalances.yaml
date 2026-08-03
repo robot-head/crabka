@@ -41,7 +41,6 @@ spec:
                   Replication throttle (bytes/sec) applied while the proposal
                   executes (KIP-73). When omitted the rebalancer falls back to its
                   own `--default-throttle-bytes-per-sec`.
-                format: int64
                 minimum: 1.0
                 nullable: true
                 type: integer
@@ -84,7 +83,6 @@ spec:
                 description: |-
                   `metadata.generation` of the last spec that produced the current
                   proposal (advanced when a fresh proposal is computed).
-                format: int64
                 nullable: true
                 type: integer
               optimizationResult:
@@ -99,32 +97,38 @@ spec:
                   leaderMovements:
                     default: 0
                     description: Number of leadership changes in the proposal.
-                    format: int32
+                    maximum: 2147483647.0
+                    minimum: -2147483648.0
                     type: integer
                   maxLeadersAfter:
                     default: 0
                     description: Max partitions led by any one broker after the proposal applies.
-                    format: int32
+                    maximum: 2147483647.0
+                    minimum: -2147483648.0
                     type: integer
                   maxLeadersBefore:
                     default: 0
                     description: Max partitions led by any one broker before the proposal applies.
-                    format: int32
+                    maximum: 2147483647.0
+                    minimum: -2147483648.0
                     type: integer
                   maxReplicasAfter:
                     default: 0
                     description: Max replicas on any one broker after the proposal applies.
-                    format: int32
+                    maximum: 2147483647.0
+                    minimum: -2147483648.0
                     type: integer
                   maxReplicasBefore:
                     default: 0
                     description: Max replicas on any one broker before the proposal applies.
-                    format: int32
+                    maximum: 2147483647.0
+                    minimum: -2147483648.0
                     type: integer
                   replicaMovements:
                     default: 0
                     description: Number of partition replica reassignments in the proposal.
-                    format: int32
+                    maximum: 2147483647.0
+                    minimum: -2147483648.0
                     type: integer
                 type: object
               sessionId:

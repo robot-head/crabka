@@ -99,7 +99,6 @@ spec:
                     type: string
                   partitions:
                     description: Number of partitions for the dedup topic. Default 8.
-                    format: uint32
                     maximum: 2147483647.0
                     minimum: 1.0
                     nullable: true
@@ -128,22 +127,22 @@ spec:
                 nullable: true
                 properties:
                   livenessInitialDelaySeconds:
-                    format: int32
+                    maximum: 2147483647.0
                     minimum: 0.0
                     nullable: true
                     type: integer
                   livenessPeriodSeconds:
-                    format: int32
+                    maximum: 2147483647.0
                     minimum: 1.0
                     nullable: true
                     type: integer
                   readinessInitialDelaySeconds:
-                    format: int32
+                    maximum: 2147483647.0
                     minimum: 0.0
                     nullable: true
                     type: integer
                   readinessPeriodSeconds:
-                    format: int32
+                    maximum: 2147483647.0
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -202,7 +201,7 @@ spec:
                       description: |-
                         Maximum number of delivery attempts before moving the record to
                         the dead-letter topic. Default 5.
-                      format: uint32
+                      maximum: 4294967295.0
                       minimum: 1.0
                       nullable: true
                       type: integer
@@ -250,7 +249,7 @@ spec:
                 type: array
               replicas:
                 description: Number of gateway replicas. Defaults to 1 when absent.
-                format: int32
+                maximum: 2147483647.0
                 minimum: 1.0
                 nullable: true
                 type: integer
@@ -325,7 +324,6 @@ spec:
                     description: |-
                       Fraction of traces to sample in the range `[0.0, 1.0]`.
                       Default 1.0 (sample everything).
-                    format: double
                     maximum: 1.0
                     minimum: 0.0
                     nullable: true
@@ -349,7 +347,7 @@ spec:
                     type: string
                   validityDays:
                     description: Serving-cert lifetime in days. Default 365.
-                    format: uint32
+                    maximum: 4294967295.0
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -360,7 +358,6 @@ spec:
                 properties:
                   clientDispatchQueueCapacity:
                     description: Kafka client request-dispatch queue capacity.
-                    format: uint
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -384,7 +381,6 @@ spec:
                     nullable: true
                     type: string
                   internalTopicReplicationFactor:
-                    format: int16
                     maximum: 32767.0
                     minimum: 1.0
                     nullable: true
@@ -393,7 +389,7 @@ spec:
                     nullable: true
                     type: string
                   ownershipWarmupEmptyPolls:
-                    format: uint32
+                    maximum: 4294967295.0
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -538,12 +534,12 @@ spec:
                 type: array
               observedGeneration:
                 description: '`metadata.generation` of the last successfully-reconciled spec.'
-                format: int64
                 nullable: true
                 type: integer
               readyReplicas:
                 description: Number of gateway replicas currently reporting Ready.
-                format: int32
+                maximum: 2147483647.0
+                minimum: -2147483648.0
                 nullable: true
                 type: integer
             type: object

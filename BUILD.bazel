@@ -14,6 +14,7 @@ exports_files([
     "Cargo.lock",
     "Cargo.toml",
     ".github/workflows/ci.yml",
+    "bazel/patches/rules_rs-build-script-warnings.patch",
     "bazel/integration_test.bzl",
     "deploy/crds/crabka.io_greses.yaml",
     "deploy/crds/crabka.io_grestenants.yaml",

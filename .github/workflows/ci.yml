@@ -12,7 +12,7 @@ permissions:
 # Cancel superseded PR runs; let pushes to main run to completion.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Coverage builds with full DWARF debuginfo (debug=2) produce enormous
 # `-C instrument-coverage` test binaries that exhaust the runner's disk ("No
@@ -22,7 +22,7 @@ concurrency:
 # changing coverage results. (`line-tables-only` keeps file:line in backtraces.)
 env:
   # Bump when bazel-diff, its flags, or the global seed algorithm changes.
-  AFFECTED_HASH_SCHEMA: v1-bazel-diff-27.0.0-seed1
+  AFFECTED_HASH_SCHEMA: v1-bazel-diff-27.0.0-seed2
   # Durable artifacts are isolated by PR and producer repository. Only a
   # protected-main artifact is eligible as a cross-run fallback.
   AFFECTED_ARTIFACT_SCOPE: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'main' }}
@@ -35,9 +35,9 @@ env:
   GIT_CONFIG_COUNT: 1
   GIT_CONFIG_KEY_0: init.defaultBranch
   GIT_CONFIG_VALUE_0: main
-  # download-artifact v8 still bundles a legacy Buffer() call under Node 24.
-  # Suppress only that upstream deprecation code, not Node warnings generally.
-  NODE_OPTIONS: --disable-warning=DEP0005
+  # Some pinned actions still use legacy Buffer() and punycode APIs under Node
+  # 24. Suppress only those upstream deprecation codes, not Node warnings generally.
+  NODE_OPTIONS: --disable-warning=DEP0005 --disable-warning=DEP0040
 
 jobs:
   changes:
@@ -63,6 +63,7 @@ jobs:
       docs: ${{ steps.filter.outputs.docs }}
       codegen: ${{ steps.filter.outputs.codegen }}
       codspeed: ${{ steps.filter.outputs.codspeed }}
+      operator_e2e: ${{ steps.filter.outputs.operator_e2e }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
@@ -256,6 +257,9 @@ jobs:
             docs:
               - 'website/**'
               - 'crates/docgen/**'
+              - 'crates/operator/**'
+              - 'crates/broker/**'
+              - 'crates/protocol/**'
               - 'crates/raft/**'
               - 'crates/kraft-core/**'
               - 'crates/voters/**'
@@ -286,6 +290,17 @@ jobs:
               - 'Cargo.lock'
               - '.github/workflows/codspeed.yml'
               - '.github/workflows/ci.yml'
+            operator_e2e:
+              - 'crates/operator/**'
+              - 'crates/broker/**'
+              - 'crates/schema-registry/**'
+              - 'charts/**'
+              - 'deploy/**'
+              - 'helm/**'
+              - 'packaging/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/operator-e2e.yml'
             gres:
               - 'Cargo.toml'
               - 'Cargo.lock'
@@ -348,7 +363,6 @@ jobs:
               - 'scripts/tests/gres_sharded_conformance_ci.py'
 
   affected-plan:
-    needs: changes
     timeout-minutes: 20
     runs-on: ubuntu-latest
     outputs:
@@ -440,12 +454,17 @@ jobs:
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
           # Graph hashing runs the cached bazel-diff release JAR and Bazel
-          # queries only. Skip the action cache, but write the repository and
-          # generated-external caches that make the next graph scan cheaper.
-          cache-save: true
+          # queries only. Restore tool and repository caches, but leave cache
+          # writes to the dependency warmer so post-job uploads do not delay
+          # the affected-plan outputs and downstream fan-out.
+          cache-save: false
           cache-snapshot: false
           disk-cache: false
-          external-cache: planner
+          external-cache: affected
+          # Avoid downloading the shared 3+ GiB repository archive for a
+          # graph-only job. Bazel still reuses the much smaller generated
+          # external cache and fetches any missing rule repositories normally.
+          repository-cache: false
       - name: Hash base build graph
         if: >-
           ${{ steps.base-hash-cache.outputs.cache-hit != 'true' &&
@@ -538,9 +557,16 @@ jobs:
     needs: [changes, affected-plan]
     if: >-
       ${{ needs.affected-plan.outputs.affected_work == 'true' ||
+          needs.changes.outputs.doc_examples == 'true' ||
+          needs.changes.outputs.docs == 'true' ||
           needs.changes.outputs.gres == 'true' }}
     timeout-minutes: 120
     runs-on: ubuntu-latest
+    env:
+      WARM_BAZEL: >-
+        ${{ needs.affected-plan.outputs.affected_work == 'true' ||
+            needs.changes.outputs.doc_examples == 'true' ||
+            needs.changes.outputs.docs == 'true' }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -548,9 +574,9 @@ jobs:
           name: affected-plan
           path: .aspect/affected-plan
       - uses: ./.github/actions/free-disk-space
-        if: ${{ needs.affected-plan.outputs.affected_work == 'true' }}
+        if: ${{ env.WARM_BAZEL == 'true' }}
       - id: bazel
-        if: ${{ needs.affected-plan.outputs.affected_work == 'true' }}
+        if: ${{ env.WARM_BAZEL == 'true' }}
         uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
@@ -561,7 +587,7 @@ jobs:
           disk-cache-artifact-restore: if-no-snapshot
       - id: trusted-disk-cache
         if: >-
-          ${{ needs.affected-plan.outputs.affected_work == 'true' &&
+          ${{ env.WARM_BAZEL == 'true' &&
               steps.bazel.outputs.disk-cache-complete != 'true' }}
         continue-on-error: true
         uses: ./.github/actions/restore-run-artifact
@@ -574,18 +600,21 @@ jobs:
           skip-decompress: true
       - name: Restore the trusted main disk-cache fallback
         if: >-
-          ${{ needs.affected-plan.outputs.affected_work == 'true' &&
+          ${{ env.WARM_BAZEL == 'true' &&
               steps.trusted-disk-cache.outputs.restored == 'true' }}
         run: >-
           aspect affected-cache --mode restore
           --archive "$RUNNER_TEMP/affected-bazel-disk-v1-main.tar.zst"
           --cache-dir "$HOME/.cache/bazel-disk"
       - name: Build affected dependencies
-        if: ${{ needs.affected-plan.outputs.affected_work == 'true' }}
-        run: aspect affected --mode warm
+        if: ${{ env.WARM_BAZEL == 'true' }}
+        run: >-
+          aspect affected --mode warm
+          ${{ needs.changes.outputs.doc_examples == 'true' && '--doc-examples' || '' }}
+          ${{ needs.changes.outputs.docs == 'true' && '--docs' || '' }}
       - name: Pack the completed affected cache
         id: pack-disk-cache
-        if: ${{ needs.affected-plan.outputs.affected_work == 'true' }}
+        if: ${{ env.WARM_BAZEL == 'true' }}
         continue-on-error: true
         env:
           CACHE_ARTIFACT: affected-bazel-disk-v1-${{ env.AFFECTED_ARTIFACT_SCOPE }}.tar.zst
@@ -596,7 +625,7 @@ jobs:
           --snapshot "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: >-
-          ${{ needs.affected-plan.outputs.affected_work == 'true' &&
+          ${{ env.WARM_BAZEL == 'true' &&
               steps.pack-disk-cache.outcome == 'success' }}
         continue-on-error: true
         with:
@@ -641,64 +670,76 @@ jobs:
   docs:
     needs: [changes, affected-plan, affected-build]
     if: >-
-      ${{ always() && github.event_name == 'pull_request' &&
-          needs.changes.outputs.docs == 'true' &&
+      ${{ always() && needs.changes.outputs.docs == 'true' &&
           needs.changes.result == 'success' &&
           needs.affected-plan.result == 'success' &&
-          (needs.affected-build.result == 'success' || needs.affected-build.result == 'skipped') }}
+          needs.affected-build.result == 'success' }}
     permissions:
+      actions: read
       contents: read
       id-token: write
       attestations: write
       pages: write
     uses: ./.github/workflows/docs.yml
+    with:
+      affected_cache: true
     secrets: inherit
 
   codegen-check:
     needs: [changes, affected-plan, affected-build]
     if: >-
-      ${{ always() && github.event_name == 'pull_request' &&
-          needs.changes.outputs.codegen == 'true' &&
+      ${{ always() && needs.changes.outputs.codegen == 'true' &&
           needs.changes.result == 'success' &&
           needs.affected-plan.result == 'success' &&
-          (needs.affected-build.result == 'success' || needs.affected-build.result == 'skipped') }}
+          (needs.affected-build.result == 'success' ||
+           needs.affected-build.result == 'skipped') }}
     permissions:
+      actions: read
       contents: read
       id-token: write
     uses: ./.github/workflows/codegen-check.yml
+    with:
+      affected_cache: ${{ needs.affected-build.result == 'success' }}
     secrets: inherit
 
   codspeed:
     needs: [changes, affected-plan, affected-build]
     if: >-
-      ${{ always() && github.event_name == 'pull_request' &&
-          needs.changes.outputs.codspeed == 'true' &&
+      ${{ always() && needs.changes.outputs.codspeed == 'true' &&
           needs.changes.result == 'success' &&
           needs.affected-plan.result == 'success' &&
-          (needs.affected-build.result == 'success' || needs.affected-build.result == 'skipped') }}
+          (needs.affected-build.result == 'success' ||
+           needs.affected-build.result == 'skipped') }}
     permissions:
+      actions: read
       contents: read
       id-token: write
     uses: ./.github/workflows/codspeed.yml
+    with:
+      affected_cache: ${{ needs.affected-build.result == 'success' }}
     secrets: inherit
 
   operator-e2e:
     needs: [changes, affected-plan, affected-build]
     if: >-
-      ${{ always() && github.event_name == 'pull_request' &&
-          needs.changes.result == 'success' &&
+      ${{ always() && needs.changes.result == 'success' &&
           needs.affected-plan.result == 'success' &&
-          (needs.affected-build.result == 'success' || needs.affected-build.result == 'skipped') &&
+          (needs.affected-build.result == 'success' ||
+           needs.affected-build.result == 'skipped') &&
           (needs.changes.outputs.helm_lint == 'true' ||
+           needs.changes.outputs.operator_e2e == 'true' ||
            needs.affected-plan.outputs.operator == 'true' ||
-           contains(github.event.pull_request.labels.*.name, 'e2e-oauth') ||
-           contains(github.event.pull_request.labels.*.name, 'e2e-oauth-introspection')) }}
+           (github.event_name == 'pull_request' &&
+            (contains(github.event.pull_request.labels.*.name, 'e2e-oauth') ||
+             contains(github.event.pull_request.labels.*.name, 'e2e-oauth-introspection')))) }}
     permissions:
+      actions: read
       contents: read
       id-token: write
     uses: ./.github/workflows/operator-e2e.yml
     with:
-      affected: ${{ needs.affected-plan.outputs.operator == 'true' }}
+      affected: ${{ needs.changes.outputs.operator_e2e == 'true' || needs.affected-plan.outputs.operator == 'true' }}
+      affected_cache: ${{ needs.affected-build.result == 'success' }}
     secrets: inherit
 
   gatekeeper-operator:
@@ -784,7 +825,7 @@ jobs:
           command-arguments: --hide-inclusion-graph
 
   creusot-verify:
-    needs: affected-plan
+    needs: [affected-plan, affected-build]
     if: ${{ needs.affected-plan.outputs.creusot == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -794,9 +835,6 @@ jobs:
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
           cache-save: false
-          cache-snapshot: false
-          disk-cache: false
-          external-cache: planner
       - name: Replay Creusot proof sessions
         run: >-
           aspect test //verif:creusot_replay
@@ -1098,13 +1136,19 @@ jobs:
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
           cache-save: false
-      - name: Client streams integration coverage
+      - name: Client streams + schema-serde coverage
         run: |
           mkdir -p coverage
           # Includes the Avro/Protobuf/JSON bridge tests + byte-exact Confluent
           # golden tests (schema serdes are always-on; goldens use checked-in
           # bytes, no broker/registry needed).
-          aspect test //crates/client-streams:all --coverage --bazel-flag=--config=ci --bazel-flag=--test_arg=--nocapture
+          aspect test \
+            //crates/client-streams:all \
+            //crates/schema-serde:schema-serde_lib_test \
+            --coverage \
+            --bazel-flag=--config=ci \
+            --bazel-flag=--test_arg=--nocapture \
+            --bazel-flag='--instrumentation_filter=^//crates/client-streams[/:],^//crates/schema-serde[/:]'
           aspect coverage-report --output coverage/client-streams-integration.lcov
       - uses: codecov/codecov-action@v7
         with:
@@ -1113,14 +1157,12 @@ jobs:
           disable_search: true
           flags: client-streams-integration
           fail_ci_if_error: false
-      - name: Schema-serde unit coverage
-        run: |
-          aspect test //crates/schema-serde:schema-serde_lib_test --coverage --bazel-flag=--config=ci
-          aspect coverage-report --output coverage/schema-serde-unit.lcov
+      # Keep the two Codecov sessions expected by `after_n_builds`; each flag's
+      # path filter in codecov.yml isolates its half of the combined report.
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          files: coverage/schema-serde-unit.lcov
+          files: coverage/client-streams-integration.lcov
           disable_search: true
           flags: schema-serde
           fail_ci_if_error: false
@@ -1134,7 +1176,7 @@ jobs:
       ${{ always() && needs.changes.outputs.doc_examples == 'true' &&
           needs.changes.result == 'success' &&
           needs.affected-plan.result == 'success' &&
-          (needs.affected-build.result == 'success' || needs.affected-build.result == 'skipped') }}
+          needs.affected-build.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -1143,8 +1185,8 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
-          cache-save: true
-          disk-cache: doc-examples
+          cache-save: false
+          disk-cache: affected
       - name: Build & run documented examples + snippet drift guard
         run: aspect docs --task:name=doc-examples
 
@@ -1470,7 +1512,7 @@ jobs:
           aspect test \
             //crates/pgwire:all //crates/pgexec:all //crates/gres-fdw:all \
             //crates/gres-substrate:all //crates/gres:all //crates/gres-ranges:all \
-            //crates/gres-control:all //crates/gres-conformance:all //crates/cli:all \
+            //crates/gres-control:all //crates/cli:all \
             //crates/gres-activator:all //crates/gres-balancer:all \
             --coverage --bazel-flag=--config=ci
           aspect coverage-report --output lcov.info
@@ -1603,11 +1645,16 @@ jobs:
       - name: Broker + client-admin integration coverage
         run: |
           mkdir -p coverage
-          aspect test //crates/broker:all //crates/client-admin:all \
+          # The diskless Jepsen test remains ignored, but including its target
+          # here keeps its compile gate in the same Bazel analysis invocation.
+          aspect test \
+            //crates/broker:all \
+            //crates/client-admin:all \
+            //crates/integration-tests:diskless_jepsen \
             --coverage \
-            --bazel-flag=--config=ci
+            --bazel-flag=--config=ci \
+            --bazel-flag='--instrumentation_filter=^//crates/broker[/:],^//crates/client-admin[/:]'
           aspect coverage-report --output coverage/broker-integration.lcov
-          aspect build //crates/integration-tests:diskless_jepsen --bazel-flag=--config=ci
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

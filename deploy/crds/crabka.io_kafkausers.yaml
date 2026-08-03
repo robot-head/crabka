@@ -166,7 +166,7 @@ spec:
                 properties:
                   consumerByteRate:
                     description: Maximum consume-side bytes/sec. Backed by `consumer_byte_rate`.
-                    format: int32
+                    maximum: 2147483647.0
                     minimum: 0.0
                     nullable: true
                     type: integer
@@ -174,12 +174,11 @@ spec:
                     description: |-
                       KIP-599 controller-mutation rate (creates/deletes/sec).
                       Backed by `controller_mutation_rate`.
-                    format: double
                     nullable: true
                     type: number
                   producerByteRate:
                     description: Maximum produce-side bytes/sec. Backed by `producer_byte_rate`.
-                    format: int32
+                    maximum: 2147483647.0
                     minimum: 0.0
                     nullable: true
                     type: integer
@@ -187,7 +186,6 @@ spec:
                     description: |-
                       Maximum percentage of a request-handler thread's time the user
                       may consume (0..=100). Backed by `request_percentage`.
-                    format: int32
                     maximum: 100.0
                     minimum: 0.0
                     nullable: true
@@ -233,7 +231,6 @@ spec:
                   delegation token (extended on each successful renew). Compared
                   against `now` to decide when to renew per
                   `spec.authentication.renewBeforeExpiry`.
-                format: int64
                 nullable: true
                 type: integer
               delegationTokenId:
@@ -251,7 +248,6 @@ spec:
                   Renew can never push `expiry_timestamp_ms` past this — the
                   operator stops renewing and surfaces `TokenExpiring` once
                   further extension is impossible.
-                format: int64
                 nullable: true
                 type: integer
               external:
@@ -264,7 +260,6 @@ spec:
                 type: boolean
               observedGeneration:
                 description: '`metadata.generation` of the last successfully-reconciled spec.'
-                format: int64
                 nullable: true
                 type: integer
               quotasInSync:

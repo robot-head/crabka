@@ -20,6 +20,16 @@ inputs:
     description: Generated external-repository cache namespace; defaults to disk-cache.
     required: false
     default: ""
+  repository-cache:
+    description: setup-bazel repository-cache configuration, or false to disable it.
+    required: false
+    default: |
+      - .github/actions/setup-bazel/action.yml
+      - .bazelrc
+      - .bazelversion
+      - MODULE.bazel
+      - MODULE.bazel.lock
+      - Cargo.lock
   disk-cache-artifact-restore:
     description: Restore mode for the scoped artifact; require-current, if-no-snapshot, or false.
     required: false
@@ -48,14 +58,9 @@ runs:
       with:
         bazelisk-cache: true
         disk-cache: ${{ inputs.disk-cache }}
-        repository-cache: |
-          - .github/actions/setup-bazel/action.yml
-          - .bazelrc
-          - .bazelversion
-          - MODULE.bazel
-          - MODULE.bazel.lock
-          - Cargo.lock
-          - "**/*.bzl"
+        # Only dependency-resolution inputs belong in the default above. Local
+        # Starlark changes alter Bazel action keys, not downloaded content.
+        repository-cache: ${{ inputs.repository-cache }}
         # Keep manifests stable within an execution namespace so one workflow
         # cannot freeze another workflow's partial external-repository list.
         external-cache: |

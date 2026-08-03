@@ -35,6 +35,7 @@ _AFFECTED_GLOBAL_INPUTS = [
     "MODULE.bazel.lock",
     "Cargo.toml",
     "Cargo.lock",
+    "bazel/patches/rules_rs-build-script-warnings.patch",
     "rust-toolchain.toml",
 ]
 
@@ -57,7 +58,36 @@ _PR_MANUAL_TESTS = [
     "//crates/protocol:differential_produce",
     "//crates/protocol:differential_records",
     "//scripts:gres_kind_lifecycle_test",
+    "//verif:creusot_replay",
 ]
+
+_DOC_EXAMPLES = [
+    "avro_pipeline",
+    "dataframe_serde",
+    "format_arrow",
+    "format_dsl",
+    "format_json",
+    "format_pipeline",
+    "json_pipeline",
+    "polars_pipeline",
+    "profile_streams",
+    "protobuf_pipeline",
+]
+_DOC_EXAMPLE_TARGETS = ["//crates/client-streams:example_" + example for example in _DOC_EXAMPLES]
+_DOCGEN_TARGET = "//crates/docgen:crabka-docgen__bin"
+_DOCS_PLAYGROUND_TARGET = "//crates/playground:playground_web"
+
+def _direct_dependencies(ctx, targets):
+    if not targets:
+        return (0, [])
+    target_set = "set(%s)" % " ".join(targets)
+    direct_deps = "deps(%s, 1)" % target_set
+    (code, output) = _output(ctx, "bazel", [
+        "query",
+        "--noimplicit_deps",
+        "kind('rule|generated file', %s except %s) except kind('.*_test rule|test_suite rule', %s)" % (direct_deps, target_set, direct_deps),
+    ])
+    return (code, [target for target in output.split("\n") if target])
 
 def _affected_suites(impacted, tests):
     creusot = _matches_exact(impacted, ["//verif:creusot_replay"])
@@ -242,27 +272,50 @@ def _affected(ctx: TaskContext) -> int:
         # Include suite-owned and manual tests here even though dedicated jobs
         # run them. Building only their direct dependencies populates one cache
         # snapshot without executing or compiling the test binaries themselves.
-        tests = _targets(ctx, plan_dir + "/warm-tests.txt")
-        if tests:
-            test_set = "set(%s)" % " ".join(tests)
-            direct_deps = "deps(%s, 1)" % test_set
-            (code, deps_output) = _output(ctx, "bazel", [
-                "query",
-                "--noimplicit_deps",
-                "kind('rule|generated file', %s except %s) except kind('.*_test rule|test_suite rule', %s)" % (direct_deps, test_set, direct_deps),
-            ])
+        roots = _targets(ctx, plan_dir + "/warm-tests.txt")
+        (code, dependencies) = _direct_dependencies(ctx, roots)
+        if code != 0:
+            return code
+        targets.extend(dependencies)
+        if targets:
+            code = _run(ctx, "bazel", [
+                "build",
+                "--config=ci",
+                "--instrument_test_targets",
+                "--strip=never",
+                "--nobuild_tests_only",
+            ] + targets)
             if code != 0:
                 return code
-            targets.extend([target for target in deps_output.split("\n") if target])
-        if not targets:
-            return 0
-        return _run(ctx, "bazel", [
-            "build",
-            "--config=ci",
-            "--instrument_test_targets",
-            "--strip=never",
-            "--nobuild_tests_only",
-        ] + targets)
+
+        # Docs use the normal target configuration, so keep their cache keys
+        # separate from the instrumented test dependencies above.
+        doc_roots = []
+        if ctx.args.doc_examples:
+            doc_roots.extend(_DOC_EXAMPLE_TARGETS + [_DOCGEN_TARGET])
+        if ctx.args.docs:
+            (code, docs_output) = _output(ctx, "bazel", ["query", "kind(rust_doc, //...)"])
+            if code != 0:
+                return code
+            doc_roots.extend([_DOCGEN_TARGET] + [target for target in docs_output.split("\n") if target])
+        (code, doc_dependencies) = _direct_dependencies(ctx, doc_roots)
+        if code != 0:
+            return code
+        if doc_dependencies:
+            code = _run(ctx, "bazel", ["build", "--config=ci"] + doc_dependencies)
+            if code != 0:
+                return code
+        if ctx.args.docs:
+            (code, playground_dependencies) = _direct_dependencies(ctx, [_DOCS_PLAYGROUND_TARGET])
+            if code != 0:
+                return code
+            if playground_dependencies:
+                return _run(ctx, "bazel", [
+                    "build",
+                    "--config=ci",
+                    "--platforms=//platforms:wasm",
+                ] + playground_dependencies)
+        return 0
     if ctx.args.mode == "test":
         tests = _targets(ctx, plan_dir + "/tests.txt")
         tests = [target for index, target in enumerate(tests) if index % ctx.args.shards == ctx.args.shard]
@@ -412,6 +465,8 @@ affected = task(
     implementation = _affected,
     summary = "Hash, plan, build, or test affected Bazel targets.",
     args = {
+        "doc_examples": args.boolean(default = False, description = "Warm direct dependencies of documentation examples."),
+        "docs": args.boolean(default = False, description = "Warm direct dependencies of the full documentation build."),
         "final_hashes": args.string(default = "", description = "Final bazel-diff hashes."),
         "hash_file": args.string(default = "", description = "Hash output path."),
         "mode": args.string(default = "plan", description = "Hash, plan, warm, or test affected targets."),
@@ -490,7 +545,7 @@ def _affected_cache(ctx: TaskContext) -> int:
         code = _run(ctx, "tar", [
             "--create",
             "--file", ctx.args.archive,
-            "--use-compress-program=zstd -1 -T0",
+            "--use-compress-program=zstd -3 -T0",
             "--directory", ctx.args.cache_dir,
             ".",
         ])
@@ -573,20 +628,7 @@ codegen = task(
 )
 
 def _docs(ctx: TaskContext) -> int:
-    examples = [
-        "avro_pipeline",
-        "dataframe_serde",
-        "format_arrow",
-        "format_dsl",
-        "format_json",
-        "format_pipeline",
-        "json_pipeline",
-        "polars_pipeline",
-        "profile_streams",
-        "protobuf_pipeline",
-    ]
-    targets = ["//crates/client-streams:example_" + example for example in examples]
-    code = _run(ctx, "bazel", ["build", "--config=ci"] + targets)
+    code = _run(ctx, "bazel", ["build", "--config=ci"] + _DOC_EXAMPLE_TARGETS)
     if code != 0:
         return code
     for example in ["format_json", "format_arrow", "format_dsl", "format_pipeline"]:

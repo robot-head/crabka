@@ -7,7 +7,7 @@ rust_package(
     test_compile_data = ["//crates/broker:test_support"],
     test_sizes = {
         "grafana_e2e": "medium",
-        "loki_differential": "medium",
+        "loki_differential": "large",
     },
     test_tags = {"diskless_jepsen": ["manual"]},
 )

@@ -9,7 +9,7 @@ rust_package(
     protoc = True,
     test_size = "small",
     test_sizes = {
-        "jvm_differential": "medium",
+        "jvm_differential": "small",
     },
     test_tags = {
         "jvm_differential": ["manual"],

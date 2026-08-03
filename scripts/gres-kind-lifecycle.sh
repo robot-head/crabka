@@ -19,7 +19,6 @@ readonly WAKE_NOROLL_MARGIN_MS=500
 PORT_FORWARD_PID=""
 COMPUTE_FORWARD_PID=""
 KEEPER_PID=""
-BROKER_FORWARD_PID=""
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null || fail "$1 is required"; }
@@ -29,7 +28,6 @@ cleanup() {
     if [ -n "$PORT_FORWARD_PID" ]; then kill "$PORT_FORWARD_PID" 2>/dev/null || true; fi
     if [ -n "$KEEPER_PID" ]; then kill "$KEEPER_PID" 2>/dev/null || true; fi
     if [ -n "$COMPUTE_FORWARD_PID" ]; then kill "$COMPUTE_FORWARD_PID" 2>/dev/null || true; fi
-    if [ -n "$BROKER_FORWARD_PID" ]; then kill "$BROKER_FORWARD_PID" 2>/dev/null || true; fi
     kubectl get events -A --sort-by=.lastTimestamp >"$ARTIFACT_DIR/events.txt" 2>&1 || true
     kubectl logs -n crabka-operator deploy/crabka-gres-operator --timestamps \
         >"$ARTIFACT_DIR/operator.log" 2>&1 || true
@@ -486,8 +484,9 @@ for iteration in $(seq 1 "$ITERATIONS"); do
     wait "$COMPUTE_FORWARD_PID" 2>/dev/null || true
     COMPUTE_FORWARD_PID=""
     physical_topic=$(kubectl exec demo-brokers-0 -- sh -c \
-        'find /var/lib/crabka/data -maxdepth 1 -type d -name "__gres_wal.tenant-a.r0.g*-0" -printf "%f\n" | sort | tail -1' \
+        'find /var/lib/crabka/data -maxdepth 1 -type d -name "__gres_wal.tenant-a.r0.g*-0" -print | sort | tail -1' \
         2>/dev/null)
+    physical_topic=${physical_topic##*/}
     [ -n "$physical_topic" ] || fail "active generation-qualified WAL directory is missing"
     printf '%s\t%s\n' "$iteration" "$physical_topic" >>"$ARTIFACT_DIR/physical-wal-generations.tsv"
     after_generation=$(kubectl get grestenant tenant-a -o jsonpath='{.status.registryVersion}')
@@ -507,11 +506,8 @@ printf '%s\t%s\n' "$lifecycle_start_ns" "$lifecycle_end_ns" >"$ARTIFACT_DIR/life
 # operator. Parking must fail closed without scaling the Deployment to zero or
 # deleting the generation-qualified WAL.
 kubectl scale deploy/crabka-gres-operator -n crabka-operator --replicas=0
-kubectl port-forward svc/demo-broker-headless 19092:9092 >"$ARTIFACT_DIR/broker-port-forward.log" 2>&1 &
-BROKER_FORWARD_PID=$!
-deadline_wait 30 "broker port-forward" "timeout 1 bash -c '</dev/tcp/127.0.0.1/19092' 2>/dev/null"
 deadline_wait 90 "real compute Suspended registry record" \
-    "./target/release/crabka gres describe --bootstrap 127.0.0.1:19092 --name tenant-a 2>/dev/null | grep -qi 'suspended'"
+    "kubectl exec demo-brokers-0 -- crabka gres describe --bootstrap 127.0.0.1:9092 --name tenant-a 2>/dev/null | grep -qi 'suspended'"
 kubectl delete pod minio-delete-manifest --ignore-not-found >/dev/null
 kubectl run minio-delete-manifest --restart=Never \
     --image=minio/mc:RELEASE.2025-04-16T18-13-26Z \
@@ -532,9 +528,6 @@ kubectl exec demo-brokers-0 -- sh -c \
     fail "operator deleted WAL despite missing final manifest"
 kubectl logs -n crabka-operator deploy/crabka-gres-operator --since=2m \
     >"$ARTIFACT_DIR/missing-manifest-refusal.log"
-kill "$BROKER_FORWARD_PID" 2>/dev/null || true
-wait "$BROKER_FORWARD_PID" 2>/dev/null || true
-BROKER_FORWARD_PID=""
 
 python3 - "$ARTIFACT_DIR" "$ITERATIONS" "$P95_CEILING_MS" "$PGDOG_IMAGE" <<'PY'
 import json, math, pathlib, platform, statistics, subprocess, sys

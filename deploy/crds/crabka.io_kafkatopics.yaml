@@ -32,7 +32,6 @@ spec:
                 description: |-
                   Number of partitions. Increases honored via `CreatePartitions`;
                   decreases rejected with `ImmutableFieldChanged`.
-                format: int32
                 maximum: 1000000.0
                 minimum: 1.0
                 type: integer
@@ -47,7 +46,6 @@ spec:
                 description: |-
                   Replication factor. Changes rejected with
                   `ImmutableFieldChanged` until partition reassignment lands.
-                format: int32
                 maximum: 1000.0
                 minimum: 1.0
                 type: integer
@@ -97,7 +95,6 @@ spec:
                 description: |-
                   `metadata.generation` of the last successfully-reconciled spec
                   (i.e. last time we wrote `Ready=True reason=Ready`).
-                format: int64
                 nullable: true
                 type: integer
               topicId:

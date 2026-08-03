@@ -36,7 +36,6 @@ spec:
                 properties:
                   checkpointFrames:
                     description: Checkpoint after this many frames when set.
-                    format: uint64
                     minimum: 0.0
                     nullable: true
                     type: integer
@@ -46,13 +45,11 @@ spec:
                     type: string
                   idleSeconds:
                     description: Idle timeout in seconds; unset means never suspend by idleness.
-                    format: uint64
                     minimum: 0.0
                     nullable: true
                     type: integer
                   scramIterations:
                     description: PBKDF2 iteration count for tenant Kafka and `PostgreSQL` SCRAM credentials.
-                    format: int32
                     maximum: 16384.0
                     minimum: 4096.0
                     nullable: true
@@ -63,7 +60,8 @@ spec:
                     type: string
                   walReplication:
                     description: Replication factor for tenant WAL topics.
-                    format: int32
+                    maximum: 2147483647.0
+                    minimum: -2147483648.0
                     nullable: true
                     type: integer
                 type: object
@@ -97,18 +95,16 @@ spec:
                       properties:
                         bucket:
                           description: Hash bucket at the boundary; absent for non-hash tables.
-                          format: uint32
+                          maximum: 4294967295.0
                           minimum: 0.0
                           nullable: true
                           type: integer
                         rowid:
                           description: Row identifier at the boundary.
-                          format: uint64
                           minimum: 0.0
                           type: integer
                         tableId:
                           description: Table identifier at the boundary.
-                          format: uint64
                           minimum: 0.0
                           type: integer
                       required:
@@ -117,7 +113,7 @@ spec:
                       type: object
                     rangeId:
                       description: Range identifier used by compute placement and WAL topics.
-                      format: uint32
+                      maximum: 4294967295.0
                       minimum: 0.0
                       type: integer
                   required:
@@ -207,7 +203,6 @@ spec:
                 type: array
               lastCheckpointOffset:
                 description: Last checkpoint offset observed by the controller.
-                format: uint64
                 minimum: 0.0
                 nullable: true
                 type: integer
@@ -217,7 +212,6 @@ spec:
                 type: string
               observedGeneration:
                 description: '`metadata.generation` of the last successfully-reconciled spec.'
-                format: int64
                 nullable: true
                 type: integer
               pgdogCredentialGraceUntilUnixMs:
@@ -225,7 +219,6 @@ spec:
                   Bounded compatibility window for `PgDog` 0.1.47 after a resumed compute
                   becomes Active. The fleet reconciler removes the temporary backend
                   credential after this Unix-millisecond deadline.
-                format: uint64
                 minimum: 0.0
                 nullable: true
                 type: integer
@@ -235,7 +228,6 @@ spec:
                 type: boolean
               registryVersion:
                 description: Registry record version last written for this tenant.
-                format: uint64
                 minimum: 0.0
                 nullable: true
                 type: integer

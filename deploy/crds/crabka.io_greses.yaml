@@ -26,7 +26,6 @@ spec:
                 properties:
                   clientDispatchQueueCapacity:
                     description: Kafka client request-dispatch queue capacity.
-                    format: uint
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -47,7 +46,7 @@ spec:
                     type: string
                   readinessProbePeriodSeconds:
                     description: Activator readiness probe period in seconds.
-                    format: int32
+                    maximum: 2147483647.0
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -57,7 +56,7 @@ spec:
                     type: string
                   replicas:
                     description: Number of activator replicas.
-                    format: int32
+                    maximum: 2147483647.0
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -138,7 +137,6 @@ spec:
                     properties:
                       cooldownEpochs:
                         description: Epoch count that suppresses repeated operation kinds.
-                        format: uint64
                         minimum: 0.0
                         type: integer
                       loadSkewHysteresis:
@@ -146,12 +144,10 @@ spec:
                         type: string
                       maxOperations:
                         description: Maximum operations in one dry-run plan.
-                        format: uint
                         minimum: 0.0
                         type: integer
                       maxRangesPerCompute:
                         description: Optional maximum ranges per compute.
-                        format: uint
                         minimum: 0.0
                         nullable: true
                         type: integer
@@ -163,7 +159,6 @@ spec:
                         type: string
                       splitStrideRows:
                         description: Row stride used when a range has no upper bound.
-                        format: uint64
                         minimum: 0.0
                         type: integer
                     required:
@@ -193,13 +188,11 @@ spec:
                     type: string
                   checkpointRetain:
                     description: Number of checkpoint manifests to retain.
-                    format: uint
                     minimum: 1.0
                     nullable: true
                     type: integer
                   clientDispatchQueueCapacity:
                     description: Kafka client request-dispatch queue capacity.
-                    format: uint
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -209,7 +202,6 @@ spec:
                     type: string
                   durableInspectionFoldMaxRecords:
                     description: Maximum records materialized by one durable inspection.
-                    format: uint
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -271,7 +263,6 @@ spec:
                     type: string
                   pgexecNotifyQueueCapacity:
                     description: Per-session LISTEN/NOTIFY queue capacity.
-                    format: uint
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -281,7 +272,6 @@ spec:
                     type: string
                   pgexecRowidReservation:
                     description: Durable internal row-ID reservation size.
-                    format: uint64
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -291,13 +281,11 @@ spec:
                     type: string
                   pgexecTsPruneVersionsPerRow:
                     description: Maximum timestamp versions pruned per written row.
-                    format: uint
                     minimum: 1.0
                     nullable: true
                     type: integer
                   pgexecXidReservation:
                     description: Durable XID reservation size.
-                    format: uint64
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -307,7 +295,6 @@ spec:
                     type: string
                   pgkvRotateAfterOps:
                     description: Committed operations between requested substrate-cache memtable rotations.
-                    format: uint64
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -341,7 +328,7 @@ spec:
                     type: string
                   rangeDecisionReleaseLagRetries:
                     description: Decision-release lag retry count.
-                    format: uint32
+                    maximum: 4294967295.0
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -351,7 +338,7 @@ spec:
                     type: string
                   rangeDurableInspectMaxRecords:
                     description: Durable range-inspection record ceiling.
-                    format: uint32
+                    maximum: 4294967295.0
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -365,31 +352,26 @@ spec:
                     type: string
                   rangeJoinBroadcastRows:
                     description: Maximum materialized broadcast rows.
-                    format: uint
                     minimum: 1.0
                     nullable: true
                     type: integer
                   rangeJoinKeyColumns:
                     description: Maximum distributed join key columns.
-                    format: uint
                     minimum: 1.0
                     nullable: true
                     type: integer
                   rangeJoinPredicates:
                     description: Maximum predicates per distributed join side.
-                    format: uint
                     minimum: 1.0
                     nullable: true
                     type: integer
                   rangeJoinProjectionColumns:
                     description: Maximum distributed join projection columns.
-                    format: uint
                     minimum: 1.0
                     nullable: true
                     type: integer
                   rangeJoinResultRows:
                     description: Maximum distributed join result rows.
-                    format: uint
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -399,19 +381,16 @@ spec:
                     type: string
                   rangeJoinSnapshotXids:
                     description: Maximum active XIDs in each distributed join snapshot.
-                    format: uint
                     minimum: 1.0
                     nullable: true
                     type: integer
                   rangeLogicalBasePersistStride:
                     description: Initial logical horizon persistence stride.
-                    format: uint64
                     minimum: 1.0
                     nullable: true
                     type: integer
                   rangeLogicalMaxPersistStride:
                     description: Maximum adaptive logical horizon persistence stride.
-                    format: uint64
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -425,7 +404,6 @@ spec:
                     type: string
                   rangeRemoteSessionMax:
                     description: Maximum hosted remote sessions.
-                    format: uint
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -439,7 +417,6 @@ spec:
                     type: string
                   rangeRpcPoolMaxIdlePerEndpoint:
                     description: Maximum idle range RPC connections retained per endpoint.
-                    format: uint
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -457,7 +434,7 @@ spec:
                     type: string
                   readinessProbePeriodSeconds:
                     description: Compute readiness probe period in seconds.
-                    format: int32
+                    maximum: 2147483647.0
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -522,7 +499,7 @@ spec:
                     type: string
                   walProducerRetries:
                     description: WAL producer retries after the initial batch send.
-                    format: int32
+                    maximum: 2147483647.0
                     minimum: 0.0
                     nullable: true
                     type: integer
@@ -548,7 +525,6 @@ spec:
                     type: string
                   walRecoveryEmptyFetchRetries:
                     description: Consecutive empty-fetch retries after the first empty recovery fetch.
-                    format: uint
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -578,7 +554,6 @@ spec:
                     type: string
                   walTopicReplicationFactor:
                     description: Replication factor requested when creating a range WAL topic.
-                    format: int32
                     maximum: 32767.0
                     minimum: 1.0
                     nullable: true
@@ -592,7 +567,6 @@ spec:
                 properties:
                   checkpointFrames:
                     description: Checkpoint after this many frames when set.
-                    format: uint64
                     minimum: 0.0
                     nullable: true
                     type: integer
@@ -602,13 +576,11 @@ spec:
                     type: string
                   idleSeconds:
                     description: Idle timeout in seconds; unset means never suspend by idleness.
-                    format: uint64
                     minimum: 0.0
                     nullable: true
                     type: integer
                   scramIterations:
                     description: PBKDF2 iteration count for tenant Kafka and `PostgreSQL` SCRAM credentials.
-                    format: int32
                     maximum: 16384.0
                     minimum: 4096.0
                     nullable: true
@@ -619,7 +591,8 @@ spec:
                     type: string
                   walReplication:
                     description: Replication factor for tenant WAL topics.
-                    format: int32
+                    maximum: 2147483647.0
+                    minimum: -2147483648.0
                     nullable: true
                     type: integer
                 type: object
@@ -644,7 +617,6 @@ spec:
                     type: object
                   connectAttempts:
                     description: Number of backend connection attempts.
-                    format: uint16
                     maximum: 65535.0
                     minimum: 1.0
                     nullable: true
@@ -665,7 +637,6 @@ spec:
                     type: string
                   listenPort:
                     description: '`PgDog` client listen port.'
-                    format: int32
                     maximum: 65535.0
                     minimum: 1.0
                     type: integer
@@ -678,13 +649,12 @@ spec:
                     type: string
                   readinessProbePeriodSeconds:
                     description: '`PgDog` readiness probe period in seconds.'
-                    format: int32
+                    maximum: 2147483647.0
                     minimum: 1.0
                     nullable: true
                     type: integer
                   replicas:
                     description: Number of `PgDog` replicas.
-                    format: int32
                     maximum: 1000.0
                     minimum: 0.0
                     type: integer
@@ -752,7 +722,6 @@ spec:
                     description: |-
                       Number of planned operations executable by the operator. Always zero:
                       the transactional registry protocol cannot execute physical operations.
-                    format: uint
                     minimum: 0.0
                     type: integer
                   message:
@@ -768,7 +737,6 @@ spec:
                     type: array
                   plannedOperations:
                     description: Number of operations in the reported dry-run plan snapshot.
-                    format: uint
                     minimum: 0.0
                     type: integer
                   transactionalRegistryProtocolAvailable:
@@ -786,7 +754,6 @@ spec:
                     type: array
                   unsupportedOperations:
                     description: Number of planned operations the operator intentionally will not execute.
-                    format: uint
                     minimum: 0.0
                     type: integer
                 required:
@@ -838,7 +805,6 @@ spec:
                 type: string
               observedGeneration:
                 description: '`metadata.generation` of the last successfully-reconciled spec.'
-                format: int64
                 nullable: true
                 type: integer
               serviceUrl:

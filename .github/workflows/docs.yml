@@ -2,23 +2,13 @@ name: docs
 
 on:
   workflow_call:
+    inputs:
+      affected_cache:
+        description: Restore the root CI dependency warmer cache read-only.
+        required: false
+        type: boolean
+        default: false
   push:
-    branches: [main]
-    paths:
-      - "website/**"
-      - "crates/docgen/**"
-      - "crates/operator/**"
-      - "crates/broker/**"
-      - "crates/protocol/**"
-      - "crates/raft/**"
-      - "crates/kraft-core/**"
-      - "crates/voters/**"
-      - "crates/playground/**"
-      - "charts/**"
-      - "README.md"
-      - "**/README.md"
-      - "lychee.toml"
-      - ".github/workflows/docs.yml"
     tags:
       # Same anchor as publish-images: one Helm repo update per workspace release.
       - "crabka-broker-v*"
@@ -27,15 +17,22 @@ on:
 permissions:
   contents: read
 
+env:
+  AFFECTED_ARTIFACT_SCOPE: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'main' }}
+  AFFECTED_ARTIFACT_BRANCH: ${{ github.head_ref || github.ref_name }}
+  AFFECTED_ARTIFACT_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id || github.repository_id }}
+  NODE_OPTIONS: --disable-warning=DEP0005 --disable-warning=DEP0040
+
 concurrency:
   group: docs-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
+      actions: read
       contents: read
       id-token: write # keyless cosign signing + Sigstore attestation (OIDC)
       attestations: write # write chart provenance to GitHub's attestation store
@@ -44,8 +41,8 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
-          cache-save: true
-          disk-cache: docs
+          cache-save: ${{ !inputs.affected_cache }}
+          disk-cache: ${{ inputs.affected_cache && 'affected' || 'docs' }}
       - name: Generate reference markdown
         run: aspect run //crates/docgen:crabka-docgen__bin --bazel-flag=--config=ci -- all --out website/content/docs/reference
       - name: Build rustdoc

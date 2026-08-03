@@ -71,7 +71,6 @@ spec:
                     nullable: true
                     type: string
                   auditEventQueueCapacity:
-                    format: uint
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -88,7 +87,6 @@ spec:
                     nullable: true
                     type: string
                   auditTailWindowOffsets:
-                    format: int64
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -111,7 +109,6 @@ spec:
                     nullable: true
                     type: string
                   clientMetricsOtlpQueueCapacity:
-                    format: uint
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -122,7 +119,7 @@ spec:
                     nullable: true
                     type: string
                   clientMetricsStalePushIntervals:
-                    format: uint32
+                    maximum: 4294967295.0
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -142,7 +139,6 @@ spec:
                     nullable: true
                     type: string
                   consumerGroupMaxSize:
-                    format: uint
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -162,7 +158,7 @@ spec:
                     nullable: true
                     type: string
                   controllerFetchMissLimit:
-                    format: uint32
+                    maximum: 4294967295.0
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -170,7 +166,6 @@ spec:
                     nullable: true
                     type: string
                   coordinatorActorMailboxCapacity:
-                    format: uint
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -181,7 +176,7 @@ spec:
                     nullable: true
                     type: string
                   defaultMinInsyncReplicas:
-                    format: int32
+                    maximum: 2147483647.0
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -195,7 +190,6 @@ spec:
                     nullable: true
                     type: string
                   disklessWalLocalReplicaCount:
-                    format: uint
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -237,22 +231,18 @@ spec:
                     nullable: true
                     type: string
                   maxConnections:
-                    format: uint
                     minimum: 0.0
                     nullable: true
                     type: integer
                   maxConnectionsPerIp:
-                    format: uint
                     minimum: 0.0
                     nullable: true
                     type: integer
                   maxIncrementalFetchSessionCacheSlots:
-                    format: uint
                     minimum: 0.0
                     nullable: true
                     type: integer
                   maxProduceGroup:
-                    format: uint
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -263,7 +253,6 @@ spec:
                     nullable: true
                     type: string
                   metadataRaftCommandQueueCapacity:
-                    format: uint
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -274,7 +263,6 @@ spec:
                     nullable: true
                     type: string
                   metadataSnapshotIntervalRecords:
-                    format: uint64
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -285,7 +273,6 @@ spec:
                     nullable: true
                     type: string
                   observerLagBound:
-                    format: uint64
                     minimum: 0.0
                     nullable: true
                     type: integer
@@ -305,7 +292,6 @@ spec:
                     nullable: true
                     type: string
                   partitionWriterQueueDepth:
-                    format: uint
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -379,7 +365,7 @@ spec:
                     nullable: true
                     type: string
                   selfRegistrationMaxAttempts:
-                    format: uint32
+                    maximum: 4294967295.0
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -396,13 +382,12 @@ spec:
                     nullable: true
                     type: string
                   shareGroupMaxDeliveryAttempts:
-                    format: int16
                     maximum: 32767.0
                     minimum: 1.0
                     nullable: true
                     type: integer
                   shareGroupMaxInflightRecords:
-                    format: int32
+                    maximum: 2147483647.0
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -416,17 +401,15 @@ spec:
                     nullable: true
                     type: string
                   shareSessionCacheMaxWhenUnlimited:
-                    format: uint
                     minimum: 1.0
                     nullable: true
                     type: integer
                   shareStateNumPartitions:
-                    format: int32
+                    maximum: 2147483647.0
                     minimum: 1.0
                     nullable: true
                     type: integer
                   shareStateReplicationFactor:
-                    format: int16
                     maximum: 32767.0
                     minimum: 1.0
                     nullable: true
@@ -444,7 +427,6 @@ spec:
                     nullable: true
                     type: string
                   streamsGroupAcceptableRecoveryLag:
-                    format: int64
                     minimum: 0.0
                     nullable: true
                     type: integer
@@ -455,12 +437,12 @@ spec:
                     nullable: true
                     type: string
                   streamsGroupNumStandbyReplicas:
-                    format: int32
+                    maximum: 2147483647.0
                     minimum: 0.0
                     nullable: true
                     type: integer
                   streamsGroupNumWarmupReplicas:
-                    format: int32
+                    maximum: 2147483647.0
                     minimum: 0.0
                     nullable: true
                     type: integer
@@ -471,7 +453,6 @@ spec:
                     nullable: true
                     type: string
                   streamsInternalTopicReplicationFactor:
-                    format: int16
                     maximum: 32767.0
                     minimum: 1.0
                     nullable: true
@@ -501,12 +482,11 @@ spec:
                     nullable: true
                     type: string
                   transactionStateNumPartitions:
-                    format: int32
+                    maximum: 2147483647.0
                     minimum: 1.0
                     nullable: true
                     type: integer
                   transactionStateReplicationFactor:
-                    format: int16
                     maximum: 32767.0
                     minimum: 1.0
                     nullable: true
@@ -521,7 +501,6 @@ spec:
                     nullable: true
                     type: string
                   uncleanRecoveryQueueCapacity:
-                    format: uint
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -546,13 +525,13 @@ spec:
                     description: |-
                       Window before `notAfter` in which the renewal `CronJob` will
                       reissue leaf certs. Default 30.
-                    format: uint32
+                    maximum: 4294967295.0
                     minimum: 0.0
                     type: integer
                   validityDays:
                     default: 365
                     description: Cert validity in days. Default 365.
-                    format: uint32
+                    maximum: 4294967295.0
                     minimum: 0.0
                     type: integer
                 type: object
@@ -577,13 +556,13 @@ spec:
                     description: |-
                       Window before `notAfter` in which the renewal `CronJob` will
                       reissue leaf certs. Default 30.
-                    format: uint32
+                    maximum: 4294967295.0
                     minimum: 0.0
                     type: integer
                   validityDays:
                     default: 365
                     description: Cert validity in days. Default 365.
-                    format: uint32
+                    maximum: 4294967295.0
                     minimum: 0.0
                     type: integer
                 type: object
@@ -658,7 +637,6 @@ spec:
                     type: string
                   replicationFactor:
                     description: Registry topic replication factor.
-                    format: int32
                     maximum: 32767.0
                     minimum: 1.0
                     nullable: true
@@ -777,13 +755,13 @@ spec:
                           minLength: 1
                           type: string
                         jwksExpirySeconds:
-                          format: int32
+                          maximum: 2147483647.0
                           minimum: 1.0
                           type: integer
                         jwksIgnoreKeyUse:
                           type: boolean
                         jwksMinRefreshPauseSeconds:
-                          format: int32
+                          maximum: 2147483647.0
                           minimum: 0.0
                           type: integer
                         jwksRefreshSeconds:
@@ -808,7 +786,7 @@ spec:
                           minimum: 0.0
                           type: integer
                         maxSecondsWithoutReauthentication:
-                          format: int32
+                          maximum: 2147483647.0
                           minimum: 1.0
                           type: integer
                         maxTimeSkew:
@@ -890,7 +868,8 @@ spec:
                               type: string
                             nodePort:
                               description: '`nodeport` only: pin the bootstrap `NodePort`.'
-                              format: int32
+                              maximum: 2147483647.0
+                              minimum: -2147483648.0
                               nullable: true
                               type: integer
                           type: object
@@ -903,12 +882,14 @@ spec:
                                 type: string
                               advertisedPort:
                                 description: Override the computed advertised port.
-                                format: int32
+                                maximum: 2147483647.0
+                                minimum: -2147483648.0
                                 nullable: true
                                 type: integer
                               broker:
                                 description: Broker id this override applies to (matches the node id).
-                                format: int32
+                                maximum: 2147483647.0
+                                minimum: -2147483648.0
                                 type: integer
                               host:
                                 description: '`ingress` / `route` only: per-broker hostname.'
@@ -920,7 +901,8 @@ spec:
                                 type: string
                               nodePort:
                                 description: '`nodeport` only: pin this broker''s `Service.spec.ports[0].nodePort`.'
-                                format: int32
+                                maximum: 2147483647.0
+                                minimum: -2147483648.0
                                 nullable: true
                                 type: integer
                             required:
@@ -1025,7 +1007,8 @@ spec:
                       type: array
                     port:
                       description: Container port the broker binds. Unique within the cluster.
-                      format: int32
+                      maximum: 2147483647.0
+                      minimum: -2147483648.0
                       type: integer
                     tls:
                       default: false
@@ -1228,7 +1211,6 @@ spec:
                           Override the per-part size for multipart uploads (bytes). When
                           unset, the broker uses
                           `crabka_remote_storage::DEFAULT_MULTIPART_CHUNK_SIZE` (16 MiB).
-                        format: uint64
                         minimum: 0.0
                         nullable: true
                         type: integer
@@ -1238,7 +1220,6 @@ spec:
                           the broker uses `crabka_remote_storage::DEFAULT_MULTIPART_THRESHOLD`
                           (100 MiB). Lower in tests to exercise the multipart path on
                           small fixtures.
-                        format: uint64
                         minimum: 0.0
                         nullable: true
                         type: integer
@@ -1279,7 +1260,6 @@ spec:
                             type: string
                           eventQueueCapacity:
                             description: Capacity of the shared metadata-event delivery queue.
-                            format: uint
                             minimum: 1.0
                             nullable: true
                             type: integer
@@ -1300,7 +1280,8 @@ spec:
                               Partition count for `__remote_log_metadata` on first creation.
                               Defaults to 50 (Kafka's
                               `remote.log.metadata.topic.num.partitions`).
-                            format: int32
+                            maximum: 2147483647.0
+                            minimum: -2147483648.0
                             nullable: true
                             type: integer
                           replication:
@@ -1308,7 +1289,8 @@ spec:
                               Replication factor for `__remote_log_metadata` on first
                               creation. Defaults to 3 (Kafka's
                               `remote.log.metadata.topic.replication.factor`).
-                            format: int32
+                            maximum: 2147483647.0
+                            minimum: -2147483648.0
                             nullable: true
                             type: integer
                           snapshotInterval:
@@ -1433,7 +1415,6 @@ spec:
                           Override the per-part size for multipart uploads (bytes). When
                           unset, the broker uses
                           `crabka_remote_storage::DEFAULT_MULTIPART_CHUNK_SIZE` (16 MiB).
-                        format: uint64
                         minimum: 0.0
                         nullable: true
                         type: integer
@@ -1443,7 +1424,6 @@ spec:
                           the broker uses `crabka_remote_storage::DEFAULT_MULTIPART_THRESHOLD`
                           (100 MiB). Lower in tests to exercise the multipart path on
                           small fixtures.
-                        format: uint64
                         minimum: 0.0
                         nullable: true
                         type: integer
@@ -1508,7 +1488,6 @@ spec:
                           Optional sampling ratio in `[0.0, 1.0]`. Rendered as
                           `CRABKA_OTLP_SAMPLE_RATIO`. Defaults to the broker's `1.0`
                           (sample every trace).
-                        format: double
                         nullable: true
                         type: number
                       serviceName:
@@ -1552,7 +1531,6 @@ spec:
                     description: |-
                       Monotonic generation of the active signing cert (bumped on
                       same-key renewal and on key promotion).
-                    format: uint64
                     minimum: 0.0
                     type: integer
                   generated:
@@ -1565,7 +1543,6 @@ spec:
                     description: |-
                       Monotonic generation of the active signing key (bumped only on
                       key replacement).
-                    format: uint64
                     minimum: 0.0
                     type: integer
                   notAfter:
@@ -1579,7 +1556,6 @@ spec:
                     type: string
                   trustAnchors:
                     description: Number of CA certs currently in the trust bundle.
-                    format: uint
                     minimum: 0.0
                     nullable: true
                     type: integer
@@ -1598,7 +1574,6 @@ spec:
                     description: |-
                       Monotonic generation of the active signing cert (bumped on
                       same-key renewal and on key promotion).
-                    format: uint64
                     minimum: 0.0
                     type: integer
                   generated:
@@ -1611,7 +1586,6 @@ spec:
                     description: |-
                       Monotonic generation of the active signing key (bumped only on
                       key replacement).
-                    format: uint64
                     minimum: 0.0
                     type: integer
                   notAfter:
@@ -1625,7 +1599,6 @@ spec:
                     type: string
                   trustAnchors:
                     description: Number of CA certs currently in the trust bundle.
-                    format: uint
                     minimum: 0.0
                     nullable: true
                     type: integer
@@ -1680,7 +1653,8 @@ spec:
                           host:
                             type: string
                           port:
-                            format: int32
+                            maximum: 2147483647.0
+                            minimum: -2147483648.0
                             type: integer
                         required:
                         - host
@@ -1715,12 +1689,14 @@ spec:
                 type: string
               readyReplicas:
                 description: Mirrors `StatefulSet.status.readyReplicas`.
-                format: int32
+                maximum: 2147483647.0
+                minimum: -2147483648.0
                 nullable: true
                 type: integer
               replicas:
                 description: Mirrors `StatefulSet.status.replicas`.
-                format: int32
+                maximum: 2147483647.0
+                minimum: -2147483648.0
                 nullable: true
                 type: integer
             type: object

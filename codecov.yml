@@ -76,8 +76,12 @@ flags:
     carryforward: true
   client-streams-integration:
     carryforward: true
+    paths:
+      - crates/client-streams/
   schema-serde:
     carryforward: true
+    paths:
+      - crates/schema-serde/
   grpc-gateway-integration:
     carryforward: true
   schema-registry-integration:

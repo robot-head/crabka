@@ -129,22 +129,22 @@ spec:
                 nullable: true
                 properties:
                   livenessInitialDelaySeconds:
-                    format: int32
+                    maximum: 2147483647.0
                     minimum: 0.0
                     nullable: true
                     type: integer
                   livenessPeriodSeconds:
-                    format: int32
+                    maximum: 2147483647.0
                     minimum: 1.0
                     nullable: true
                     type: integer
                   readinessInitialDelaySeconds:
-                    format: int32
+                    maximum: 2147483647.0
                     minimum: 0.0
                     nullable: true
                     type: integer
                   readinessPeriodSeconds:
-                    format: int32
+                    maximum: 2147483647.0
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -193,7 +193,6 @@ spec:
                 type: object
               replicas:
                 description: Stateless replicas; all join the election group. Default 1.
-                format: int32
                 maximum: 1000.0
                 minimum: 1.0
                 type: integer
@@ -240,7 +239,6 @@ spec:
                 properties:
                   clientDispatchQueueCapacity:
                     description: Kafka client request-dispatch queue capacity.
-                    format: uint
                     minimum: 1.0
                     nullable: true
                     type: integer
@@ -288,7 +286,8 @@ spec:
                 type: string
               schemasTopicReplicationFactor:
                 description: Replication factor for `_schemas` when auto-created. Default 3.
-                format: int32
+                maximum: 2147483647.0
+                minimum: -2147483648.0
                 nullable: true
                 type: integer
               tls:
@@ -370,15 +369,16 @@ spec:
                 type: array
               observedGeneration:
                 description: '`metadata.generation` of the last successfully-reconciled spec.'
-                format: int64
                 nullable: true
                 type: integer
               readyReplicas:
-                format: int32
+                maximum: 2147483647.0
+                minimum: -2147483648.0
                 nullable: true
                 type: integer
               replicas:
-                format: int32
+                maximum: 2147483647.0
+                minimum: -2147483648.0
                 nullable: true
                 type: integer
               url:
