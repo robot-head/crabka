@@ -924,6 +924,7 @@ pub(crate) fn execute_ddl(
                 ));
             }
             let table_meta = crabka_pgcatalog::get_table(kv, table)?;
+            validate_index_opclasses(kv, resolution, &table_meta, keys, index_method)?;
             validate_index_expressions(&table_meta, keys, *unique, placement, index_method)?;
             validate_index_method(&table_meta, columns, *unique, placement, index_method)?;
             let (id, mut ops) = crabka_pgcatalog::create_index_with_method_ops(
@@ -1733,6 +1734,94 @@ fn validate_index_expressions(
             return Err(ExecError::InvalidObjectDefinition(
                 "functions in index expression must be marked IMMUTABLE".into(),
             ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_index_opclasses(
+    kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
+    table: &Table,
+    keys: &[crabka_pgparser::ast::IndexKey],
+    method: crabka_pgcatalog::IndexMethod,
+) -> Result<(), ExecError> {
+    let method_name = index_method_name(method);
+    let method_oid = match method {
+        crabka_pgcatalog::IndexMethod::Btree => crate::catalog_rel::BTREE_AM_OID,
+        crabka_pgcatalog::IndexMethod::Hash => crate::catalog_rel::HASH_AM_OID,
+        crabka_pgcatalog::IndexMethod::Gist => crate::catalog_rel::GIST_AM_OID,
+        crabka_pgcatalog::IndexMethod::Gin => crate::catalog_rel::GIN_AM_OID,
+        crabka_pgcatalog::IndexMethod::Spgist => crate::catalog_rel::SPGIST_AM_OID,
+    };
+    let user_classes = crabka_pgcatalog::list_operator_classes(kv)?;
+    let visible_schemas = resolution.visible_schemas(kv)?;
+    for key in keys {
+        let Some(written) = key.opclass.as_deref() else {
+            continue;
+        };
+        let (schema, name) = written
+            .split_once('.')
+            .map_or((None, written), |(schema, name)| (Some(schema), name));
+        let builtin_input_oid = || {
+            crate::builtin_opclasses::BUILTIN_OPERATOR_CLASSES
+                .iter()
+                .find(|(_, am_oid, class_name, _, _, _, _)| {
+                    *am_oid == method_oid && *class_name == name
+                })
+                .map(|(_, _, _, _, input_oid, _, _)| *input_oid as u32)
+        };
+        let user_input_oid = |schema: &str| {
+            user_classes
+                .iter()
+                .find(|class| {
+                    class.method == method_name
+                        && class.name.name == name
+                        && class.name.schema == schema
+                })
+                .map(|class| class.input_type_oid)
+        };
+        let input_oid = match schema {
+            Some("pg_catalog") => builtin_input_oid(),
+            Some(schema) => user_input_oid(schema),
+            None => visible_schemas.iter().find_map(|schema| {
+                if schema == "pg_catalog" {
+                    builtin_input_oid()
+                } else {
+                    user_classes
+                    .iter()
+                    .find(|class| {
+                        class.method == method_name
+                            && class.name.name == name
+                            && class.name.schema == *schema
+                    })
+                    .map(|class| class.input_type_oid)
+                }
+            }),
+        }
+        .ok_or_else(|| {
+            ExecError::UndefinedObject(format!(
+                "operator class \"{written}\" does not exist for access method \"{method_name}\""
+            ))
+        })?;
+        let Some(column) = key.column.as_deref() else {
+            return Err(ExecError::Unsupported(
+                "operator classes on expression index keys are not supported".into(),
+            ));
+        };
+        let column = table
+            .columns
+            .iter()
+            .find(|candidate| candidate.name == column)
+            .ok_or_else(|| ExecError::UndefinedColumn(column.into()))?;
+        let column_oid = column.ty.oid();
+        let binary_text_compatible = input_oid == crabka_pgtypes::oids::TEXT
+            && matches!(column.ty, ColumnType::Text | ColumnType::Varchar(_));
+        if input_oid != column_oid && input_oid != 2277 && !binary_text_compatible {
+            return Err(ExecError::TypeMismatch(format!(
+                "operator class \"{written}\" does not accept data type {}",
+                crate::func::format_type(i64::from(column_oid), -1)
+            )));
         }
     }
     Ok(())
@@ -15425,6 +15514,7 @@ fn is_immutable_function(name: &str) -> bool {
             | "set_config"
             | "version"
             | "pg_backend_pid"
+            | "pg_notification_queue_usage"
             | "pg_postmaster_start_time"
             | "txid_current"
             | "pg_current_xact_id"
@@ -18796,6 +18886,62 @@ mod tests {
                 &RelationName::public("t_expr_idx")
             )
             .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn create_index_resolves_and_validates_operator_classes() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        run_s(&mut session, "CREATE TABLE t (a int4, b text, data int4)").await;
+        run_s(&mut session, "CREATE INDEX i1 ON t (a int4_ops)").await;
+        run_s(
+            &mut session,
+            "CREATE INDEX i2 ON t (data pg_catalog.int4_ops)",
+        )
+        .await;
+        assert!(
+            sqlstate_of(
+                &mut session,
+                "CREATE INDEX i3 ON t USING hash (a int4_minmax_ops)",
+            )
+            .await
+                == "42704"
+        );
+        assert!(
+            sqlstate_of(&mut session, "CREATE INDEX i4 ON t (b int4_ops)").await == "42804"
+        );
+        assert!(
+            sqlstate_of(&mut session, "CREATE INDEX i5 ON t (b name_ops)").await == "42804"
+        );
+    }
+
+    #[tokio::test]
+    async fn notification_queue_usage_has_postgres_value_type_arity_and_volatility() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        assert!(
+            text_rows_of(
+                &mut session,
+                "SELECT pg_notification_queue_usage(), \
+                 pg_typeof(pg_notification_queue_usage())",
+            )
+            .await
+                == vec![text_row(&["0", "double precision"])]
+        );
+        assert!(
+            sqlstate_of(&mut session, "SELECT pg_notification_queue_usage(1)").await == "42883"
+        );
+        run_s(&mut session, "CREATE TABLE t (a int4)").await;
+        assert!(
+            sqlstate_of(
+                &mut session,
+                "CREATE INDEX i ON t USING spgist ((pg_notification_queue_usage()))",
+            )
+            .await
+                == "42P17"
         );
     }
 

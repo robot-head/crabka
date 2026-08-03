@@ -164,7 +164,7 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "right" => ScalarFunc::Right,
         "repeat" => ScalarFunc::Repeat,
         "reverse" => ScalarFunc::Reverse,
-        "strpos" => ScalarFunc::Strpos,
+        "strpos" | "position" => ScalarFunc::Strpos,
         "initcap" => ScalarFunc::Initcap,
         "ascii" => ScalarFunc::Ascii,
         "chr" => ScalarFunc::Chr,

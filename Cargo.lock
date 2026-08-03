@@ -3471,6 +3471,7 @@ dependencies = [
  "crabka-pgtypes",
  "crabka-pgwire",
  "crabka-units",
+ "encoding_rs",
  "hex",
  "jiff",
  "md-5 0.11.0",

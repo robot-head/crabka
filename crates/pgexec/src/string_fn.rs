@@ -36,6 +36,7 @@ enum StrFunc {
     Encode,
     Decode,
     Convert,
+    ConvertFrom,
     ToHex,
     QuoteIdent,
     QuoteLiteral,
@@ -64,6 +65,7 @@ fn str_func(name: &str) -> Option<StrFunc> {
         "encode" => StrFunc::Encode,
         "decode" => StrFunc::Decode,
         "convert" => StrFunc::Convert,
+        "convert_from" => StrFunc::ConvertFrom,
         "to_hex" => StrFunc::ToHex,
         "quote_ident" => StrFunc::QuoteIdent,
         "quote_literal" => StrFunc::QuoteLiteral,
@@ -145,6 +147,10 @@ pub(crate) fn string_func_result_type(
                 }
             }
             Ok(ColumnType::Bytea)
+        }
+        StrFunc::ConvertFrom => {
+            require_arity(fc, n == 2)?;
+            Ok(ColumnType::Text)
         }
         // `to_hex` has an int4 and an int8 overload and no preferred one, so a
         // lone `unknown` argument leaves PostgreSQL unable to choose.
@@ -282,24 +288,18 @@ fn eval_strict(
         }
         StrFunc::Convert => {
             require_arity(fc, vals.len() == 3)?;
-            let bytes = match &vals[0] {
-                Datum::Bytea(bytes) => bytes.clone(),
-                Datum::Text(_) => match crabka_pgtypes::cast::cast(
-                    &vals[0],
-                    ColumnType::Bytea,
-                    &ctx.time_zone,
-                )? {
-                    Datum::Bytea(bytes) => bytes,
-                    _ => unreachable!("text to bytea cast returns bytea"),
-                },
-                other => return Err(type_error("convert", other)),
-            };
+            let bytes = conversion_bytes(&vals[0], ctx)?;
             convert_encoding(
                 &bytes,
                 text_arg(&vals[1])?,
                 text_arg(&vals[2])?,
             )
             .map(Datum::Bytea)
+        }
+        StrFunc::ConvertFrom => {
+            require_arity(fc, vals.len() == 2)?;
+            let bytes = conversion_bytes(&vals[0], ctx)?;
+            decode_encoding(&bytes, text_arg(&vals[1])?).map(Datum::Text)
         }
         StrFunc::ToHex => {
             require_arity(fc, vals.len() == 1)?;
@@ -387,6 +387,21 @@ fn byte_len(n: usize) -> i32 {
     i32::try_from(n).unwrap_or(i32::MAX)
 }
 
+fn conversion_bytes(value: &Datum, ctx: &EvalCtx) -> Result<Vec<u8>, ExecError> {
+    match value {
+        Datum::Bytea(bytes) => Ok(bytes.clone()),
+        Datum::Text(_) => match crabka_pgtypes::cast::cast(
+            value,
+            ColumnType::Bytea,
+            &ctx.time_zone,
+        )? {
+            Datum::Bytea(bytes) => Ok(bytes),
+            _ => unreachable!("text to bytea cast returns bytea"),
+        },
+        other => Err(type_error("convert", other)),
+    }
+}
+
 fn convert_encoding(bytes: &[u8], source: &str, target: &str) -> Result<Vec<u8>, ExecError> {
     let Some(source_id) = crate::catalog_fn::encoding_id(source) else {
         return Err(ExecError::FunctionError {
@@ -423,6 +438,54 @@ fn convert_encoding(bytes: &[u8], source: &str, target: &str) -> Result<Vec<u8>,
         sqlstate: "0A000",
         message: format!("encoding conversion from {source} to {target} is not supported"),
     })
+}
+
+fn decode_encoding(bytes: &[u8], source: &str) -> Result<String, ExecError> {
+    let Some(source_id) = crate::catalog_fn::encoding_id(source) else {
+        return Err(ExecError::FunctionError {
+            sqlstate: "22023",
+            message: format!("invalid source encoding name \"{source}\""),
+        });
+    };
+    if source_id == crate::catalog_fn::UTF8_ENCODING {
+        return String::from_utf8(bytes.to_vec()).map_err(|_| ExecError::FunctionError {
+            sqlstate: "22021",
+            message: "invalid byte sequence for encoding \"UTF8\"".into(),
+        });
+    }
+    if source_id != crate::catalog_fn::EUC_KR_ENCODING {
+        return Err(ExecError::FunctionError {
+            sqlstate: "0A000",
+            message: format!("encoding conversion from {source} to UTF8 is not supported"),
+        });
+    }
+    // PostgreSQL EUC_KR accepts ASCII plus strict KS X 1001 two-byte pairs.
+    // encoding_rs implements the wider Windows-949 repertoire, so validate the
+    // byte grammar before using its decoder.
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index].is_ascii() {
+            index += 1;
+            continue;
+        }
+        if index + 1 >= bytes.len()
+            || !(0xa1..=0xfe).contains(&bytes[index])
+            || !(0xa1..=0xfe).contains(&bytes[index + 1])
+        {
+            return Err(ExecError::FunctionError {
+                sqlstate: "22021",
+                message: format!("invalid byte sequence for encoding \"{source}\""),
+            });
+        }
+        index += 2;
+    }
+    encoding_rs::EUC_KR
+        .decode_without_bom_handling_and_without_replacement(bytes)
+        .map(|text| text.into_owned())
+        .ok_or_else(|| ExecError::FunctionError {
+            sqlstate: "22021",
+            message: format!("invalid byte sequence for encoding \"{source}\""),
+        })
 }
 
 fn text_arg(d: &Datum) -> Result<&str, ExecError> {

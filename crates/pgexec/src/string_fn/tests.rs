@@ -329,4 +329,10 @@ fn convert_preserves_ascii_across_known_encodings() {
     assert!(sqlstate("convert('ABC'::bytea, 'MULE_INTERNAL', 'UTF8')") == "42883");
     assert!(text_of("convert('\\xc3a9'::bytea, 'UTF8', 'UNICODE')") == "\\xc3a9");
     assert!(text_of("convert('\\xc3a9'::bytea, 'UTF8', 'SQL_ASCII')") == "\\xc3a9");
+    assert!(text_of("convert_from('\\xbcf6c7d0', 'EUC_KR')") == "수학");
+    assert!(text_of("convert_from('\\xbcf6c7d0', 'EUC-KR')") == "수학");
+    assert!(sqlstate("convert_from('\\x8141', 'EUC_KR')") == "22021");
+    assert!(sqlstate("convert_from('\\xa1', 'EUC_KR')") == "22021");
+    assert!(sqlstate("convert_from('\\xa120', 'EUC_KR')") == "22021");
+    assert!(sqlstate("convert_from('\\xe9', 'LATIN1')") == "0A000");
 }

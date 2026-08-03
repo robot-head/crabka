@@ -112,10 +112,10 @@ The adopted-corpus score (`9323/14272`) remains useful diagnostic evidence, but
 it is not the compatibility headline. Compatibility is the upstream 231-test
 serial and parallel result. The checked-in baseline-eligible serial run is
 `6/231` with 225 semantic failures. The latest infrastructure-clean review run
-is `9/231` with 222 semantic failures after `test_setup` passed under that
-20 MiB policy. Serial has 169365 changed lines across 4554 hunks; parallel is
-also `9/231`, with 170119 changed lines across 4555 hunks. Certified artifact:
-`target/pg-regress-runs/20260803T064530Z-3296344-gres`. It records observed
+is `12/231` with 219 semantic failures after `mvcc`, `euc_kr`, and `async`
+passed. Serial has 169230 changed lines across 4552 hunks; parallel is also
+`12/231`, with 169647 changed lines across 4552 hunks. Certified artifact:
+`target/pg-regress-runs/20260803T091747Z-6393-gres`. It records observed
 conformance without replacing the monotone baseline. Neither result satisfies
 the 231/231 completion gate.
 

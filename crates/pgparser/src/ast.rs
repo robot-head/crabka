@@ -1796,6 +1796,8 @@ pub struct IndexKey {
     pub column: Option<String>,
     /// Source text of the key — the column name, or the expression as written.
     pub text: String,
+    /// The operator-class name, when written.
+    pub opclass: Option<String>,
     pub descending: bool,
     /// `NULLS FIRST` (`Some(true)`) / `NULLS LAST` (`Some(false)`); `None` when
     /// the clause is absent and `PostgreSQL`'s direction-derived default applies.

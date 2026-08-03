@@ -42,6 +42,7 @@ md-5 = { workspace = true }
 base64 = { workspace = true }
 hex = { workspace = true }
 unicode-normalization = { workspace = true }
+encoding_rs = { workspace = true }
 zstd = { workspace = true }
 
 [dev-dependencies]
