@@ -115,6 +115,7 @@ const PG_CATALOG_RELATIONS: &[&str] = &[
     "pg_amproc",
     "pg_attrdef",
     "pg_authid",
+    "pg_cast",
     "pg_collation",
     "pg_constraint",
     "pg_database",
@@ -169,6 +170,7 @@ static RELATION_NAMES: &[&str] = &[
     "pg_amproc",
     "pg_attrdef",
     "pg_authid",
+    "pg_cast",
     "pg_collation",
     "pg_constraint",
     "pg_database",
@@ -226,6 +228,7 @@ pub(crate) fn relation_oid(name: &str) -> i32 {
         "pg_amproc" => 2603,
         "pg_attrdef" => 2604,
         "pg_authid" => 1260,
+        "pg_cast" => 2605,
         "pg_collation" => 3456,
         "pg_constraint" => 2606,
         "pg_database" => 1262,
@@ -583,6 +586,7 @@ pub(crate) fn rows(
         "pg_proc" => crate::routine::pg_proc_rows(kv),
         "pg_attrdef" => pg_attrdef_rows(kv),
         "pg_authid" => pg_authid_rows(kv),
+        "pg_cast" => Ok(pg_cast_rows()),
         "pg_collation" => Ok(pg_collation_rows()),
         "pg_constraint" => pg_constraint_rows(kv),
         "pg_database" => Ok(pg_database_rows()),
@@ -602,6 +606,30 @@ pub(crate) fn rows(
         "pg_views" => pg_views_rows(kv),
         _ => information_schema_rows(kv, name),
     }
+}
+
+fn pg_cast_rows() -> Vec<Vec<Datum>> {
+    crate::builtin_casts::BUILTIN_CASTS
+        .iter()
+        .map(|&(oid, source, target, function, context, method)| {
+            vec![int(oid), int(source), int(target), int(function), text(context), text(method)]
+        })
+        .collect()
+}
+
+/// PostgreSQL's identity, polymorphic-target, and implicit binary-relabelling
+/// coercions. The finite relation is the same one exposed through `pg_cast`.
+pub(crate) fn is_binary_coercible(source: u32, target: u32) -> bool {
+    source == target
+        || matches!(target, 2276 | 2283 | 5077)
+        || crate::builtin_casts::BUILTIN_CASTS.iter().any(
+            |&(_, cast_source, cast_target, _, context, method)| {
+                u32::try_from(cast_source) == Ok(source)
+                    && u32::try_from(cast_target) == Ok(target)
+                    && context == "i"
+                    && method == "b"
+            },
+        )
 }
 
 fn pg_trigger_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
@@ -782,6 +810,14 @@ fn pg_catalog_columns(name: &str) -> Vec<Column> {
             ("rolconnlimit", Int4),
             ("rolpassword", Text),
             ("rolvaliduntil", Timestamptz),
+        ]),
+        "pg_cast" => cols(&[
+            ("oid", Int4),
+            ("castsource", Int4),
+            ("casttarget", Int4),
+            ("castfunc", Int4),
+            ("castcontext", Text),
+            ("castmethod", Text),
         ]),
         "pg_collation" => cols(&[
             ("oid", Int4),

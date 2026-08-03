@@ -43,6 +43,7 @@ mod agg;
 mod array_fn;
 mod builtin_amop;
 mod builtin_amproc;
+mod builtin_casts;
 mod builtin_opclasses;
 mod builtin_operator_descriptions;
 mod builtin_opfamilies;
