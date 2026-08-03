@@ -1488,7 +1488,7 @@ fn eval_eager(
             require_arity(fc, vals.len() == 2)?;
             let source = u32::try_from(int_arg(&vals[0])?).unwrap_or(0);
             let target = u32::try_from(int_arg(&vals[1])?).unwrap_or(0);
-            Ok(Datum::Bool(is_binary_coercible(source, target)))
+            Ok(Datum::Bool(crate::catalog_rel::is_binary_coercible(source, target)))
         }
         ScalarFunc::PgTableIsVisible => {
             require_arity(fc, vals.len() == 1)?;
@@ -1498,69 +1498,6 @@ fn eval_eager(
         // concat / coalesce / nullif / greatest / least are handled before here.
         _ => unreachable!("non-eager scalar function reached eval_eager"),
     }
-}
-
-/// PostgreSQL 18.4's hard-wired and implicit binary `pg_cast` pathways.
-/// `binary_coercible()` is supplied by the upstream regression extension and
-/// calls `IsBinaryCoercible` directly; keeping the finite built-in relation
-/// here makes the helper useful without teaching the executor to run C code.
-fn is_binary_coercible(source: u32, target: u32) -> bool {
-    if source == target || matches!(target, 2276 | 2283 | 5077) {
-        return true;
-    }
-
-    matches!(
-        (source, target),
-        (23, 26)
-            | (26, 24)
-            | (24, 26)
-            | (23, 24)
-            | (24, 2202)
-            | (2202, 24)
-            | (26, 2202)
-            | (2202, 26)
-            | (23, 2202)
-            | (26, 2203)
-            | (2203, 26)
-            | (23, 2203)
-            | (2203, 2204)
-            | (2204, 2203)
-            | (26, 2204)
-            | (2204, 26)
-            | (23, 2204)
-            | (26, 2205)
-            | (2205, 26)
-            | (23, 2205)
-            | (26, 4191)
-            | (4191, 26)
-            | (23, 4191)
-            | (26, 2206)
-            | (2206, 26)
-            | (23, 2206)
-            | (26, 3734)
-            | (3734, 26)
-            | (23, 3734)
-            | (26, 3769)
-            | (3769, 26)
-            | (23, 3769)
-            | (26, 4096)
-            | (4096, 26)
-            | (23, 4096)
-            | (26, 4089)
-            | (4089, 26)
-            | (23, 4089)
-            | (25, 1042)
-            | (25, 1043)
-            | (1043, 25)
-            | (1043, 1042)
-            | (194, 25)
-            | (3361, 17)
-            | (3402, 17)
-            | (5017, 17)
-            | (650, 869)
-            | (1560, 1562)
-            | (1562, 1560)
-    )
 }
 
 fn eval_multirange_predicate(name: &str, vals: &[Datum]) -> Result<Datum, ExecError> {

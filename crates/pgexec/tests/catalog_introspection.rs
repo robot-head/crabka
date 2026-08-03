@@ -77,6 +77,7 @@ async fn every_named_catalog_relation_resolves() {
         "pg_catalog.pg_description",
         "pg_catalog.pg_roles",
         "pg_catalog.pg_authid",
+        "pg_catalog.pg_cast",
         "pg_catalog.pg_database",
         "pg_catalog.pg_tablespace",
         "pg_catalog.pg_am",
@@ -121,6 +122,18 @@ async fn every_named_catalog_relation_resolves() {
             .unwrap_or_else(|error| panic!("{relation} does not resolve: {error:?}"));
         assert2::assert!(result.len() == 1, "{relation}");
     }
+}
+
+#[tokio::test]
+async fn pg_cast_exposes_postgresql_builtin_casts() {
+    let engine = SqlEngine::new();
+    let listed = grid(
+        &engine,
+        "SELECT oid, castsource, casttarget, castfunc, castcontext, castmethod \
+         FROM pg_catalog.pg_cast WHERE castsource = 23 AND casttarget = 26",
+    )
+    .await;
+    assert2::assert!(listed == vec![some(&["10039", "23", "26", "0", "i", "b"])]);
 }
 
 /// A bare `pg_catalog.`-less name resolves to the same relation as the
