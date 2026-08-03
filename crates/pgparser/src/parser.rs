@@ -309,6 +309,10 @@ impl Parser {
             // it wherever an identifier is wanted keeps those matches working while
             // letting `public.t`, and a column or alias called `public`, parse.
             Token::Keyword(Keyword::Public) => Ok("public".into()),
+            // `DATA` is unreserved in PostgreSQL. This lexer promotes it only
+            // to recognize FOREIGN DATA WRAPPER, so it remains an identifier
+            // everywhere an ordinary name is accepted.
+            Token::Keyword(Keyword::Data) => Ok("data".into()),
             other => Err(ParseError::new(
                 format!("expected identifier, found {other:?}"),
                 self.peek_pos(),
@@ -2401,11 +2405,11 @@ impl Parser {
             self.expect(&Token::Comma)?;
             let haystack = self.expr(0)?;
             self.expect(&Token::RParen)?;
-            return Ok(Some(Self::call("strpos", vec![haystack, needle])));
+            return Ok(Some(Self::call("position", vec![haystack, needle])));
         }
         let haystack = self.expr(0)?;
         self.expect(&Token::RParen)?;
-        Ok(Some(Self::call("strpos", vec![haystack, needle])))
+        Ok(Some(Self::call("position", vec![haystack, needle])))
     }
 
     /// `OVERLAY(string PLACING replacement FROM start [FOR count])`.
@@ -6607,17 +6611,18 @@ impl Parser {
         let mut keys = Vec::new();
         loop {
             let start = self.peek_pos();
-            // A bare identifier followed by a key terminator is a plain column
-            // reference; anything else is an expression key.
-            let column = if matches!(self.peek(), Token::Ident(_))
+            // A bare identifier followed by a key terminator or an identifier
+            // clause (`COLLATE` / operator class) is a plain column reference;
+            // anything else is an expression key.
+            let column = if self.peek_col_id().is_some()
                 && matches!(
                     self.peek2(),
-                    Token::Comma | Token::RParen | Token::Keyword(Keyword::Asc | Keyword::Desc)
+                    Token::Comma
+                        | Token::RParen
+                        | Token::Ident(_)
+                        | Token::Keyword(Keyword::Asc | Keyword::Desc)
                 ) {
-                match self.bump() {
-                    Token::Ident(name) => Some(name),
-                    other => unreachable!("peeked an identifier, bumped {other:?}"),
-                }
+                Some(self.expect_col_id()?)
             } else {
                 self.expr(0)?;
                 None
@@ -6629,12 +6634,13 @@ impl Parser {
             }
             // An operator-class name is a bare identifier in the one position
             // where nothing else can appear.
-            if column.is_none()
-                && matches!(self.peek(), Token::Ident(_))
+            let opclass = if matches!(self.peek(), Token::Ident(_))
                 && !matches!(self.peek(), Token::Ident(s) if s.eq_ignore_ascii_case("nulls"))
             {
-                self.bump();
-            }
+                Some(self.qualified_name_text()?)
+            } else {
+                None
+            };
             let descending = if self.eat_keyword(Keyword::Desc) {
                 true
             } else {
@@ -6657,6 +6663,7 @@ impl Parser {
             keys.push(IndexKey {
                 column,
                 text,
+                opclass,
                 descending,
                 nulls_first,
             });
@@ -11824,6 +11831,7 @@ fn encode_sequence_options(options: &crate::ast::SequenceOptions) -> Vec<crate::
         .map(|text| crate::ast::IndexKey {
             column: None,
             text,
+            opclass: None,
             descending: false,
             nulls_first: None,
         })
@@ -12018,6 +12026,11 @@ mod tests {
             let q = only_query(sql);
             assert!(q.locking.is_none());
         }
+
+        let Statement::CreateIndex { keys, .. } = one("CREATE INDEX i ON t (data)") else {
+            panic!("expected CREATE INDEX");
+        };
+        assert!(keys[0].column.as_deref() == Some("data"));
     }
 
     #[test]
@@ -12265,6 +12278,7 @@ mod tests {
                     name: "data".into(),
                 }
         );
+        assert!(parse("CREATE TABLE t (data text)").is_ok());
     }
 
     #[test]
@@ -16026,9 +16040,40 @@ mod tests {
         crate::ast::IndexKey {
             column: Some(column.into()),
             text: column.into(),
+            opclass: None,
             descending: false,
             nulls_first: None,
         }
+    }
+
+    #[test]
+    fn create_index_keeps_opclass_keys_as_plain_columns() {
+        use assert2::assert;
+
+        for (sql, expected) in [
+            ("CREATE INDEX i ON t (a int4_ops)", "int4_ops"),
+            (
+                "CREATE INDEX i ON t (a pg_catalog.int4_ops)",
+                "pg_catalog.int4_ops",
+            ),
+            (
+                "CREATE INDEX i ON t (a COLLATE c int4_ops DESC)",
+                "int4_ops",
+            ),
+        ] {
+            let Statement::CreateIndex { keys, .. } = one(sql) else {
+                panic!("expected CREATE INDEX: {sql}");
+            };
+            assert!(keys[0].column.as_deref() == Some("a"), "{sql}");
+            assert!(keys[0].opclass.as_deref() == Some(expected), "{sql}");
+        }
+
+        let Statement::CreateIndex { keys, .. } =
+            one("CREATE INDEX i ON t ((lower(a)) text_ops)")
+        else {
+            panic!("expected CREATE INDEX");
+        };
+        assert!(keys[0].column.is_none());
     }
 
     fn alter_table_stmt(table: &str, actions: Vec<AlterTableAction>) -> Statement {
@@ -16481,7 +16526,7 @@ fn explicit_compatibility_refusals_reject_malformed_neighbors() {
 fn every_non_goal_has_a_bounded_typed_refusal_probe() {
     use crate::ast::{NON_GOAL_REFUSALS, Statement};
 
-    assert_eq!(NON_GOAL_REFUSALS.len(), 36);
+    assert_eq!(NON_GOAL_REFUSALS.len(), 31);
     for spec in NON_GOAL_REFUSALS {
         assert_eq!(
             parse(spec.representative_sql),

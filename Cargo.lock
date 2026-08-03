@@ -3520,6 +3520,7 @@ dependencies = [
  "crabka-pgwire",
  "crabka-trace-context",
  "crabka-units",
+ "encoding_rs",
  "hex",
  "jiff",
  "md-5 0.11.0",

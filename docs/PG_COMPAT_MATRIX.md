@@ -14,7 +14,7 @@ tools/check-pg-compat-matrix.sh
 ## Current G-1/G-2 baseline
 
 The implemented rows reflect the current parser/executor surface. The
-authoritative PostgreSQL 18.4 core-schedule score is 9 / 231 exact in both
+authoritative PostgreSQL 18.4 core-schedule score is 12 / 231 exact in both
 serial and parallel under the runner's explicit 20 MiB blocking-query memory
 policy; the checked-in monotone floor remains 6 / 231.
 

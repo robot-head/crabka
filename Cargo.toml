@@ -255,3 +255,4 @@ sqlx = { version = "0.9.0", default-features = false, features = ["postgres", "r
 # PostgreSQL's `normalize(text, form)` / `is_normalized(text, form)` need the
 # Unicode NFC/NFD/NFKC/NFKD algorithms; this is the ecosystem's UAX #15 crate.
 unicode-normalization = "0.1"
+encoding_rs = "0.8"

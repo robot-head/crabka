@@ -48,10 +48,10 @@ pub(crate) const BOOTSTRAP_ROLE_OID: i32 = 10;
 pub(crate) const DATABASE_OWNER_ROLE_OID: i32 = 6171;
 /// PostgreSQL's encoding number for UTF-8.
 pub(crate) const UTF8_ENCODING: i32 = 6;
-/// The role that owns every crabka object.
-///
-/// Crabka has no per-object owner column, and the bootstrap superuser is the
-/// only role that can create an object.
+/// PostgreSQL's encoding number for EUC-KR.
+pub(crate) const EUC_KR_ENCODING: i32 = 3;
+/// The role every crabka object is owned by. crabka has no per-object owner
+/// column, and the bootstrap superuser is the only role that can create one.
 pub(crate) const OBJECT_OWNER: &str = "postgres";
 
 /// Which member of the `pg_get_function*` family a call names.
@@ -100,6 +100,7 @@ enum CatalogFunc {
     TriggerDepth,
     EventRewriteOid,
     EventRewriteReason,
+    NotificationQueueUsage,
 }
 
 /// Classify a lowercased function name.
@@ -151,6 +152,7 @@ fn catalog_func(name: &str) -> Option<CatalogFunc> {
         "pg_trigger_depth" => TriggerDepth,
         "pg_event_trigger_table_rewrite_oid" => CatalogFunc::EventRewriteOid,
         "pg_event_trigger_table_rewrite_reason" => CatalogFunc::EventRewriteReason,
+        "pg_notification_queue_usage" => CatalogFunc::NotificationQueueUsage,
         _ if is_privilege_func(name) => HasPrivilege,
         "pg_has_role" => HasRole,
         _ => return None,
@@ -209,6 +211,7 @@ pub(crate) fn catalog_func_result_type(
         | CatalogFunc::TriggerDepth
         | CatalogFunc::EventRewriteOid
         | CatalogFunc::EventRewriteReason => ColumnType::Int4,
+        CatalogFunc::NotificationQueueUsage => ColumnType::Float8,
         StartTime => ColumnType::Timestamptz,
         CurrentSchemas => ColumnType::Array(ElemType::Text),
         _ => ColumnType::Text,
@@ -239,6 +242,7 @@ fn arity_ok(f: CatalogFunc, n: usize) -> bool {
         | CatalogFunc::TriggerDepth
         | CatalogFunc::EventRewriteOid
         | CatalogFunc::EventRewriteReason => n == 0,
+        CatalogFunc::NotificationQueueUsage => n == 0,
         HasPrivilege => (1..=4).contains(&n),
     }
 }
@@ -301,6 +305,10 @@ fn eval_resolved(
                 reason
             }))
         }
+        // Notification queues are not implemented, so their occupied fraction
+        // is exactly zero. Keep the function volatile: that remains correct if
+        // queue state is added later.
+        CatalogFunc::NotificationQueueUsage => Ok(Datum::Float8(0.0)),
         StartTime => Ok(Datum::Timestamptz(process_start_time())),
         CurrentSchemas => current_schemas(&vals[0], ctx),
         EncodingToChar => Ok(encoding_to_char(&vals[0])),
@@ -1519,6 +1527,7 @@ mod tests {
             "shobj_description",
             "current_schemas",
             "pg_backend_pid",
+            "pg_notification_queue_usage",
             "pg_postmaster_start_time",
             "has_table_privilege",
             "pg_encoding_to_char",
