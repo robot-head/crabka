@@ -103,7 +103,7 @@ jobs:
           name: e2e-images
 
       - name: Create kind cluster
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
         with:
           cluster_name: crabka-e2e
           version: v0.24.0
@@ -833,7 +833,7 @@ jobs:
         with:
           name: e2e-images
       - name: Create kind cluster
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
         with:
           cluster_name: crabka-sr-e2e
           version: v0.24.0
@@ -1194,7 +1194,7 @@ jobs:
           name: e2e-images
 
       - name: Create kind cluster
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
         with:
           cluster_name: crabka-kt-e2e
           version: v0.24.0
@@ -1477,7 +1477,7 @@ jobs:
           name: e2e-images
 
       - name: Create kind cluster
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
         with:
           cluster_name: crabka-auth-e2e
           version: v0.24.0
@@ -2172,7 +2172,7 @@ jobs:
           name: e2e-images
 
       - name: Create kind cluster
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
         with:
           cluster_name: crabka-dt-e2e
           version: v0.24.0
@@ -2442,7 +2442,7 @@ jobs:
           name: e2e-images
 
       - name: Create kind cluster
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
         with:
           cluster_name: crabka-opa-e2e
           version: v0.24.0
@@ -2850,7 +2850,7 @@ jobs:
           name: e2e-images
 
       - name: Create kind cluster
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
         with:
           cluster_name: crabka-oauth-e2e
           version: v0.24.0
@@ -3599,7 +3599,7 @@ jobs:
           name: e2e-images
 
       - name: Create kind cluster
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
         with:
           cluster_name: crabka-oauth-introspection-e2e
           version: v0.24.0

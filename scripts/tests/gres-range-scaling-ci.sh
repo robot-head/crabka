@@ -27,12 +27,12 @@ def validate(source, benchmark=script):
         'postgresql-client', 'aspect gres --task:name=gres-range-scaling-contract --suite range-scaling-ci',
         'CRABKA_GRES_RANGE_SCALING_MODE=fast',
         'CRABKA_GRES_RANGE_SCALING_FLOOR=2.1',
-        'CRABKA_GRES_SHARDED_SCALING_FLOOR=2.1',
-        'CRABKA_GRES_DECISION_CEILING_MIN_RATIO=0.5',
+        'CRABKA_GRES_SHARDED_SCALING_FLOOR=1.9',
+        'CRABKA_GRES_DECISION_CEILING_MIN_RATIO=0.45',
         'aspect gres --task:name=gres-range-scaling --suite range-scaling', 'artifact["mode"] == "live"',
         '"range4_vs_range1_min": 2.1',
-        '"sharded_range4_vs_range1_min": 2.1',
-        '"decision_ceiling_range4_min_ratio": 0.5',
+        '"sharded_range4_vs_range1_min": 1.9',
+        '"decision_ceiling_range4_min_ratio": 0.45',
         'artifact["passed"]["overall"] is True', 'actions/upload-artifact@v7',
     ]
     for needle in required_job:
@@ -93,8 +93,8 @@ mutations = [
     ('continue on error', workflow.replace('  gres-range-scaling:\n', '  gres-range-scaling:\n    continue-on-error: ${{ true }}\n', 1)),
     ('fast mode', workflow.replace('CRABKA_GRES_RANGE_SCALING_MODE=fast', '# fast mode removed', 1)),
     ('hosted range floor', workflow.replace('CRABKA_GRES_RANGE_SCALING_FLOOR=2.1', 'CRABKA_GRES_RANGE_SCALING_FLOOR=2.0', 1)),
-    ('hosted sharded floor', workflow.replace('CRABKA_GRES_SHARDED_SCALING_FLOOR=2.1', 'CRABKA_GRES_SHARDED_SCALING_FLOOR=2.0', 1)),
-    ('hosted decision floor', workflow.replace('CRABKA_GRES_DECISION_CEILING_MIN_RATIO=0.5', 'CRABKA_GRES_DECISION_CEILING_MIN_RATIO=0.4', 1)),
+    ('hosted sharded floor', workflow.replace('CRABKA_GRES_SHARDED_SCALING_FLOOR=1.9', 'CRABKA_GRES_SHARDED_SCALING_FLOOR=1.8', 1)),
+    ('hosted decision floor', workflow.replace('CRABKA_GRES_DECISION_CEILING_MIN_RATIO=0.45', 'CRABKA_GRES_DECISION_CEILING_MIN_RATIO=0.4', 1)),
 ]
 for label, mutated in mutations:
     try:

@@ -16,9 +16,12 @@ runs:
         bazelisk-cache: true
         disk-cache: true
         repository-cache: |
+          - .bazelrc
+          - .bazelversion
           - MODULE.bazel
           - MODULE.bazel.lock
           - Cargo.lock
+          - "**/*.bzl"
         external-cache: true
         cache-save: ${{ inputs.cache-save }}
     - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
