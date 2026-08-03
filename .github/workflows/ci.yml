@@ -353,14 +353,6 @@ jobs:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
       - name: Build and test affected targets
         run: aspect affected --base "${{ github.event.pull_request.base.sha || github.event.before }}"
-      - uses: codecov/codecov-action@v7
-        if: ${{ hashFiles('coverage/affected.lcov') != '' }}
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: coverage/affected.lcov
-          disable_search: true
-          flags: affected
-          fail_ci_if_error: false
 
   docs:
     needs: [changes, affected]

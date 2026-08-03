@@ -120,24 +120,21 @@ def _affected(ctx: TaskContext) -> int:
         if code != 0:
             return code
         builds = [target for target in uncovered_output.split("\n") if target]
-    if builds:
-        code = _run(ctx, "bazel", ["build", "--config=ci"] + builds)
-        if code != 0:
-            return code
-    if tests:
-        code = _run(ctx, "mkdir", ["-p", "coverage"])
-        if code != 0:
-            return code
     if cargo_connect_derive:
         code = _run(ctx, "cargo", ["test", "-p", "crabka-connect-derive", "--test", "derive"])
         if code != 0:
             return code
     if tests:
-        code = _run(ctx, "aspect", ["test"] + tests + [
-            "--coverage",
-            "--coverage-report=coverage/affected.lcov",
+        # A single Bazel configuration shares dependencies between standalone
+        # build roots and tests. Dedicated jobs own coverage reporting.
+        code = _run(ctx, "aspect", ["test"] + builds + tests + [
             "--bazel-flag=--config=ci",
+            "--bazel-flag=--nobuild_tests_only",
         ])
+        if code != 0:
+            return code
+    elif builds:
+        code = _run(ctx, "bazel", ["build", "--config=ci"] + builds)
         if code != 0:
             return code
     print("Built %d and tested %d affected targets." % (len(builds), len(tests)))
