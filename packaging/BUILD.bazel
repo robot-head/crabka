@@ -76,7 +76,7 @@ runtime_image(
         "//crates/metrics:crabka-metrics-heap__bin": "crabka-metrics",
         "//crates/metrics-service:crabka-metrics-service-heap__bin": "crabka-metrics-service",
         "//crates/observability:crabka-observability-heap__bin": "crabka-observability",
-        "//crates/observability-demo-app:observability-demo-app-heap__bin": "observability-demo-app",
+        "//crates/observability-demo-app:observability-demo-app__bin": "observability-demo-app",
         "//crates/profiles:crabka-profiles-heap__bin": "crabka-profiles",
         "//crates/schema-registry:crabka-schema-registry-heap__bin": "crabka-schema-registry",
         "//crates/traces:crabka-traces-heap__bin": "crabka-traces",
