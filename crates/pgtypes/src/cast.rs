@@ -428,6 +428,7 @@ pub fn cast_in(
         (Datum::Text(s), Int8) => text_to_i64(s),
         (Datum::Text(s), Float4) => text_to_f32(s),
         (Datum::Text(s), Float8) => text_to_f64(s),
+        (Datum::Text(s), ColumnType::Bytea) => text_to_bytea(s).map(Datum::Bytea),
         (Datum::Text(s), ColumnType::Point) => crate::Point::parse(s).map(Datum::Point),
         (Datum::Text(s), ColumnType::Path) => crate::Path::parse(s).map(Datum::Path),
         // `regclass` → the oid family drops the name and keeps the oid, which is
@@ -1045,6 +1046,60 @@ fn text_to_f32(s: &str) -> Result<Datum, TypeError> {
     Ok(Datum::Float4(parsed))
 }
 
+fn text_to_bytea(s: &str) -> Result<Vec<u8>, TypeError> {
+    let invalid = || TypeError::InvalidText {
+        type_name: "bytea",
+        value: s.to_string(),
+    };
+    if let Some(hex) = s.strip_prefix("\\x") {
+        if hex.len() % 2 != 0 {
+            return Err(invalid());
+        }
+        return hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let digit = |byte: u8| match byte {
+                    b'0'..=b'9' => Some(byte - b'0'),
+                    b'a'..=b'f' => Some(byte - b'a' + 10),
+                    b'A'..=b'F' => Some(byte - b'A' + 10),
+                    _ => None,
+                };
+                digit(pair[0])
+                    .zip(digit(pair[1]))
+                    .map(|(high, low)| high * 16 + low)
+                    .ok_or_else(|| invalid())
+            })
+            .collect();
+    }
+
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'\\' {
+            out.push(bytes[index]);
+            index += 1;
+        } else if bytes.get(index + 1) == Some(&b'\\') {
+            out.push(b'\\');
+            index += 2;
+        } else if let Some(octal) = bytes.get(index + 1..index + 4) {
+            if octal.iter().all(|byte| matches!(byte, b'0'..=b'7')) {
+                let value = u16::from(octal[0] - b'0') * 64
+                    + u16::from(octal[1] - b'0') * 8
+                    + u16::from(octal[2] - b'0');
+                out.push(u8::try_from(value).map_err(|_| invalid())?);
+                index += 4;
+            } else {
+                return Err(invalid());
+            }
+        } else {
+            return Err(invalid());
+        }
+    }
+    Ok(out)
+}
+
 /// Does `t` contain a non-zero decimal digit? A parse result of exactly zero
 /// from such a string is an underflow, not the value zero (`'1e-46'` vs
 /// `'0.000'`).
@@ -1116,6 +1171,18 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn bytea_input_accepts_plain_hex_and_escape_forms() {
+        let cast = |value: &str| {
+            super::cast(&Datum::Text(value.into()), ColumnType::Bytea, &utc())
+                .expect("valid bytea")
+        };
+        assert_eq!(cast("ABC"), Datum::Bytea(b"ABC".to_vec()));
+        assert_eq!(cast("\\x414243"), Datum::Bytea(b"ABC".to_vec()));
+        assert_eq!(cast("A\\\\B\\103"), Datum::Bytea(b"A\\BC".to_vec()));
+        assert!(super::cast(&Datum::Text("\\400".into()), ColumnType::Bytea, &utc()).is_err());
     }
 
     #[test]

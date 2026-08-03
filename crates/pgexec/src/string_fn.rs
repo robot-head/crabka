@@ -35,6 +35,7 @@ enum StrFunc {
     Sha512,
     Encode,
     Decode,
+    Convert,
     ToHex,
     QuoteIdent,
     QuoteLiteral,
@@ -62,6 +63,7 @@ fn str_func(name: &str) -> Option<StrFunc> {
         "sha512" => StrFunc::Sha512,
         "encode" => StrFunc::Encode,
         "decode" => StrFunc::Decode,
+        "convert" => StrFunc::Convert,
         "to_hex" => StrFunc::ToHex,
         "quote_ident" => StrFunc::QuoteIdent,
         "quote_literal" => StrFunc::QuoteLiteral,
@@ -128,6 +130,20 @@ pub(crate) fn string_func_result_type(
         }
         StrFunc::Decode => {
             require_arity(fc, n == 2)?;
+            Ok(ColumnType::Bytea)
+        }
+        StrFunc::Convert => {
+            require_arity(fc, n == 3)?;
+            if !is_unknown_arg(&args[0])
+                && crate::eval::infer_type(&args[0], scope)? != ColumnType::Bytea
+            {
+                return Err(undefined_function_spelled(&fc.name, args, scope));
+            }
+            for arg in &args[1..] {
+                if !is_unknown_arg(arg) && !crate::eval::infer_type(arg, scope)?.is_string() {
+                    return Err(undefined_function_spelled(&fc.name, args, scope));
+                }
+            }
             Ok(ColumnType::Bytea)
         }
         // `to_hex` has an int4 and an int8 overload and no preferred one, so a
@@ -264,6 +280,27 @@ fn eval_strict(
             require_arity(fc, vals.len() == 2)?;
             decode(text_arg(&vals[0])?, text_arg(&vals[1])?).map(Datum::Bytea)
         }
+        StrFunc::Convert => {
+            require_arity(fc, vals.len() == 3)?;
+            let bytes = match &vals[0] {
+                Datum::Bytea(bytes) => bytes.clone(),
+                Datum::Text(_) => match crabka_pgtypes::cast::cast(
+                    &vals[0],
+                    ColumnType::Bytea,
+                    &ctx.time_zone,
+                )? {
+                    Datum::Bytea(bytes) => bytes,
+                    _ => unreachable!("text to bytea cast returns bytea"),
+                },
+                other => return Err(type_error("convert", other)),
+            };
+            convert_encoding(
+                &bytes,
+                text_arg(&vals[1])?,
+                text_arg(&vals[2])?,
+            )
+            .map(Datum::Bytea)
+        }
         StrFunc::ToHex => {
             require_arity(fc, vals.len() == 1)?;
             Ok(Datum::Text(match &vals[0] {
@@ -348,6 +385,44 @@ fn eval_strict(
 
 fn byte_len(n: usize) -> i32 {
     i32::try_from(n).unwrap_or(i32::MAX)
+}
+
+fn convert_encoding(bytes: &[u8], source: &str, target: &str) -> Result<Vec<u8>, ExecError> {
+    let Some(source_id) = crate::catalog_fn::encoding_id(source) else {
+        return Err(ExecError::FunctionError {
+            sqlstate: "22023",
+            message: format!("invalid source encoding name \"{source}\""),
+        });
+    };
+    let Some(target_id) = crate::catalog_fn::encoding_id(target) else {
+        return Err(ExecError::FunctionError {
+            sqlstate: "22023",
+            message: format!("invalid destination encoding name \"{target}\""),
+        });
+    };
+    let supported = source_id == target_id
+        || source_id == 0
+        || target_id == 0
+        || crate::builtin_conversions::BUILTIN_CONVERSIONS.iter().any(
+            |&(_, _, _, _, candidate_source, candidate_target, _, default)| {
+                default && candidate_source == source_id && candidate_target == target_id
+            },
+        );
+    if !supported {
+        return Err(ExecError::FunctionError {
+            sqlstate: "42883",
+            message: format!("default conversion from {source} to {target} does not exist"),
+        });
+    }
+    // ponytail: ASCII is invariant across PostgreSQL's built-in encodings;
+    // add a converter backend when non-ASCII conversion becomes an owning test.
+    if bytes.is_ascii() || source.eq_ignore_ascii_case(target) {
+        return Ok(bytes.to_vec());
+    }
+    Err(ExecError::FunctionError {
+        sqlstate: "0A000",
+        message: format!("encoding conversion from {source} to {target} is not supported"),
+    })
 }
 
 fn text_arg(d: &Datum) -> Result<&str, ExecError> {

@@ -45,6 +45,7 @@ mod builtin_aggregates;
 mod builtin_amop;
 mod builtin_amproc;
 mod builtin_casts;
+mod builtin_conversions;
 mod builtin_opclasses;
 mod builtin_operator_descriptions;
 mod builtin_opfamilies;

@@ -322,3 +322,11 @@ fn strictness_matches_postgres() {
     }
     assert!(text_of("quote_nullable(NULL)") == "NULL");
 }
+
+#[test]
+fn convert_preserves_ascii_across_known_encodings() {
+    assert!(text_of("convert('ABC'::bytea, 'KOI8R', 'UTF8')") == "\\x414243");
+    assert!(text_of("convert('\\x41', 'KOI8R', 'UTF8')") == "\\x41");
+    assert!(result_type("convert('ABC'::bytea, 'KOI8R', 'UTF8')") == ColumnType::Bytea);
+    assert!(sqlstate("convert('ABC'::bytea, 'MULE_INTERNAL', 'UTF8')") == "42883");
+}
