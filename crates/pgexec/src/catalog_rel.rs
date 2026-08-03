@@ -115,6 +115,7 @@ const PG_CATALOG_RELATIONS: &[&str] = &[
     "pg_cast",
     "pg_collation",
     "pg_constraint",
+    "pg_conversion",
     "pg_database",
     "pg_depend",
     "pg_description",
@@ -171,6 +172,7 @@ static RELATION_NAMES: &[&str] = &[
     "pg_cast",
     "pg_collation",
     "pg_constraint",
+    "pg_conversion",
     "pg_database",
     "pg_depend",
     "pg_description",
@@ -228,6 +230,7 @@ pub(crate) fn relation_oid(name: &str) -> i32 {
         "pg_cast" => 2605,
         "pg_collation" => 3456,
         "pg_constraint" => 2606,
+        "pg_conversion" => 2607,
         "pg_database" => 1262,
         "pg_depend" => 2608,
         "pg_description" => 2609,
@@ -575,6 +578,7 @@ pub(crate) fn rows(
         "pg_cast" => Ok(pg_cast_rows()),
         "pg_collation" => Ok(pg_collation_rows()),
         "pg_constraint" => pg_constraint_rows(kv),
+        "pg_conversion" => Ok(pg_conversion_rows()),
         "pg_database" => Ok(pg_database_rows()),
         "pg_opclass" => pg_opclass_rows(kv),
         "pg_opfamily" => pg_opfamily_rows(kv),
@@ -647,6 +651,24 @@ fn pg_cast_rows() -> Vec<Vec<Datum>> {
         .iter()
         .map(|&(oid, source, target, function, context, method)| {
             vec![int(oid), int(source), int(target), int(function), text(context), text(method)]
+        })
+        .collect()
+}
+
+fn pg_conversion_rows() -> Vec<Vec<Datum>> {
+    crate::builtin_conversions::BUILTIN_CONVERSIONS
+        .iter()
+        .map(|&(oid, name, namespace, owner, source, target, function, default)| {
+            vec![
+                int(oid),
+                text(name),
+                int(namespace),
+                int(owner),
+                int(source),
+                int(target),
+                int(function),
+                Datum::Bool(default),
+            ]
         })
         .collect()
 }
@@ -892,6 +914,16 @@ fn pg_catalog_columns(name: &str) -> Vec<Column> {
             ("collversion", Text),
         ]),
         "pg_constraint" => pg_constraint_columns(),
+        "pg_conversion" => cols(&[
+            ("oid", Int4),
+            ("conname", Text),
+            ("connamespace", Int4),
+            ("conowner", Int4),
+            ("conforencoding", Int4),
+            ("contoencoding", Int4),
+            ("conproc", Int4),
+            ("condefault", Bool),
+        ]),
         "pg_database" => pg_database_columns(),
         "pg_depend" => cols(&[
             ("classid", Int4),
@@ -1232,7 +1264,7 @@ fn pg_proc_columns() -> Vec<Column> {
         ("procost", Float4),
         ("prorows", Float4),
         ("provariadic", Int4),
-        ("prosupport", Text),
+        ("prosupport", Int4),
         ("prokind", Text),
         ("prosecdef", Bool),
         ("proleakproof", Bool),

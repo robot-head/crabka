@@ -2914,7 +2914,7 @@ pub(crate) fn pg_proc_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             Datum::Float8(routine.cost),
             Datum::Float8(routine.rows),
             Datum::Int4(0),
-            Datum::Null,
+            Datum::Int4(0),
             Datum::Text(routine.kind.catalog_code().to_string()),
             Datum::Bool(routine.security_definer),
             Datum::Bool(routine.leakproof),
@@ -2987,6 +2987,22 @@ pub(crate) fn builtin_pg_proc_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
         .iter()
         .map(|data| zstd::decode_all(*data).map_err(|_| corrupt()))
         .collect::<Result<Vec<_>, _>>()?;
+    let support_oids = data
+        .iter()
+        .flat_map(|data| data.split(|byte| *byte == b'\n'))
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let line = std::str::from_utf8(line).map_err(|_| corrupt())?;
+            let fields = line.split('\t').collect::<Vec<_>>();
+            let oid = fields
+                .first()
+                .ok_or_else(corrupt)?
+                .parse::<i32>()
+                .map_err(|_| corrupt())?;
+            let name = fields.get(1).ok_or_else(corrupt)?;
+            Ok(((*name).to_string(), oid))
+        })
+        .collect::<Result<std::collections::BTreeMap<_, _>, ExecError>>()?;
     data.iter()
         .flat_map(|data| data.split(|byte| *byte == b'\n'))
         .filter(|line| !line.is_empty())
@@ -3019,7 +3035,11 @@ pub(crate) fn builtin_pg_proc_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
                 Datum::Float8(f64::from(int(cost)?)),
                 Datum::Float8(f64::from(int(result_rows)?)),
                 Datum::Int4(int(variadic)?),
-                Datum::Text((*support).to_string()),
+                Datum::Int4(if *support == "-" || *support == "0" {
+                    0
+                } else {
+                    *support_oids.get(*support).ok_or_else(corrupt)?
+                }),
                 Datum::Text(character(kind)?.to_string()),
                 Datum::Bool(flags[0] == b'1'),
                 Datum::Bool(flags[1] == b'1'),
@@ -3267,6 +3287,17 @@ mod tests {
                 row[26] == Datum::Null
             }
         }));
+    }
+
+    #[test]
+    fn builtin_support_functions_are_catalog_oids() {
+        let rows = builtin_pg_proc_rows().expect("built-in pg_proc rows");
+        let starts_with = rows
+            .iter()
+            .find(|row| row[0] == Datum::Int4(3696))
+            .expect("starts_with row");
+        assert!(starts_with[8] == Datum::Int4(6242));
+        assert!(rows.iter().all(|row| matches!(row[8], Datum::Int4(_))));
     }
 
     /// Run `sql` as a definition against `kv`, returning the completion tag.

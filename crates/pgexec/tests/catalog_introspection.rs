@@ -73,6 +73,7 @@ async fn every_named_catalog_relation_resolves() {
         "pg_catalog.pg_type",
         "pg_catalog.pg_index",
         "pg_catalog.pg_constraint",
+        "pg_catalog.pg_conversion",
         "pg_catalog.pg_proc",
         "pg_catalog.pg_description",
         "pg_catalog.pg_roles",
@@ -164,6 +165,32 @@ async fn pg_aggregate_exposes_postgresql_builtin_aggregates() {
                 None,
             ]]
     );
+}
+
+#[tokio::test]
+async fn pg_conversion_exposes_postgresql_builtin_conversions() {
+    let engine = SqlEngine::new();
+    let listed = grid(
+        &engine,
+        "SELECT oid, conname, connamespace, conowner, conforencoding, \
+                contoencoding, conproc, condefault \
+         FROM pg_catalog.pg_conversion WHERE oid = 4402",
+    )
+    .await;
+    assert2::assert!(
+        listed == vec![some(&["4402", "koi8_r_to_mic", "11", "10", "22", "7", "4302", "t"])]
+    );
+}
+
+#[tokio::test]
+async fn pg_proc_support_oid_join_stays_indexable() {
+    let engine = SqlEngine::new();
+    let count = column(
+        &engine,
+        "SELECT count(*) FROM pg_proc p1, pg_proc p2 WHERE p2.oid = p1.prosupport",
+    )
+    .await;
+    assert2::assert!(count == some(&["52"]));
 }
 
 /// A bare `pg_catalog.`-less name resolves to the same relation as the

@@ -571,22 +571,100 @@ fn current_schemas(include_implicit: &Datum, ctx: &EvalCtx) -> Result<Datum, Exe
     )))
 }
 
-/// crabka is UTF-8 only, so only PostgreSQL's UTF8 encoding number has a name.
+/// PostgreSQL 18.4's stable encoding-id table. The engine stores text as UTF-8,
+/// but catalog inspection still needs every PostgreSQL encoding identity.
+const ENCODING_NAMES: &[&str] = &[
+    "SQL_ASCII",
+    "EUC_JP",
+    "EUC_CN",
+    "EUC_KR",
+    "EUC_TW",
+    "EUC_JIS_2004",
+    "UTF8",
+    "MULE_INTERNAL",
+    "LATIN1",
+    "LATIN2",
+    "LATIN3",
+    "LATIN4",
+    "LATIN5",
+    "LATIN6",
+    "LATIN7",
+    "LATIN8",
+    "LATIN9",
+    "LATIN10",
+    "WIN1256",
+    "WIN1258",
+    "WIN866",
+    "WIN874",
+    "KOI8R",
+    "WIN1251",
+    "WIN1252",
+    "ISO_8859_5",
+    "ISO_8859_6",
+    "ISO_8859_7",
+    "ISO_8859_8",
+    "WIN1250",
+    "WIN1253",
+    "WIN1254",
+    "WIN1255",
+    "WIN1257",
+    "KOI8U",
+    "SJIS",
+    "BIG5",
+    "GBK",
+    "UHC",
+    "GB18030",
+    "JOHAB",
+    "SHIFT_JIS_2004",
+];
+
 fn encoding_to_char(encoding: &Datum) -> Datum {
     match int_arg(encoding) {
-        Ok(n) if i32::try_from(n) == Ok(UTF8_ENCODING) => Datum::Text("UTF8".into()),
+        Ok(n) => usize::try_from(n)
+            .ok()
+            .and_then(|index| ENCODING_NAMES.get(index))
+            .map_or_else(
+                || Datum::Text(String::new()),
+                |name| Datum::Text((*name).to_string()),
+            ),
         // PostgreSQL answers the empty string for an out-of-range encoding id.
-        Ok(_) => Datum::Text(String::new()),
         Err(_) => Datum::Null,
     }
 }
 
 fn char_to_encoding(name: &Datum) -> Datum {
     match name {
-        Datum::Text(text) if text.eq_ignore_ascii_case("UTF8") => Datum::Int4(UTF8_ENCODING),
-        Datum::Text(_) => Datum::Int4(-1),
+        Datum::Text(text) => encoding_id(text).map_or(Datum::Int4(-1), Datum::Int4),
         _ => Datum::Null,
     }
+}
+
+pub(crate) fn encoding_id(name: &str) -> Option<i32> {
+    let mut normalized = name
+        .bytes()
+        .filter(u8::is_ascii_alphanumeric)
+        .map(|byte| byte.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    if normalized == b"unicode" {
+        return Some(UTF8_ENCODING);
+    }
+    if normalized.starts_with(b"windows") {
+        normalized.splice(..7, b"win".iter().copied());
+    } else if normalized.starts_with(b"cp") {
+        normalized.splice(..2, b"win".iter().copied());
+    } else if normalized == b"shiftjis" {
+        normalized = b"sjis".to_vec();
+    }
+    ENCODING_NAMES
+        .iter()
+        .position(|candidate| {
+            candidate
+                .bytes()
+                .filter(u8::is_ascii_alphanumeric)
+                .map(|byte| byte.to_ascii_lowercase())
+                .eq(normalized.iter().copied())
+        })
+        .and_then(|index| i32::try_from(index).ok())
 }
 
 /// `pg_size_pretty(bigint)`, byte for byte as PostgreSQL formats it: the value
@@ -1336,8 +1414,8 @@ mod tests {
     use crabka_pgtypes::Datum;
 
     use super::{
-        catalog_func, constraint_def, foreign_key_definition, is_catalog_func, quote_identifier,
-        size_pretty,
+        catalog_func, char_to_encoding, constraint_def, encoding_to_char,
+        foreign_key_definition, is_catalog_func, quote_identifier, size_pretty,
     };
 
     // One case: how it differs from `sample_foreign_key`, and the definition
@@ -1412,6 +1490,17 @@ mod tests {
     fn unknown_names_are_not_claimed() {
         assert!(catalog_func("pg_get_nonesuch").is_none());
         assert!(!is_catalog_func("upper"));
+    }
+
+    #[test]
+    fn encoding_identity_matches_postgresql() {
+        assert_eq!(encoding_to_char(&Datum::Int4(22)), Datum::Text("KOI8R".into()));
+        assert_eq!(encoding_to_char(&Datum::Int4(41)), Datum::Text("SHIFT_JIS_2004".into()));
+        assert_eq!(encoding_to_char(&Datum::Int4(42)), Datum::Text(String::new()));
+        assert_eq!(char_to_encoding(&Datum::Text("utf8".into())), Datum::Int4(6));
+        assert_eq!(char_to_encoding(&Datum::Text("UNICODE".into())), Datum::Int4(6));
+        assert_eq!(char_to_encoding(&Datum::Text("UTF-8".into())), Datum::Int4(6));
+        assert_eq!(char_to_encoding(&Datum::Text("WINDOWS1252".into())), Datum::Int4(24));
     }
 
     /// PostgreSQL's own `pg_size_pretty` boundaries, measured on 18.4.
