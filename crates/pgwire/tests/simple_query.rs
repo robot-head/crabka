@@ -334,6 +334,70 @@ async fn three_sequential_queries_on_one_session() {
 }
 
 #[tokio::test]
+async fn raw_fastpath_error_preserves_session() {
+    let mut stream = raw_connect(spawn_server().await).await;
+    let mut messages = Vec::new();
+    let mut fastpath = Vec::new();
+    fastpath.extend_from_slice(&964u32.to_be_bytes());
+    fastpath.extend_from_slice(&0i16.to_be_bytes()); // argument format count
+    fastpath.extend_from_slice(&0i16.to_be_bytes()); // argument count
+    fastpath.extend_from_slice(&1i16.to_be_bytes()); // binary result
+    put_message(&mut messages, b'F', &fastpath);
+    put_message(&mut messages, b'Q', b"SELECT 1\0");
+    stream.write_all(&messages).await.expect("fastpath and query");
+
+    let (tag, body) = read_message(&mut stream).await;
+    assert_eq!(tag, b'E');
+    assert!(body.windows(7).any(|field| field == b"C0A000\0"));
+    assert_eq!(read_ready_status(&mut stream).await, b'I');
+
+    assert_eq!(read_tag(&mut stream).await, b'T');
+    assert_eq!(read_tag(&mut stream).await, b'D');
+    assert_eq!(read_tag(&mut stream).await, b'C');
+    assert_eq!(read_ready_status(&mut stream).await, b'I');
+}
+
+#[tokio::test]
+async fn raw_fastpath_obeys_extended_failure_and_failed_transaction_state() {
+    let mut stream = raw_connect(spawn_copy_server().await).await;
+    let mut fastpath = Vec::new();
+    fastpath.extend_from_slice(&964u32.to_be_bytes());
+    fastpath.extend_from_slice(&0i16.to_be_bytes());
+    fastpath.extend_from_slice(&0i16.to_be_bytes());
+    fastpath.extend_from_slice(&1i16.to_be_bytes());
+
+    // Parse fails, so the following FunctionCall is ignored until Sync.
+    let mut pipeline = Vec::new();
+    put_message(&mut pipeline, b'P', b"\0SELECT 1\0\0\0");
+    put_message(&mut pipeline, b'F', &fastpath);
+    put_message(&mut pipeline, b'S', b"");
+    stream.write_all(&pipeline).await.expect("extended failure");
+    let (tag, body) = read_message(&mut stream).await;
+    assert_eq!(tag, b'E');
+    assert!(body.windows(7).any(|field| field == b"C0A000\0"));
+    assert_eq!(read_ready_status(&mut stream).await, b'I');
+
+    let mut begin = Vec::new();
+    put_message(&mut begin, b'Q', b"BEGIN\0");
+    stream.write_all(&begin).await.expect("begin");
+    assert_eq!(read_tag(&mut stream).await, b'C');
+    assert_eq!(read_ready_status(&mut stream).await, b'T');
+
+    let mut calls = Vec::new();
+    put_message(&mut calls, b'F', &fastpath);
+    put_message(&mut calls, b'F', &fastpath);
+    stream.write_all(&calls).await.expect("fastpath calls");
+    let (tag, body) = read_message(&mut stream).await;
+    assert_eq!(tag, b'E');
+    assert!(body.windows(7).any(|field| field == b"C0A000\0"));
+    assert_eq!(read_ready_status(&mut stream).await, b'E');
+    let (tag, body) = read_message(&mut stream).await;
+    assert_eq!(tag, b'E');
+    assert!(body.windows(7).any(|field| field == b"C25P02\0"));
+    assert_eq!(read_ready_status(&mut stream).await, b'E');
+}
+
+#[tokio::test]
 async fn raw_copy_from_stdin_success_then_query_recovery() {
     let mut stream = raw_connect(spawn_copy_server().await).await;
     let mut out = Vec::new();

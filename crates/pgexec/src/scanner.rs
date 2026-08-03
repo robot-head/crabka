@@ -1077,7 +1077,9 @@ fn scanned_rows_bytes<'a>(rows: impl Iterator<Item = &'a ScannedRow>) -> usize {
 pub(crate) fn datum_row_bytes(row: &[crabka_pgtypes::Datum]) -> usize {
     row.iter().fold(0usize, |bytes, datum| {
         let variable = match datum {
-            crabka_pgtypes::Datum::Text(value) => value.len(),
+            crabka_pgtypes::Datum::Text(value) | crabka_pgtypes::Datum::JsonPath(value) => {
+                value.len()
+            }
             crabka_pgtypes::Datum::Bytea(value) => value.len(),
             crabka_pgtypes::Datum::Numeric(value) => value.to_string().len(),
             _ => 0,
@@ -2178,6 +2180,15 @@ mod cursor_contract_tests {
             xmin: 1,
             row: vec![Datum::Int8(i64::try_from(rowid).expect("test rowid fits"))],
         }
+    }
+
+    #[test]
+    fn jsonpath_payload_counts_toward_the_query_memory_budget() {
+        let value = Datum::JsonPath("$.a".into());
+        assert_eq!(
+            super::datum_row_bytes(&[value]),
+            std::mem::size_of::<Datum>() + 3
+        );
     }
 
     #[tokio::test]

@@ -65,6 +65,9 @@ pub enum ExecError {
         column: String,
         table: String,
     },
+    /// An index-backed constraint names a column that does not exist (42703).
+    /// PostgreSQL's index-analysis message calls this a column "named in key".
+    UndefinedIndexColumn(String),
     /// `ALTER TABLE … ADD COLUMN` / `RENAME COLUMN` collided with an existing
     /// column (42701).
     DuplicateColumn {
@@ -641,6 +644,10 @@ impl ExecError {
                 "42703",
                 format!("column \"{column}\" of relation \"{table}\" does not exist"),
             ),
+            ExecError::UndefinedIndexColumn(column) => PgError::error(
+                "42703",
+                format!("column \"{column}\" named in key does not exist"),
+            ),
             ExecError::DuplicateColumn { column, table } => PgError::error(
                 "42701",
                 format!("column \"{column}\" of relation \"{table}\" already exists"),
@@ -998,6 +1005,11 @@ mod tests {
                 },
                 "42704",
                 "constraint \"t_k_key\" for table \"t\" does not exist",
+            ),
+            (
+                ExecError::UndefinedIndexColumn("missing".into()),
+                "42703",
+                "column \"missing\" named in key does not exist",
             ),
         ];
 

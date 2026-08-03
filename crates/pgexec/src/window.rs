@@ -357,6 +357,12 @@ fn plan_call(
             crate::eval::infer_type(&args[0], scope)?
         }
     };
+    for expr in &spec.partition_by {
+        crate::eval::require_equality_operator(crate::eval::infer_type(expr, scope)?)?;
+    }
+    for item in &spec.order_by {
+        crate::eval::require_ordering_operator(crate::eval::infer_type(&item.expr, scope)?)?;
+    }
     let range_offset_ty = validate_frame(&spec, scope)?;
     Ok(PlannedCall {
         func,

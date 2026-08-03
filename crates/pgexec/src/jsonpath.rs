@@ -25,7 +25,7 @@
 use std::fmt::Write as _;
 
 use bigdecimal::{BigDecimal, One, ToPrimitive, Zero};
-use crabka_pgtypes::JsonbValue;
+use crabka_pgtypes::{ArrayValue, Datum, ElemType, JsonbValue, TypeError};
 
 use crate::error::ExecError;
 
@@ -37,6 +37,75 @@ const MAX_DEPTH: u32 = 128;
 /// has no such cap; `.**` over a deeply nested document is otherwise unbounded
 /// work inside a single statement.
 const MAX_ITEMS: usize = 1_000_000;
+
+/// Run the `jsonpath` input function and keep its canonical text representation.
+pub(crate) fn canonical_datum(src: &str) -> Result<Datum, ExecError> {
+    if src.is_empty() {
+        return Err(TypeError::InvalidText {
+            type_name: "jsonpath",
+            value: String::new(),
+        }
+        .into());
+    }
+    Ok(Datum::JsonPath(JsonPath::parse(src)?.to_string()))
+}
+
+pub(crate) fn cast_datum(value: &Datum) -> Result<Datum, ExecError> {
+    match value {
+        Datum::Null => Ok(Datum::Null),
+        Datum::Text(text) => canonical_datum(text),
+        Datum::JsonPath(text) => Ok(Datum::JsonPath(text.clone())),
+        other => Err(TypeError::CannotCast {
+            from: other
+                .column_type()
+                .map_or("unknown", crabka_pgtypes::ColumnType::name),
+            to: "jsonpath",
+        }
+        .into()),
+    }
+}
+
+/// Run `jsonpath_in` over each non-NULL element while preserving dimensions.
+pub(crate) fn cast_array_datum(value: &Datum) -> Result<Datum, ExecError> {
+    match value {
+        Datum::Null => Ok(Datum::Null),
+        Datum::Text(text) => {
+            let literal = crabka_pgtypes::array::parse_literal(text)?;
+            let elems = literal
+                .elements
+                .into_iter()
+                .map(|elem| match elem {
+                    None => Ok(Datum::Null),
+                    Some(text) => canonical_datum(&text),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Datum::Array(ArrayValue::with_dims(
+                ElemType::JsonPath,
+                elems,
+                literal.dims,
+            )))
+        }
+        Datum::Array(array) => {
+            let elems = array
+                .elems
+                .iter()
+                .map(cast_datum)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Datum::Array(ArrayValue::with_dims(
+                ElemType::JsonPath,
+                elems,
+                array.dims.clone(),
+            )))
+        }
+        other => Err(TypeError::CannotCast {
+            from: other
+                .column_type()
+                .map_or("unknown", crabka_pgtypes::ColumnType::name),
+            to: "jsonpath[]",
+        }
+        .into()),
+    }
+}
 
 /// A compiled jsonpath.
 #[derive(Debug, Clone, PartialEq)]

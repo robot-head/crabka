@@ -149,6 +149,15 @@ async fn filtered_aggregates_stream_with_a_pushdown_where() {
         .map(|grp| vec![Some(grp.to_string()), Some("100".to_string())])
         .collect::<Vec<_>>();
     assert!(grouped == expected);
+
+    // Inclusion-exclusion keeps an OR with overlapping pushdown predicates
+    // bounded too: 2400 + 501 - 401 = all 2500 rows.
+    let count = one_cell(
+        &mut session,
+        "SELECT count(*) FROM big WHERE id <= 2400 OR id >= 2000",
+    )
+    .await;
+    assert!(count.as_deref() == Some("2500"));
 }
 
 #[tokio::test]

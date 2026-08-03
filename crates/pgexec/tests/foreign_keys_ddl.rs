@@ -369,6 +369,51 @@ async fn a_self_reference_inside_create_table_resolves_against_the_in_flight_def
     );
 }
 
+/// DROP COLUMN runs before ADD CONSTRAINT inside PostgreSQL's ALTER TABLE pass
+/// order. A self-reference therefore sees the referenced column as missing;
+/// CASCADE does not change that analysis error, and neither failed statement
+/// may disturb the original primary key or create the staged foreign key.
+#[tokio::test]
+async fn drop_column_precedes_an_added_self_referencing_foreign_key() {
+    let (_engine, mut s) = engine_with(&[
+        "CREATE TABLE staged_self_fk (id int4 PRIMARY KEY, parent int4)",
+        "INSERT INTO staged_self_fk VALUES (1, NULL)",
+    ])
+    .await;
+
+    for suffix in ["", " CASCADE"] {
+        let sql = format!(
+            "ALTER TABLE staged_self_fk \
+             ADD CONSTRAINT staged_self_fk_parent_fkey \
+             FOREIGN KEY (parent) REFERENCES staged_self_fk (id), \
+             DROP COLUMN id{suffix}"
+        );
+        assert!(
+            failure_of(&mut s, &sql).await
+                == Failure::new(
+                    "42703",
+                    "column \"id\" referenced in foreign key constraint does not exist",
+                ),
+            "{sql}"
+        );
+        assert!(
+            query(&mut s, "SELECT id, parent FROM staged_self_fk").await
+                == vec![vec![Some("1".to_string()), None]],
+            "{sql}"
+        );
+        assert!(
+            query(
+                &mut s,
+                "SELECT conname FROM pg_constraint \
+                 WHERE conname = 'staged_self_fk_parent_fkey'",
+            )
+            .await
+                == Vec::<Vec<Option<String>>>::new(),
+            "{sql}"
+        );
+    }
+}
+
 /// A composite key written in a different order from the referenced index's.
 ///
 /// Both column lists are stored as written and paired positionally, and the

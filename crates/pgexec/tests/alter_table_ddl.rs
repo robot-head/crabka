@@ -632,6 +632,97 @@ async fn generated_columns_depend_on_the_columns_they_read() {
     assert!(err_code(&mut s, "SELECT b FROM t").await == "42703");
 }
 
+/// PostgreSQL runs the DROP COLUMN pass before it builds constraints added by
+/// the same ALTER TABLE, regardless of their written order. The missing key is
+/// therefore a 42703 and the whole statement leaves both schema and catalog
+/// untouched.
+#[tokio::test]
+async fn drop_column_precedes_an_added_unique_constraint() {
+    let (_engine, mut s) = engine_with(&[
+        "CREATE TABLE staged_unique (a int4, keep int4)",
+        "INSERT INTO staged_unique VALUES (1, 2)",
+    ])
+    .await;
+
+    let sql = "ALTER TABLE staged_unique ADD UNIQUE (a), DROP COLUMN a";
+    assert!(err_code(&mut s, sql).await == "42703");
+    assert!(err_message(&mut s, sql).await == "column \"a\" named in key does not exist");
+    assert!(
+        query(&mut s, "SELECT a, keep FROM staged_unique").await == vec![text_row(&["1", "2"])]
+    );
+    assert!(
+        query(
+            &mut s,
+            "SELECT conname FROM pg_constraint WHERE conname = 'staged_unique_a_key'",
+        )
+        .await
+            == Vec::<Vec<Option<String>>>::new()
+    );
+}
+
+/// DROP COLUMN, ADD COLUMN, and ADD CONSTRAINT run in separate PostgreSQL
+/// passes. Their written order therefore cannot make a constraint bind to the
+/// dropped incarnation of a same-named column.
+#[tokio::test]
+async fn drop_and_readd_column_precedes_an_added_unique_constraint() {
+    for (table, actions) in [
+        (
+            "staged_order_one",
+            "ADD UNIQUE (a), DROP COLUMN a, ADD COLUMN a int4 DEFAULT 9",
+        ),
+        (
+            "staged_order_two",
+            "DROP COLUMN a, ADD UNIQUE (a), ADD COLUMN a int4 DEFAULT 9",
+        ),
+    ] {
+        let (_engine, mut s) = engine_with(&[
+            &format!("CREATE TABLE {table} (a int4, keep int4)"),
+            &format!("INSERT INTO {table} VALUES (1, 2)"),
+        ])
+        .await;
+
+        run(&mut s, &format!("ALTER TABLE {table} {actions}")).await;
+        assert!(
+            query(&mut s, &format!("SELECT a, keep FROM {table}")).await
+                == vec![text_row(&["9", "2"])]
+        );
+        assert!(
+            err_code(&mut s, &format!("INSERT INTO {table} VALUES (3, 9)")).await == "23505"
+        );
+    }
+}
+
+/// SET NOT NULL is PostgreSQL's column-attribute pass, before the pass that
+/// builds a UNIQUE index. A row set containing both NULLs and duplicate keys
+/// must therefore report the null failure first, independent of written order.
+#[tokio::test]
+async fn set_not_null_precedes_an_added_unique_constraint() {
+    for actions in [
+        "ADD UNIQUE (a), ALTER COLUMN a SET NOT NULL",
+        "ALTER COLUMN a SET NOT NULL, ADD UNIQUE (a)",
+    ] {
+        let (_engine, mut s) = engine_with(&[
+            "CREATE TABLE staged_not_null (a int4)",
+            "INSERT INTO staged_not_null VALUES (NULL), (NULL), (1), (1)",
+        ])
+        .await;
+
+        assert!(
+            err_code(
+                &mut s,
+                &format!("ALTER TABLE staged_not_null {actions}")
+            )
+            .await
+                == "23502",
+            "{actions}"
+        );
+        assert!(
+            query(&mut s, "SELECT count(*) FROM staged_not_null").await
+                == vec![text_row(&["4"])]
+        );
+    }
+}
+
 /// `NOT VALID` applies only to constraints `PostgreSQL` can validate lazily; an
 /// index-backed one has to be built now.
 #[tokio::test]

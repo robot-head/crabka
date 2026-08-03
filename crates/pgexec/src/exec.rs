@@ -10,7 +10,8 @@ use bytes::Bytes;
 use crabka_pgcatalog::{Column, ColumnDefault, Sequence, Table, TableId};
 use crabka_pgkv::Kv;
 use crabka_pgparser::ast::{
-    ArraySubscript, Expr, FuncArgs, OrderItem, SelectItem, SelectStmt, Statement, UtilityStatement,
+    ArraySubscript, BinaryOp, Expr, FuncArgs, OrderItem, SelectItem, SelectStmt, Statement,
+    UtilityStatement,
 };
 use crabka_pgtypes::{ColumnType, Datum};
 use crabka_pgwire::engine::{Cell, FieldDescription, QueryResult};
@@ -494,6 +495,22 @@ pub(crate) fn execute_ddl(
                 foreign: None,
                 checks,
             };
+            for index in &pending_indexes {
+                if !matches!(
+                    index.method,
+                    crabka_pgcatalog::IndexMethod::Btree | crabka_pgcatalog::IndexMethod::Hash
+                ) {
+                    continue;
+                }
+                for column in &index.columns {
+                    let column = table
+                        .columns
+                        .iter()
+                        .find(|candidate| candidate.name == *column)
+                        .ok_or_else(|| ExecError::UndefinedColumn(column.clone()))?;
+                    validate_default_index_opclass(column.ty, index.method)?;
+                }
+            }
             let index_ops =
                 crabka_pgcatalog::create_indexes_on_table_ops(kv, &table, &pending_indexes)?;
             let staged_indexes = staged_indexes_of(&index_ops, &pending_indexes);
@@ -1586,7 +1603,7 @@ fn column_from_ast(
             crabka_pgparser::ast::ColumnConstraintKind::NotNull => catalog_column.not_null = true,
             crabka_pgparser::ast::ColumnConstraintKind::Null => catalog_column.not_null = false,
             crabka_pgparser::ast::ColumnConstraintKind::Default(expr) => {
-                let value = crate::eval::eval(expr, &Scope::empty(), &[], ctx)?;
+                let value = eval_assignment_value(expr, column.ty, &Scope::empty(), &[], ctx)?;
                 let value = coerce(value, column.ty, ctx)?;
                 ensure_default_can_be_persisted(&value)?;
                 catalog_column.default = Some(ColumnDefault::Value(value));
@@ -1758,6 +1775,21 @@ fn validate_index_opclasses(
     let visible_schemas = resolution.visible_schemas(kv)?;
     for key in keys {
         let Some(written) = key.opclass.as_deref() else {
+            let ty = match key.column.as_deref() {
+                Some(column) => {
+                    table
+                        .columns
+                        .iter()
+                        .find(|candidate| candidate.name == column)
+                        .ok_or_else(|| ExecError::UndefinedColumn(column.into()))?
+                        .ty
+                }
+                None => crate::eval::infer_type(
+                    &crabka_pgparser::parser::parse_expression(&key.text)?,
+                    &Scope::single(table, &table.name.name),
+                )?,
+            };
+            validate_default_index_opclass(ty, method)?;
             continue;
         };
         let (schema, name) = written
@@ -1827,6 +1859,25 @@ fn validate_index_opclasses(
     Ok(())
 }
 
+fn validate_default_index_opclass(
+    ty: ColumnType,
+    method: crabka_pgcatalog::IndexMethod,
+) -> Result<(), ExecError> {
+    if ty.storage_type() == ColumnType::JsonPath
+        && matches!(
+            method,
+            crabka_pgcatalog::IndexMethod::Btree | crabka_pgcatalog::IndexMethod::Hash
+        )
+    {
+        return Err(ExecError::UndefinedObject(format!(
+            "data type {} has no default operator class for access method \"{}\"",
+            ty.name(),
+            index_method_name(method)
+        )));
+    }
+    Ok(())
+}
+
 fn validate_index_method(
     table: &Table,
     columns: &[String],
@@ -1892,6 +1943,7 @@ fn ensure_default_can_be_persisted(value: &Datum) -> Result<(), ExecError> {
             | Datum::Int4(_)
             | Datum::Int8(_)
             | Datum::Text(_)
+            | Datum::JsonPath(_)
             | Datum::Float8(_)
             | Datum::Numeric(_)
             | Datum::Jsonb(_)
@@ -2083,6 +2135,13 @@ fn build_insert_row(
                 let target = table.columns[*slot].ty;
                 if target == crabka_pgtypes::ColumnType::Bytea {
                     Datum::Bytea(crate::session::decode_bytea_text(value)?)
+                } else if let Some(base) = jsonpath_assignment_base(target) {
+                    let value = crate::eval::cast_value(
+                        &Datum::Text(value.clone()),
+                        base,
+                        &ctx.time_zone,
+                    )?;
+                    coerce(value, target, ctx)?
                 } else {
                     // An unadorned literal resolves to the column's type, and that
                     // resolution is an assignment: `INSERT INTO t(v) VALUES ('abcd')`
@@ -2114,13 +2173,22 @@ fn build_copy_row(
 ) -> Result<Vec<Datum>, ExecError> {
     let mut row = unsupplied_defaults(table, target_idx, ctx)?;
     for (slot, value) in target_idx.iter().zip(row_values.iter()) {
+        let target = table.columns[*slot].ty;
         row[*slot] = match value {
+            Some(value) if let Some(base) = jsonpath_assignment_base(target) => {
+                let value = crate::eval::cast_value(
+                    &Datum::Text(value.clone()),
+                    base,
+                    &ctx.time_zone,
+                )?;
+                coerce(value, target, ctx)?
+            }
             Some(value) => crabka_pgtypes::cast::cast(
                 &Datum::Text(value.clone()),
-                table.columns[*slot].ty,
+                target,
                 &ctx.time_zone,
             )?,
-            None => Datum::Null,
+            None => coerce(Datum::Null, target, ctx)?,
         };
     }
     finish_written_row(table, &mut row, ctx)?;
@@ -2199,6 +2267,9 @@ pub(crate) fn finish_written_row(
     ctx: &crate::clock::EvalCtx,
 ) -> Result<(), ExecError> {
     apply_generated_columns(table, row, ctx)?;
+    for (column, value) in table.columns.iter().zip(row.iter()) {
+        crate::usertype::check_domain(column.ty, value, ctx)?;
+    }
     enforce_not_null(table, row)?;
     if table.checks.is_empty() {
         return Ok(());
@@ -4408,7 +4479,9 @@ fn apply_assignments(
         let raw = match value {
             AssignedValue::Value(value) => value.clone(),
             AssignedValue::Expr(Expr::Default) => default_value(&table.columns[*idx], ctx)?,
-            AssignedValue::Expr(expr) => crate::eval::eval(expr, scope, joined_row, ctx)?,
+            AssignedValue::Expr(expr) => {
+                eval_assignment_value(expr, table.columns[*idx].ty, scope, joined_row, ctx)?
+            }
             // The subscripted form reads the column's *current* value, so a
             // second entry for the same column sees the first one's result.
             AssignedValue::Subscripted { subscripts, value } => {
@@ -6704,7 +6777,7 @@ async fn apply_insert_conflict_update(
         let idx = table
             .column_index(column)
             .ok_or_else(|| ExecError::UndefinedColumn(column.clone()))?;
-        let value = crate::eval::eval(expr, &scope, &bindings, ctx)?;
+        let value = eval_assignment_value(expr, table.columns[idx].ty, &scope, &bindings, ctx)?;
         next[idx] = coerce(value, table.columns[idx].ty, ctx)?;
     }
     let updated_columns = update
@@ -7510,7 +7583,7 @@ fn execute_timestamp_update(
         }
         let mut next = row.clone();
         for (index, expr) in &targets {
-            let value = crate::eval::eval(expr, &scope, &row, ctx)?;
+            let value = eval_assignment_value(expr, table.columns[*index].ty, &scope, &row, ctx)?;
             next[*index] = coerce(value, table.columns[*index].ty, ctx)?;
         }
         finish_written_row(table, &mut next, ctx)?;
@@ -7969,6 +8042,31 @@ fn find_visible_one_keyed(
     Ok(visible)
 }
 
+/// Evaluate an assignment expression with the target context PostgreSQL gives
+/// an untyped string literal. Typed `text` expressions still flow through
+/// [`coerce`] and are rejected for jsonpath/jsonpath[] assignment.
+fn jsonpath_assignment_base(target: ColumnType) -> Option<ColumnType> {
+    let base = target.storage_type();
+    matches!(
+        base,
+        ColumnType::JsonPath | ColumnType::Array(crabka_pgtypes::ElemType::JsonPath)
+    )
+    .then_some(base)
+}
+
+fn eval_assignment_value(
+    expr: &Expr,
+    target: ColumnType,
+    scope: &Scope,
+    values: &[Datum],
+    ctx: &crate::clock::EvalCtx,
+) -> Result<Datum, ExecError> {
+    if let (Expr::StringLiteral(text), Some(base)) = (expr, jsonpath_assignment_base(target)) {
+        return crate::eval::cast_value(&Datum::Text(text.clone()), base, &ctx.time_zone);
+    }
+    crate::eval::eval(expr, scope, values, ctx)
+}
+
 /// Coerce an evaluated value into a target column type (assignment context). `ctx`
 /// supplies the session zone for any temporal numeric conversion.
 pub(crate) fn coerce(
@@ -7999,6 +8097,28 @@ pub(crate) fn coerce(
         && e.ty == named
     {
         return Ok(value);
+    }
+    if target == ColumnType::JsonPath {
+        return match value {
+            Datum::Null => Ok(Datum::Null),
+            Datum::JsonPath(text) => Ok(Datum::JsonPath(text)),
+            other => Err(ExecError::TypeMismatch(format!(
+                "column is of type jsonpath but expression is of type {}",
+                other.column_type().map_or("unknown", ColumnType::name),
+            ))),
+        };
+    }
+    if target == ColumnType::Array(crabka_pgtypes::ElemType::JsonPath) {
+        return match value {
+            Datum::Null => Ok(Datum::Null),
+            Datum::Array(array) if array.elem == crabka_pgtypes::ElemType::JsonPath => {
+                Ok(Datum::Array(array))
+            }
+            other => Err(ExecError::TypeMismatch(format!(
+                "column is of type jsonpath[] but expression is of type {}",
+                other.column_type().map_or("unknown", ColumnType::name),
+            ))),
+        };
     }
     // SP32: assignment to a `numeric` column — any numeric-family value (int4/
     // int8/float8/numeric) converts, applying the column's `(p,s)` modifier (round
@@ -10348,10 +10468,10 @@ fn try_execute_partial_aggregate_pushdown(
 /// item decomposes into scalar expressions over pushdown-model aggregate calls
 /// (`CAST(count(*) AS BIGINT)`, `COALESCE(sum(x), 0)`, `sum(a) / count(*)`, …
 /// — or the narrow grouped shape), with a WHERE that parses into the strict
-/// pushdown predicate subset. Everything else — `DISTINCT`, `HAVING`, bare
-/// ungrouped columns, aggregates over non-column arguments, whole-row reads,
-/// non-pushdown filters — keeps the materializing scan and its whole-result
-/// memory budget.
+/// pushdown predicate subset (or, for `count(*)`, an OR of two such filters).
+/// Everything else — `DISTINCT`, `HAVING`, bare ungrouped columns, aggregates
+/// over non-column arguments, whole-row reads, non-pushdown filters — keeps the
+/// materializing scan and its whole-result memory budget.
 fn try_execute_local_streaming_aggregate(
     read_ctx: &crate::subquery::SubCtx<'_>,
     s: &SelectStmt,
@@ -10371,40 +10491,60 @@ fn try_execute_local_streaming_aggregate(
     let Some(plan) = local_streaming_aggregate_plan(&table, s) else {
         return Ok(None);
     };
-    let Ok(predicate) = crate::plan_dist::strict_predicate_for_filter(&table, s.filter.as_ref())
-    else {
-        return Ok(None);
+    let predicates = match crate::plan_dist::strict_predicate_for_filter(&table, s.filter.as_ref()) {
+        Ok(predicate) => vec![predicate],
+        Err(_) => {
+            let Some(predicates) = count_star_or_predicates(&table, s, &plan) else {
+                return Ok(None);
+            };
+            Vec::from(predicates)
+        }
     };
     // An equality probe over a local index reads less than any table scan:
     // keep that existing path (and its materializing budget) for those filters.
-    if choose_local_index_equality(read_ctx.catalog_kv, &table, &predicate)?.is_some() {
+    if predicates.len() == 1
+        && choose_local_index_equality(read_ctx.catalog_kv, &table, &predicates[0])?.is_some()
+    {
         return Ok(None);
     }
     let scope = Scope::single(&table, &qualifier);
     let (fields, out_exprs, tys) = resolve_projection(&s.projection, &scope)?;
-    let states = crate::scanner::collect_partial_aggregates_bounded(
-        read_ctx.range_scanner,
-        ScanRequest {
-            local: read_ctx.kv,
-            global: read_ctx.global,
-            global_snapshot: read_ctx.gsnap,
-            snapshot: read_ctx.snapshot,
-            own_xid: read_ctx.own,
-            read_ts: None,
-            own_start_ts: None,
-            table: &table,
-            interval: RowInterval::ALL,
-            predicate,
-            projection: crate::ProjectionPushdown::All,
-            partial_aggregate: None,
-            top_k: None,
-        },
-        plan.specs(),
-        crate::scanner::BLOCKING_QUERY_MEMORY,
-    )?;
+    let states = predicates
+        .into_iter()
+        .map(|predicate| {
+            crate::scanner::collect_partial_aggregates_bounded(
+                read_ctx.range_scanner,
+                ScanRequest {
+                    local: read_ctx.kv,
+                    global: read_ctx.global,
+                    global_snapshot: read_ctx.gsnap,
+                    snapshot: read_ctx.snapshot,
+                    own_xid: read_ctx.own,
+                    read_ts: None,
+                    own_start_ts: None,
+                    table: &table,
+                    interval: RowInterval::ALL,
+                    predicate,
+                    projection: crate::ProjectionPushdown::All,
+                    partial_aggregate: None,
+                    top_k: None,
+                },
+                plan.specs(),
+                crate::scanner::BLOCKING_QUERY_MEMORY,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let rows = match &plan {
         StreamingAggregatePlan::Scalar { calls, specs } => {
-            let values = finalize_scalar_streaming_aggregates(states, specs)?;
+            let values = match <[Vec<Vec<ScannedRow>>; 1]>::try_from(states) {
+                Ok([states]) => finalize_scalar_streaming_aggregates(states, specs)?,
+                Err(states) => {
+                    let Ok(states) = <[Vec<Vec<ScannedRow>>; 3]>::try_from(states) else {
+                        return Err(invalid_scalar_aggregate_shape());
+                    };
+                    finalize_count_star_union(states, specs)?
+                }
+            };
             vec![crate::agg::eval_over_aggregate_values(
                 &out_exprs,
                 &scope,
@@ -10414,6 +10554,11 @@ fn try_execute_local_streaming_aggregate(
             )?]
         }
         StreamingAggregatePlan::Grouped(spec) => {
+            let Ok([states]) = <[Vec<Vec<ScannedRow>>; 1]>::try_from(states) else {
+                return Err(ExecError::Unsupported(
+                    "grouped partial aggregate streaming expects one predicate".into(),
+                ));
+            };
             let Ok([state]) = <[Vec<ScannedRow>; 1]>::try_from(states) else {
                 return Err(ExecError::Unsupported(
                     "grouped partial aggregate streaming expects exactly one spec".into(),
@@ -10440,6 +10585,80 @@ fn try_execute_local_streaming_aggregate(
         scope: out_scope,
         rows,
     }))
+}
+
+/// The one safe disjunction for local streaming: `count(*)` over two strict
+/// predicates. Three bounded scans compute `left + right - intersection`
+/// without materializing the matching rows.
+fn count_star_or_predicates(
+    table: &Table,
+    s: &SelectStmt,
+    plan: &StreamingAggregatePlan,
+) -> Option<[PredicatePushdown; 3]> {
+    let StreamingAggregatePlan::Scalar { calls, specs } = plan else {
+        return None;
+    };
+    let ([call], [spec]) = (calls.as_slice(), specs.as_slice()) else {
+        return None;
+    };
+    if call.name != "count"
+        || call.distinct
+        || !matches!(call.args, FuncArgs::Star)
+        || call.filter.is_some()
+        || spec.function != crate::PartialAggregateFunction::Count
+        || spec.column.is_some()
+    {
+        return None;
+    }
+    let Expr::Binary {
+        op: BinaryOp::Or,
+        left,
+        right,
+    } = s.filter.as_ref()?
+    else {
+        return None;
+    };
+    let PredicatePushdown::Conjunctive(left) =
+        crate::plan_dist::strict_predicate_for_filter(table, Some(left)).ok()?
+    else {
+        return None;
+    };
+    let PredicatePushdown::Conjunctive(right) =
+        crate::plan_dist::strict_predicate_for_filter(table, Some(right)).ok()?
+    else {
+        return None;
+    };
+    let mut intersection = left.clone();
+    intersection.extend(right.iter().cloned());
+    Some([
+        PredicatePushdown::Conjunctive(left),
+        PredicatePushdown::Conjunctive(right),
+        PredicatePushdown::Conjunctive(intersection),
+    ])
+}
+
+fn finalize_count_star_union(
+    [left, right, intersection]: [Vec<Vec<ScannedRow>>; 3],
+    specs: &[crate::PartialAggregateSpec],
+) -> Result<Vec<Datum>, ExecError> {
+    let [spec] = specs else {
+        return Err(invalid_scalar_aggregate_shape());
+    };
+    let count = |states| -> Result<i64, ExecError> {
+        let values = finalize_scalar_streaming_aggregates(states, std::slice::from_ref(spec))?;
+        let [Datum::Int8(count)] = values.as_slice() else {
+            return Err(invalid_scalar_aggregate_shape());
+        };
+        Ok(*count)
+    };
+    let (left, right, intersection) = (count(left)?, count(right)?, count(intersection)?);
+    if intersection > left || intersection > right {
+        return Err(invalid_scalar_aggregate_shape());
+    }
+    let count = (left - intersection).checked_add(right).ok_or_else(|| {
+        ExecError::Unsupported("streamed COUNT union exceeds int8 range".into())
+    })?;
+    Ok(vec![Datum::Int8(count)])
 }
 
 /// How the local streaming path computes a supported aggregate SELECT.
@@ -12235,7 +12454,7 @@ fn format_default_value(value: &Datum, ty: ColumnType) -> String {
         )
         .expect("a Datum's text encoding is always valid UTF-8"),
         Datum::Numeric(value) => value.to_string(),
-        Datum::Text(value) => {
+        Datum::Text(value) | Datum::JsonPath(value) => {
             let mut out = String::new();
             let _ = write!(out, "'{}'::{}", escape_sql_string(value), ty.name());
             out
@@ -13040,11 +13259,20 @@ pub(crate) fn virtual_relation_oid(name: &str) -> i32 {
     }
 }
 
-/// The scalar built-in types crabka exposes. `array` is 0 for the three whose
-/// array type crabka does not implement; every other one gets a generated
-/// array row from [`builtin_type_rows`].
+/// The scalar built-in types crabka exposes. `array` is 0 when crabka does not
+/// implement that array type; every other one gets a generated array row from
+/// [`builtin_type_rows`].
 fn scalar_type_rows() -> &'static [BuiltinTypeRow] {
     &[
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::OID as i32,
+            name: "oid",
+            len: 4,
+            category: "N",
+            elem: 0,
+            // `_oid` is not a supported value type yet.
+            array: 0,
+        },
         BuiltinTypeRow {
             oid: crabka_pgtypes::oids::OIDVECTOR as i32,
             name: "oidvector",
@@ -13249,6 +13477,14 @@ fn scalar_type_rows() -> &'static [BuiltinTypeRow] {
             array: crabka_pgtypes::oids::JSONBARRAY as i32,
         },
         BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::JSONPATH as i32,
+            name: "jsonpath",
+            len: -1,
+            category: "U",
+            elem: 0,
+            array: crabka_pgtypes::oids::JSONPATHARRAY as i32,
+        },
+        BuiltinTypeRow {
             oid: crabka_pgtypes::oids::TSVECTOR as i32,
             name: "tsvector",
             len: -1,
@@ -13334,6 +13570,7 @@ fn array_typname(elem: crabka_pgtypes::ElemType) -> &'static str {
         ElemType::Bytea => "_bytea",
         ElemType::Uuid => "_uuid",
         ElemType::Jsonb => "_jsonb",
+        ElemType::JsonPath => "_jsonpath",
         ElemType::Int2 => "_int2",
         ElemType::Float4 => "_float4",
         ElemType::Regtype => "_regtype",
@@ -13876,6 +14113,25 @@ pub(crate) fn project_rows_ordered(
     let order_keys =
         resolve_select_order_keys(&s.order_by, scope, fields, out_exprs, require_output)?;
 
+    if matches!(s.distinct, crabka_pgparser::ast::DistinctClause::Distinct) {
+        for expr in out_exprs {
+            crate::eval::require_equality_operator(crate::eval::infer_type(expr, scope)?)?;
+        }
+    }
+    let distinct_on = distinct_on_plan(s, scope, fields, out_exprs, &order_keys)?;
+    if let Some(plan) = &distinct_on {
+        for expr in &plan.group {
+            crate::eval::require_equality_operator(crate::eval::infer_type(expr, scope)?)?;
+        }
+    }
+    for key in &order_keys {
+        let expr = match key {
+            SelectOrderKey::Output(index) => &out_exprs[*index],
+            SelectOrderKey::SourceExpr(expr) => expr,
+        };
+        crate::eval::require_ordering_operator(crate::eval::infer_type(expr, scope)?)?;
+    }
+
     // SP39: SELECT DISTINCT projects FIRST, dedups output rows, then ORDER BY
     // sorts the deduped output. PostgreSQL requires every sort key to refer to
     // the select-list output (ordinal, alias/name, or the exact select expression).
@@ -13909,7 +14165,7 @@ pub(crate) fn project_rows_ordered(
     // Non-DISTINCT keeps the existing source-row ordering shape so non-projected
     // source expressions still work, but output ordinals/labels evaluate the
     // corresponding projection expression for each source row.
-    let Some(plan) = distinct_on_plan(s, scope, fields, out_exprs, &order_keys)? else {
+    let Some(plan) = distinct_on else {
         let mut keyed = key_source_rows(&order_keys, out_exprs, scope, kept, ctx)?;
         if !order_keys.is_empty() {
             keyed.sort_by(|a, b| order_cmp(&a.0, &b.0, &s.order_by));
@@ -13917,7 +14173,6 @@ pub(crate) fn project_rows_ordered(
         let kept = apply_row_window(keyed, window, &s.order_by);
         return project_rows(out_exprs, scope, &kept, ctx);
     };
-
     // DISTINCT ON dedups a stream sorted by `plan.sort`, which is not always the
     // query's own ORDER BY — the sort decides which row of each group survives,
     // ORDER BY only decides how the survivors come out.
@@ -14664,6 +14919,8 @@ pub(crate) fn column_type_from_oid(oid: u32) -> Result<ColumnType, ExecError> {
         crabka_pgtypes::oids::UUID => ColumnType::Uuid,
         // `json` is an input alias for `jsonb`; both name the same column type.
         crabka_pgtypes::oids::JSON | crabka_pgtypes::oids::JSONB => ColumnType::Jsonb,
+        crabka_pgtypes::oids::JSONPATH => ColumnType::JsonPath,
+        crabka_pgtypes::oids::RECORD => ColumnType::Record(None),
         // Every array oid crabka has an element type for, `_json` included.
         _ => match crabka_pgtypes::ElemType::from_array_oid(oid) {
             Some(elem) => ColumnType::Array(elem),
@@ -14683,9 +14940,11 @@ pub(crate) fn datum_to_cell(
     if d.is_null() {
         return None;
     }
+    let text = crabka_pgtypes::encoding::encode_text_in(d, style);
+    let binary = crabka_pgtypes::encoding::encode_binary(d);
     Some(Cell {
-        text: Bytes::from(crabka_pgtypes::encoding::encode_text_in(d, style)),
-        binary: Bytes::from(crabka_pgtypes::encoding::encode_binary(d)),
+        text: Bytes::from(text),
+        binary: Bytes::from(binary),
     })
 }
 
@@ -14912,7 +15171,7 @@ fn partition_definition(
                 crabka_pgparser::ast::ColumnConstraintKind::NotNull => target.not_null = true,
                 crabka_pgparser::ast::ColumnConstraintKind::Null => target.not_null = false,
                 crabka_pgparser::ast::ColumnConstraintKind::Default(expr) => {
-                    let value = crate::eval::eval(expr, &Scope::empty(), &[], ctx)?;
+                    let value = eval_assignment_value(expr, target.ty, &Scope::empty(), &[], ctx)?;
                     target.default = Some(ColumnDefault::Value(coerce(value, target.ty, ctx)?));
                 }
                 other => {
@@ -15547,7 +15806,8 @@ fn backfill_generated_column(
         .rows_mut(kv)?
         .iter()
         .map(|(_, xmin, xmax, row)| {
-            let value = crate::eval::eval(&expr, &scope, row, ctx).and_then(|v| coerce(v, ty, ctx));
+            let value =
+                eval_assignment_value(&expr, ty, &scope, row, ctx).and_then(|v| coerce(v, ty, ctx));
             match value {
                 Ok(value) => Ok(value),
                 Err(error) => {
@@ -15801,7 +16061,7 @@ pub(crate) fn apply_generated_columns(
             continue;
         };
         let expr = crabka_pgparser::parser::parse_expression(source)?;
-        let value = crate::eval::eval(&expr, &scope, &snapshot, ctx)?;
+        let value = eval_assignment_value(&expr, column.ty, &scope, &snapshot, ctx)?;
         row[index] = coerce(value, column.ty, ctx)?;
     }
     Ok(())
@@ -16128,6 +16388,76 @@ impl AlterTableState {
     }
 }
 
+/// Validate added constraints against the column shape PostgreSQL presents to
+/// them. PostgreSQL executes every `DROP COLUMN` pass before its constraint-add
+/// passes, regardless of the subcommands' written order. Without this preflight,
+/// `ADD UNIQUE (a), DROP COLUMN a` built a staged index and then removed `a`,
+/// while PostgreSQL rejects the whole statement with 42703.
+fn validate_alter_constraint_columns(
+    kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
+    table: &Table,
+    actions: &[crabka_pgparser::ast::AlterTableAction],
+) -> Result<(), ExecError> {
+    use crabka_pgparser::ast::{AlterTableAction as Action, TableConstraintKind as Constraint};
+
+    let mut columns: HashSet<String> = table
+        .columns
+        .iter()
+        .map(|column| column.name.clone())
+        .collect();
+    for action in actions {
+        if let Action::DropColumn { column, .. } = action {
+            columns.remove(column);
+        }
+    }
+    // ADD COLUMN runs after DROP COLUMN but before either kind of added
+    // constraint, so a dropped name re-added in the same statement is visible.
+    for action in actions {
+        if let Action::AddColumn { column, .. } = action {
+            columns.insert(column.name.clone());
+        }
+    }
+
+    for action in actions {
+        let Action::AddConstraint(constraint) = action else {
+            continue;
+        };
+        match &constraint.kind {
+            Constraint::PrimaryKey(keys) | Constraint::Unique { columns: keys, .. } => {
+                if let Some(missing) = keys.iter().find(|column| !columns.contains(*column)) {
+                    return Err(ExecError::UndefinedIndexColumn(missing.clone()));
+                }
+            }
+            Constraint::ForeignKey {
+                columns: referencing,
+                references,
+            } => {
+                if let Some(missing) = referencing.iter().find(|column| !columns.contains(*column))
+                {
+                    return Err(ExecError::UndefinedForeignKeyColumn(missing.clone()));
+                }
+                let referenced = resolve_relation(
+                    kv,
+                    resolution,
+                    &references.table,
+                    SchemaDisposition::Utility,
+                )?;
+                if referenced == table.name
+                    && let Some(missing) = references
+                        .columns
+                        .iter()
+                        .find(|column| !columns.contains(*column))
+                {
+                    return Err(ExecError::UndefinedForeignKeyColumn(missing.clone()));
+                }
+            }
+            Constraint::Check(_) | Constraint::Exclude { .. } => {}
+        }
+    }
+    Ok(())
+}
+
 /// `ALTER TABLE [IF EXISTS] name <action> [, …]`.
 fn alter_table_ops(
     kv: &dyn Kv,
@@ -16184,6 +16514,7 @@ fn alter_table_ops(
         }
         Err(error) => return Err(error.into()),
     };
+    validate_alter_constraint_columns(kv, resolution, &table, actions)?;
     let mut state = AlterTableState {
         table,
         rows: None,
@@ -16195,7 +16526,9 @@ fn alter_table_ops(
         dropped_foreign_keys: Vec::new(),
         foreign_key_ids: crabka_pgcatalog::ForeignKeyIds::default(),
     };
-    for action in actions {
+    let mut ordered_actions = actions.iter().collect::<Vec<_>>();
+    ordered_actions.sort_by_key(|action| alter_table_action_pass(action));
+    for action in ordered_actions {
         alter_table_action_ops(kv, resolution, &mut state, action, own_xid, catalog)?;
     }
 
@@ -16217,6 +16550,48 @@ fn alter_table_ops(
     }
     ops.extend(state.ops);
     Ok((command("ALTER TABLE"), ops))
+}
+
+/// The phase-2 pass order PostgreSQL assigns to the ALTER TABLE subcommands
+/// crabka supports. Written order is preserved within a pass.
+fn alter_table_action_pass(action: &crabka_pgparser::ast::AlterTableAction) -> u8 {
+    use crabka_pgparser::ast::AlterTableAction as Action;
+
+    match action {
+        Action::DropColumn { .. }
+        | Action::DropNotNull(_)
+        | Action::DropDefault(_)
+        | Action::DropConstraint { .. } => 0,
+        Action::SetType { .. } => 1,
+        Action::AddColumn { .. } => 2,
+        // PostgreSQL first examines ADD CONSTRAINT, then queues its actual
+        // work after the column-attribute pass. Crabka executes it directly,
+        // so order the effective work rather than the examination pass.
+        Action::SetNotNull(_) => 3,
+        Action::AddConstraint(constraint)
+            if matches!(
+                constraint.kind,
+                crabka_pgparser::ast::TableConstraintKind::PrimaryKey(_)
+                    | crabka_pgparser::ast::TableConstraintKind::Unique { .. }
+                    | crabka_pgparser::ast::TableConstraintKind::Exclude { .. }
+            ) =>
+        {
+            4
+        }
+        Action::AddConstraint(_) | Action::SetDefault { .. } => 5,
+        Action::RenameTable { .. }
+        | Action::RenameColumn { .. }
+        | Action::RenameConstraint { .. }
+        | Action::ValidateConstraint(_)
+        | Action::SetStorageParameters(_)
+        | Action::ResetStorageParameters(_)
+        | Action::SetTablespace(_)
+        | Action::OwnerTo(_)
+        | Action::SetTriggerMode { .. }
+        | Action::AttachPartition { .. }
+        | Action::DetachPartition { .. }
+        | Action::Unsupported(_) => 6,
+    }
 }
 
 /// How `PostgreSQL` names an `ALTER TABLE` subcommand in the 42809 it raises
@@ -16442,7 +16817,7 @@ fn alter_table_action_ops(
             let index = state.column_index(column)?;
             let ty = state.table.columns[index].ty;
             let value = coerce(
-                crate::eval::eval(expr, &Scope::empty(), &[], &ddl_ctx)?,
+                eval_assignment_value(expr, ty, &Scope::empty(), &[], &ddl_ctx)?,
                 ty,
                 &ddl_ctx,
             )?;
@@ -16495,7 +16870,7 @@ fn alter_table_action_ops(
                 .iter()
                 .map(|(_, xmin, xmax, row)| {
                     let cast = match using {
-                        Some(expr) => crate::eval::eval(expr, &scope, row, &ddl_ctx)
+                        Some(expr) => eval_assignment_value(expr, *ty, &scope, row, &ddl_ctx)
                             .and_then(|value| coerce(value, *ty, &ddl_ctx)),
                         None => {
                             let value = row.get(index).cloned().unwrap_or(Datum::Null);
@@ -17235,6 +17610,12 @@ fn add_constraint_index(
         .iter()
         .map(|column| state.column_index(column))
         .collect::<Result<Vec<_>, _>>()?;
+    for index in &key_column_indices {
+        validate_default_index_opclass(
+            state.table.columns[*index].ty,
+            crabka_pgcatalog::IndexMethod::Btree,
+        )?;
+    }
     let rows = state.live_rows(kv)?;
     let new_index = crabka_pgcatalog::NewIndex {
         name: name.map_or_else(
@@ -17364,6 +17745,11 @@ fn rebuild_indexes_on_column(
     }
     let rows = state.live_rows(kv)?;
     for index in &affected {
+        for column in &index.columns {
+            if let Some(column) = state.table.column_index(column) {
+                validate_default_index_opclass(state.table.columns[column].ty, index.method)?;
+            }
+        }
         let prefix = crabka_pgkv::key::secondary_index_prefix(index.table_id, index.id);
         // Drop the entries this statement already staged before re-deriving
         // them, so the rebuild is not layered on top of stale keys.
@@ -17447,7 +17833,6 @@ fn drop_table_column(
             row.remove(index);
         }
     }
-    state.table.columns.remove(index);
     for foreign_key in state.current_foreign_keys(kv)? {
         if foreign_key.columns.iter().any(|name| name == column) {
             drop_foreign_key_constraint(kv, state, &foreign_key.name);
@@ -17468,6 +17853,7 @@ fn drop_table_column(
             )?;
         }
     }
+    state.table.columns.remove(index);
     let column_names: Vec<String> = state.table.columns.iter().map(|c| c.name.clone()).collect();
     state
         .table
@@ -22035,6 +22421,7 @@ mod tests {
             (oids::JSON, ColumnType::Jsonb),
             (oids::JSONB, ColumnType::Jsonb),
             (oids::JSONARRAY, ColumnType::Array(ElemType::Jsonb)),
+            (oids::RECORD, ColumnType::Record(None)),
         ] {
             assert!(super::column_type_from_oid(oid).expect("known oid") == expected);
         }

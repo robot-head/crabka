@@ -771,84 +771,13 @@ impl Parser {
             // than `< > = <= >= <>`, `BETWEEN/IN/LIKE`, `AND`/`OR` but LOOSER than
             // `+ - * /`. So `+ - * /` and the unary-minus operand power shift up by
             // two to make room (odd l_bp / even r_bp preserved).
-            let (op, l_bp, r_bp) = match self.peek() {
-                // `AND` and `OR` are bare-label keywords too, so — as for the
-                // predicate words above — the operator reading needs an operand
-                // in sight: `SELECT id and FROM w` names the column `and`.
-                Token::Keyword(Keyword::Or) if Self::starts_expr(self.peek2()) => {
-                    (BinaryOp::Or, 1, 2)
-                }
-                Token::Keyword(Keyword::And) if Self::starts_expr(self.peek2()) => {
-                    (BinaryOp::And, 3, 4)
-                }
-                Token::Eq => (BinaryOp::Eq, 5, 6),
-                Token::Ne => (BinaryOp::Ne, 5, 6),
-                Token::Lt => (BinaryOp::Lt, 5, 6),
-                Token::Le => (BinaryOp::Le, 5, 6),
-                Token::Gt => (BinaryOp::Gt, 5, 6),
-                Token::Ge => (BinaryOp::Ge, 5, 6),
-                Token::Concat => (BinaryOp::Concat, 7, 8),
-                // The jsonb/array operators share the `||` slot (7, 8),
-                // left-associative: tighter than the comparisons (so
-                // `a->>'k' = 'v'` groups as `(a->>'k') = 'v'`) and looser than
-                // `+ - * /`, which is PostgreSQL's relative ordering for this
-                // whole family.
-                Token::JsonGet => (BinaryOp::JsonGet, 7, 8),
-                Token::JsonGetText => (BinaryOp::JsonGetText, 7, 8),
-                Token::JsonGetPath => (BinaryOp::JsonGetPath, 7, 8),
-                Token::JsonGetPathText => (BinaryOp::JsonGetPathText, 7, 8),
-                Token::Contains => (BinaryOp::Contains, 7, 8),
-                Token::ContainedBy => (BinaryOp::ContainedBy, 7, 8),
-                Token::KeyExists => (BinaryOp::KeyExists, 7, 8),
-                Token::KeyExistsAny => (BinaryOp::KeyExistsAny, 7, 8),
-                Token::KeyExistsAll => (BinaryOp::KeyExistsAll, 7, 8),
-                Token::JsonPathExists => (BinaryOp::JsonPathExists, 7, 8),
-                Token::JsonPathMatch => (BinaryOp::JsonPathMatch, 7, 8),
-                Token::Overlaps => (BinaryOp::Overlaps, 7, 8),
-                Token::DoesNotExtendRight => (BinaryOp::DoesNotExtendRight, 7, 8),
-                Token::DoesNotExtendLeft => (BinaryOp::DoesNotExtendLeft, 7, 8),
-                Token::Adjacent => (BinaryOp::Adjacent, 7, 8),
-                Token::Phrase => (BinaryOp::Phrase, 7, 8),
-                // The regex-match and bitwise operators are "any other operator"
-                // in PostgreSQL's precedence table — the same level as `||` and
-                // the jsonb family, left-associative. `1 | 2 # 3` is therefore
-                // `(1 | 2) # 3` (0), not `1 | (2 # 3)`.
-                Token::Tilde => (BinaryOp::Match, 7, 8),
-                Token::TildeCi => (BinaryOp::MatchCi, 7, 8),
-                Token::NotTilde => (BinaryOp::NotMatch, 7, 8),
-                Token::NotTildeCi => (BinaryOp::NotMatchCi, 7, 8),
-                Token::Amp => (BinaryOp::BitAnd, 7, 8),
-                Token::Pipe => (BinaryOp::BitOr, 7, 8),
-                Token::Hash => (BinaryOp::BitXor, 7, 8),
-                Token::Shl => (BinaryOp::Shl, 7, 8),
-                Token::Shr => (BinaryOp::Shr, 7, 8),
-                Token::Plus => (BinaryOp::Add, 9, 10),
-                Token::Minus => (BinaryOp::Sub, 9, 10),
-                Token::Star => (BinaryOp::Mul, 11, 12),
-                Token::Slash => (BinaryOp::Div, 11, 12),
-                Token::Percent => (BinaryOp::Mod, 11, 12),
-                // `^` binds TIGHTER than `* / %` and LOOSER than unary minus
-                // (whose operand power is 15), so `-2^2` is `(-2)^2` = 4. It is
-                // left-associative in PostgreSQL — `2^3^2` is 64, not 512.
-                Token::Caret => (BinaryOp::Pow, 13, 14),
-                _ => break,
-            };
-            if l_bp < min_bp {
+            let Some((op, r_bp, op_pos)) = self.take_infix_operator(min_bp)? else {
                 break;
-            }
-            let op_pos = self.peek_pos();
-            self.bump();
-            // SP34: `op ANY|SOME|ALL ( SELECT … )` — a quantified comparison. Only
-            // the comparison operators take a quantifier (PostgreSQL).
+            };
+            // SP34: `op ANY|SOME|ALL ( SELECT … )` — any representable
+            // operator is syntactically valid here. Type analysis is responsible
+            // for requiring a boolean result, just as PostgreSQL does.
             if matches!(
-                op,
-                BinaryOp::Eq
-                    | BinaryOp::Ne
-                    | BinaryOp::Lt
-                    | BinaryOp::Le
-                    | BinaryOp::Gt
-                    | BinaryOp::Ge
-            ) && matches!(
                 self.peek(),
                 Token::Keyword(Keyword::Any | Keyword::Some | Keyword::All)
             ) {
@@ -898,6 +827,153 @@ impl Parser {
             };
         }
         Ok(lhs)
+    }
+
+    /// Consume one infix operator whose left binding power reaches `min_bp`.
+    /// Wrapper decoding stays out of [`Parser::expr`]'s recursive frame so the
+    /// parser's near-limit stack-safety guarantee is unchanged.
+    fn take_infix_operator(
+        &mut self,
+        min_bp: u8,
+    ) -> Result<Option<(BinaryOp, u8, usize)>, ParseError> {
+        let explicit = self.explicit_operator_starts();
+        if explicit && 7 < min_bp {
+            return Ok(None);
+        }
+        let explicit_token = if explicit {
+            Some(self.explicit_operator_token()?)
+        } else {
+            None
+        };
+        let (token, position) = match explicit_token.as_ref() {
+            Some((token, position)) => (token, *position),
+            None => (self.peek(), self.peek_pos()),
+        };
+        let (op, l_bp, r_bp) = match token {
+            // `AND` and `OR` are bare-label keywords too, so they are operators
+            // only when an operand follows.
+            Token::Keyword(Keyword::Or) if !explicit && Self::starts_expr(self.peek2()) => {
+                (BinaryOp::Or, 1, 2)
+            }
+            Token::Keyword(Keyword::And) if !explicit && Self::starts_expr(self.peek2()) => {
+                (BinaryOp::And, 3, 4)
+            }
+            Token::Eq => (BinaryOp::Eq, 5, 6),
+            Token::Ne => (BinaryOp::Ne, 5, 6),
+            Token::Lt => (BinaryOp::Lt, 5, 6),
+            Token::Le => (BinaryOp::Le, 5, 6),
+            Token::Gt => (BinaryOp::Gt, 5, 6),
+            Token::Ge => (BinaryOp::Ge, 5, 6),
+            Token::Concat => (BinaryOp::Concat, 7, 8),
+            Token::JsonGet => (BinaryOp::JsonGet, 7, 8),
+            Token::JsonGetText => (BinaryOp::JsonGetText, 7, 8),
+            Token::JsonGetPath => (BinaryOp::JsonGetPath, 7, 8),
+            Token::JsonGetPathText => (BinaryOp::JsonGetPathText, 7, 8),
+            Token::Contains => (BinaryOp::Contains, 7, 8),
+            Token::ContainedBy => (BinaryOp::ContainedBy, 7, 8),
+            Token::KeyExists => (BinaryOp::KeyExists, 7, 8),
+            Token::KeyExistsAny => (BinaryOp::KeyExistsAny, 7, 8),
+            Token::KeyExistsAll => (BinaryOp::KeyExistsAll, 7, 8),
+            Token::JsonPathExists => (BinaryOp::JsonPathExists, 7, 8),
+            Token::JsonPathMatch => (BinaryOp::JsonPathMatch, 7, 8),
+            Token::Overlaps => (BinaryOp::Overlaps, 7, 8),
+            Token::DoesNotExtendRight => (BinaryOp::DoesNotExtendRight, 7, 8),
+            Token::DoesNotExtendLeft => (BinaryOp::DoesNotExtendLeft, 7, 8),
+            Token::Adjacent => (BinaryOp::Adjacent, 7, 8),
+            Token::Phrase => (BinaryOp::Phrase, 7, 8),
+            Token::Tilde => (BinaryOp::Match, 7, 8),
+            Token::TildeCi => (BinaryOp::MatchCi, 7, 8),
+            Token::NotTilde => (BinaryOp::NotMatch, 7, 8),
+            Token::NotTildeCi => (BinaryOp::NotMatchCi, 7, 8),
+            Token::Amp => (BinaryOp::BitAnd, 7, 8),
+            Token::Pipe => (BinaryOp::BitOr, 7, 8),
+            Token::Hash => (BinaryOp::BitXor, 7, 8),
+            Token::Shl => (BinaryOp::Shl, 7, 8),
+            Token::Shr => (BinaryOp::Shr, 7, 8),
+            Token::Plus => (BinaryOp::Add, 9, 10),
+            Token::Minus => (BinaryOp::Sub, 9, 10),
+            Token::Star => (BinaryOp::Mul, 11, 12),
+            Token::Slash => (BinaryOp::Div, 11, 12),
+            Token::Percent => (BinaryOp::Mod, 11, 12),
+            Token::Caret => (BinaryOp::Pow, 13, 14),
+            _ if explicit => return Err(ParseError::new("expected operator name", position)),
+            _ => return Ok(None),
+        };
+        let (l_bp, r_bp) = if explicit { (7, 8) } else { (l_bp, r_bp) };
+        if l_bp < min_bp {
+            return Ok(None);
+        }
+        if !explicit {
+            self.bump();
+        }
+        Ok(Some((op, r_bp, position)))
+    }
+
+    fn explicit_operator_starts(&self) -> bool {
+        self.peek_ident_eq("operator")
+            && !self.peek_is_quoted_ident()
+            && *self.peek2() == Token::LParen
+    }
+
+    /// Parse `OPERATOR([schema.]symbol)` in prefix or infix position. Gres has
+    /// no user-defined operators, so only an omitted schema or `pg_catalog` can
+    /// name one of the built-ins represented by [`BinaryOp`] / [`UnaryOp`].
+    fn explicit_operator_token(&mut self) -> Result<(Token, usize), ParseError> {
+        self.bump(); // OPERATOR
+        self.expect(&Token::LParen)?;
+        if let Some(schema) = self.peek_col_id()
+            && *self.peek2() == Token::Dot
+        {
+            let schema_pos = self.peek_pos();
+            self.bump();
+            self.bump(); // dot
+            if schema != "pg_catalog" {
+                return Err(ParseError::new_sqlstate(
+                    "0A000",
+                    format!("operator schema \"{schema}\" is not supported"),
+                    schema_pos,
+                ));
+            }
+            if self.peek_col_id().is_some() && *self.peek2() == Token::Dot {
+                return Err(ParseError::new(
+                    "multi-part operator qualification is not supported",
+                    self.peek_pos(),
+                ));
+            }
+        }
+        let position = self.peek_pos();
+        if *self.peek() == Token::RParen {
+            return Err(ParseError::new("expected operator name", position));
+        }
+        let token = self.bump();
+        if *self.peek() == Token::Dot {
+            return Err(ParseError::new(
+                "multi-part operator qualification is not supported",
+                self.peek_pos(),
+            ));
+        }
+        self.expect(&Token::RParen)?;
+        Ok((token, position))
+    }
+
+    fn explicit_prefix_operator(&mut self) -> Result<Expr, ParseError> {
+        let (token, position) = self.explicit_operator_token()?;
+        let op = match token {
+            Token::Minus => UnaryOp::Neg,
+            Token::Plus => UnaryOp::Plus,
+            Token::Tilde => UnaryOp::BitNot,
+            Token::At => UnaryOp::Abs,
+            Token::SquareRoot => UnaryOp::Sqrt,
+            Token::CubeRoot => UnaryOp::Cbrt,
+            Token::TsNot => UnaryOp::TsNot,
+            _ => return Err(ParseError::new("expected prefix operator", position)),
+        };
+        Ok(Expr::Unary {
+            op,
+            // OPERATOR(...) has PostgreSQL's generic-operator precedence,
+            // even when the wrapped spelling is `+` or `-`.
+            expr: Box::new(self.expr(8)?),
+        })
     }
 
     /// Consume one tight-binding postfix operator — `::`, `COLLATE`, an array
@@ -1087,6 +1163,9 @@ impl Parser {
     }
 
     fn prefix(&mut self) -> Result<Expr, ParseError> {
+        if self.explicit_operator_starts() {
+            return self.explicit_prefix_operator();
+        }
         match self.peek().clone() {
             Token::Keyword(Keyword::Not) => {
                 self.bump();
@@ -16687,6 +16766,127 @@ mod json_array_conflict_notify_tests {
                 projected(&format!("SELECT {expression}")) == binary(*op, column("a"), column("b")),
                 "{expression}"
             );
+        }
+    }
+
+    #[test]
+    fn explicit_operator_wrapper_reuses_the_binary_operator() {
+        let expected = projected("SELECT relname ~ '^x' COLLATE pg_catalog.default");
+        for sql in [
+            "SELECT relname OPERATOR(pg_catalog.~) '^x' COLLATE pg_catalog.default",
+            "SELECT relname OPERATOR(~) '^x' COLLATE pg_catalog.default",
+        ] {
+            assert_eq!(projected(sql), expected, "{sql}");
+        }
+        assert_eq!(
+            projected("SELECT 1 + 2 OPERATOR(pg_catalog.*) 3"),
+            projected("SELECT (1 + 2) * 3")
+        );
+        assert_eq!(
+            projected("SELECT 1 OPERATOR(pg_catalog.+) 2 * 3"),
+            projected("SELECT 1 + (2 * 3)")
+        );
+        assert_eq!(
+            projected("SELECT 1 OPERATOR(+) 2 OPERATOR(*) 3"),
+            projected("SELECT (1 + 2) * 3")
+        );
+    }
+
+    #[test]
+    fn explicit_operator_wrapper_supports_prefix_and_quantified_forms() {
+        let prefix_cases: &[(&str, UnaryOp)] = &[
+            ("OPERATOR(pg_catalog.-) a", UnaryOp::Neg),
+            ("OPERATOR(+) a", UnaryOp::Plus),
+            ("OPERATOR(pg_catalog.~) a", UnaryOp::BitNot),
+            ("OPERATOR(pg_catalog.@) a", UnaryOp::Abs),
+            ("OPERATOR(pg_catalog.|/) a", UnaryOp::Sqrt),
+            ("OPERATOR(pg_catalog.||/) a", UnaryOp::Cbrt),
+            ("OPERATOR(pg_catalog.!!) a", UnaryOp::TsNot),
+        ];
+        for (expression, op) in prefix_cases {
+            assert_eq!(
+                projected(&format!("SELECT {expression}")),
+                Expr::Unary {
+                    op: *op,
+                    expr: Box::new(column("a")),
+                },
+                "{expression}"
+            );
+        }
+        assert_eq!(
+            projected("SELECT OPERATOR(pg_catalog.-) 2 ^ 2"),
+            projected("SELECT -(2 ^ 2)")
+        );
+
+        assert_eq!(
+            projected("SELECT value OPERATOR(pg_catalog.~) ANY(ARRAY['^x', '^y'])"),
+            Expr::QuantifiedArray {
+                expr: Box::new(column("value")),
+                op: BinaryOp::Match,
+                all: false,
+                array: Box::new(Expr::ArrayLiteral(vec![
+                    Expr::StringLiteral("^x".into()),
+                    Expr::StringLiteral("^y".into()),
+                ])),
+            }
+        );
+        assert!(matches!(
+            projected("SELECT value OPERATOR(pg_catalog.~) ALL(SELECT pattern FROM patterns)"),
+            Expr::Quantified {
+                op: BinaryOp::Match,
+                all: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            projected("SELECT value OPERATOR(pg_catalog.+) SOME(values_array)"),
+            Expr::QuantifiedArray {
+                op: BinaryOp::Add,
+                all: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn explicit_operator_wrapper_rejects_unsupported_names_without_stealing_aliases() {
+        let bare_alias = select("SELECT relname operator FROM relations");
+        assert!(matches!(
+            &bare_alias.projection[0],
+            SelectItem::Expr {
+                alias: Some(alias),
+                ..
+            } if alias == "operator"
+        ));
+        let quoted_alias = select("SELECT relname \"operator\" FROM relations");
+        assert!(matches!(
+            &quoted_alias.projection[0],
+            SelectItem::Expr {
+                alias: Some(alias),
+                ..
+            } if alias == "operator"
+        ));
+
+        let schema_error = error("SELECT 1 OPERATOR(public.+) 2");
+        assert_eq!(schema_error.sqlstate(), "0A000");
+        assert!(
+            schema_error
+                .message
+                .contains("operator schema \"public\" is not supported")
+        );
+        assert!(
+            error("SELECT 1 OPERATOR(pg_catalog.public.+) 2")
+                .message
+                .contains("multi-part operator qualification")
+        );
+
+        for sql in [
+            "SELECT 1 OPERATOR() 2",
+            "SELECT OPERATOR() 1",
+            "SELECT 1 OPERATOR(pg_catalog.) 2",
+            "SELECT 1 OPERATOR(pg_catalog.+ 2",
+        ] {
+            assert!(crate::parse(sql).is_err(), "{sql}");
         }
     }
 

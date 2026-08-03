@@ -55,6 +55,16 @@ fn declaration_type(
     })
 }
 
+pub(crate) fn cast_value(
+    value: &Datum,
+    ty: ColumnType,
+    ctx: &crate::clock::EvalCtx,
+) -> Result<Datum, ExecError> {
+    let value = crate::eval::cast_value(value, ty, &ctx.time_zone)?;
+    crate::usertype::check_domain(ty, &value, ctx)?;
+    Ok(value)
+}
+
 #[derive(Default)]
 struct Frame {
     label: Option<String>,
@@ -697,7 +707,7 @@ fn bind_scalar_parameters(
             .column
             .or_else(|| value.column_type())
             .unwrap_or(ColumnType::Text);
-        let value = crabka_pgtypes::cast::cast(value, ty, &ctx.time_zone)?;
+        let value = cast_value(value, ty, ctx)?;
         let positional = format!("${}", index + 1);
         frame.slots.insert(
             positional.clone(),
@@ -1226,7 +1236,7 @@ impl ScalarInterpreter<'_> {
                     .map(|expr| self.eval(expr))
                     .transpose()?
                     .unwrap_or(Datum::Null);
-                let value = crabka_pgtypes::cast::cast(&value, ty, &self.ctx.time_zone)?;
+                let value = cast_value(&value, ty, self.ctx)?;
                 if *not_null && value.is_null() {
                     return Err(ExecError::FunctionError {
                         sqlstate: "23502",
@@ -1307,8 +1317,7 @@ impl ScalarInterpreter<'_> {
 
     fn integer(&self, expr: &Expr) -> Result<i32, ExecError> {
         let value = self.eval(expr)?;
-        let Datum::Int4(value) =
-            crabka_pgtypes::cast::cast(&value, ColumnType::Int4, &self.ctx.time_zone)?
+        let Datum::Int4(value) = cast_value(&value, ColumnType::Int4, self.ctx)?
         else {
             unreachable!("int4 cast returned another datum type");
         };
@@ -1383,7 +1392,7 @@ impl ScalarInterpreter<'_> {
                     .or_else(|| record.values[index].column_type());
                 record.values[index] = if subscripts.is_empty() {
                     match field_type {
-                        Some(ty) => crabka_pgtypes::cast::cast(&value, ty, &self.ctx.time_zone)?,
+                        Some(ty) => cast_value(&value, ty, self.ctx)?,
                         None => value,
                     }
                 } else {
@@ -1413,7 +1422,7 @@ impl ScalarInterpreter<'_> {
                         message: format!("variable \"{name}\" is declared CONSTANT"),
                     });
                 }
-                let value = crabka_pgtypes::cast::cast(&value, slot.ty, &self.ctx.time_zone)?;
+                let value = cast_value(&value, slot.ty, self.ctx)?;
                 if slot.not_null && value.is_null() {
                     return Err(ExecError::FunctionError {
                         sqlstate: "23502",
@@ -1858,7 +1867,7 @@ impl Interpreter<'_> {
                             let ty = ty.resolved.unwrap_or(ColumnType::Text);
                             let value = self.eval_async(expression).await?.0;
                             let ctx = self.session.plpgsql_eval_context();
-                            let value = crabka_pgtypes::cast::cast(&value, ty, &ctx.time_zone)?;
+                            let value = cast_value(&value, ty, &ctx)?;
                             frame.slots.insert(
                                 name.clone(),
                                 Slot {
@@ -2205,6 +2214,8 @@ impl Interpreter<'_> {
                     }
                     None => Datum::Null,
                 };
+                let ctx = self.session.plpgsql_eval_context();
+                let value = cast_value(&value, ty, &ctx)?;
                 if *not_null && matches!(value, Datum::Null) {
                     return Err(ExecError::FunctionError {
                         sqlstate: "23502",
@@ -2310,8 +2321,8 @@ impl Interpreter<'_> {
 
     async fn integer_async(&mut self, expr: &Expr) -> Result<i32, ExecError> {
         let value = self.eval_async(expr).await?.0;
-        let time_zone = self.session.plpgsql_eval_context().time_zone;
-        let Datum::Int4(value) = crabka_pgtypes::cast::cast(&value, ColumnType::Int4, &time_zone)?
+        let ctx = self.session.plpgsql_eval_context();
+        let Datum::Int4(value) = cast_value(&value, ColumnType::Int4, &ctx)?
         else {
             unreachable!("int4 cast returned another datum type");
         };
@@ -2391,7 +2402,7 @@ impl Interpreter<'_> {
                     .or_else(|| record.values[index].column_type());
                 record.values[index] = if subscripts.is_empty() {
                     match field_type {
-                        Some(ty) => crabka_pgtypes::cast::cast(&value, ty, &ctx.time_zone)?,
+                        Some(ty) => cast_value(&value, ty, &ctx)?,
                         None => value,
                     }
                 } else {
@@ -2413,7 +2424,7 @@ impl Interpreter<'_> {
 
     fn assign_name(&mut self, name: &str, value: Datum) -> Result<(), ExecError> {
         let name = self.resolve_alias(name);
-        let time_zone = self.session.plpgsql_eval_context().time_zone;
+        let ctx = self.session.plpgsql_eval_context();
         for frame in self.frames.iter_mut().rev() {
             if let Some(slot) = frame.slots.get_mut(&name) {
                 if slot.constant {
@@ -2422,7 +2433,7 @@ impl Interpreter<'_> {
                         message: format!("variable \"{name}\" is declared CONSTANT"),
                     });
                 }
-                let value = crabka_pgtypes::cast::cast(&value, slot.ty, &time_zone)?;
+                let value = cast_value(&value, slot.ty, &ctx)?;
                 if slot.not_null && matches!(value, Datum::Null) {
                     return Err(ExecError::FunctionError {
                         sqlstate: "23502",
@@ -2502,7 +2513,7 @@ impl Interpreter<'_> {
     }
 
     fn push_set_row(&mut self, row: Vec<Datum>) -> Result<(), ExecError> {
-        let time_zone = self.session.plpgsql_eval_context().time_zone;
+        let ctx = self.session.plpgsql_eval_context();
         let collector = self
             .set_results
             .as_mut()
@@ -2520,9 +2531,7 @@ impl Interpreter<'_> {
         let row = row
             .into_iter()
             .zip(&collector.columns)
-            .map(|(value, (_, ty))| {
-                crabka_pgtypes::cast::cast(&value, *ty, &time_zone).map_err(ExecError::from)
-            })
+            .map(|(value, (_, ty))| cast_value(&value, *ty, &ctx))
             .collect::<Result<Vec<_>, _>>()?;
         collector.rows.push(row);
         Ok(())

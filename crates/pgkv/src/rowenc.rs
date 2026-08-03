@@ -52,6 +52,8 @@ mod tag {
     pub const RANGE: u8 = 24;
     /// A multirange (`[25][u32 type oid][u32 count][tagged ranges...]`).
     pub const MULTIRANGE: u8 = 25;
+    /// `jsonpath`, stored as canonical UTF-8 text. Append-only.
+    pub const JSONPATH: u8 = 26;
 }
 
 /// Encode one row using the current storage format.
@@ -91,6 +93,12 @@ fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
             Datum::Text(s) => {
                 out.push(tag::TEXT);
                 let len = u32::try_from(s.len()).expect("text column exceeds 4 GiB");
+                out.extend_from_slice(&len.to_be_bytes());
+                out.extend_from_slice(s.as_bytes());
+            }
+            Datum::JsonPath(s) => {
+                out.push(tag::JSONPATH);
+                let len = u32::try_from(s.len()).expect("jsonpath column exceeds 4 GiB");
                 out.extend_from_slice(&len.to_be_bytes());
                 out.extend_from_slice(s.as_bytes());
             }
@@ -293,6 +301,14 @@ fn decode_field(cur: &mut &[u8]) -> Result<Datum, KvError> {
             Datum::Text(
                 String::from_utf8(raw.to_vec())
                     .map_err(|_| KvError::CorruptRow("text is not valid UTF-8".into()))?,
+            )
+        }
+        tag::JSONPATH => {
+            let len = take_u32_len(cur)?;
+            let raw = take_n(cur, len)?;
+            Datum::JsonPath(
+                String::from_utf8(raw.to_vec())
+                    .map_err(|_| KvError::CorruptRow("jsonpath is not valid UTF-8".into()))?,
             )
         }
         tag::FLOAT4 => {
@@ -588,6 +604,7 @@ mod tests {
             Datum::Int4(i32::MIN),
             Datum::Int8(i64::MIN),
             Datum::Text("héllo".into()),
+            Datum::JsonPath("$.\"héllo\"".into()),
             Datum::Float4(-1.5),
             Datum::Float4(f32::NAN),
             Datum::Float4(-0.0),
@@ -627,6 +644,10 @@ mod tests {
             Datum::Array(ArrayValue::new(
                 ElemType::Jsonb,
                 vec![json(r#"{"z":1}"#), Datum::Null],
+            )),
+            Datum::Array(ArrayValue::new(
+                ElemType::JsonPath,
+                vec![Datum::JsonPath("$.\"a\"".into()), Datum::Null],
             )),
             Datum::Array(ArrayValue::new(
                 ElemType::Numeric,

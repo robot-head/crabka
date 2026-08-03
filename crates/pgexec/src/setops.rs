@@ -236,8 +236,6 @@ pub(crate) fn set_expr_to_relation(
 ) -> Result<crate::join::Relation, ExecError> {
     let cols = resolve_set_columns(ctx.catalog_kv, ctx.fctx.resolution, body, ctx.ctes, 0)?;
     let out_tys: Vec<ColumnType> = cols.iter().map(output_type).collect();
-    let rows = fold(ctx, body, &out_tys, 0)?;
-
     let scope = Scope {
         columns: cols
             .iter()
@@ -248,6 +246,19 @@ pub(crate) fn set_expr_to_relation(
             })
             .collect(),
     };
+    for item in order_by {
+        let ty = if let Some(index) = crate::sql92::output_position(
+            &item.expr,
+            scope.width(),
+            crate::sql92::Sql92Clause::OrderBy,
+        )? {
+            scope.ty_at(index)
+        } else {
+            crate::eval::infer_type(&item.expr, &scope)?
+        };
+        crate::eval::require_ordering_operator(ty)?;
+    }
+    let rows = fold(ctx, body, &out_tys, 0)?;
 
     let mut keyed: Vec<(Vec<Datum>, Vec<Datum>)> = Vec::with_capacity(rows.len());
     for row in rows {
@@ -311,6 +322,11 @@ fn fold(
             left,
             right,
         } => {
+            if !(*op == SetOp::Union && *all) {
+                for ty in out_tys {
+                    crate::eval::require_equality_operator(*ty)?;
+                }
+            }
             let lrows = fold(ctx, left, out_tys, depth + 1)?;
             let rrows = fold(ctx, right, out_tys, depth + 1)?;
             let combined_bytes = lrows.iter().chain(&rrows).fold(0usize, |bytes, row| {
@@ -363,7 +379,7 @@ fn coerce_rows(
             if scope.ty_at(i) == tys[i] || cell.is_null() {
                 cells.push(cell);
             } else {
-                cells.push(crabka_pgtypes::cast::cast(&cell, tys[i], &ctx.time_zone)?);
+                cells.push(crate::eval::cast_value(&cell, tys[i], &ctx.time_zone)?);
             }
         }
         out.push(cells);
