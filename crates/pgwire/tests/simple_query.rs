@@ -344,7 +344,10 @@ async fn raw_fastpath_error_preserves_session() {
     fastpath.extend_from_slice(&1i16.to_be_bytes()); // binary result
     put_message(&mut messages, b'F', &fastpath);
     put_message(&mut messages, b'Q', b"SELECT 1\0");
-    stream.write_all(&messages).await.expect("fastpath and query");
+    stream
+        .write_all(&messages)
+        .await
+        .expect("fastpath and query");
 
     let (tag, body) = read_message(&mut stream).await;
     assert_eq!(tag, b'E');

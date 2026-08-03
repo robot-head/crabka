@@ -863,14 +863,14 @@ fn read_operator_object(bytes: &[u8]) -> Result<(u32, String, &[u8]), CatalogErr
 }
 
 fn operator_object_oid(kv: &dyn Kv) -> Result<u32, CatalogError> {
-    kv.get(NEXT_OPERATOR_OBJECT_OID_KEY)?.map_or(
-        Ok(FIRST_USER_OPERATOR_OBJECT_OID),
-        |bytes| {
+    kv.get(NEXT_OPERATOR_OBJECT_OID_KEY)?
+        .map_or(Ok(FIRST_USER_OPERATOR_OBJECT_OID), |bytes| {
             U32::read_from_prefix(&bytes)
                 .map(|(oid, _)| oid.get())
-                .map_err(|_| KvError::CorruptRow("next operator object oid is not u32".into()).into())
-        },
-    )
+                .map_err(|_| {
+                    KvError::CorruptRow("next operator object oid is not u32".into()).into()
+                })
+        })
 }
 
 /// Create an operator family and advance the shared operator-object oid cursor.
@@ -936,7 +936,11 @@ pub fn create_operator_class_ops(
     let family_name = family.unwrap_or(name);
     let family_key = operator_object_key(OPERATOR_FAMILY_PREFIX, method, family_name);
     let (family_oid, mut ops, oid) = if let Some(bytes) = kv.get(&family_key)? {
-        (read_operator_object(&bytes)?.0, Vec::new(), operator_object_oid(kv)?)
+        (
+            read_operator_object(&bytes)?.0,
+            Vec::new(),
+            operator_object_oid(kv)?,
+        )
     } else if family.is_some() {
         return Err(CatalogError::UndefinedObject(family_name.name.clone()));
     } else {
@@ -1284,8 +1288,9 @@ fn drop_operator_family_member_ops(
         OPERATOR_FAMILY_FUNCTION_PREFIX,
     ] {
         for (key, _) in kv.scan_prefix(prefix)? {
-            let parts = key::key_parts(&key[prefix.len()..], 4)
-                .ok_or_else(|| KvError::CorruptRow("operator family member key is incomplete".into()))?;
+            let parts = key::key_parts(&key[prefix.len()..], 4).ok_or_else(|| {
+                KvError::CorruptRow("operator family member key is incomplete".into())
+            })?;
             if parts[0] == family_oid {
                 ops.push(WriteOp::Delete { key });
             }
@@ -1449,8 +1454,9 @@ fn deserialize_tablespace(name: String, bytes: &[u8]) -> Result<Tablespace, Cata
         .next()
         .ok_or_else(|| KvError::CorruptRow("tablespace location is missing".into()))?;
     let utf8 = |field: &[u8]| {
-        String::from_utf8(field.to_vec())
-            .map_err(|_| CatalogError::Storage(KvError::CorruptRow("non-UTF-8 tablespace row".into())))
+        String::from_utf8(field.to_vec()).map_err(|_| {
+            CatalogError::Storage(KvError::CorruptRow("non-UTF-8 tablespace row".into()))
+        })
     };
     let mut options = Vec::new();
     for field in fields.filter(|field| !field.is_empty()) {
@@ -3957,7 +3963,10 @@ fn schema_privilege_ops(
             for privilege in expand_schema_privileges(privileges) {
                 let key = schema_privilege_key(schema, grantee, privilege);
                 ops.push(if grant {
-                    WriteOp::Put { key, value: Vec::new() }
+                    WriteOp::Put {
+                        key,
+                        value: Vec::new(),
+                    }
                 } else {
                     WriteOp::Delete { key }
                 });

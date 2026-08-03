@@ -493,11 +493,7 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
             // value returned.
             for a in args {
                 if let Expr::StringLiteral(s) = a {
-                    crate::eval::cast_value(
-                        &Datum::Text(s.clone()),
-                        ty,
-                        &jiff::tz::TimeZone::UTC,
-                    )?;
+                    crate::eval::cast_value(&Datum::Text(s.clone()), ty, &jiff::tz::TimeZone::UTC)?;
                 }
             }
             Ok(ty)
@@ -1539,7 +1535,9 @@ fn eval_eager(
             require_arity(fc, vals.len() == 2)?;
             let source = u32::try_from(int_arg(&vals[0])?).unwrap_or(0);
             let target = u32::try_from(int_arg(&vals[1])?).unwrap_or(0);
-            Ok(Datum::Bool(crate::catalog_rel::is_binary_coercible(source, target)))
+            Ok(Datum::Bool(crate::catalog_rel::is_binary_coercible(
+                source, target,
+            )))
         }
         ScalarFunc::PgNumaAvailable => {
             require_arity(fc, vals.is_empty())?;
@@ -1597,9 +1595,11 @@ pub(crate) fn input_error(
         sqlstate: "42704",
         message: format!("type \"{type_name}\" does not exist"),
     })?;
-    Ok(crate::eval::cast_value(&Datum::Text(input.to_string()), ty, time_zone)
-        .err()
-        .map(ExecError::into_pg))
+    Ok(
+        crate::eval::cast_value(&Datum::Text(input.to_string()), ty, time_zone)
+            .err()
+            .map(ExecError::into_pg),
+    )
 }
 
 // ---- argument-type helpers ----

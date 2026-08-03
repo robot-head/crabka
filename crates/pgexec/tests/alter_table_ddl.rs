@@ -688,9 +688,7 @@ async fn drop_and_readd_column_precedes_an_added_unique_constraint() {
             query(&mut s, &format!("SELECT a, keep FROM {table}")).await
                 == vec![text_row(&["9", "2"])]
         );
-        assert!(
-            err_code(&mut s, &format!("INSERT INTO {table} VALUES (3, 9)")).await == "23505"
-        );
+        assert!(err_code(&mut s, &format!("INSERT INTO {table} VALUES (3, 9)")).await == "23505");
     }
 }
 
@@ -710,17 +708,11 @@ async fn set_not_null_precedes_an_added_unique_constraint() {
         .await;
 
         assert!(
-            err_code(
-                &mut s,
-                &format!("ALTER TABLE staged_not_null {actions}")
-            )
-            .await
-                == "23502",
+            err_code(&mut s, &format!("ALTER TABLE staged_not_null {actions}")).await == "23502",
             "{actions}"
         );
         assert!(
-            query(&mut s, "SELECT count(*) FROM staged_not_null").await
-                == vec![text_row(&["4"])]
+            query(&mut s, "SELECT count(*) FROM staged_not_null").await == vec![text_row(&["4"])]
         );
     }
 }

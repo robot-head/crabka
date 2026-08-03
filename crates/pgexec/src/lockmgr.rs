@@ -260,14 +260,8 @@ impl RowLockManager {
         my_xid: u64,
         wait_cap: Option<Duration>,
     ) -> Result<(), AcquireError> {
-        self.acquire_as(
-            table,
-            rowid,
-            mode,
-            LockOwner::Xid(my_xid),
-            wait_cap,
-        )
-        .await
+        self.acquire_as(table, rowid, mode, LockOwner::Xid(my_xid), wait_cap)
+            .await
     }
 
     pub(crate) async fn acquire_as(
@@ -471,11 +465,7 @@ impl RowLockManager {
 
     /// Restore `my_xid`'s lock set to a savepoint snapshot, releasing locks
     /// acquired later and undoing a later shared-to-exclusive upgrade.
-    pub(crate) fn restore_locks_as(
-        &self,
-        owner: LockOwner,
-        snapshot: &HashMap<LockKey, LockMode>,
-    ) {
+    pub(crate) fn restore_locks_as(&self, owner: LockOwner, snapshot: &HashMap<LockKey, LockMode>) {
         let to_wake = {
             let mut inner = self.inner.lock().expect("lockmgr");
             inner.locks.retain(|key, lock| {

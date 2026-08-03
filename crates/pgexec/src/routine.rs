@@ -32,6 +32,7 @@ use crabka_pgparser::ast::{
 };
 use crabka_pgtypes::{ColumnType, Datum};
 use crabka_pgwire::engine::QueryResult;
+
 use crate::{error::ExecError, eval::ArgType};
 
 pub(crate) struct ScalarFunctionRequest {
@@ -364,9 +365,7 @@ fn static_regress_symbol(symbol: &str) -> bool {
 fn inaccessible_c_object(object_file: &str) -> ExecError {
     ExecError::FunctionError {
         sqlstate: "58P01",
-        message: format!(
-            "could not access file \"{object_file}\": No such file or directory"
-        ),
+        message: format!("could not access file \"{object_file}\": No such file or directory"),
     }
 }
 
@@ -378,9 +377,9 @@ fn unsupported_c_object(object_file: &str) -> ExecError {
 
 fn unavailable_c_object(object_file: &str) -> ExecError {
     let path = std::path::Path::new(object_file);
-    let library_name = path.extension().is_some_and(|extension| {
-        extension == "so" || extension == "dylib" || extension == "dll"
-    });
+    let library_name = path
+        .extension()
+        .is_some_and(|extension| extension == "so" || extension == "dylib" || extension == "dll");
     if !path.is_absolute() || library_name {
         inaccessible_c_object(object_file)
     } else {
@@ -1637,11 +1636,7 @@ fn eval_regression_c_adapter(
     }
 }
 
-fn falls_back_to_regression_binary_coercible(
-    kv: &dyn Kv,
-    name: &str,
-    given: &[ArgType],
-) -> bool {
+fn falls_back_to_regression_binary_coercible(kv: &dyn Kv, name: &str, given: &[ArgType]) -> bool {
     if !name.eq_ignore_ascii_case("binary_coercible")
         || !routines_named(kv, name)
             .is_ok_and(|routines| routines.iter().any(is_regression_binary_coercible))
@@ -1770,11 +1765,7 @@ pub(crate) fn plpgsql_scalar_result_type(
         }
         let given = crate::eval::static_arg_types(args, scope);
         if given.as_ref().is_ok_and(|given| {
-            falls_back_to_regression_binary_coercible(
-                runtime.catalog.as_ref(),
-                &call.name,
-                given,
-            )
+            falls_back_to_regression_binary_coercible(runtime.catalog.as_ref(), &call.name, given)
         }) {
             return None;
         }
@@ -3242,11 +3233,7 @@ pub(crate) fn pg_proc_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             .collect();
         let mut has_names = routine.params.iter().any(|param| param.name.is_some());
         if let RoutineResult::Table(columns) = &routine.result {
-            arg_names.extend(
-                columns
-                    .iter()
-                    .map(|(name, _)| Datum::Text(name.clone())),
-            );
+            arg_names.extend(columns.iter().map(|(name, _)| Datum::Text(name.clone())));
             has_names = true;
         }
         rows.push(vec![
@@ -3375,12 +3362,8 @@ pub(crate) fn builtin_pg_proc_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
             };
             let int = |value: &str| value.parse::<i32>().map_err(|_| corrupt());
             let short = |value: &str| value.parse::<i16>().map_err(|_| corrupt());
-            let character = |value: &str| {
-                value
-                    .parse::<u8>()
-                    .map(char::from)
-                    .map_err(|_| corrupt())
-            };
+            let character =
+                |value: &str| value.parse::<u8>().map(char::from).map_err(|_| corrupt());
             let flags = flags.as_bytes();
             if flags.len() != 4 {
                 return Err(corrupt());
@@ -3453,14 +3436,12 @@ pub(crate) fn builtin_pg_proc_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
                 match argument_modes {
                     Some(modes) => {
                         let modes = modes
-                        .into_iter()
-                        .map(|mode| match mode.as_str() {
-                            "i" | "o" | "b" | "v" | "t" => {
-                                Ok(Datum::Text(mode))
-                            }
-                            _ => Err(corrupt()),
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
+                            .into_iter()
+                            .map(|mode| match mode.as_str() {
+                                "i" | "o" | "b" | "v" | "t" => Ok(Datum::Text(mode)),
+                                _ => Err(corrupt()),
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
                         Datum::Array(crabka_pgtypes::ArrayValue::new(
                             crabka_pgtypes::ElemType::Text,
                             modes,
@@ -3471,10 +3452,7 @@ pub(crate) fn builtin_pg_proc_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
                 match argument_names {
                     Some(names) => Datum::Array(crabka_pgtypes::ArrayValue::new(
                         crabka_pgtypes::ElemType::Text,
-                        names
-                            .into_iter()
-                            .map(Datum::Text)
-                            .collect(),
+                        names.into_iter().map(Datum::Text).collect(),
                     )),
                     None => Datum::Null,
                 },
@@ -3768,10 +3746,16 @@ mod tests {
             aclexplode[22]
                 == Datum::Array(crabka_pgtypes::ArrayValue::new(
                     crabka_pgtypes::ElemType::Text,
-                    ["acl", "grantor", "grantee", "privilege_type", "is_grantable"]
-                        .into_iter()
-                        .map(|name| Datum::Text(name.into()))
-                        .collect(),
+                    [
+                        "acl",
+                        "grantor",
+                        "grantee",
+                        "privilege_type",
+                        "is_grantable"
+                    ]
+                    .into_iter()
+                    .map(|name| Datum::Text(name.into()))
+                    .collect(),
                 ))
         );
     }
@@ -4663,13 +4647,8 @@ mod tests {
                     == ColumnType::Int4
             );
             assert!(
-                crate::eval::eval(
-                    &nested,
-                    &crate::scope::Scope::empty(),
-                    &[],
-                    &ctx,
-                )
-                .expect("nested PGLZ call")
+                crate::eval::eval(&nested, &crate::scope::Scope::empty(), &[], &ctx,)
+                    .expect("nested PGLZ call")
                     == Datum::Int4(0)
             );
         });
@@ -4759,8 +4738,7 @@ mod tests {
         with_scalar_runtime(&catalog, None, || {
             assert!(crate::eval::infer_type(&call, &scope).expect("type") == ColumnType::Bool);
             assert!(
-                crate::eval::eval(&call, &scope, &[], &ctx).expect("value")
-                    == Datum::Bool(false)
+                crate::eval::eval(&call, &scope, &[], &ctx).expect("value") == Datum::Bool(false)
             );
         });
     }

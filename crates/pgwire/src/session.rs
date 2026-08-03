@@ -1025,12 +1025,7 @@ where
                     };
                     write_notices(&mut out, notices.as_mut());
                     backend::error_response(&mut out, &e);
-                    write_ready(
-                        &mut out,
-                        &session,
-                        notices.as_mut(),
-                        notifications.as_mut(),
-                    );
+                    write_ready(&mut out, &session, notices.as_mut(), notifications.as_mut());
                     stream.write_all(&out).await?;
                     out.clear();
                 }

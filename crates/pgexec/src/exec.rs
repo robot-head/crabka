@@ -1054,19 +1054,14 @@ pub(crate) fn execute_ddl(
             member_of,
         } => {
             let ops = crabka_pgcatalog::create_role_with_memberships_ops(
-                kv,
-                name,
-                *can_login,
-                member_of,
+                kv, name, *can_login, member_of,
             )?;
             Ok((command("CREATE ROLE"), ops))
         }
         Statement::DropRole { name, if_exists } => {
             let ops = match crabka_pgcatalog::drop_role_ops(kv, name) {
                 Ok(ops) => ops,
-                Err(crabka_pgcatalog::CatalogError::UndefinedObject(_)) if *if_exists => {
-                    Vec::new()
-                }
+                Err(crabka_pgcatalog::CatalogError::UndefinedObject(_)) if *if_exists => Vec::new(),
                 Err(error) => return Err(error.into()),
             };
             Ok((command("DROP ROLE"), ops))
@@ -1089,9 +1084,8 @@ pub(crate) fn execute_ddl(
             schemas,
             grantees,
         } => {
-            let ops = crabka_pgcatalog::grant_schema_privileges_ops(
-                kv, schemas, grantees, privileges,
-            )?;
+            let ops =
+                crabka_pgcatalog::grant_schema_privileges_ops(kv, schemas, grantees, privileges)?;
             Ok((command("GRANT"), ops))
         }
         Statement::RevokeTablePrivileges {
@@ -1112,9 +1106,8 @@ pub(crate) fn execute_ddl(
             schemas,
             grantees,
         } => {
-            let ops = crabka_pgcatalog::revoke_schema_privileges_ops(
-                kv, schemas, grantees, privileges,
-            )?;
+            let ops =
+                crabka_pgcatalog::revoke_schema_privileges_ops(kv, schemas, grantees, privileges)?;
             Ok((command("REVOKE"), ops))
         }
         Statement::CreateFdw { name, options } => {
@@ -1706,9 +1699,10 @@ fn index_key_columns(
                         .into(),
                 ));
             }
-            Ok(key.column.clone().unwrap_or_else(|| {
-                crabka_pgcatalog::expression_index_key(&key.text)
-            }))
+            Ok(key
+                .column
+                .clone()
+                .unwrap_or_else(|| crabka_pgcatalog::expression_index_key(&key.text)))
         })
         .collect()
 }
@@ -1833,13 +1827,13 @@ fn validate_index_opclasses(
                     builtin_input_oid()
                 } else {
                     user_classes
-                    .iter()
-                    .find(|class| {
-                        class.method == method_name
-                            && class.name.name == name
-                            && class.name.schema == *schema
-                    })
-                    .map(|class| class.input_type_oid)
+                        .iter()
+                        .find(|class| {
+                            class.method == method_name
+                                && class.name.name == name
+                                && class.name.schema == *schema
+                        })
+                        .map(|class| class.input_type_oid)
                 }
             }),
         }
@@ -2148,11 +2142,8 @@ fn build_insert_row(
                 if target == crabka_pgtypes::ColumnType::Bytea {
                     Datum::Bytea(crate::session::decode_bytea_text(value)?)
                 } else if let Some(base) = jsonpath_assignment_base(target) {
-                    let value = crate::eval::cast_value(
-                        &Datum::Text(value.clone()),
-                        base,
-                        &ctx.time_zone,
-                    )?;
+                    let value =
+                        crate::eval::cast_value(&Datum::Text(value.clone()), base, &ctx.time_zone)?;
                     coerce(value, target, ctx)?
                 } else {
                     // An unadorned literal resolves to the column's type, and that
@@ -2188,18 +2179,13 @@ fn build_copy_row(
         let target = table.columns[*slot].ty;
         row[*slot] = match value {
             Some(value) if let Some(base) = jsonpath_assignment_base(target) => {
-                let value = crate::eval::cast_value(
-                    &Datum::Text(value.clone()),
-                    base,
-                    &ctx.time_zone,
-                )?;
+                let value =
+                    crate::eval::cast_value(&Datum::Text(value.clone()), base, &ctx.time_zone)?;
                 coerce(value, target, ctx)?
             }
-            Some(value) => crabka_pgtypes::cast::cast(
-                &Datum::Text(value.clone()),
-                target,
-                &ctx.time_zone,
-            )?,
+            Some(value) => {
+                crabka_pgtypes::cast::cast(&Datum::Text(value.clone()), target, &ctx.time_zone)?
+            }
             None => coerce(Datum::Null, target, ctx)?,
         };
     }
@@ -2493,8 +2479,7 @@ struct StatementWrites {
     pending_unique_keys: HashSet<PendingUniqueKey>,
     /// Exclusion keys staged by this statement, which are not visible in KV
     /// until the statement's batch commits.
-    pending_exclusion_keys:
-        HashMap<crabka_pgcatalog::IndexId, Vec<(u64, Vec<Datum>)>>,
+    pending_exclusion_keys: HashMap<crabka_pgcatalog::IndexId, Vec<(u64, Vec<Datum>)>>,
     /// `(index, rowid)` pairs whose key this statement freed — a deleted row, or
     /// an updated row whose indexed values changed. A row holds exactly one key
     /// per index, so the rowid identifies the freed key. The superseded version
@@ -6256,9 +6241,11 @@ async fn enforce_exclusion_constraint(
     write_ctx
         .lockmgr
         .acquire_key_as(
-            crate::lockmgr::LockKey::UniqueKey(
-                crabka_pgkv::key::secondary_index_entry_prefix(table.id, index.id, &[]),
-            ),
+            crate::lockmgr::LockKey::UniqueKey(crabka_pgkv::key::secondary_index_entry_prefix(
+                table.id,
+                index.id,
+                &[],
+            )),
             crate::lockmgr::LockMode::Exclusive,
             write_ctx.lock_owner,
             write_ctx.lock_wait_cap,
@@ -6281,13 +6268,17 @@ async fn enforce_exclusion_constraint(
         }
         let holder = indexed_values(table, index, &holder_row)?;
         if exclusion_keys_conflict(operators, &values, &holder)? {
-            return Err(exclusion_violation(write_ctx, table, index, &values, &holder));
+            return Err(exclusion_violation(
+                write_ctx, table, index, &values, &holder,
+            ));
         }
     }
     if let Some(pending) = writes.pending_exclusion_keys.get(&index.id) {
         for (holder_rowid, holder) in pending {
             if *holder_rowid != rowid && exclusion_keys_conflict(operators, &values, holder)? {
-                return Err(exclusion_violation(write_ctx, table, index, &values, holder));
+                return Err(exclusion_violation(
+                    write_ctx, table, index, &values, holder,
+                ));
             }
         }
     }
@@ -8937,8 +8928,10 @@ fn append_from_item(
     if !is_lateral_item(te, &acc.scope) {
         let mut acc = acc;
         let mut next = build_table_expr(read_ctx, te, None, None)?;
-        if matches!(kind, crabka_pgparser::ast::JoinKind::Inner | crabka_pgparser::ast::JoinKind::Cross)
-            && let Some(filter) = filter
+        if matches!(
+            kind,
+            crabka_pgparser::ast::JoinKind::Inner | crabka_pgparser::ast::JoinKind::Cross
+        ) && let Some(filter) = filter
         {
             push_local_where(&mut acc, &mut next, filter, read_ctx.eval_ctx)?;
         }
@@ -10646,7 +10639,8 @@ fn try_execute_local_streaming_aggregate(
     let Some(plan) = local_streaming_aggregate_plan(&table, s) else {
         return Ok(None);
     };
-    let predicates = match crate::plan_dist::strict_predicate_for_filter(&table, s.filter.as_ref()) {
+    let predicates = match crate::plan_dist::strict_predicate_for_filter(&table, s.filter.as_ref())
+    {
         Ok(predicate) => vec![predicate],
         Err(_) => {
             let Some(predicates) = count_star_or_predicates(&table, s, &plan) else {
@@ -10810,9 +10804,9 @@ fn finalize_count_star_union(
     if intersection > left || intersection > right {
         return Err(invalid_scalar_aggregate_shape());
     }
-    let count = (left - intersection).checked_add(right).ok_or_else(|| {
-        ExecError::Unsupported("streamed COUNT union exceeds int8 range".into())
-    })?;
+    let count = (left - intersection)
+        .checked_add(right)
+        .ok_or_else(|| ExecError::Unsupported("streamed COUNT union exceeds int8 range".into()))?;
     Ok(vec![Datum::Int8(count)])
 }
 
@@ -16091,9 +16085,7 @@ fn exclusion_constraint_index(
         }
         columns.push(element.column.clone());
         operators.push(match element.operator {
-            crabka_pgparser::ast::BinaryOp::Eq => {
-                crabka_pgcatalog::ExclusionOperator::Equal
-            }
+            crabka_pgparser::ast::BinaryOp::Eq => crabka_pgcatalog::ExclusionOperator::Equal,
             crabka_pgparser::ast::BinaryOp::Overlaps => {
                 crabka_pgcatalog::ExclusionOperator::Overlaps
             }
@@ -17871,10 +17863,7 @@ fn add_exclusion_constraint(
             if exclusion_keys_conflict(operators, &left, &right)? {
                 return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
                     "23P01",
-                    format!(
-                        "could not create exclusion constraint \"{}\"",
-                        index.name
-                    ),
+                    format!("could not create exclusion constraint \"{}\"", index.name),
                 )));
             }
         }
@@ -19437,32 +19426,25 @@ mod tests {
             .await
                 == vec![text_row(&["1"])]
         );
-        let expression = crabka_pgcatalog::get_index(
-            engine.catalog_kv(),
-            &RelationName::public("t_expr_idx"),
-        )
-        .expect("expression index");
+        let expression =
+            crabka_pgcatalog::get_index(engine.catalog_kv(), &RelationName::public("t_expr_idx"))
+                .expect("expression index");
         assert!(
             crabka_pgcatalog::index_key_expression(&expression.columns[0])
                 == Some("int4range(a, a + 10)")
         );
         run_s(&mut session, "ALTER TABLE t RENAME COLUMN a TO n").await;
-        let renamed = crabka_pgcatalog::get_index(
-            engine.catalog_kv(),
-            &RelationName::public("t_expr_idx"),
-        )
-        .expect("renamed expression index");
+        let renamed =
+            crabka_pgcatalog::get_index(engine.catalog_kv(), &RelationName::public("t_expr_idx"))
+                .expect("renamed expression index");
         assert!(
             crabka_pgcatalog::index_key_expression(&renamed.columns[0])
                 == Some("int4range(n, n + 10)")
         );
         run_s(&mut session, "ALTER TABLE t DROP COLUMN n").await;
         assert!(
-            crabka_pgcatalog::get_index(
-                engine.catalog_kv(),
-                &RelationName::public("t_expr_idx")
-            )
-            .is_err()
+            crabka_pgcatalog::get_index(engine.catalog_kv(), &RelationName::public("t_expr_idx"))
+                .is_err()
         );
     }
 
@@ -19475,11 +19457,9 @@ mod tests {
         run_s(&mut session, "INSERT INTO t VALUES (1), (2)").await;
 
         run_s(&mut session, "CREATE INDEX t_expr_idx ON t ((1))").await;
-        let index = crabka_pgcatalog::get_index(
-            engine.catalog_kv(),
-            &RelationName::public("t_expr_idx"),
-        )
-        .expect("expression index");
+        let index =
+            crabka_pgcatalog::get_index(engine.catalog_kv(), &RelationName::public("t_expr_idx"))
+                .expect("expression index");
         assert!(index.method == crabka_pgcatalog::IndexMethod::Btree);
         assert!(crabka_pgcatalog::index_key_expression(&index.columns[0]) == Some("(1)"));
 
@@ -19501,11 +19481,8 @@ mod tests {
                 .is_empty()
         );
         assert!(
-            crabka_pgcatalog::get_index(
-                engine.catalog_kv(),
-                &RelationName::public("t_expr_idx")
-            )
-            .expect("persisted expression index")
+            crabka_pgcatalog::get_index(engine.catalog_kv(), &RelationName::public("t_expr_idx"))
+                .expect("persisted expression index")
                 == index
         );
     }
@@ -19530,12 +19507,8 @@ mod tests {
             .await
                 == "42704"
         );
-        assert!(
-            sqlstate_of(&mut session, "CREATE INDEX i4 ON t (b int4_ops)").await == "42804"
-        );
-        assert!(
-            sqlstate_of(&mut session, "CREATE INDEX i5 ON t (b name_ops)").await == "42804"
-        );
+        assert!(sqlstate_of(&mut session, "CREATE INDEX i4 ON t (b int4_ops)").await == "42804");
+        assert!(sqlstate_of(&mut session, "CREATE INDEX i5 ON t (b name_ops)").await == "42804");
     }
 
     #[tokio::test]
@@ -21205,11 +21178,10 @@ mod tests {
         run(&engine, "CREATE ROLE existing_role").await;
         let results = run(&engine, "DROP ROLE IF EXISTS existing_role").await;
         assert!(tag_of(&results[0]) == "DROP ROLE");
-        assert!(!crabka_pgcatalog::role_exists(
-            engine.catalog_kv(),
-            "existing_role"
-        )
-        .expect("role lookup"));
+        assert!(
+            !crabka_pgcatalog::role_exists(engine.catalog_kv(), "existing_role")
+                .expect("role lookup")
+        );
     }
 
     #[tokio::test]

@@ -13,8 +13,7 @@ use std::cmp::Ordering;
 use crabka_pgparser::ast::{BinaryOp, Expr};
 use crabka_pgtypes::{ColumnType, Datum, RecordValue, ops};
 
-use crate::error::ExecError;
-use crate::scope::Scope;
+use crate::{error::ExecError, scope::Scope};
 
 /// Type-check every field operator selected by a row comparison.
 ///

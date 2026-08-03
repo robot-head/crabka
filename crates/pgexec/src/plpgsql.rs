@@ -1317,8 +1317,7 @@ impl ScalarInterpreter<'_> {
 
     fn integer(&self, expr: &Expr) -> Result<i32, ExecError> {
         let value = self.eval(expr)?;
-        let Datum::Int4(value) = cast_value(&value, ColumnType::Int4, self.ctx)?
-        else {
+        let Datum::Int4(value) = cast_value(&value, ColumnType::Int4, self.ctx)? else {
             unreachable!("int4 cast returned another datum type");
         };
         Ok(value)
@@ -2322,8 +2321,7 @@ impl Interpreter<'_> {
     async fn integer_async(&mut self, expr: &Expr) -> Result<i32, ExecError> {
         let value = self.eval_async(expr).await?.0;
         let ctx = self.session.plpgsql_eval_context();
-        let Datum::Int4(value) = cast_value(&value, ColumnType::Int4, &ctx)?
-        else {
+        let Datum::Int4(value) = cast_value(&value, ColumnType::Int4, &ctx)? else {
             unreachable!("int4 cast returned another datum type");
         };
         Ok(value)

@@ -91,7 +91,9 @@ fn eval_depth(
             let handle = std::thread::Builder::new()
                 .name("crabka-deep-expression".into())
                 .stack_size(DEEP_EVAL_STACK_BYTES)
-                .spawn_scoped(thread_scope, || eval_depth_inner(expr, scope, values, ctx, depth))
+                .spawn_scoped(thread_scope, || {
+                    eval_depth_inner(expr, scope, values, ctx, depth)
+                })
                 .map_err(|_| ExecError::StackDepthExceeded)?;
             match handle.join() {
                 Ok(result) => result,
@@ -1399,9 +1401,7 @@ pub(crate) fn apply_binary(
         BinaryOp::IsDistinctFrom | BinaryOp::IsNotDistinctFrom => {
             if let Some(equal) = runtime_equality_short_circuit(l, r) {
                 let distinct = !equal;
-                return Ok(Datum::Bool(
-                    distinct ^ (op == BinaryOp::IsNotDistinctFrom),
-                ));
+                return Ok(Datum::Bool(distinct ^ (op == BinaryOp::IsNotDistinctFrom)));
             }
             require_runtime_equality(l, r)?;
             let distinct = rowexpr::is_distinct(l, r)?;
@@ -2538,9 +2538,7 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
         // SP34: EXISTS / IN-subquery / quantified comparison are always boolean
         // (typeable without executing — used by `describe`). The array form of a
         // quantified comparison (`= ANY(arr)`) is boolean for the same reason.
-        Expr::Exists(_) | Expr::InSubquery { .. } | Expr::Quantified { .. } => {
-            Ok(ColumnType::Bool)
-        }
+        Expr::Exists(_) | Expr::InSubquery { .. } | Expr::Quantified { .. } => Ok(ColumnType::Bool),
         Expr::QuantifiedArray {
             expr, op, array, ..
         } => {

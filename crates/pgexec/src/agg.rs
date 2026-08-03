@@ -1258,9 +1258,7 @@ fn eval_grouped_depth(
             result
         }
         Expr::Func(fc) if crate::func::is_scalar(&fc.name) => {
-            crate::func::eval_scalar(fc, Some(scope), ctx, |e| {
-                eval_grouped_depth(e, grouped, d)
-            })
+            crate::func::eval_scalar(fc, Some(scope), ctx, |e| eval_grouped_depth(e, grouped, d))
         }
         // SP37: a date/time function over grouped/aggregate arguments (e.g.
         // `date_trunc('day', max(ts))`) — same pattern, grouped child-eval closure.

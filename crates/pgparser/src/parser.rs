@@ -4389,8 +4389,9 @@ impl Parser {
             }
             _ => self.create_table().map(|statement| {
                 let command_identity = match &statement {
-                    crate::ast::Statement::CreateTable { inherits, .. }
-                        if !inherits.is_empty() => I::CreateTableInherits,
+                    crate::ast::Statement::CreateTable { inherits, .. } if !inherits.is_empty() => {
+                        I::CreateTableInherits
+                    }
                     _ => I::CreateTable,
                 };
                 ParsedStatement {
@@ -7519,7 +7520,10 @@ impl Parser {
         let input_type = self.parse_type_name()?;
         self.expect_keyword_or_ident(Keyword::Using, "using")?;
         let method = self.expect_object_name()?;
-        let family = self.eat_ident_eq("family").then(|| self.relation_ref()).transpose()?;
+        let family = self
+            .eat_ident_eq("family")
+            .then(|| self.relation_ref())
+            .transpose()?;
         self.expect_keyword_or_ident(Keyword::As, "as")?;
         // Each member is already validated when its referenced operator or
         // support function is used. Keep the DDL boundary strict (non-empty,
@@ -12528,10 +12532,10 @@ mod tests {
 
     #[test]
     fn parses_exclusion_constraints() {
-        let Statement::CreateTable { constraints, .. } = one(
-            "CREATE TABLE t (room int4range, during tstzrange, \
-             EXCLUDE USING gist (room WITH =, during WITH &&))",
-        ) else {
+        let Statement::CreateTable { constraints, .. } =
+            one("CREATE TABLE t (room int4range, during tstzrange, \
+             EXCLUDE USING gist (room WITH =, during WITH &&))")
+        else {
             panic!("expected create table");
         };
         let TableConstraintKind::Exclude { method, elements } = &constraints[0].kind else {
@@ -16209,8 +16213,7 @@ mod tests {
             assert!(keys[0].opclass.as_deref() == Some(expected), "{sql}");
         }
 
-        let Statement::CreateIndex { keys, .. } =
-            one("CREATE INDEX i ON t ((lower(a)) text_ops)")
+        let Statement::CreateIndex { keys, .. } = one("CREATE INDEX i ON t ((lower(a)) text_ops)")
         else {
             panic!("expected CREATE INDEX");
         };
@@ -18309,19 +18312,19 @@ mod q1_statement_completeness_tests {
 
     #[test]
     fn alter_operator_family_members_preserve_catalog_keys() {
+        use crabka_pgtypes::ColumnType;
+
         use crate::ast::{
             OperatorFamilyFunctionType, OperatorFamilyMember, OperatorFamilyMemberKey,
             OperatorObjectAlterAction,
         };
-        use crabka_pgtypes::ColumnType;
 
         let Statement::Utility(crate::ast::UtilityStatement::AlterOperatorObject {
             action: OperatorObjectAlterAction::AddMembers(add),
             ..
-        }) = one(
-            "ALTER OPERATOR FAMILY f USING btree ADD \
-             OPERATOR 1 < (int4, int2), FUNCTION 1 btint42cmp(int4, int2)",
-        ) else {
+        }) = one("ALTER OPERATOR FAMILY f USING btree ADD \
+             OPERATOR 1 < (int4, int2), FUNCTION 1 btint42cmp(int4, int2)")
+        else {
             panic!("expected operator-family ADD");
         };
         assert!(matches!(
@@ -18348,10 +18351,9 @@ mod q1_statement_completeness_tests {
         let Statement::Utility(crate::ast::UtilityStatement::AlterOperatorObject {
             action: OperatorObjectAlterAction::AddMembers(add),
             ..
-        }) = one(
-            "ALTER OPERATOR FAMILY f USING btree ADD \
-             FUNCTION 6 (int4, int2) btint4skipsupport(internal)",
-        ) else {
+        }) = one("ALTER OPERATOR FAMILY f USING btree ADD \
+             FUNCTION 6 (int4, int2) btint4skipsupport(internal)")
+        else {
             panic!("expected internal support function");
         };
         assert!(matches!(
@@ -18363,17 +18365,20 @@ mod q1_statement_completeness_tests {
         let Statement::Utility(crate::ast::UtilityStatement::AlterOperatorObject {
             action: OperatorObjectAlterAction::DropMembers(drop),
             ..
-        }) = one(
-            "ALTER OPERATOR FAMILY f USING btree DROP \
-             OPERATOR 1 (int4, int2), FUNCTION 1 (int4)",
-        ) else {
+        }) = one("ALTER OPERATOR FAMILY f USING btree DROP \
+             OPERATOR 1 (int4, int2), FUNCTION 1 (int4)")
+        else {
             panic!("expected operator-family DROP");
         };
         assert!(matches!(
             drop.as_slice(),
             [
                 OperatorFamilyMemberKey::Operator { number: 1, .. },
-                OperatorFamilyMemberKey::Function { number: 1, left_type: ColumnType::Int4, right_type: ColumnType::Int4 }
+                OperatorFamilyMemberKey::Function {
+                    number: 1,
+                    left_type: ColumnType::Int4,
+                    right_type: ColumnType::Int4
+                }
             ]
         ));
     }
