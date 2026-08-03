@@ -29,15 +29,21 @@ use crabka_security::gssapi::{
 };
 use crabka_units::secs;
 
-const KEYTAB_PATH: &str = "tests/fixtures/kdc/kafka.keytab";
 const SERVICE_NAME: &str = "kafka";
 const TARGET_SPN: &str = "kafka/localhost";
 const CLIENT_PRINCIPAL: &str = "alice@CRABKA.TEST";
-const CLIENT_KEYTAB_PATH: &str = "tests/fixtures/kdc/alice.keytab";
+
+fn fixture(name: &str) -> String {
+    std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/kdc")
+        .join(name)
+        .to_string_lossy()
+        .into_owned()
+}
 
 #[test]
 fn acceptor_builds_with_explicit_clock_skew() {
-    SspiAcceptor::new(KEYTAB_PATH, SERVICE_NAME, secs(7)).expect("build acceptor");
+    SspiAcceptor::new(&fixture("kafka.keytab"), SERVICE_NAME, secs(7)).expect("build acceptor");
     assert_eq!(DEFAULT_GSSAPI_MAX_TIME_SKEW, secs(300));
 }
 
@@ -56,11 +62,19 @@ fn full_gssapi_handshake_and_wrap_roundtrip() {
         return;
     };
 
-    let mut acceptor = SspiAcceptor::new(KEYTAB_PATH, SERVICE_NAME, DEFAULT_GSSAPI_MAX_TIME_SKEW)
-        .expect("build acceptor");
-    let mut initiator =
-        SspiInitiator::new(CLIENT_KEYTAB_PATH, CLIENT_PRINCIPAL, TARGET_SPN, &kdc_url)
-            .expect("build initiator");
+    let mut acceptor = SspiAcceptor::new(
+        &fixture("kafka.keytab"),
+        SERVICE_NAME,
+        DEFAULT_GSSAPI_MAX_TIME_SKEW,
+    )
+    .expect("build acceptor");
+    let mut initiator = SspiInitiator::new(
+        &fixture("alice.keytab"),
+        CLIENT_PRINCIPAL,
+        TARGET_SPN,
+        &kdc_url,
+    )
+    .expect("build initiator");
 
     // Drive the context-establishment loop: initiator produces a token, acceptor
     // consumes it, alternating until both sides report established.

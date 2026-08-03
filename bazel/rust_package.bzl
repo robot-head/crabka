@@ -30,7 +30,7 @@ def rust_feature_binary(name, crate_root, crate_label = None, features = [], dep
     """Declares an opt-in feature variant of a Cargo binary."""
     metadata = DEP_DATA[native.package_name()]
     srcs = native.glob(["src/**/*.rs"])
-    data = native.glob(["**"], exclude = ["**/*.rs", "BUILD.bazel"], allow_empty = True)
+    data = native.glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel"], allow_empty = True)
     rust_binary(
         name = name,
         aliases = normal_aliases(),
@@ -48,7 +48,7 @@ def rust_package_tests(name, crate_label = None, rustc_env = {}, compile_data = 
     """Declares a package's top-level integration tests for a hand-written library target."""
     metadata = DEP_DATA[native.package_name()]
     srcs = native.glob(["src/**/*.rs"])
-    data = depset(native.glob(["**"], exclude = ["**/*.rs", "BUILD.bazel"], allow_empty = True) + compile_data).to_list()
+    data = depset(native.glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel"], allow_empty = True) + compile_data).to_list()
     for test in native.glob(["tests/*.rs"], allow_empty = True):
         test_name = test.removeprefix("tests/").removesuffix(".rs")
         test_rustc_env = dict(rustc_env)
@@ -62,6 +62,7 @@ def rust_package_tests(name, crate_label = None, rustc_env = {}, compile_data = 
             data = data + test_binaries.values(),
             deps = all_crate_deps(normal = True, normal_dev = True) + ([crate_label] if crate_label else []),
             edition = "2024",
+            env = {"CARGO_MANIFEST_DIR": native.package_name()},
             use_libtest_harness = test_name not in harnessless,
             rustc_env = test_rustc_env,
             srcs = srcs + native.glob(["tests/**/*.rs"]),
@@ -71,7 +72,7 @@ def rust_package_benches(crate_label = None, rustc_env = {}, compile_data = []):
     """Declares Cargo-style harnessless benchmark binaries."""
     metadata = DEP_DATA[native.package_name()]
     srcs = native.glob(["src/**/*.rs"])
-    data = depset(native.glob(["**"], exclude = ["**/*.rs", "BUILD.bazel"], allow_empty = True) + compile_data).to_list()
+    data = depset(native.glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel"], allow_empty = True) + compile_data).to_list()
     for bench in native.glob(["benches/*.rs"], allow_empty = True):
         bench_name = bench.removeprefix("benches/").removesuffix(".rs")
         rust_binary(
@@ -91,7 +92,7 @@ def rust_package_examples(crate_label = None, rustc_env = {}, compile_data = [],
     """Declares Cargo-style example binaries."""
     metadata = DEP_DATA[native.package_name()]
     srcs = native.glob(["src/**/*.rs"])
-    data = depset(native.glob(["**"], exclude = ["**/*.rs", "BUILD.bazel"], allow_empty = True) + compile_data).to_list()
+    data = depset(native.glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel"], allow_empty = True) + compile_data).to_list()
     for example in native.glob(["examples/*.rs"], allow_empty = True):
         example_name = example.removeprefix("examples/").removesuffix(".rs")
         rust_binary(
@@ -118,6 +119,7 @@ def rust_package(
         rustc_env = {},
         compile_data = [],
         test_compile_data = [],
+        test_env = {},
         test_features = {},
         test_tags = {},
         test_binaries = {},
@@ -128,7 +130,7 @@ def rust_package(
     """Declares the library, binaries, and tests described by Cargo metadata."""
     metadata = DEP_DATA[native.package_name()]
     srcs = native.glob(["src/**/*.rs"])
-    data = depset(native.glob(["**"], exclude = ["**/*.rs", "BUILD.bazel"], allow_empty = True) + compile_data).to_list()
+    data = depset(native.glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel"], allow_empty = True) + compile_data).to_list()
     deps = all_crate_deps(normal = True) + extra_deps
 
     if build_script:
@@ -166,11 +168,14 @@ def rust_package(
 
         lib_test_rustc_env = dict(rustc_env)
         lib_test_rustc_env["CARGO_MANIFEST_DIR"] = native.package_name()
+        runtime_env = {"CARGO_MANIFEST_DIR": native.package_name()}
+        runtime_env.update(test_env)
         rust_test(
             name = name + "_lib_test",
             crate = ":" + name,
-            data = data,
+            data = data + test_compile_data,
             deps = all_crate_deps(normal_dev = True),
+            env = runtime_env,
             rustc_env = lib_test_rustc_env,
         )
 
@@ -229,6 +234,8 @@ def rust_package(
         test_rustc_env["CARGO_MANIFEST_DIR"] = native.package_name()
         test_rustc_env.update({"CARGO_BIN_EXE_" + binary: "$(rootpath :" + binary + "__bin)" for binary in metadata["binaries"]})
         test_rustc_env.update({"CARGO_BIN_EXE_" + binary: "$(rootpath " + target + ")" for binary, target in test_binaries.items()})
+        runtime_env = {"CARGO_MANIFEST_DIR": native.package_name()}
+        runtime_env.update(test_env)
         rust_test(
             name = test_name,
             aliases = _aliases("deps", "dev_deps"),
@@ -238,6 +245,7 @@ def rust_package(
             deps = all_crate_deps(normal = True, normal_dev = True) + ([":_build_script"] if build_script else []) + ([test_library] if crate_name else []),
             data = data + test_compile_data + binary_data,
             edition = "2024",
+            env = runtime_env,
             rustc_env = test_rustc_env,
             srcs = srcs + native.glob(["tests/**/*.rs"]),
             tags = test_tags.get(test_name, []),

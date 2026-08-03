@@ -67,6 +67,14 @@ fn corpus_entry_round_trips(path: &Path) -> datatest_stable::Result<()> {
     Ok(())
 }
 
-datatest_stable::harness! {
-    { test = corpus_entry_round_trips, root = "tests/corpus", pattern = r".*\.hex$" },
+#[test]
+fn every_corpus_entry_round_trips() -> datatest_stable::Result<()> {
+    let root = Path::new(&std::env::var("CARGO_MANIFEST_DIR")?).join("tests/corpus");
+    for entry in std::fs::read_dir(root)? {
+        let path = entry?.path();
+        if path.extension().and_then(|value| value.to_str()) == Some("hex") {
+            corpus_entry_round_trips(&path)?;
+        }
+    }
+    Ok(())
 }

@@ -50,6 +50,14 @@ fn metadata_log_roundtrips(path: &Path) -> datatest_stable::Result<()> {
     Ok(())
 }
 
-datatest_stable::harness! {
-    { test = metadata_log_roundtrips, root = "tests/fixtures", pattern = r"^[^/]+\.bin$" },
+#[test]
+fn every_metadata_log_roundtrips() -> datatest_stable::Result<()> {
+    let root = Path::new(&std::env::var("CARGO_MANIFEST_DIR")?).join("tests/fixtures");
+    for entry in std::fs::read_dir(root)? {
+        let path = entry?.path();
+        if path.extension().and_then(|value| value.to_str()) == Some("bin") {
+            metadata_log_roundtrips(&path)?;
+        }
+    }
+    Ok(())
 }

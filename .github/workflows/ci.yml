@@ -341,7 +341,7 @@ jobs:
 
   affected:
     needs: changes
-    timeout-minutes: 60
+    timeout-minutes: 90
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

@@ -83,6 +83,14 @@ fn rpc_frame_roundtrips(path: &Path) -> datatest_stable::Result<()> {
     Ok(())
 }
 
-datatest_stable::harness! {
-    { test = rpc_frame_roundtrips, root = "tests/fixtures/rpc", pattern = r".*\.bin$" },
+#[test]
+fn every_rpc_frame_roundtrips() -> datatest_stable::Result<()> {
+    let root = Path::new(&std::env::var("CARGO_MANIFEST_DIR")?).join("tests/fixtures/rpc");
+    for entry in std::fs::read_dir(root)? {
+        let path = entry?.path();
+        if path.extension().and_then(|value| value.to_str()) == Some("bin") {
+            rpc_frame_roundtrips(&path)?;
+        }
+    }
+    Ok(())
 }

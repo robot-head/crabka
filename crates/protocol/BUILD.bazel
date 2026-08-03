@@ -6,6 +6,12 @@ load("//:bazel/rust_package.bzl", "cargo_features", "normal_aliases", "rust_pack
 # Manifest is consumed by crate_universe (see //MODULE.bazel).
 exports_files(["Cargo.toml"])
 
+filegroup(
+    name = "schemas",
+    srcs = glob(["schemas/**"]),
+    visibility = ["//visibility:public"],
+)
+
 # NOTE: protocol's build.rs is intentionally NOT run under Bazel. It only
 # *validates* that the checked-in `generated/` sources match the `schemas/`
 # SHAs (a dev/CI guard) and emits no code, so it is dead weight here — the
@@ -60,11 +66,6 @@ rust_package_tests(
     name = "protocol",
     compile_data = glob(["generated/**/*.rs"]),
     crate_label = ":protocol",
-    harnessless = [
-        "corpus_replay",
-        "kraft_metadata_roundtrip",
-        "kraft_rpc_roundtrip",
-    ],
     rustc_env = {
         "CARGO_MANIFEST_DIR": "$${pwd}/crates/protocol",
     },

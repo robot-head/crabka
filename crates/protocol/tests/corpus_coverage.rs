@@ -25,7 +25,8 @@ struct Meta {
 }
 
 fn corpus_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/corpus")
+    PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+        .join("tests/corpus")
 }
 
 fn load_meta(stem: &Path) -> Meta {

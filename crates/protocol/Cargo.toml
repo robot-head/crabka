@@ -73,15 +73,3 @@ harness = false
 [[bench]]
 name = "records"
 harness = false
-
-[[test]]
-name = "corpus_replay"
-harness = false
-
-[[test]]
-name = "kraft_metadata_roundtrip"
-harness = false
-
-[[test]]
-name = "kraft_rpc_roundtrip"
-harness = false

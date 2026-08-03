@@ -1,7 +1,18 @@
 load("//:bazel/rust_package.bzl", "rust_package")
 
+filegroup(
+    name = "test_data",
+    srcs = glob(["tests/snapshots/**/*.rs"]),
+)
+
 rust_package(
     name = "protocol-codegen",
     cargo_name = "crabka-protocol-codegen",
     crate_name = "crabka_protocol_codegen",
+    test_compile_data = [
+        ":test_data",
+        "//crates/protocol:schemas",
+        "@rules_rust//rust/toolchain:current_rustfmt_files",
+    ],
+    test_env = {"RUSTFMT": "$(rootpath @rules_rust//rust/toolchain:current_rustfmt_files)"},
 )

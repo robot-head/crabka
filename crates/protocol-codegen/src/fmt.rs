@@ -69,7 +69,8 @@ fn split_banner(src: &str) -> (&str, &str) {
 
 fn run_rustfmt(src: &str) -> Result<String, FmtError> {
     let empty_config = if cfg!(windows) { "NUL" } else { "/dev/null" };
-    let mut child = Command::new("rustfmt")
+    let rustfmt = std::env::var_os("RUSTFMT").unwrap_or_else(|| "rustfmt".into());
+    let mut child = Command::new(rustfmt)
         .args([
             "--edition",
             "2024",
