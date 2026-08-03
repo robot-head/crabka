@@ -150,6 +150,8 @@ pub(crate) struct WriteContext<'a> {
     pub fctx: ForeignCtx<'a>,
     /// The ordinary-table scanner seam the same feeding queries read through.
     pub range_scanner: &'a dyn crate::scanner::RangeScanner,
+    /// Memory available to blocking reads that feed this write.
+    pub blocking_query_memory: crabka_units::ByteSize,
     /// The CTE scope the statement starts from (empty for a plain statement).
     pub ctes: &'a crate::cte::CteContext,
     /// The open transaction's deferred referential checks, which the
@@ -181,7 +183,7 @@ impl<'a> WriteContext<'a> {
             eval_ctx: self.eval_ctx,
             fctx: self.fctx,
             range_scanner: self.range_scanner,
-            blocking_query_memory: crate::scanner::BLOCKING_QUERY_MEMORY,
+            blocking_query_memory: self.blocking_query_memory,
         }
     }
 }
@@ -9806,7 +9808,7 @@ fn build_table_expr(
             let rows = match crate::scanner::collect_cursor_bounded(
                 range_scanner,
                 scan_request,
-                crate::scanner::BLOCKING_QUERY_MEMORY,
+                read_ctx.blocking_query_memory,
             ) {
                 Ok(rows) => rows,
                 Err(error) if should_retry_without_scan_pushdown(&error, distributed_plan) => {
@@ -9827,7 +9829,7 @@ fn build_table_expr(
                             partial_aggregate: None,
                             top_k: None,
                         },
-                        crate::scanner::BLOCKING_QUERY_MEMORY,
+                        read_ctx.blocking_query_memory,
                     )?
                 }
                 Err(error) => return Err(error),

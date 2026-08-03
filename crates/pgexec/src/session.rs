@@ -3228,6 +3228,7 @@ impl SqlSession {
             lock_wait_cap: self.lock_wait_cap,
             fctx: crate::exec::ForeignCtx::none(),
             range_scanner: self.range_scanner.as_ref(),
+            blocking_query_memory: self.blocking_query_memory,
             ctes: statement.ctes,
             // Only an open block has a later statement that could repair a
             // deferred violation, so only an open block promotes checks out of
@@ -7983,6 +7984,7 @@ impl SqlSession {
         let lockmgr = Arc::clone(&self.lockmgr);
         let seq = Arc::clone(&self.seq);
         let range_scanner = Arc::clone(&self.range_scanner);
+        let blocking_query_memory = self.blocking_query_memory;
         let deferred_fk = Arc::clone(&self.deferred_fk);
         let defer_constraints = matches!(self.state, TxnState::InTransaction(_));
         let lock_wait_cap = self.lock_wait_cap;
@@ -8035,6 +8037,7 @@ impl SqlSession {
                 lock_wait_cap,
                 fctx: crate::exec::ForeignCtx::none(),
                 range_scanner: range_scanner.as_ref(),
+                blocking_query_memory,
                 ctes: &ctes,
                 deferred_fk: defer_constraints.then(|| &*deferred_fk),
             };
