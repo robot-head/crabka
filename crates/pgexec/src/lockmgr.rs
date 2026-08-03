@@ -1,6 +1,7 @@
 //! In-memory lock manager for concurrent writers. Exclusive/shared locks over
-//! two key spaces — heap rows (`(table, rowid)`) and unique local index keys
-//! (`LockKey::UniqueKey`) — transaction-scoped (released at COMMIT/ROLLBACK).
+//! three key spaces — heap rows (`(table, rowid)`), unique local index keys
+//! (`LockKey::UniqueKey`), and unique-index backfill relations — transaction-
+//! scoped (released at COMMIT/ROLLBACK).
 //! A blocked writer calls the integrated async `acquire`, which detects a
 //! conflict and registers a per-waiter `Notify` ATOMICALLY under one guard; the
 //! holder's `release_all` wakes each waiter with `notify_one` (which stores a
@@ -35,8 +36,14 @@ pub enum LockMode {
 /// Result of a non-blocking lock attempt.
 pub enum Acquire {
     Acquired,
-    /// Held by `holder` (one of the holders) — an xid to wait on.
-    Conflict(u64),
+    /// Held by `holder` (one of the holders).
+    Conflict(LockOwner),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum LockOwner {
+    Xid(u64),
+    Session(u64),
 }
 
 /// Result of the eager cycle check.
@@ -68,16 +75,20 @@ pub enum LockKey {
     /// identity for `(table, index, key values)`. Serializes the
     /// check-then-write unique probe per key instead of engine-wide.
     UniqueKey(Vec<u8>),
+    /// A relation whose ordinary writes run SHARED with unique-index backfill
+    /// running EXCLUSIVE. Session ownership makes same-transaction upgrades
+    /// atomic and keeps its waits in the ordinary row-lock deadlock graph.
+    UniqueIndexRelation(crabka_pgcatalog::TableId),
 }
 
 struct HeldLock {
     mode: LockMode,
-    holders: HashSet<u64>,
+    holders: HashSet<LockOwner>,
 }
 
 struct Inner {
     locks: HashMap<LockKey, HeldLock>,
-    waiters: HashMap<u64, Vec<Arc<Notify>>>, // holder xid -> waiters' notifiers
+    waiters: HashMap<LockOwner, Vec<Arc<Notify>>>, // holder -> waiters' notifiers
     // wait-for graph: each waiting xid -> the single holder xid it blocks on.
     // NOTE: this is single-successor (one out-edge per waiter), so the eager
     // cycle check is exact for exclusive locks. A deadlock cycle that runs only
@@ -85,7 +96,7 @@ struct Inner {
     // check — but it cannot hang permanently: every release re-wakes the waiter,
     // which re-checks against a possibly-different chosen holder until the cyclic
     // one is the edge. Shared-only deadlocks are out of SP6's tested scope.
-    wait_for: HashMap<u64, u64>,
+    wait_for: HashMap<LockOwner, LockOwner>,
 }
 
 pub(crate) struct RowLockManager {
@@ -110,6 +121,7 @@ impl RowLockManager {
     /// This is how `NOWAIT` and `SKIP LOCKED` are served: both need to know
     /// whether the row is free *without* waiting, and differ only in what they do
     /// with a conflict.
+    #[cfg(test)]
     pub(crate) fn try_acquire(
         &self,
         table: crabka_pgcatalog::TableId,
@@ -117,8 +129,18 @@ impl RowLockManager {
         mode: LockMode,
         my_xid: u64,
     ) -> Acquire {
+        self.try_acquire_as(table, rowid, mode, LockOwner::Xid(my_xid))
+    }
+
+    pub(crate) fn try_acquire_as(
+        &self,
+        table: crabka_pgcatalog::TableId,
+        rowid: u64,
+        mode: LockMode,
+        owner: LockOwner,
+    ) -> Acquire {
         let mut g = self.inner.lock().expect("lockmgr");
-        try_acquire_locked(&mut g, LockKey::Row(table, rowid), mode, my_xid)
+        try_acquire_locked(&mut g, LockKey::Row(table, rowid), mode, owner)
     }
 
     /// Number of lock-table entries currently held (both key spaces). Lets
@@ -160,7 +182,7 @@ impl RowLockManager {
                 holders: HashSet::new(),
             });
         lock.mode = LockMode::Exclusive;
-        lock.holders.insert(my_xid);
+        lock.holders.insert(LockOwner::Xid(my_xid));
     }
 
     /// Acquire `(table, rowid)` in `mode` for `my_xid`, blocking until granted
@@ -174,7 +196,25 @@ impl RowLockManager {
         my_xid: u64,
         wait_cap: Option<Duration>,
     ) -> Result<(), AcquireError> {
-        self.acquire_key(LockKey::Row(table, rowid), mode, my_xid, wait_cap)
+        self.acquire_as(
+            table,
+            rowid,
+            mode,
+            LockOwner::Xid(my_xid),
+            wait_cap,
+        )
+        .await
+    }
+
+    pub(crate) async fn acquire_as(
+        &self,
+        table: crabka_pgcatalog::TableId,
+        rowid: u64,
+        mode: LockMode,
+        owner: LockOwner,
+        wait_cap: Option<Duration>,
+    ) -> Result<(), AcquireError> {
+        self.acquire_key_as(LockKey::Row(table, rowid), mode, owner, wait_cap)
             .await
     }
 
@@ -186,6 +226,7 @@ impl RowLockManager {
     /// and the holder's `release_all` wakes us via a permit-backed
     /// `notify_one` — so there is no lost-wakeup window and no chance of
     /// registering on a holder that already released.
+    #[cfg(test)]
     pub async fn acquire_key(
         &self,
         key: LockKey,
@@ -193,24 +234,35 @@ impl RowLockManager {
         my_xid: u64,
         wait_cap: Option<Duration>,
     ) -> Result<(), AcquireError> {
+        self.acquire_key_as(key, mode, LockOwner::Xid(my_xid), wait_cap)
+            .await
+    }
+
+    pub(crate) async fn acquire_key_as(
+        &self,
+        key: LockKey,
+        mode: LockMode,
+        owner: LockOwner,
+        wait_cap: Option<Duration>,
+    ) -> Result<(), AcquireError> {
         let deadline = wait_cap.map(|cap| tokio::time::Instant::now() + cap);
         loop {
             let (notify, holder) = {
                 let mut g = self.inner.lock().expect("lockmgr");
-                match try_acquire_locked(&mut g, key.clone(), mode, my_xid) {
+                match try_acquire_locked(&mut g, key.clone(), mode, owner) {
                     Acquire::Acquired => {
-                        g.wait_for.remove(&my_xid); // no longer waiting
+                        g.wait_for.remove(&owner); // no longer waiting
                         return Ok(());
                     }
                     Acquire::Conflict(holder) => {
                         if matches!(
-                            check_cycle(&g.wait_for, holder, my_xid),
+                            check_cycle(&g.wait_for, holder, owner),
                             CycleCheck::Deadlock
                         ) {
-                            g.wait_for.remove(&my_xid);
+                            g.wait_for.remove(&owner);
                             return Err(AcquireError::Deadlock);
                         }
-                        g.wait_for.insert(my_xid, holder);
+                        g.wait_for.insert(owner, holder);
                         let n = Arc::new(Notify::new());
                         g.waiters.entry(holder).or_default().push(Arc::clone(&n));
                         (n, holder)
@@ -233,7 +285,7 @@ impl RowLockManager {
                         // on a hot key does not accumulate one dead `Notify`
                         // per expired wait until it releases.
                         let mut g = self.inner.lock().expect("lockmgr");
-                        g.wait_for.remove(&my_xid);
+                        g.wait_for.remove(&owner);
                         if let Some(queue) = g.waiters.get_mut(&holder) {
                             queue.retain(|waiter| !Arc::ptr_eq(waiter, &notify));
                             if queue.is_empty() {
@@ -255,7 +307,7 @@ impl RowLockManager {
             .lock()
             .expect("lockmgr")
             .waiters
-            .get(&holder)
+            .get(&LockOwner::Xid(holder))
             .map_or(0, Vec::len)
     }
 
@@ -270,16 +322,20 @@ impl RowLockManager {
     /// held by `my_xid` (impossible for the single-lock sweep, but harmless
     /// in general) simply re-attempts its acquire and re-blocks.
     pub fn release_key(&self, key: &LockKey, my_xid: u64) {
+        self.release_key_as(key, LockOwner::Xid(my_xid));
+    }
+
+    pub(crate) fn release_key_as(&self, key: &LockKey, owner: LockOwner) {
         let to_wake = {
             let mut g = self.inner.lock().expect("lockmgr");
             if let Some(lock) = g.locks.get_mut(key) {
-                lock.holders.remove(&my_xid);
+                lock.holders.remove(&owner);
                 if lock.holders.is_empty() {
                     g.locks.remove(key);
                 }
             }
-            g.wait_for.remove(&my_xid);
-            g.waiters.remove(&my_xid).unwrap_or_default()
+            g.wait_for.remove(&owner);
+            g.waiters.remove(&owner).unwrap_or_default()
         };
         // Permit-backed like `release_all`: `notify_one` stores a permit if
         // the waiter has not yet reached `.await`, so no wakeup is ever lost.
@@ -290,14 +346,18 @@ impl RowLockManager {
 
     /// Release every lock held by `my_xid`, wake its waiters, clear its edge.
     pub fn release_all(&self, my_xid: u64) {
+        self.release_all_as(LockOwner::Xid(my_xid));
+    }
+
+    pub(crate) fn release_all_as(&self, owner: LockOwner) {
         let to_wake = {
             let mut g = self.inner.lock().expect("lockmgr");
             g.locks.retain(|_, lock| {
-                lock.holders.remove(&my_xid);
+                lock.holders.remove(&owner);
                 !lock.holders.is_empty()
             });
-            g.wait_for.remove(&my_xid);
-            g.waiters.remove(&my_xid).unwrap_or_default()
+            g.wait_for.remove(&owner);
+            g.waiters.remove(&owner).unwrap_or_default()
         };
         // Each per-waiter `Notify` has exactly one consumer; `notify_one` stores
         // a permit if the waiter has not yet reached `.await`, so no wakeup is
@@ -308,24 +368,28 @@ impl RowLockManager {
     }
 
     /// Snapshot every lock `my_xid` currently holds for a savepoint boundary.
-    pub(crate) fn held_locks(&self, my_xid: u64) -> HashMap<LockKey, LockMode> {
+    pub(crate) fn held_locks_as(&self, owner: LockOwner) -> HashMap<LockKey, LockMode> {
         self.inner
             .lock()
             .expect("lockmgr")
             .locks
             .iter()
-            .filter(|(_, lock)| lock.holders.contains(&my_xid))
+            .filter(|(_, lock)| lock.holders.contains(&owner))
             .map(|(key, lock)| (key.clone(), lock.mode))
             .collect()
     }
 
     /// Restore `my_xid`'s lock set to a savepoint snapshot, releasing locks
     /// acquired later and undoing a later shared-to-exclusive upgrade.
-    pub(crate) fn restore_locks(&self, my_xid: u64, snapshot: &HashMap<LockKey, LockMode>) {
+    pub(crate) fn restore_locks_as(
+        &self,
+        owner: LockOwner,
+        snapshot: &HashMap<LockKey, LockMode>,
+    ) {
         let to_wake = {
             let mut inner = self.inner.lock().expect("lockmgr");
             inner.locks.retain(|key, lock| {
-                if !lock.holders.contains(&my_xid) {
+                if !lock.holders.contains(&owner) {
                     return true;
                 }
                 match snapshot.get(key) {
@@ -334,13 +398,13 @@ impl RowLockManager {
                         true
                     }
                     None => {
-                        lock.holders.remove(&my_xid);
+                        lock.holders.remove(&owner);
                         !lock.holders.is_empty()
                     }
                 }
             });
-            inner.wait_for.remove(&my_xid);
-            inner.waiters.remove(&my_xid).unwrap_or_default()
+            inner.wait_for.remove(&owner);
+            inner.waiters.remove(&owner).unwrap_or_default()
         };
         for waiter in to_wake {
             waiter.notify_one();
@@ -353,30 +417,35 @@ impl RowLockManager {
             .lock()
             .expect("lockmgr")
             .wait_for
-            .insert(waiter, holder);
+            .insert(LockOwner::Xid(waiter), LockOwner::Xid(holder));
     }
     #[cfg(test)]
     pub(crate) fn check_cycle(&self, holder: u64, my_xid: u64) -> CycleCheck {
         check_cycle(
             &self.inner.lock().expect("lockmgr").wait_for,
-            holder,
-            my_xid,
+            LockOwner::Xid(holder),
+            LockOwner::Xid(my_xid),
         )
     }
 }
 
 /// Locked, non-blocking acquire over `&mut Inner`. Idempotent if `my_xid`
 /// already holds compatibly; a sole shared holder may upgrade to exclusive.
-fn try_acquire_locked(inner: &mut Inner, key: LockKey, mode: LockMode, my_xid: u64) -> Acquire {
+fn try_acquire_locked(
+    inner: &mut Inner,
+    key: LockKey,
+    mode: LockMode,
+    owner: LockOwner,
+) -> Acquire {
     match inner.locks.get_mut(&key) {
         None => {
             let mut holders = HashSet::new();
-            holders.insert(my_xid);
+            holders.insert(owner);
             inner.locks.insert(key, HeldLock { mode, holders });
             Acquire::Acquired
         }
         Some(lock) => {
-            if lock.holders.contains(&my_xid) {
+            if lock.holders.contains(&owner) {
                 if mode == LockMode::Exclusive && lock.mode == LockMode::Shared {
                     if lock.holders.len() == 1 {
                         lock.mode = LockMode::Exclusive;
@@ -385,7 +454,7 @@ fn try_acquire_locked(inner: &mut Inner, key: LockKey, mode: LockMode, my_xid: u
                         let other = *lock
                             .holders
                             .iter()
-                            .find(|&&h| h != my_xid)
+                            .find(|&&holder| holder != owner)
                             .expect("other holder");
                         Acquire::Conflict(other)
                     }
@@ -393,7 +462,7 @@ fn try_acquire_locked(inner: &mut Inner, key: LockKey, mode: LockMode, my_xid: u
                     Acquire::Acquired
                 }
             } else if mode == LockMode::Shared && lock.mode == LockMode::Shared {
-                lock.holders.insert(my_xid);
+                lock.holders.insert(owner);
                 Acquire::Acquired
             } else {
                 Acquire::Conflict(*lock.holders.iter().next().expect("a holder"))
@@ -404,11 +473,15 @@ fn try_acquire_locked(inner: &mut Inner, key: LockKey, mode: LockMode, my_xid: u
 
 /// Would adding `my_xid -> holder` close a cycle? Walk the chain from `holder`;
 /// if it reaches `my_xid`, the edge closes a cycle.
-fn check_cycle(wait_for: &HashMap<u64, u64>, holder: u64, my_xid: u64) -> CycleCheck {
+fn check_cycle(
+    wait_for: &HashMap<LockOwner, LockOwner>,
+    holder: LockOwner,
+    owner: LockOwner,
+) -> CycleCheck {
     let mut cur = holder;
     let mut seen = HashSet::new();
     loop {
-        if cur == my_xid {
+        if cur == owner {
             return CycleCheck::Deadlock;
         }
         if !seen.insert(cur) {
@@ -857,7 +930,7 @@ mod tests {
         ));
         assert!(matches!(
             m.try_acquire(1, 1, LockMode::Exclusive, 11),
-            Acquire::Conflict(10)
+            Acquire::Conflict(LockOwner::Xid(10))
         ));
         assert!(matches!(
             m.try_acquire(1, 2, LockMode::Shared, 11),
@@ -915,7 +988,7 @@ mod tests {
         // and the released entry was REMOVED (the waiter now holds it anew).
         assert!(matches!(
             m.try_acquire(1, 2, LockMode::Exclusive, 11),
-            Acquire::Conflict(10)
+            Acquire::Conflict(LockOwner::Xid(10))
         ));
         assert!(m.held_entry_count() == 2);
     }
@@ -948,7 +1021,7 @@ mod tests {
         // now another exclusive conflicts
         assert!(matches!(
             m.try_acquire(1, 1, LockMode::Exclusive, 11),
-            Acquire::Conflict(10)
+            Acquire::Conflict(LockOwner::Xid(10))
         ));
     }
 

@@ -106,7 +106,7 @@ impl ForeignCtx<'_> {
 }
 
 /// Map a refused blocking acquire to its statement-level error (both 40P01).
-fn lock_acquire_error(error: crate::lockmgr::AcquireError) -> ExecError {
+pub(crate) fn lock_acquire_error(error: crate::lockmgr::AcquireError) -> ExecError {
     match error {
         crate::lockmgr::AcquireError::Deadlock => ExecError::Deadlock,
         crate::lockmgr::AcquireError::CapExpired => ExecError::LockWaitCapExpired,
@@ -120,6 +120,7 @@ pub(crate) struct WriteContext<'a> {
     pub global_snapshot: &'a crabka_pgmvcc::visibility::Snapshot,
     pub procarray: &'a crate::procarray::ProcArray,
     pub lockmgr: &'a crate::lockmgr::RowLockManager,
+    pub lock_owner: crate::lockmgr::LockOwner,
     pub seq: &'a crate::seq::SequenceManager,
     pub snapshot: &'a crabka_pgmvcc::visibility::Snapshot,
     pub xid: u64,
@@ -2369,10 +2370,10 @@ impl crate::fk::FkKeyLocks for WriteContext<'_> {
             crate::fk::FkLockMode::Exclusive => crate::lockmgr::LockMode::Exclusive,
         };
         self.lockmgr
-            .acquire_key(
+            .acquire_key_as(
                 crate::lockmgr::LockKey::UniqueKey(key),
                 mode,
-                self.xid,
+                self.lock_owner,
                 self.lock_wait_cap,
             )
             .await
@@ -2491,11 +2492,11 @@ impl crate::fk::FkCascade for StatementCascade<'_, '_> {
         };
         write_ctx
             .lockmgr
-            .acquire(
+            .acquire_as(
                 table.id,
                 rowid,
                 crate::lockmgr::LockMode::Exclusive,
-                write_ctx.xid,
+                write_ctx.lock_owner,
                 write_ctx.lock_wait_cap,
             )
             .await
@@ -3606,6 +3607,7 @@ async fn execute_write_body(
     let lockmgr = write_ctx.lockmgr;
     let seq = write_ctx.seq;
     let xid = write_ctx.xid;
+    let lock_owner = write_ctx.lock_owner;
     let ctx = write_ctx.eval_ctx;
     let mut ops: Vec<crabka_pgkv::WriteOp> = Vec::new();
     match stmt {
@@ -3851,11 +3853,11 @@ async fn execute_write_body(
                 }
                 // 2. Lock only matching candidates.
                 lockmgr
-                    .acquire(
+                    .acquire_as(
                         t.id,
                         rowid,
                         crate::lockmgr::LockMode::Exclusive,
-                        xid,
+                        lock_owner,
                         write_ctx.lock_wait_cap,
                     )
                     .await
@@ -3981,11 +3983,11 @@ async fn execute_write_body(
                 }
                 // 2. Lock only matching candidates.
                 lockmgr
-                    .acquire(
+                    .acquire_as(
                         t.id,
                         rowid,
                         crate::lockmgr::LockMode::Exclusive,
-                        xid,
+                        lock_owner,
                         write_ctx.lock_wait_cap,
                     )
                     .await
@@ -5073,11 +5075,11 @@ async fn apply_merge_row_action(
     let ctx = write_ctx.eval_ctx;
     write_ctx
         .lockmgr
-        .acquire(
+        .acquire_as(
             t.id,
             request.rowid,
             crate::lockmgr::LockMode::Exclusive,
-            write_ctx.xid,
+            write_ctx.lock_owner,
             write_ctx.lock_wait_cap,
         )
         .await
@@ -5957,12 +5959,12 @@ async fn enforce_exclusion_constraint(
     // catalog-only; correctness needs only this one coarse key today.
     write_ctx
         .lockmgr
-        .acquire_key(
+        .acquire_key_as(
             crate::lockmgr::LockKey::UniqueKey(
                 crabka_pgkv::key::secondary_index_entry_prefix(table.id, index.id, &[]),
             ),
             crate::lockmgr::LockMode::Exclusive,
-            write_ctx.xid,
+            write_ctx.lock_owner,
             write_ctx.lock_wait_cap,
         )
         .await
@@ -6137,12 +6139,12 @@ async fn lock_and_probe_unique_key(
 ) -> Result<Vec<ScannedRow>, ExecError> {
     write_ctx
         .lockmgr
-        .acquire_key(
+        .acquire_key_as(
             crate::lockmgr::LockKey::UniqueKey(crabka_pgkv::key::secondary_index_entry_prefix(
                 table.id, index.id, values,
             )),
             crate::lockmgr::LockMode::Exclusive,
-            write_ctx.xid,
+            write_ctx.lock_owner,
             write_ctx.lock_wait_cap,
         )
         .await
@@ -6327,11 +6329,11 @@ async fn arbitrate_insert_row(
             // on the write path, so upserts add no new deadlock shapes.
             write_ctx
                 .lockmgr
-                .acquire(
+                .acquire_as(
                     table.id,
                     holder.rowid,
                     crate::lockmgr::LockMode::Exclusive,
-                    write_ctx.xid,
+                    write_ctx.lock_owner,
                     write_ctx.lock_wait_cap,
                 )
                 .await
@@ -13581,6 +13583,7 @@ pub(crate) async fn execute_read_locking(
     read_ctx: &crate::subquery::SubCtx<'_>,
     procarray: &crate::procarray::ProcArray,
     lockmgr: &crate::lockmgr::RowLockManager,
+    lock_owner: crate::lockmgr::LockOwner,
     repeatable_read: bool,
     lock_wait_cap: Option<std::time::Duration>,
     s: &SelectStmt,
@@ -13707,13 +13710,13 @@ pub(crate) async fn execute_read_locking(
         match locking.wait {
             crabka_pgparser::ast::LockWaitPolicy::Wait => {
                 lockmgr
-                    .acquire(t.id, rowid, mode, xid, lock_wait_cap)
+                    .acquire_as(t.id, rowid, mode, lock_owner, lock_wait_cap)
                     .await
                     .map_err(lock_acquire_error)?;
             }
             policy => {
                 if let crate::lockmgr::Acquire::Conflict(_) =
-                    lockmgr.try_acquire(t.id, rowid, mode, xid)
+                    lockmgr.try_acquire_as(t.id, rowid, mode, lock_owner)
                 {
                     if policy == crabka_pgparser::ast::LockWaitPolicy::SkipLocked {
                         continue;

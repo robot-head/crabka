@@ -114,7 +114,7 @@ mod window;
 use std::{
     collections::HashMap,
     path::Path,
-    sync::{Arc, Mutex, OnceLock, Weak},
+    sync::{Arc, Mutex, OnceLock, Weak, atomic::AtomicU64},
 };
 
 pub use commit::{Committer, LocalCommitter};
@@ -156,39 +156,23 @@ struct EngineCoordination {
     table_id_lock: Arc<tokio::sync::Mutex<()>>,
     table_write_gate: Arc<tokio::sync::RwLock<()>>,
     writer_fence: Arc<WriterFence>,
-    unique_index_gates: Arc<UniqueIndexGates>,
+    lockmgr: Arc<RowLockManager>,
+    unique_index_gates: Arc<RowLockManager>,
+    next_unique_index_owner: AtomicU64,
 }
 
 impl EngineCoordination {
     fn new() -> Self {
+        let lockmgr = Arc::new(RowLockManager::new());
         Self {
             catalog_lock: Arc::new(tokio::sync::Mutex::new(())),
             table_id_lock: Arc::new(tokio::sync::Mutex::new(())),
             table_write_gate: Arc::new(tokio::sync::RwLock::new(())),
             writer_fence: Arc::new(WriterFence::new()),
-            unique_index_gates: Arc::new(UniqueIndexGates::default()),
+            lockmgr: Arc::clone(&lockmgr),
+            unique_index_gates: lockmgr,
+            next_unique_index_owner: AtomicU64::new(0),
         }
-    }
-}
-
-#[derive(Default)]
-pub(crate) struct UniqueIndexGates {
-    gates: Mutex<HashMap<crabka_pgcatalog::TableId, Weak<tokio::sync::RwLock<()>>>>,
-}
-
-impl UniqueIndexGates {
-    pub(crate) fn for_table(
-        &self,
-        table: crabka_pgcatalog::TableId,
-    ) -> Arc<tokio::sync::RwLock<()>> {
-        let mut gates = self.gates.lock().expect("unique-index gates");
-        gates.retain(|_, gate| gate.strong_count() != 0);
-        if let Some(gate) = gates.get(&table).and_then(Weak::upgrade) {
-            return gate;
-        }
-        let gate = Arc::new(tokio::sync::RwLock::new(()));
-        gates.insert(table, Arc::downgrade(&gate));
-        gate
     }
 }
 
@@ -477,7 +461,7 @@ pub struct SqlEngine {
     /// or until COMMIT/ROLLBACK in an explicit transaction); unique-index DDL
     /// holds the same relation's gate EXCLUSIVELY while it backfills.
     /// Same-key DML conflicts serialize through per-key locks in `lockmgr`.
-    pub(crate) unique_index_gates: Arc<UniqueIndexGates>,
+    pub(crate) unique_index_gates: Arc<RowLockManager>,
     pub(crate) committer: Arc<dyn crate::commit::Committer>,
     pub(crate) linearizer: Arc<dyn crate::read_gate::Linearizer>,
     pub(crate) persist_mode: PersistMode,
@@ -882,7 +866,7 @@ impl SqlEngine {
             kv: Arc::clone(&kv),
             procarray,
             seq: Arc::new(SequenceManager::new(PersistMode::Durable)),
-            lockmgr: Arc::new(RowLockManager::new()),
+            lockmgr: Arc::clone(&coordination.lockmgr),
             session_locks: Arc::new(crate::lockmgr::SessionLocks::new()),
             notify: Arc::new(notify::NotifyBus::new()),
             notify_replication: Arc::new(NotifyReplication::default()),
@@ -1493,7 +1477,7 @@ impl SqlEngine {
             kv: Arc::clone(&sm_kv),
             procarray,
             seq: Arc::new(SequenceManager::new(PersistMode::Replicated)),
-            lockmgr: Arc::new(RowLockManager::new()),
+            lockmgr: Arc::clone(&coordination.lockmgr),
             session_locks: Arc::new(crate::lockmgr::SessionLocks::new()),
             notify: Arc::new(notify::NotifyBus::new()),
             notify_replication: Arc::new(NotifyReplication::default()),
