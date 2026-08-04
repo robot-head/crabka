@@ -27,6 +27,7 @@ GRES_PORT=""
 GRES_USER="${GRES_PG_REGRESS_USER:-crab}"
 GRES_DB="${GRES_PG_REGRESS_DB:-crab}"
 GRES_PID=""
+declare -a FOCUS_TESTS=()
 
 export LC_ALL=C LANG=C LANGUAGE=C TZ=UTC
 unset PGDATABASE PGHOST PGHOSTADDR PGOPTIONS PGPORT PGUSER PGSERVICE PGSERVICEFILE
@@ -34,10 +35,31 @@ unset PGDATABASE PGHOST PGHOSTADDR PGOPTIONS PGPORT PGUSER PGSERVICE PGSERVICEFI
 usage() {
     cat <<'EOF'
 Usage: scripts/gres-pg-regress.sh self-check|gres [serial|parallel|both]
+                                  [--tests <name>...]
 
 self-check  Run PostgreSQL 18.4 against a clean PostgreSQL 18.4 temp instance.
 gres        Run both self-checks, then gate fresh local Gres instances. Serial
             mode enforces crates/gres-conformance/pg-regress-baseline.json.
+
+Options:
+  --tests <name>...  Run only the named regression tests instead of
+                     parallel_schedule, using the identical server flags,
+                     environment and pg_regress arguments as a full run. Must
+                     be the last option; every remaining argument is a test
+                     name. test_setup is prepended automatically when absent,
+                     because most tests depend on the objects it creates. The
+                     baseline gate is skipped, since it grades the whole
+                     schedule. Example:
+                       scripts/gres-pg-regress.sh gres serial --tests boolean
+
+                     Not every test can be run this way. Many depend on objects
+                     built by earlier tests in the schedule, not just those from
+                     test_setup, and PostgreSQL itself fails those in isolation
+                     (alter_table is one). The self-check gate catches that and
+                     reports "PostgreSQL self-check failed" -- which means the
+                     subset is not self-contained, not that Gres is at fault.
+                     Read self-check-serial/regression.out to see which test,
+                     and certify against the full schedule instead.
 
 Environment:
   GRES_PG_REGRESS_ARTIFACT_DIR  New directory for retained run artifacts.
@@ -49,6 +71,8 @@ Environment:
   GRES_PG_REGRESS_RANDOM_SEED   Deterministic initial random seed (default: 1).
   GRES_PG_REGRESS_TOKIO_WORKERS Override Tokio workers (serial defaults to 1;
                                 parallel uses the runtime default).
+  GRES_PG_REGRESS_BLOCKING_QUERY_MEMORY
+                                Gres blocking-query memory budget (default: 20MiB).
 EOF
 }
 
@@ -154,9 +178,11 @@ run_pg_regress() {
         "--inputdir=${REGRESS_SOURCE_DIR}"
         "--expecteddir=${REGRESS_SOURCE_DIR}"
         "--outputdir=${output}"
-        "--schedule=${REGRESS_SOURCE_DIR}/parallel_schedule"
-        "--max-concurrent-tests=20"
     )
+    if ((${#FOCUS_TESTS[@]} == 0)); then
+        command+=("--schedule=${REGRESS_SOURCE_DIR}/parallel_schedule")
+    fi
+    command+=("--max-concurrent-tests=20")
     mkdir -p "$output"
 
     case "$subject" in
@@ -181,6 +207,9 @@ run_pg_regress() {
             return 2
             ;;
     esac
+    if ((${#FOCUS_TESTS[@]})); then
+        command+=("${FOCUS_TESTS[@]}")
+    fi
 
     printf '%q ' "${command[@]}" >"${output}/command.txt"
     printf '\n' >>"${output}/command.txt"
@@ -317,7 +346,8 @@ run_gres_mode() {
     kill -0 "$GRES_PID" 2>/dev/null && server_alive=1
     stop_gres "$output"
     detect_infrastructure_failures "$output" "$postflight_rc" "$server_alive" "$regress_rc" || infrastructure_rc=$?
-    if [[ "$mode" == serial && "$regress_rc" -le 1 && "$infrastructure_rc" -eq 0 ]]; then
+    if [[ "$mode" == serial ]] && ((${#FOCUS_TESTS[@]} == 0)) &&
+        [[ "$regress_rc" -le 1 && "$infrastructure_rc" -eq 0 ]]; then
         check_serial_baseline "$output" || baseline_rc=$?
         ((baseline_rc == 0))
     else
@@ -344,12 +374,61 @@ run_modes() {
     return "$failed"
 }
 
-main() {
-    if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
-        usage
-        return
+parse_focus_tests() {
+    if (($# == 0)); then
+        echo "error: --tests requires at least one test name" >&2
+        return 2
     fi
-    local subject="${1:-}" modes="${2:-both}"
+    local name
+    for name in "$@"; do
+        if [[ ! "$name" =~ ^[A-Za-z0-9_-]+$ ]]; then
+            echo "error: invalid test name: ${name}" >&2
+            return 2
+        fi
+        if [[ -d "${REGRESS_SOURCE_DIR}/sql" && ! -f "${REGRESS_SOURCE_DIR}/sql/${name}.sql" ]]; then
+            echo "error: no such regression test: ${name}" >&2
+            return 2
+        fi
+    done
+    FOCUS_TESTS=("$@")
+    if [[ " $* " != *" test_setup "* ]]; then
+        FOCUS_TESTS=(test_setup "$@")
+    fi
+}
+
+main() {
+    local subject="" modes="both" positional=0
+    while (($#)); do
+        case "$1" in
+            -h | --help)
+                usage
+                return
+                ;;
+            --tests)
+                shift
+                parse_focus_tests "$@" || return $?
+                break
+                ;;
+            -*)
+                echo "error: unknown option: $1" >&2
+                usage >&2
+                return 2
+                ;;
+            *)
+                case "$positional" in
+                    0) subject="$1" ;;
+                    1) modes="$1" ;;
+                    *)
+                        echo "error: unexpected argument: $1" >&2
+                        usage >&2
+                        return 2
+                        ;;
+                esac
+                positional=$((positional + 1))
+                shift
+                ;;
+        esac
+    done
     if [[ "$subject" != self-check && "$subject" != gres ]]; then
         usage >&2
         return 2
@@ -367,6 +446,10 @@ main() {
     mkdir -p "$artifact_root"
     printf 'postgres_tag=%s\nsource_url=%s\nsha256=%s\n' \
         "$POSTGRES_TAG" "$POSTGRES_URL" "$POSTGRES_SHA256" >"${artifact_root}/provenance.txt"
+    if ((${#FOCUS_TESTS[@]})); then
+        printf 'tests=%s\n' "${FOCUS_TESTS[*]}" >>"${artifact_root}/provenance.txt"
+        echo "==> focused subset: ${FOCUS_TESTS[*]}"
+    fi
     trap 'stop_gres' EXIT INT TERM
     prepare_postgres "${artifact_root}/postgres-build.log"
 
