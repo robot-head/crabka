@@ -320,21 +320,27 @@ For each item, first add one focused test at the shared layer that fails before 
 - [x] Include schema-qualified user types and their generated multirange/dependent types in schema dependency discovery and cleanup. `DROP SCHEMA ... RESTRICT` rejects a nonempty type-only schema; `CASCADE` and the shared temp cleanup remove roots and transitive dependents in dependents-first order, including primary and multirange registry identities. The schema lifecycle integration target passes 10 / 10 and pgcatalog schema tests pass 9 / 9.
 - [x] Within one active catalog, publish the process type registry only from the durable catalog delta after TYPE/DOMAIN create, alter, drop, `DROP SCHEMA CASCADE`, `DISCARD TEMP`, session teardown, or stale-temp reclamation commits and event triggers accept it. Successful nested event-trigger DDL re-reads the final durable type set before publication; a rejected hook publishes the current-to-restored rollback delta. Event-trigger rejection, partial multi-drop builder failure, commit/read failure, and savepoint rollback leave parser-visible names aligned with catalog state; one registry write lock applies removals and replacements atomically, including multirange mappings.
 - [ ] Scope the process user-type registry by a stable catalog identity and replace each catalog namespace atomically during hydration. Independent `SqlEngine` catalogs currently allocate the same local user-type OIDs and can overwrite one another's global name/OID mappings; single-catalog atomic publication does not provide multi-catalog isolation.
-- [ ] **A dangling user-type reference makes `pg_class` and `pg_attribute`
-      unreadable outright.** Reproduced from a snapshot of the 91 tests
-      preceding `sanity_check`: every scan of either catalog returns
+- [ ] **User types are not fully rehydrated on durable restart, which makes
+      `pg_class` and `pg_attribute` unreadable.** Run the 91 tests preceding
+      `sanity_check` against a `--data-dir` instance, stop it, and start a new
+      process on the same directory: every scan of either catalog then returns
       `catalog storage error: corrupt row encoding: column type oid 300119 is
-      not a registered type`, while `pg_type` and `pg_namespace` still read
-      normally and 300119 is absent from `pg_type`. So an earlier `DROP TYPE` /
-      `DROP SCHEMA … CASCADE` removed a type while a relation kept a column
-      typed by it, and one such row now fails *all* relation introspection —
-      not merely the query that touches it. This is the observable cause of the
-      `sanity_check` residual and it will break every `\d`-style catalog query
-      after the same point. PostgreSQL cannot reach this state because
-      `DROP TYPE` is refused (`2BP01`) while a column still uses the type, and
-      `CASCADE` drops that column; the closure item below is what makes that
-      true here. Fix the closure rather than making row decoding tolerate an
-      unregistered OID, which would hide real corruption.
+      not a registered type`, while `pg_type` and `pg_namespace` still read and
+      300119 is absent from the projected `pg_type`. One unhydrated type
+      therefore breaks *all* relation introspection, not merely the query that
+      touches it.
+      Scope, established by measurement rather than assumed: the originating
+      run itself logs **zero** such errors, and so does the complete certified
+      serial schedule — the failure appears only *after* the restart. It is a
+      hydration defect (see the process-registry item below), not a
+      `DROP TYPE` closure defect, and it does not affect the pg_regress score,
+      which runs in-memory without restarting. It does mean Gres cannot be
+      restarted with user types present.
+      Consequence for tooling: a snapshot-and-restart harness is **not** sound
+      for reproducing an in-memory schedule failure, because restart changes
+      catalog behaviour. The `sanity_check` residual — whose real message in the
+      certified run is a truncated `ERROR:  column "` — is still unreproduced
+      and still unexplained.
 - [ ] Extend schema/type dependency closure beyond user types to every non-type dependent: table columns and defaults, routines, views, indexes, and their catalog dependency rows. In particular, `DROP TYPE`/`DROP SCHEMA ... CASCADE` can remove a user-type record while leaving a table outside the dropped schema with a column that references the tombstoned OID. A type-to-type cascade is not yet full PostgreSQL object dependency closure.
 - [ ] Make stored SQL/expression reparsers (views, SQL/PL/pgSQL bodies, and domain/check expressions) use the session or captured type search path; today an unqualified non-`public` user type can fail to resolve or rebind after creation.
 - [x] Retain usable hash-compatible keys in mixed-key equijoins and recheck the full join predicate for every candidate.
