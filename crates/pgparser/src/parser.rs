@@ -10081,9 +10081,11 @@ impl Parser {
         let lateral = self.eat_ident_eq("lateral");
         if *self.peek() == Token::LParen {
             self.bump();
+            // `TABLE t` is a query body like any other — `set_primary` already
+            // parses it — so a derived table may be spelled `(TABLE t) AS s`.
             if matches!(
                 self.peek(),
-                Token::Keyword(Keyword::Select | Keyword::Values | Keyword::With)
+                Token::Keyword(Keyword::Select | Keyword::Values | Keyword::With | Keyword::Table)
             ) {
                 let subquery = self.query_expr_after_open_paren()?;
                 // The alias is optional, as it has been since PostgreSQL 16.
@@ -12082,6 +12084,21 @@ mod tests {
         assert!(matches!(
             one("REVOKE USAGE ON SCHEMA s FROM r"),
             Statement::RevokeSchemaPrivileges { .. }
+        ));
+    }
+
+    /// `TABLE t` is a query body, so it may spell a derived table exactly as
+    /// the equivalent `SELECT *` does.
+    #[test]
+    fn a_derived_table_may_be_spelled_with_the_table_query_form() {
+        use assert2::assert;
+        assert!(
+            one("SELECT * FROM (TABLE int2_tbl) AS s (a, b)")
+                == one("SELECT * FROM (SELECT * FROM int2_tbl) AS s (a, b)")
+        );
+        assert!(matches!(
+            one("SELECT * FROM (TABLE t) AS s"),
+            Statement::Query(_)
         ));
     }
 
