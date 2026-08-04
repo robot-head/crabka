@@ -10171,6 +10171,15 @@ impl SqlSession {
             Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => return None,
             Err(error) => return Some(Err(error.into())),
         };
+        // A partitioned parent stores no rows of its own — they live in its
+        // leaves. This cursor scans exactly one relation, so serving `SELECT *
+        // FROM parent` here silently returns nothing instead of the partitions'
+        // rows. Only `run_select` expands a parent to its leaves.
+        match crate::partition::is_partitioned(self.catalog_kv.as_ref(), &name) {
+            Ok(false) => {}
+            Ok(true) => return None,
+            Err(error) => return Some(Err(error)),
+        }
         if crate::plan_dist::plan_scan(&table, select.filter.as_ref(), &select.projection)
             .text_search
             .is_some()
