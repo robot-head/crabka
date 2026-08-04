@@ -450,3 +450,39 @@ async fn grouped_streaming_aggregate_orders_groups_with_nulls_last() {
         ]
     );
 }
+
+/// `GROUPING()` outside a grouped query must keep `PostgreSQL`'s 42803, naming
+/// the missing GROUP BY, on the streaming path as well as the materializing one.
+///
+/// The streaming cursor resolves projection expressions row-by-row and has no
+/// notion of `GROUPING()`, so if it accepts the shape at all it reports 42883
+/// "function grouping(...) does not exist" — a different error for the same SQL
+/// depending only on which path served it. Its eligibility gate therefore has
+/// to decline on `grouping::is_grouping_query`, not just on
+/// `agg::is_aggregate_query`: `GROUPING()` is not an aggregate.
+///
+/// This regressed the differential-conformance parity gate the moment
+/// `RuntimeSession` began forwarding `simple_query_into`, which is what made
+/// the streaming path reachable in the first place.
+#[tokio::test]
+async fn bare_grouping_call_keeps_its_sqlstate_on_the_streaming_path() {
+    use crabka_pgwire::engine::CollectingResultSink;
+
+    let engine = SqlEngine::new();
+    let mut setup = engine.connect();
+    exec(&mut setup, "CREATE TABLE q3gs (a int4, b int4)").await;
+    exec(&mut setup, "INSERT INTO q3gs VALUES (1, 2)").await;
+
+    // Both entry points must agree, and both must agree with PostgreSQL.
+    let mut session = engine.connect();
+    let buffered = session.simple_query("SELECT grouping(a) FROM q3gs").await;
+    let error = buffered.expect_err("bare GROUPING() is an error");
+    assert!(error.code == "42803", "buffered path: {error:?}");
+
+    let mut sink = CollectingResultSink::default();
+    let streamed = session
+        .simple_query_into("SELECT grouping(a) FROM q3gs", 16, &mut sink)
+        .await;
+    let error = streamed.expect_err("bare GROUPING() is an error");
+    assert!(error.code == "42803", "streaming path: {error:?}");
+}

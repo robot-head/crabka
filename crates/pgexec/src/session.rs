@@ -10142,7 +10142,14 @@ impl SqlSession {
             || select.filter.as_ref().is_some_and(requires_materialization)
             || select.limit.as_ref().is_some_and(requires_materialization)
             || select.offset.as_ref().is_some_and(requires_materialization)
-            || crate::agg::is_aggregate_query(&select)
+            // `is_grouping_query`, not `agg::is_aggregate_query`: it also covers
+            // a grouping-set clause carrying no aggregate and a bare
+            // `GROUPING()` call. `GROUPING()` is not a function this cursor can
+            // resolve — `PostgreSQL` answers 42803 naming the missing GROUP BY,
+            // and only the materializing path knows that. Evaluating it here
+            // row-by-row reports 42883 "function grouping(...) does not exist"
+            // instead, which is the SQLSTATE change the comment above forbids.
+            || crate::grouping::is_grouping_query(&select)
             // A set-returning function in the select list turns one source row
             // into many, which this one-row-in-one-row-out cursor cannot do.
             || crate::srf::projection_contains_srf(&select.projection)
