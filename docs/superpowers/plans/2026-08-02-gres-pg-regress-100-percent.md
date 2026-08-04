@@ -6,13 +6,13 @@
 test files, not the adopted corpus's statement matches. The checked-in monotone
 floor remains `6/231`; this review is still non-monotone against that floor and
 does not ratchet it. Serial completes all 231 files with zero infrastructure
-failures, leaving 203 semantic failures across 174557 canonical changed lines
+failures, leaving 203 semantic failures across 174377 canonical changed lines
 and 4568 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
 postflight probe succeeds, and the infrastructure report is empty.
 
 The measurement immediately before this wave was `22/231` at 176686 changed
 lines / 4606 hunks, from the same runner and the same pinned corpus. The
-waves below are therefore `+6` exact files and `-2129` changed lines with
+waves below are therefore `+6` exact files and `-2309` changed lines with
 **zero newly failing files**: `int4`, `int2`, `roleattributes`, `lseg`, `line` and `circle` become exact,
 and 4 files gain a combined 22 lines.
 
@@ -274,7 +274,19 @@ and their certified artifact describe current conformance.
 - [x] Add the `circle` type (OID 718) with `center`/`radius`/`diameter`/`area`,
       the `<->` distance operator and area-based ordering. Makes `circle` exact
       and takes `geometry` down 245 lines.
-- [ ] **User relation OIDs fall inside the system-reserved range.** `CREATE
+- [x] **Allocate user relation oids above the system-reserved range.** Table
+      oids now come from a band at 20000, above `FirstNormalObjectId` and below
+      the index band at 50000. `misc_sanity` -152, `opr_sanity` -25,
+      `replica_identity` -3, nothing worsened.
+      It took three follow-up waves to land, and every miss was a producer of
+      relation oids the unit tests never join: first `pg_trigger`/`pg_depend`
+      (`triggers` +73), then `TG_RELID` (+6), then the discovery that
+      `Trigger::table_id` is *polymorphic* — a catalog id for a table, but an
+      already-formed `pg_class` oid when the trigger is `INSTEAD OF` on a view,
+      which must not be banded twice. Route every new producer through
+      `table_relation_oid`/`trigger_relation_oid`; a green `cargo test` does not
+      cover this, because no unit test joins `pg_trigger` to `pg_class`.
+- [ ] ~~User relation OIDs fall inside the system-reserved range.~~ (done above) `CREATE
       TABLE t; SELECT oid >= 16384 FROM pg_class WHERE relname = 't'` is `f`
       here and `t` in PostgreSQL, so every upstream sanity query that separates
       catalogs from user objects with `c.oid < 16384` sees user tables. The
