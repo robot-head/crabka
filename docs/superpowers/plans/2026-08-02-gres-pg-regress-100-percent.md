@@ -253,6 +253,21 @@ and their certified artifact describe current conformance.
       also improves `create_index_spgist` (-50), `polymorphism` (-12),
       `spgist` (-9) and `gist` (-6): the geometry opclass tests need the type
       to exist at all.
+- [ ] Add the four remaining geometry types — `box`, `circle`, `line`,
+      `polygon`. **This is the highest-value repeatable shape left**, proven by
+      `lseg`: each is a bounded type (input spellings, canonical output, a
+      constructor, durable/wire encodings) that makes its own upstream file
+      exact *and* ripples into the shared geometry tests, because
+      `create_index_spgist`, `gist`, `spgist`, `polymorphism` and `geometry`
+      all fail at `type "box" does not exist` rather than on their own subject.
+      Current owner sizes: `box` 541/4h, `polygon` 278/2h, `line` 138/1h,
+      `circle` 112/1h, and `geometry` 5132/2h behind them.
+      Sizing notes taken from the upstream files: `line` needs four input forms
+      plus the two-point → `{A,B,C}` coefficient conversion (vertical is
+      `A=-1, B=0, C=x`; otherwise `A=(y2-y1)/(x2-x1)`, `B=-1`, `C=y1-A*x1`),
+      equality, and `line(point,point)`; `circle` additionally needs
+      `center`/`radius`/`diameter`/`area`, `<->` and `<`. `box` normalizes its
+      corners on input, so `((1,2),(3,4))` prints `(3,4),(1,2)`.
 - [ ] Match remaining exact wire-visible diagnostics.
 - [ ] Attach `22008 date/time field value out of range` and `malformed array
       literal` source positions. Neither message names its type, so the
