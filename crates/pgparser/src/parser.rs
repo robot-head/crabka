@@ -3235,6 +3235,7 @@ impl Parser {
                 {
                     emitted(I::AlterOperatorFamily, self.alter_operator_object())
                 }
+                Token::Ident(s) if s == "role" => emitted(I::AlterRole, self.alter_role()),
                 Token::Ident(s) if s == "type" => emitted(I::AlterType, self.alter_type()),
                 Token::Ident(s) if s == "domain" => emitted(I::AlterDomain, self.alter_domain()),
                 _ => Err(ParseError::new(
@@ -3637,6 +3638,7 @@ impl Parser {
         }
         let name = self.expect_object_name()?;
         let mut member_of = Vec::new();
+        let mut options = crate::ast::RoleOptions::default();
         while !matches!(self.peek(), Token::Semicolon | Token::Eof) {
             if self.eat_keyword(Keyword::In) {
                 self.expect_ident_eq("role")?;
@@ -3646,9 +3648,9 @@ impl Parser {
                         break;
                     }
                 }
-            } else {
-                // Role attributes such as NOSUPERUSER are accepted metadata;
-                // only membership currently affects authorization.
+            } else if !self.eat_role_option(&mut options) {
+                // Options crabka does not model yet (PASSWORD, VALID UNTIL,
+                // CONNECTION LIMIT, …) stay accepted metadata.
                 self.bump();
             }
         }
@@ -3656,7 +3658,65 @@ impl Parser {
             name,
             can_login,
             member_of,
+            options,
         })
+    }
+
+    /// `ALTER ROLE name [WITH] option …` — the attribute form. Only the options
+    /// written are applied; the rest keep their stored value. `ALTER USER`
+    /// stays routed to `ALTER USER MAPPING`, which owns that spelling here.
+    fn alter_role(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.expect_ident_eq("alter")?;
+        self.expect_ident_eq("role")?;
+        let name = self.expect_object_name()?;
+        let mut options = crate::ast::RoleOptions::default();
+        let mut saw_option = false;
+        while !matches!(self.peek(), Token::Semicolon | Token::Eof) {
+            if self.eat_role_option(&mut options) {
+                saw_option = true;
+            } else {
+                self.bump();
+            }
+        }
+        if !saw_option {
+            return Err(ParseError::new(
+                "expected at least one role option after ALTER ROLE",
+                self.peek_pos(),
+            ));
+        }
+        Ok(crate::ast::Statement::AlterRole { name, options })
+    }
+
+    /// Consume one `CREATE`/`ALTER ROLE` boolean attribute, if the next token is
+    /// one. `WITH` is noise and is consumed the same way `PostgreSQL` ignores it.
+    fn eat_role_option(&mut self, options: &mut crate::ast::RoleOptions) -> bool {
+        if self.eat_keyword(Keyword::With) {
+            return true;
+        }
+        let Token::Ident(word) = self.peek() else {
+            return false;
+        };
+        let word = word.to_ascii_lowercase();
+        let (field, value): (&mut Option<bool>, bool) = match word.as_str() {
+            "superuser" => (&mut options.superuser, true),
+            "nosuperuser" => (&mut options.superuser, false),
+            "inherit" => (&mut options.inherit, true),
+            "noinherit" => (&mut options.inherit, false),
+            "createrole" => (&mut options.createrole, true),
+            "nocreaterole" => (&mut options.createrole, false),
+            "createdb" => (&mut options.createdb, true),
+            "nocreatedb" => (&mut options.createdb, false),
+            "login" => (&mut options.login, true),
+            "nologin" => (&mut options.login, false),
+            "replication" => (&mut options.replication, true),
+            "noreplication" => (&mut options.replication, false),
+            "bypassrls" => (&mut options.bypassrls, true),
+            "nobypassrls" => (&mut options.bypassrls, false),
+            _ => return false,
+        };
+        *field = Some(value);
+        self.bump();
+        true
     }
 
     fn drop_role(&mut self) -> Result<crate::ast::Statement, ParseError> {
@@ -12100,6 +12160,75 @@ mod tests {
             one("SELECT * FROM (TABLE t) AS s"),
             Statement::Query(_)
         ));
+    }
+
+    /// `CREATE`/`ALTER ROLE … WITH` record the boolean attributes, and an
+    /// option the statement does not write stays `None` so `ALTER ROLE` leaves
+    /// the stored value alone.
+    #[test]
+    fn role_options_are_parsed_and_only_written_ones_are_set() {
+        use assert2::assert;
+
+        use crate::ast::RoleOptions;
+        let Statement::CreateRole {
+            options, can_login, ..
+        } = one("CREATE ROLE r WITH SUPERUSER CREATEDB NOINHERIT")
+        else {
+            panic!("CREATE ROLE")
+        };
+        assert!(!can_login);
+        assert!(
+            options
+                == RoleOptions {
+                    superuser: Some(true),
+                    createdb: Some(true),
+                    inherit: Some(false),
+                    ..RoleOptions::default()
+                }
+        );
+
+        let Statement::AlterRole { name, options } = one("ALTER ROLE r WITH NOSUPERUSER") else {
+            panic!("ALTER ROLE")
+        };
+        assert!(name == "r");
+        assert!(
+            options
+                == RoleOptions {
+                    superuser: Some(false),
+                    ..RoleOptions::default()
+                }
+        );
+
+        for (sql, field) in [
+            ("ALTER ROLE r WITH LOGIN", "login"),
+            ("ALTER ROLE r NOLOGIN", "login"),
+            ("ALTER ROLE r WITH BYPASSRLS", "bypassrls"),
+            ("ALTER ROLE r WITH NOREPLICATION", "replication"),
+            ("ALTER ROLE r WITH CREATEROLE", "createrole"),
+        ] {
+            let Statement::AlterRole { options, .. } = one(sql) else {
+                panic!("{sql}")
+            };
+            let set = [
+                ("login", options.login),
+                ("bypassrls", options.bypassrls),
+                ("replication", options.replication),
+                ("createrole", options.createrole),
+            ];
+            assert!(
+                set.iter().filter(|(_, v)| v.is_some()).count() == 1,
+                "{sql} sets exactly one option"
+            );
+            assert!(
+                set.iter().any(|(name, v)| *name == field && v.is_some()),
+                "{sql} sets {field}"
+            );
+        }
+
+        assert!(
+            parse("ALTER ROLE r").is_err(),
+            "an empty option list is an error"
+        );
     }
 
     fn only_query(sql: &str) -> crate::ast::QueryExpr {

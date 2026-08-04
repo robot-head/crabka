@@ -436,6 +436,84 @@ pub struct UserMapping {
 pub struct Role {
     pub name: String,
     pub can_login: bool,
+    /// The boolean attributes `pg_authid` projects. `PostgreSQL`'s `CREATE ROLE`
+    /// defaults are all false except `rolinherit`.
+    pub attributes: RoleAttributes,
+}
+
+/// One `CREATE`/`ALTER ROLE … WITH` boolean attribute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoleAttribute {
+    Superuser,
+    Inherit,
+    CreateRole,
+    CreateDb,
+    Replication,
+    BypassRls,
+}
+
+impl RoleAttribute {
+    /// Every attribute, in `pg_authid` column order.
+    pub const ALL: [Self; 6] = [
+        Self::Superuser,
+        Self::Inherit,
+        Self::CreateRole,
+        Self::CreateDb,
+        Self::Replication,
+        Self::BypassRls,
+    ];
+
+    const fn bit(self) -> u8 {
+        match self {
+            Self::Superuser => 1 << 0,
+            Self::Inherit => 1 << 1,
+            Self::CreateRole => 1 << 2,
+            Self::CreateDb => 1 << 3,
+            Self::Replication => 1 << 4,
+            Self::BypassRls => 1 << 5,
+        }
+    }
+}
+
+/// `PostgreSQL`'s boolean role attributes, held as a bitset so the durable
+/// record is one byte and the set cannot drift out of sync with its encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RoleAttributes {
+    bits: u8,
+}
+
+impl Default for RoleAttributes {
+    /// `PostgreSQL`'s `CREATE ROLE` defaults: everything off but `INHERIT`.
+    fn default() -> Self {
+        Self {
+            bits: RoleAttribute::Inherit.bit(),
+        }
+    }
+}
+
+impl RoleAttributes {
+    /// Whether `attribute` is set.
+    #[must_use]
+    pub const fn has(self, attribute: RoleAttribute) -> bool {
+        self.bits & attribute.bit() != 0
+    }
+
+    /// Set or clear `attribute`.
+    pub const fn set(&mut self, attribute: RoleAttribute, value: bool) {
+        if value {
+            self.bits |= attribute.bit();
+        } else {
+            self.bits &= !attribute.bit();
+        }
+    }
+
+    const fn to_bits(self) -> u8 {
+        self.bits
+    }
+
+    const fn from_bits(bits: u8) -> Self {
+        Self { bits }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3698,7 +3776,7 @@ const SCHEMA_PRIVILEGE_PREFIX: &[u8] = b"catalog/schema_privilege/";
 ///
 /// Returns duplicate-object or storage/corruption errors from the catalog KV seam.
 pub fn create_role(kv: &dyn Kv, name: &str, can_login: bool) -> Result<(), CatalogError> {
-    let ops = create_role_ops(kv, name, can_login)?;
+    let ops = create_role_ops(kv, name, can_login, RoleAttributes::default())?;
     kv.write_batch(&ops)?;
     Ok(())
 }
@@ -3712,13 +3790,34 @@ pub fn create_role_ops(
     kv: &dyn Kv,
     name: &str,
     can_login: bool,
+    attributes: RoleAttributes,
 ) -> Result<Vec<WriteOp>, CatalogError> {
     if role_exists(kv, name)? {
         return Err(CatalogError::DuplicateObject(name.to_string()));
     }
     Ok(vec![WriteOp::Put {
         key: role_key(name),
-        value: serialize_role(name, can_login),
+        value: serialize_role(name, can_login, attributes),
+    }])
+}
+
+/// Rewrite an existing role's login flag and boolean attributes.
+///
+/// # Errors
+///
+/// Returns undefined-object or storage/corruption errors from the catalog KV seam.
+pub fn alter_role_ops(
+    kv: &dyn Kv,
+    name: &str,
+    can_login: bool,
+    attributes: RoleAttributes,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    if !role_exists(kv, name)? {
+        return Err(CatalogError::UndefinedObject(name.to_string()));
+    }
+    Ok(vec![WriteOp::Put {
+        key: role_key(name),
+        value: serialize_role(name, can_login, attributes),
     }])
 }
 
@@ -3731,9 +3830,10 @@ pub fn create_role_with_memberships_ops(
     kv: &dyn Kv,
     name: &str,
     can_login: bool,
+    attributes: RoleAttributes,
     member_of: &[String],
 ) -> Result<Vec<WriteOp>, CatalogError> {
-    let mut ops = create_role_ops(kv, name, can_login)?;
+    let mut ops = create_role_ops(kv, name, can_login, attributes)?;
     for role in member_of {
         if !role_exists(kv, role)? {
             return Err(CatalogError::UndefinedObject(role.clone()));
@@ -3787,6 +3887,7 @@ pub fn get_role(kv: &dyn Kv, name: &str) -> Result<Role, CatalogError> {
         return Ok(Role {
             name: "public".into(),
             can_login: true,
+            attributes: RoleAttributes::default(),
         });
     }
     let bytes = kv
@@ -3816,6 +3917,7 @@ pub fn list_roles(kv: &dyn Kv) -> Result<Vec<Role>, CatalogError> {
     let mut roles = vec![Role {
         name: "public".into(),
         can_login: true,
+        attributes: RoleAttributes::default(),
     }];
     for (_, bytes) in kv.scan_prefix(ROLE_PREFIX)? {
         let role = deserialize_role(&bytes)?;
@@ -4083,22 +4185,23 @@ fn schema_privilege_key(schema: &str, grantee: &str, privilege: &str) -> Vec<u8>
     key
 }
 
-fn serialize_role(name: &str, can_login: bool) -> Vec<u8> {
-    let mut bytes = vec![1, u8::from(can_login)];
+fn serialize_role(name: &str, can_login: bool, attributes: RoleAttributes) -> Vec<u8> {
+    let mut bytes = vec![2, u8::from(can_login), attributes.to_bits()];
     bytes.extend_from_slice(name.as_bytes());
     bytes
 }
 
 fn deserialize_role(bytes: &[u8]) -> Result<Role, CatalogError> {
-    if bytes.len() < 2 || bytes[0] != 1 {
+    if bytes.len() < 3 || bytes[0] != 2 {
         return Err(KvError::CorruptRow("role record has invalid version".into()).into());
     }
-    let name = std::str::from_utf8(&bytes[2..])
+    let name = std::str::from_utf8(&bytes[3..])
         .map_err(|_| KvError::CorruptRow("role name is not utf8".into()))?
         .to_string();
     Ok(Role {
         name,
         can_login: bytes[1] != 0,
+        attributes: RoleAttributes::from_bits(bytes[2]),
     })
 }
 

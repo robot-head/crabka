@@ -1466,21 +1466,25 @@ fn pg_attrdef_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
 }
 
 fn pg_authid_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    use crabka_pgcatalog::RoleAttribute;
     let oids = role_oids(kv)?;
     Ok(crabka_pgcatalog::list_roles(kv)?
         .into_iter()
-        .map(|role| (role.name, role.can_login))
-        .map(|(name, can_login)| {
+        .map(|role| {
+            // The bootstrap owner is a superuser by construction; every other
+            // role reports exactly what `CREATE`/`ALTER ROLE` stored.
+            let bootstrap = role.name == crate::catalog_fn::OBJECT_OWNER;
+            let attributes = role.attributes;
             vec![
-                int(oids.get(&name).copied().unwrap_or(0)),
-                text(&name),
-                Datum::Bool(false),
-                Datum::Bool(true),
-                Datum::Bool(false),
-                Datum::Bool(false),
-                Datum::Bool(can_login),
-                Datum::Bool(false),
-                Datum::Bool(false),
+                int(oids.get(&role.name).copied().unwrap_or(0)),
+                text(&role.name),
+                Datum::Bool(bootstrap || attributes.has(RoleAttribute::Superuser)),
+                Datum::Bool(attributes.has(RoleAttribute::Inherit)),
+                Datum::Bool(bootstrap || attributes.has(RoleAttribute::CreateRole)),
+                Datum::Bool(bootstrap || attributes.has(RoleAttribute::CreateDb)),
+                Datum::Bool(role.can_login),
+                Datum::Bool(attributes.has(RoleAttribute::Replication)),
+                Datum::Bool(bootstrap || attributes.has(RoleAttribute::BypassRls)),
                 int(-1),
                 Datum::Null,
                 Datum::Null,

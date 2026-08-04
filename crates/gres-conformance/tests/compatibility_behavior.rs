@@ -42,6 +42,7 @@ impl ForeignScanner for EmptyImporter {
 /// probe may also need its object present to reach the refusal at all.
 fn probe_setup(command: &str) -> &'static [&'static str] {
     match command {
+        "ALTER ROLE" => &["CREATE ROLE parser_commands_role"],
         "ALTER INDEX" => &[
             "CREATE TABLE parser_commands_probe (id int4)",
             "CREATE INDEX parser_commands_idx ON parser_commands_probe (id)",
@@ -170,7 +171,7 @@ async fn execute_probe(command: &str, sql: &str) {
 #[tokio::test]
 async fn every_resolved_behavior_probe_reaches_the_session_contract() {
     let report = parser_command_report().expect("behavior manifest parses");
-    assert!(report.probes.len() == 157);
+    assert!(report.probes.len() == 158);
     let mut executed = 0;
     let mut refused = 0;
     for probe in report.probes {
@@ -206,7 +207,7 @@ async fn every_resolved_behavior_probe_reaches_the_session_contract() {
         );
         refused += 1;
     }
-    assert!(executed == 114);
+    assert!(executed == 115);
     assert!(refused == 43);
 }
 

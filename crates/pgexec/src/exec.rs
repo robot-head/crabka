@@ -1051,11 +1051,21 @@ pub(crate) fn execute_ddl(
             name,
             can_login,
             member_of,
+            options,
         } => {
+            let mut attributes = crabka_pgcatalog::RoleAttributes::default();
+            let login = apply_role_options(&mut attributes, *can_login, *options);
             let ops = crabka_pgcatalog::create_role_with_memberships_ops(
-                kv, name, *can_login, member_of,
+                kv, name, login, attributes, member_of,
             )?;
             Ok((command("CREATE ROLE"), ops))
+        }
+        Statement::AlterRole { name, options } => {
+            let role = crabka_pgcatalog::get_role(kv, name)?;
+            let mut attributes = role.attributes;
+            let login = apply_role_options(&mut attributes, role.can_login, *options);
+            let ops = crabka_pgcatalog::alter_role_ops(kv, name, login, attributes)?;
+            Ok((command("ALTER ROLE"), ops))
         }
         Statement::DropRole { name, if_exists } => {
             let ops = match crabka_pgcatalog::drop_role_ops(kv, name) {
@@ -14744,26 +14754,52 @@ fn pg_prepared_statement_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
         .collect())
 }
 
+/// Fold a written `CREATE`/`ALTER ROLE` option list onto stored attributes,
+/// returning the resulting login flag. An option the statement did not write
+/// keeps its current value, which is what `ALTER ROLE … WITH SUPERUSER` means.
+fn apply_role_options(
+    attributes: &mut crabka_pgcatalog::RoleAttributes,
+    can_login: bool,
+    options: crabka_pgparser::ast::RoleOptions,
+) -> bool {
+    use crabka_pgcatalog::RoleAttribute;
+    for (attribute, written) in [
+        (RoleAttribute::Superuser, options.superuser),
+        (RoleAttribute::Inherit, options.inherit),
+        (RoleAttribute::CreateRole, options.createrole),
+        (RoleAttribute::CreateDb, options.createdb),
+        (RoleAttribute::Replication, options.replication),
+        (RoleAttribute::BypassRls, options.bypassrls),
+    ] {
+        if let Some(value) = written {
+            attributes.set(attribute, value);
+        }
+    }
+    options.login.unwrap_or(can_login)
+}
+
 fn pg_roles_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    use crabka_pgcatalog::RoleAttribute;
     let oids = crate::catalog_rel::role_oids(catalog_kv)?;
     Ok(crabka_pgcatalog::list_roles(catalog_kv)?
         .into_iter()
         .map(|role| {
-            let superuser = role.name == crate::catalog_fn::OBJECT_OWNER;
+            let bootstrap = role.name == crate::catalog_fn::OBJECT_OWNER;
+            let attributes = role.attributes;
             vec![
                 text(&role.name),
-                Datum::Bool(superuser),
-                Datum::Bool(true),
-                Datum::Bool(superuser),
-                Datum::Bool(superuser),
+                Datum::Bool(bootstrap || attributes.has(RoleAttribute::Superuser)),
+                Datum::Bool(attributes.has(RoleAttribute::Inherit)),
+                Datum::Bool(bootstrap || attributes.has(RoleAttribute::CreateRole)),
+                Datum::Bool(bootstrap || attributes.has(RoleAttribute::CreateDb)),
                 Datum::Bool(role.can_login),
-                Datum::Bool(false),
+                Datum::Bool(attributes.has(RoleAttribute::Replication)),
                 int(-1),
                 // PostgreSQL blanks the password in `pg_roles` (only
                 // `pg_authid` holds it, and only a superuser may read that).
                 text("********"),
                 Datum::Null,
-                Datum::Bool(superuser),
+                Datum::Bool(bootstrap || attributes.has(RoleAttribute::BypassRls)),
                 Datum::Null,
                 int(oids.get(&role.name).copied().unwrap_or(0)),
             ]

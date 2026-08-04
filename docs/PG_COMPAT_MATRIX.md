@@ -98,7 +98,7 @@ Full-text search includes first-class `tsvector`/`tsquery` values (OIDs 3614/361
 | ALTER POLICY | Wave-assigned(D8) | RLS wave. |
 | ALTER PROCEDURE | Implemented | Same actions as ALTER FUNCTION, enforcing the procedure kind (42809 on a function). |
 | ALTER PUBLICATION | Non-goal(physical replication SQL) | Publication/subscription SQL is outside this chapter. |
-| ALTER ROLE | Wave-assigned(D8) | Roles and privileges wave. |
+| ALTER ROLE | Implemented | `ALTER ROLE name [WITH] option …` sets the boolean attributes `SUPERUSER`, `INHERIT`, `CREATEROLE`, `CREATEDB`, `LOGIN`, `REPLICATION` and `BYPASSRLS` (each with its `NO` form), which `pg_authid` and `pg_roles` then project. Only the options written are applied; the rest keep their stored value. `PASSWORD`, `VALID UNTIL`, `CONNECTION LIMIT`, `RESET`/`SET` and role-level GUCs are not modelled, and the attributes are recorded metadata — they do not yet gate authorization. `ALTER USER` remains the `ALTER USER MAPPING` spelling. |
 | ALTER ROUTINE | Implemented | The kind-agnostic spelling; matches either kind. |
 | ALTER RULE | Non-goal(legacy rewrite system) | RULE is explicitly excluded. |
 | ALTER SCHEMA | Implemented | `OWNER TO` validates and stores the new owner. Divergence: `RENAME TO` reaches a typed `0A000` refusal explaining why a relation's catalog key carries its schema and every object key would need rewriting. |

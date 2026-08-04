@@ -2230,6 +2230,7 @@ fn establishes_transaction_activity(stmt: &Statement) -> bool {
         | Statement::CreateForeignTable { .. }
         | Statement::DropForeignTable { .. }
         | Statement::CreateRole { .. }
+        | Statement::AlterRole { .. }
         | Statement::DropRole { .. }
         | Statement::GrantTablePrivileges { .. }
         | Statement::GrantSchemaPrivileges { .. }
@@ -6033,6 +6034,7 @@ impl SqlSession {
             | Statement::CreateForeignTable { .. }
             | Statement::DropForeignTable { .. }
             | Statement::CreateRole { .. }
+        | Statement::AlterRole { .. }
             | Statement::DropRole { .. }
             | Statement::GrantTablePrivileges { .. }
             | Statement::GrantSchemaPrivileges { .. }

@@ -185,6 +185,20 @@ pub enum AlterEventTriggerAction {
     RenameTo(String),
 }
 
+/// The boolean attributes a `CREATE`/`ALTER ROLE … WITH` list may set. `None`
+/// leaves the current value alone, which is what `ALTER ROLE` needs: only the
+/// options actually written are applied.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RoleOptions {
+    pub superuser: Option<bool>,
+    pub inherit: Option<bool>,
+    pub createrole: Option<bool>,
+    pub createdb: Option<bool>,
+    pub login: Option<bool>,
+    pub replication: Option<bool>,
+    pub bypassrls: Option<bool>,
+}
+
 #[rustfmt::skip]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
@@ -462,6 +476,11 @@ pub enum Statement {
         name: String,
         can_login: bool,
         member_of: Vec<String>,
+        options: RoleOptions,
+    },
+    /* SQL parity matrix row: ALTER ROLE / ALTER USER. */ AlterRole {
+        name: String,
+        options: RoleOptions,
     },
     /* SQL parity matrix row: DROP ROLE / DROP USER. */ DropRole {
         name: String,

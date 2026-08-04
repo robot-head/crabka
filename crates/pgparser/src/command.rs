@@ -28,6 +28,7 @@ command_identities!(
     (AlterOperatorFamily, "ALTER OPERATOR FAMILY"),
     (AlterProcedure, "ALTER PROCEDURE"),
     (AlterPublication, "ALTER PUBLICATION"),
+    (AlterRole, "ALTER ROLE"),
     (AlterRoutine, "ALTER ROUTINE"),
     (AlterRule, "ALTER RULE"),
     (AlterSchema, "ALTER SCHEMA"),
