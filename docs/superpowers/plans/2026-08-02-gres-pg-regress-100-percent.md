@@ -6,13 +6,13 @@
 test files, not the adopted corpus's statement matches. The checked-in monotone
 floor remains `6/231`; this review is still non-monotone against that floor and
 does not ratchet it. Serial completes all 231 files with zero infrastructure
-failures, leaving 203 semantic failures across 174249 canonical changed lines
+failures, leaving 203 semantic failures across 174080 canonical changed lines
 and 4624 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
 postflight probe succeeds, and the infrastructure report is empty.
 
 The measurement immediately before this wave was `22/231` at 176686 changed
 lines / 4606 hunks, from the same runner and the same pinned corpus. The
-waves below are therefore `+6` exact files and `-2437` changed lines with
+waves below are therefore `+6` exact files and `-2606` changed lines with
 **zero newly failing files**: `int4`, `int2`, `roleattributes`, `lseg`, `line` and `circle` become exact,
 and 4 files gain a combined 22 lines.
 
@@ -326,7 +326,10 @@ and their certified artifact describe current conformance.
       Result: `point` -161, `box` -156, `create_index` -52,
       `create_index_spgist` -40, against `psql` +196, `geometry` +73 and
       `gist` +34 as those files reach the *next* layer.
-- [ ] Finish the geometry cluster. `box` 385 and `point` 226 still need their
+- [x] Add `&<|`, `|&>`, `box(point,point)` and the box overloads of `area` and
+      `center`: `geometry` -80, `box` -46, `index_including_gist` -38,
+      `spgist` -5, nothing worsened.
+- [ ] Finish the geometry cluster. `box` and `point` still need their
       remaining functions (`box(point,point)`, `area`, `center`, `height`,
       `width` on more shapes) and `polygon` needs its type plus SP-GiST quad
       indexes. `geometry` 4945 and `gist` are now failing on those rather than
