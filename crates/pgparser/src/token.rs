@@ -46,6 +46,9 @@ pub enum Token {
     Same,
     StrictlyBelow,
     StrictlyAbove,
+    /// `&<|` (does not extend above) and `|&>` (does not extend below).
+    DoesNotExtendAbove,
+    DoesNotExtendBelow,
     Contains,
     /// The jsonb/array `<@` "contained by" operator.
     ContainedBy,

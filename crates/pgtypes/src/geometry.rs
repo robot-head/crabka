@@ -205,6 +205,27 @@ impl Box2 {
         self.low.y > other.high.y
     }
 
+    /// `&<|` — does not extend above.
+    #[must_use]
+    pub fn does_not_extend_above(self, other: Self) -> bool {
+        self.high.y <= other.high.y
+    }
+
+    /// `|&>` — does not extend below.
+    #[must_use]
+    pub fn does_not_extend_below(self, other: Self) -> bool {
+        self.low.y >= other.low.y
+    }
+
+    /// `@@` — the centre point of the box.
+    #[must_use]
+    pub fn center(self) -> Point {
+        Point {
+            x: f64::midpoint(self.high.x, self.low.x),
+            y: f64::midpoint(self.high.y, self.low.y),
+        }
+    }
+
     /// `&&` — the two boxes overlap.
     #[must_use]
     pub fn overlaps(self, other: Self) -> bool {

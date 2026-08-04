@@ -10252,7 +10252,11 @@ fn binary_param_type(
     match op {
         // The geometric positional operators take a geometric operand on both
         // sides; a parameter beside one adopts nothing useful here.
-        BinaryOp::Same | BinaryOp::StrictlyBelow | BinaryOp::StrictlyAbove => None,
+        BinaryOp::Same
+        | BinaryOp::StrictlyBelow
+        | BinaryOp::StrictlyAbove
+        | BinaryOp::DoesNotExtendAbove
+        | BinaryOp::DoesNotExtendBelow => None,
         // Comparisons and arithmetic take same-family operands, so a
         // parameter adopts its sibling's type — matching PostgreSQL's
         // operator resolution for `int8 + $1` and friends.

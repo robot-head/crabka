@@ -1392,6 +1392,8 @@ pub(crate) fn apply_binary(
         BinaryOp::Same
         | BinaryOp::StrictlyBelow
         | BinaryOp::StrictlyAbove
+        | BinaryOp::DoesNotExtendAbove
+        | BinaryOp::DoesNotExtendBelow
         | BinaryOp::DoesNotExtendRight
         | BinaryOp::DoesNotExtendLeft
         | BinaryOp::Adjacent
@@ -1405,6 +1407,8 @@ pub(crate) fn apply_binary(
         BinaryOp::Same
         | BinaryOp::StrictlyBelow
         | BinaryOp::StrictlyAbove
+        | BinaryOp::DoesNotExtendAbove
+        | BinaryOp::DoesNotExtendBelow
         | BinaryOp::DoesNotExtendRight
         | BinaryOp::DoesNotExtendLeft
         | BinaryOp::Adjacent => {
@@ -2136,6 +2140,8 @@ fn apply_geometric_position(op: BinaryOp, left: &Datum, right: &Datum) -> Option
         BinaryOp::DoesNotExtendRight => a.does_not_extend_right(b),
         BinaryOp::DoesNotExtendLeft => a.does_not_extend_left(b),
         BinaryOp::StrictlyBelow => a.strictly_below(b),
+        BinaryOp::DoesNotExtendAbove => a.does_not_extend_above(b),
+        BinaryOp::DoesNotExtendBelow => a.does_not_extend_below(b),
         BinaryOp::StrictlyAbove => a.strictly_above(b),
         BinaryOp::Overlaps => a.overlaps(b),
         BinaryOp::Contains => a.contains(b),
@@ -2152,6 +2158,8 @@ fn apply_geometric_position(op: BinaryOp, left: &Datum, right: &Datum) -> Option
 fn op_spelling(op: BinaryOp) -> &'static str {
     match op {
         BinaryOp::Same => "~=",
+        BinaryOp::DoesNotExtendAbove => "&<|",
+        BinaryOp::DoesNotExtendBelow => "|&>",
         BinaryOp::StrictlyBelow => "<<|",
         BinaryOp::StrictlyAbove => "|>>",
         BinaryOp::Add => "+",
@@ -3065,6 +3073,8 @@ fn json_or_array_operator_result_type(
             | BinaryOp::DoesNotExtendLeft
             | BinaryOp::StrictlyBelow
             | BinaryOp::StrictlyAbove
+            | BinaryOp::DoesNotExtendAbove
+            | BinaryOp::DoesNotExtendBelow
             | BinaryOp::Overlaps
             | BinaryOp::Contains
             | BinaryOp::ContainedBy

@@ -3241,6 +3241,9 @@ pub enum BinaryOp {
     Same,
     StrictlyBelow,
     StrictlyAbove,
+    /// Geometric `&<|` (does not extend above), `|&>` (does not extend below).
+    DoesNotExtendAbove,
+    DoesNotExtendBelow,
     DoesNotExtendRight,
     /// Range does not extend left of the other range (`&>`).
     DoesNotExtendLeft,

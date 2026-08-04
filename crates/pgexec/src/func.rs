@@ -123,6 +123,8 @@ enum ScalarFunc {
     /// `width(box)` and `height(box)`.
     BoxWidth,
     BoxHeight,
+    /// `box(point, point)` — the box bounding two corners.
+    BoxConstructor,
     RangeConstructor(RangeRef),
     MultirangeConstructor(MultirangeRef),
     GenericMultirangeConstructor,
@@ -254,6 +256,7 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "area" => ScalarFunc::CircleArea,
         "width" => ScalarFunc::BoxWidth,
         "height" => ScalarFunc::BoxHeight,
+        "box" => ScalarFunc::BoxConstructor,
         "isempty" => ScalarFunc::IsEmpty,
         "lower_inc" => ScalarFunc::LowerInc,
         "lower_inf" => ScalarFunc::LowerInf,
@@ -719,6 +722,10 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
         ScalarFunc::CircleCenter => {
             require_arity(fc, n == 1)?;
             Ok(ColumnType::Point)
+        }
+        ScalarFunc::BoxConstructor => {
+            require_arity(fc, n == 2)?;
+            Ok(ColumnType::Box)
         }
         ScalarFunc::CircleRadius
         | ScalarFunc::CircleDiameter
@@ -1636,6 +1643,17 @@ fn eval_eager(
                 end: endpoint(&vals[1])?,
             }))
         }
+        ScalarFunc::BoxConstructor => {
+            require_arity(fc, vals.len() == 2)?;
+            let corner = |value: &Datum| match value {
+                Datum::Point(point) => Ok(*point),
+                _ => Err(undefined_function("box")),
+            };
+            Ok(Datum::Box(crabka_pgtypes::geometry::Box2::normalized(
+                corner(&vals[0])?,
+                corner(&vals[1])?,
+            )))
+        }
         side @ (ScalarFunc::BoxWidth | ScalarFunc::BoxHeight) => {
             require_arity(fc, vals.len() == 1)?;
             let Datum::Box(value) = &vals[0] else {
@@ -1651,6 +1669,13 @@ fn eval_eager(
         | ScalarFunc::CircleDiameter
         | ScalarFunc::CircleArea) => {
             require_arity(fc, vals.len() == 1)?;
+            if let Datum::Box(value) = &vals[0] {
+                return Ok(match accessor {
+                    ScalarFunc::CircleCenter => Datum::Point(value.center()),
+                    ScalarFunc::CircleArea => Datum::Float8(value.area()),
+                    _ => return Err(undefined_function(&fc.name)),
+                });
+            }
             let Datum::Circle(circle) = &vals[0] else {
                 return Err(undefined_function(&fc.name));
             };
