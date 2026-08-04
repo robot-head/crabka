@@ -6,13 +6,13 @@
 test files, not the adopted corpus's statement matches. The checked-in monotone
 floor remains `6/231`; this review is still non-monotone against that floor and
 does not ratchet it. Serial completes all 231 files with zero infrastructure
-failures, leaving 203 semantic failures across 174377 canonical changed lines
-and 4568 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
+failures, leaving 203 semantic failures across 174249 canonical changed lines
+and 4624 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
 postflight probe succeeds, and the infrastructure report is empty.
 
 The measurement immediately before this wave was `22/231` at 176686 changed
 lines / 4606 hunks, from the same runner and the same pinned corpus. The
-waves below are therefore `+6` exact files and `-2309` changed lines with
+waves below are therefore `+6` exact files and `-2437` changed lines with
 **zero newly failing files**: `int4`, `int2`, `roleattributes`, `lseg`, `line` and `circle` become exact,
 and 4 files gain a combined 22 lines.
 
@@ -314,27 +314,24 @@ and their certified artifact describe current conformance.
       on operators against roughly 36 on missing types. `polygon` additionally
       needs SP-GiST quad-index support. The reverted implementation is in the
       history if it helps: `feat(pgtypes): add PostgreSQL's box type`.
-- [ ] **The remaining geometry work is one indivisible wave — do not subdivide
-      it.** Established empirically, twice. Every partial slice makes the
-      measured surface *worse*, because an unblocked statement fails at greater
-      length than a blocked one:
-        * The type alone: `box` was implemented, verified byte-identical, and
-          reverted at `+132` lines — `type "box" does not exist` (1 line)
-          becomes `function box(...) does not exist` plus a caret (3 lines).
-        * The parser tokens alone: `~=`, `<<|`, `|>>`, `&<`, `&>` do not lex, so
-          `point` currently reports `syntax error` (1 line). Adding the tokens
-          without the semantics turns each into `operator does not exist` plus
-          LINE, caret and HINT (4 lines).
-        * The operators alone: `point` cannot finish without `box` either — 6 of
-          its errors are `type "box" does not exist` — while `box` cannot
-          finish without the operators. They are mutually blocking.
-      Land together: the `box` and `polygon` types, the five missing operator
-      tokens, and the eleven operators (`<->`, `<@`, `@>`, `&<`, `&>`, `<<`,
-      `>>`, `<<|`, `|>>`, `~=`, `&&`) across `point`/`lseg`/`line`/`box`/
-      `circle`/`polygon`. Owners: `geometry` 4872, `box` 541, `point` 387,
-      `polygon` 278. `polygon` additionally needs SP-GiST quad indexes. A
-      working `box` implementation is in the history at `feat(pgtypes): add
-      PostgreSQL's box type`.
+- [x] **Land the geometry types and operators as one wave — proven necessary.**
+      The `box` type alone measured `+132` lines and was reverted; the same
+      type *plus* the eleven operators measures `-128`. The difference is that
+      an unblocked statement must go on to succeed, not merely fail further
+      along. Landed: the `box` type, the three operator tokens that did not lex
+      (`~=`, `<<|`, `|>>`), and all eleven operators over the boxable types
+      (`point`, `box`, `circle`, `lseg`) by bounding-box reduction — with
+      `circle <-> circle` kept on its own centre-minus-radii definition, which
+      the box reduction otherwise silently overrides.
+      Result: `point` -161, `box` -156, `create_index` -52,
+      `create_index_spgist` -40, against `psql` +196, `geometry` +73 and
+      `gist` +34 as those files reach the *next* layer.
+- [ ] Finish the geometry cluster. `box` 385 and `point` 226 still need their
+      remaining functions (`box(point,point)`, `area`, `center`, `height`,
+      `width` on more shapes) and `polygon` needs its type plus SP-GiST quad
+      indexes. `geometry` 4945 and `gist` are now failing on those rather than
+      on missing operators. Note `psql` +196 is not this wave's doing: it is the
+      pre-existing `\d` listing divergence, which grows with every new table.
 - [ ] Add the two remaining geometry types — `box`, `circle`, `line`,
       `polygon`. **This is the highest-value repeatable shape left**, proven by
       `lseg`: each is a bounded type (input spellings, canonical output, a
