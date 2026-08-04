@@ -590,10 +590,19 @@ for raw_line in gres_log.read_text().splitlines():
     line = ansi_escape.sub("", raw_line)
     if "timestamp_primary_committed" not in line:
         continue
-    marker = "primary_range="
-    if marker not in line:
+    # gres emits structured JSON (crabka_logfmt, installed by
+    # crabka_telemetry::init), so read the field instead of scraping a
+    # `primary_range=N` rendering — that spelling only ever existed in
+    # tracing_subscriber's plain-text output.
+    try:
+        record = json.loads(line)
+    except json.JSONDecodeError:
+        raise SystemExit(f"timestamp primary observation is not JSON: {line[:200]}")
+    if record.get("message") != "timestamp_primary_committed":
+        continue
+    if "primary_range" not in record:
         raise SystemExit("timestamp primary observation omitted primary_range")
-    range_id = line.split(marker, 1)[1].split()[0].rstrip(",")
+    range_id = str(record["primary_range"])
     primary_range_distribution[range_id] = primary_range_distribution.get(range_id, 0) + 1
 expected_ranges = {str(range_id) for range_id in range(range_count)}
 if set(primary_range_distribution) != expected_ranges:

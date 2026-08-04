@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Static anti-rot checks for the live G-8 corpus-through-sharding gate."""
 
+import json
 from pathlib import Path
 
 
@@ -47,13 +48,32 @@ def validate(
     namespace = {"__name__": "gres_sharded_evidence_test"}
     exec(compile(evidence_text, "gres-sharded-evidence.py", "exec"), namespace)
     summarize = namespace["summarize_lines"]
+    # gres emits structured JSON (crabka_logfmt, installed by
+    # crabka_telemetry::init). `table_ids` arrives as the `Debug` rendering of
+    # a `BTreeSet<u32>`, hence the braces inside the string. The first line is
+    # wrapped in ANSI escapes so the normalization step stays load-bearing:
+    # without it the line is not valid JSON and the range-0 evidence vanishes.
     valid = summarize([
-        "\x1b[2m2026-07-14T00:00:00Z\x1b[0m "
-        "timestamp_primary_committed "
-        "\x1b[3mprimary_range\x1b[0m\x1b[2m=\x1b[0m0 "
-        "\x1b[3mstart_ts\x1b[0m\x1b[2m=\x1b[0m1 "
-        "\x1b[3mtable_ids\x1b[0m\x1b[2m=\x1b[0m{0, 42}",
-        "timestamp_primary_committed primary_range=1 start_ts=2 table_ids={42}",
+        "\x1b[2m"
+        + json.dumps(
+            {
+                "timestamp": "2026-07-14T00:00:00Z",
+                "severity": "INFO",
+                "message": "timestamp_primary_committed",
+                "primary_range": 0,
+                "start_ts": 1,
+                "table_ids": "{0, 42}",
+            }
+        )
+        + "\x1b[0m",
+        json.dumps(
+            {
+                "message": "timestamp_primary_committed",
+                "primary_range": 1,
+                "start_ts": 2,
+                "table_ids": "{42}",
+            }
+        ),
     ])
     assert valid == {
         "user_table_primary_counts": {"42": {"0": 1, "1": 1}},
@@ -61,8 +81,22 @@ def validate(
     }
     try:
         summarize([
-            "timestamp_primary_committed primary_range=0 start_ts=1 table_ids={0}",
-            "timestamp_primary_committed primary_range=1 start_ts=2 table_ids={42}",
+            json.dumps(
+                {
+                    "message": "timestamp_primary_committed",
+                    "primary_range": 0,
+                    "start_ts": 1,
+                    "table_ids": "{0}",
+                }
+            ),
+            json.dumps(
+                {
+                    "message": "timestamp_primary_committed",
+                    "primary_range": 1,
+                    "start_ts": 2,
+                    "table_ids": "{42}",
+                }
+            ),
         ])
     except ValueError:
         pass

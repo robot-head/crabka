@@ -8,10 +8,34 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 
-COMMIT = re.compile(
-    r"timestamp_primary_committed primary_range=(\d+).*table_ids=\{([^}]*)\}"
-)
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+#: `table_ids` reaches the log as the `Debug` rendering of a `BTreeSet<u32>`
+#: (`"{1, 2}"`), so pull the ids back out of that string.
+TABLE_ID = re.compile(r"\d+")
+
+
+def commit_record(line: str) -> dict | None:
+    """The decoded `timestamp_primary_committed` record on `line`, if any.
+
+    gres emits structured JSON (crabka_logfmt, installed by
+    `crabka_telemetry::init`). The previous `primary_range=N` spelling this
+    parsed only ever existed in tracing_subscriber's plain-text output.
+    """
+    if "timestamp_primary_committed" not in line:
+        return None
+    try:
+        record = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(record, dict):
+        return None
+    if record.get("message") != "timestamp_primary_committed":
+        return None
+    if "primary_range" not in record or "table_ids" not in record:
+        raise ValueError(
+            "timestamp_primary_committed record omitted primary_range/table_ids"
+        )
+    return record
 
 
 def summarize_lines(lines: list[str], expected_ranges: set[int] = {0, 1}) -> dict:
@@ -19,14 +43,12 @@ def summarize_lines(lines: list[str], expected_ranges: set[int] = {0, 1}) -> dic
     ranges_by_table: dict[int, set[int]] = defaultdict(set)
     for line in lines:
         line = ANSI_ESCAPE.sub("", line)
-        match = COMMIT.search(line)
-        if not match:
+        record = commit_record(line)
+        if record is None:
             continue
-        primary_range = int(match.group(1))
+        primary_range = int(record["primary_range"])
         table_ids = {
-            int(value.strip())
-            for value in match.group(2).split(",")
-            if value.strip()
+            int(value) for value in TABLE_ID.findall(str(record["table_ids"]))
         }
         for table_id in table_ids:
             if table_id == 0:
