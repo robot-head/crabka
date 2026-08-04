@@ -314,6 +314,27 @@ and their certified artifact describe current conformance.
       on operators against roughly 36 on missing types. `polygon` additionally
       needs SP-GiST quad-index support. The reverted implementation is in the
       history if it helps: `feat(pgtypes): add PostgreSQL's box type`.
+- [ ] **The remaining geometry work is one indivisible wave — do not subdivide
+      it.** Established empirically, twice. Every partial slice makes the
+      measured surface *worse*, because an unblocked statement fails at greater
+      length than a blocked one:
+        * The type alone: `box` was implemented, verified byte-identical, and
+          reverted at `+132` lines — `type "box" does not exist` (1 line)
+          becomes `function box(...) does not exist` plus a caret (3 lines).
+        * The parser tokens alone: `~=`, `<<|`, `|>>`, `&<`, `&>` do not lex, so
+          `point` currently reports `syntax error` (1 line). Adding the tokens
+          without the semantics turns each into `operator does not exist` plus
+          LINE, caret and HINT (4 lines).
+        * The operators alone: `point` cannot finish without `box` either — 6 of
+          its errors are `type "box" does not exist` — while `box` cannot
+          finish without the operators. They are mutually blocking.
+      Land together: the `box` and `polygon` types, the five missing operator
+      tokens, and the eleven operators (`<->`, `<@`, `@>`, `&<`, `&>`, `<<`,
+      `>>`, `<<|`, `|>>`, `~=`, `&&`) across `point`/`lseg`/`line`/`box`/
+      `circle`/`polygon`. Owners: `geometry` 4872, `box` 541, `point` 387,
+      `polygon` 278. `polygon` additionally needs SP-GiST quad indexes. A
+      working `box` implementation is in the history at `feat(pgtypes): add
+      PostgreSQL's box type`.
 - [ ] Add the two remaining geometry types — `box`, `circle`, `line`,
       `polygon`. **This is the highest-value repeatable shape left**, proven by
       `lseg`: each is a bounded type (input spellings, canonical output, a
