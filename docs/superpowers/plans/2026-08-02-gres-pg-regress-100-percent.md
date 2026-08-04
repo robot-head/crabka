@@ -362,10 +362,37 @@ and their certified artifact describe current conformance.
       memory cap -- each producing a memory error plus a cascade of
       `current transaction is aborted` (14 and 75 respectively in `join`).
       Nobody broke anything; the measurement basis moved.
-      The real fix is spill-to-disk for the blocking operators: PostgreSQL never
-      errors on `work_mem`, it spills. Until sorts/hashes spill, `join` and
-      `cluster` cannot converge, and the baseline cannot honestly be ratcheted
-      past them. Ratchet the other 53 files only after that lands.
+      **Correction -- it is not a memory problem.** The 4 GiB replay held only
+      372 MB RSS while pinning one core, so it never approached the cap; the
+      cost is CPU, not memory, and spill-to-disk would not have helped. The
+      stalling statement is the bug #8591 triple join over `tenk1`, and Gres's
+      own `EXPLAIN` gives it away:
+
+          Nested Loop
+            Join Filter: ((a.unique2 < 10) AND (coalesce(...) = 44))
+            ->  Nested Loop
+                  ->  Seq Scan on tenk1 a
+                  ->  Seq Scan on tenk1 b
+            ->  Seq Scan on tenk1 c
+
+      Three 10k-row seq scans with no join key: 10^12 pairs. PostgreSQL runs
+      the same query as a `Nested Loop Left Join` whose inner side is an
+      `Index Cond: (thousand = a.unique1)`, and derives `c.unique2 = 44` by
+      equivalence.
+      Probing a scratch instance: every equality join -- inner or outer,
+      `JOIN ... ON` or comma-plus-`WHERE` -- plans as a bare nested loop with
+      the equality demoted to a per-pair filter (and `ON` conditions are not
+      printed in `EXPLAIN` at all). Results are *correct*; a 3x3 probe returns
+      exactly the matching rows. The defect is purely that no equality join
+      ever becomes a hash join or an index nested loop, so cost is O(n*m).
+      The 20 MiB cap has been masking this by turning a cartesian product into
+      a fast error.
+      The fix is an equality-join path -- hash join, or index nested loop when
+      the inner side has a usable index -- for both `ON` and `WHERE`
+      predicates, plus emitting the join condition in `EXPLAIN`. That is the
+      root gating `join`, `cluster` and the suite's runtime; it is a planner
+      and executor project, not a wave. Ratchet the other 53 files only after
+      it lands.
 - [ ] Finish the geometry cluster. `box` and `point` still need their
       remaining functions (`box(point,point)`, `area`, `center`, `height`,
       `width` on more shapes) and `polygon` needs its type plus SP-GiST quad
