@@ -113,6 +113,8 @@ enum ScalarFunc {
     PointConstructor,
     /// `lseg(point, point)` — the two-endpoint constructor.
     LsegConstructor,
+    /// `line(point, point)` — the line through two distinct points.
+    LineConstructor,
     RangeConstructor(RangeRef),
     MultirangeConstructor(MultirangeRef),
     GenericMultirangeConstructor,
@@ -237,6 +239,7 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "pg_numa_available" => ScalarFunc::PgNumaAvailable,
         "point" => ScalarFunc::PointConstructor,
         "lseg" => ScalarFunc::LsegConstructor,
+        "line" => ScalarFunc::LineConstructor,
         "isempty" => ScalarFunc::IsEmpty,
         "lower_inc" => ScalarFunc::LowerInc,
         "lower_inf" => ScalarFunc::LowerInf,
@@ -694,6 +697,10 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
         ScalarFunc::LsegConstructor => {
             require_arity(fc, n == 2)?;
             Ok(ColumnType::Lseg)
+        }
+        ScalarFunc::LineConstructor => {
+            require_arity(fc, n == 2)?;
+            Ok(ColumnType::Line)
         }
         ScalarFunc::RangeConstructor(range) => {
             require_arity(fc, (1..=3).contains(&n))?;
@@ -1602,6 +1609,17 @@ fn eval_eager(
                 start: endpoint(&vals[0])?,
                 end: endpoint(&vals[1])?,
             }))
+        }
+        ScalarFunc::LineConstructor => {
+            require_arity(fc, vals.len() == 2)?;
+            let endpoint = |value: &Datum| match value {
+                Datum::Point(point) => Ok(*point),
+                _ => Err(undefined_function("line")),
+            };
+            Ok(Datum::Line(crabka_pgtypes::geometry::Line::from_points(
+                endpoint(&vals[0])?,
+                endpoint(&vals[1])?,
+            )?))
         }
         ScalarFunc::PgTableIsVisible => {
             require_arity(fc, vals.len() == 1)?;

@@ -65,6 +65,14 @@ pub fn encode_text_in(d: &Datum, style: OutputStyle<'_>) -> Vec<u8> {
             encode_float8_text(point.y)
         )
         .into_bytes(),
+        // `line_out` always writes the coefficient form.
+        Datum::Line(line) => format!(
+            "{{{},{},{}}}",
+            encode_float8_text(line.a),
+            encode_float8_text(line.b),
+            encode_float8_text(line.c)
+        )
+        .into_bytes(),
         // `lseg_out` always writes the bracketed two-point form, whatever
         // spelling the input used.
         Datum::Lseg(lseg) => format!(
@@ -308,6 +316,14 @@ pub fn encode_binary(d: &Datum) -> Vec<u8> {
             let mut out = Vec::with_capacity(16);
             out.extend_from_slice(&point.x.to_be_bytes());
             out.extend_from_slice(&point.y.to_be_bytes());
+            out
+        }
+        // `line_send`: three float8 coefficients.
+        Datum::Line(line) => {
+            let mut out = Vec::with_capacity(24);
+            for coefficient in [line.a, line.b, line.c] {
+                out.extend_from_slice(&coefficient.to_be_bytes());
+            }
             out
         }
         // `lseg_send`: four float8s, start then end.

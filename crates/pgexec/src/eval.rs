@@ -2192,6 +2192,13 @@ pub(crate) fn runtime_equality_short_circuit(left: &Datum, right: &Datum) -> Opt
 }
 
 pub(crate) fn require_runtime_comparison(left: &Datum, right: &Datum) -> Result<(), ExecError> {
+    // `line` has `=` but no btree opclass, so ordering it is
+    // `operator does not exist` exactly as in PostgreSQL.
+    if matches!((left, right), (Datum::Line(_), Datum::Line(_))) {
+        return Err(ExecError::UndefinedFunction(
+            "operator does not exist: line < line".into(),
+        ));
+    }
     if matches!((left, right), (Datum::JsonPath(_), Datum::JsonPath(_)))
         || matches!(
             (left, right),

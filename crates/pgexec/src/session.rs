@@ -10880,6 +10880,23 @@ fn decode_binary_value(
                 y: f64::from_be_bytes(bytes[8..].try_into().expect("8 bytes")),
             }))
         }
+        // `line_recv`: three float8 coefficients.
+        ColumnType::Line => {
+            let coefficients: [u8; 24] =
+                value.try_into().map_err(|_| malformed_binary_parameter())?;
+            let at = |index: usize| {
+                f64::from_be_bytes(
+                    coefficients[index * 8..index * 8 + 8]
+                        .try_into()
+                        .expect("8 bytes"),
+                )
+            };
+            Ok(Datum::Line(crabka_pgtypes::geometry::Line {
+                a: at(0),
+                b: at(1),
+                c: at(2),
+            }))
+        }
         // `lseg_recv`: four float8s, start then end.
         ColumnType::Lseg => {
             let coordinates: [u8; 32] =
@@ -12133,6 +12150,12 @@ fn encloses_function_call(tokens: &[(crabka_pgparser::token::Token, usize)], ind
 /// Attach the position only when exactly one string literal in the statement
 /// carries the rejected value; a repeated literal stays undecorated rather than
 /// guessing which occurrence failed.
+///
+/// Known gap: when a *component* fails inside a composite literal — a `float8`
+/// coordinate overflowing inside a `line`, say — the message names the
+/// component's type while the source states the outer type, so the check
+/// declines and no caret is attached. PostgreSQL does attach one. No statement
+/// in the pinned corpus reaches that path with a position.
 fn attach_type_input_literal_position(sql: &str, error: PgError) -> PgError {
     use crabka_pgparser::token::Token;
 
@@ -12148,8 +12171,15 @@ fn attach_type_input_literal_position(sql: &str, error: PgError) -> PgError {
     {
         return error;
     }
-    let Some((value, type_name)) = rejected_input_value(&error.message) else {
-        return error;
+    // `line_in`'s two specification errors describe the line rather than the
+    // text, so they name neither the value nor the type. They can only come
+    // from a `line` input, so the evidence is a single directly-coerced
+    // literal; the type check is unavailable and is skipped.
+    let line_specification = error.message.starts_with("invalid line specification:");
+    let (value, type_name) = match rejected_input_value(&error.message) {
+        Some(parsed) => parsed,
+        None if line_specification => ("", "line"),
+        None => return error,
     };
     let Ok(tokens) = crabka_pgparser::lexer::lex(sql) else {
         return error;
@@ -12159,7 +12189,7 @@ fn attach_type_input_literal_position(sql: &str, error: PgError) -> PgError {
         .iter()
         .enumerate()
         .filter_map(|(index, (token, offset))| match token {
-            Token::StringLit(candidate) if candidate == value => {
+            Token::StringLit(candidate) if line_specification || candidate == value => {
                 let coerced = match literal_target_type(&tokens, index) {
                     Some(stated) => canonical_type_key(stated) == reported,
                     None => !encloses_function_call(&tokens, index),

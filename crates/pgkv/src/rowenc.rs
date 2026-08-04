@@ -57,6 +57,8 @@ mod tag {
     pub const JSONPATH: u8 = 26;
     /// `PostgreSQL` `lseg`. Append-only — no version bump.
     pub const LSEG: u8 = 27;
+    /// `PostgreSQL` `line`. Append-only — no version bump.
+    pub const LINE: u8 = 28;
 }
 
 /// Encodes one row in the current storage format.
@@ -117,6 +119,12 @@ fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
                 out.push(tag::POINT);
                 out.extend_from_slice(&point.x.to_be_bytes());
                 out.extend_from_slice(&point.y.to_be_bytes());
+            }
+            Datum::Line(line) => {
+                out.push(tag::LINE);
+                for coefficient in [line.a, line.b, line.c] {
+                    out.extend_from_slice(&coefficient.to_be_bytes());
+                }
             }
             Datum::Lseg(lseg) => {
                 out.push(tag::LSEG);
@@ -416,6 +424,17 @@ fn decode_field(cur: &mut &[u8]) -> Result<Datum, KvError> {
                 points.push(crabka_pgtypes::Point { x, y });
             }
             Datum::Path(crabka_pgtypes::Path { closed, points })
+        }
+        tag::LINE => {
+            let mut coefficients = [0.0_f64; 3];
+            for coefficient in &mut coefficients {
+                *coefficient = f64::from_be_bytes(take_n(cur, 8)?.try_into().expect("8"));
+            }
+            Datum::Line(crabka_pgtypes::geometry::Line {
+                a: coefficients[0],
+                b: coefficients[1],
+                c: coefficients[2],
+            })
         }
         tag::LSEG => {
             let mut coordinates = [0.0_f64; 4];

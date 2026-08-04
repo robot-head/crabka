@@ -52,6 +52,8 @@ pub mod oids {
     pub const PATH: u32 = 602;
     /// PostgreSQL `lseg` — a line segment between two points.
     pub const LSEG: u32 = 601;
+    /// PostgreSQL `line` — an infinite line as `Ax + By + C = 0`.
+    pub const LINE: u32 = 628;
     /// SP32: arbitrary-precision `numeric`/`decimal`.
     pub const NUMERIC: u32 = 1700;
     /// SP37: `date`: days since 2000-01-01, stored as i32.
@@ -273,6 +275,7 @@ impl ElemType {
             ColumnType::Point
             | ColumnType::Path
             | ColumnType::Lseg
+            | ColumnType::Line
             | ColumnType::Regclass
             | ColumnType::Regprocedure
             | ColumnType::OidVector
@@ -582,6 +585,8 @@ pub enum ColumnType {
     Path,
     /// PostgreSQL `lseg` (OID 601): a line segment between two endpoints.
     Lseg,
+    /// PostgreSQL `line` (OID 628): the infinite line `Ax + By + C = 0`.
+    Line,
     /// SP32: PostgreSQL `numeric`/`decimal`. The `Typmod` (precision, scale) is
     /// significant only when storing/casting; OID/name/typlen ignore it.
     Numeric(Option<Typmod>),
@@ -738,6 +743,7 @@ impl ColumnType {
             "point" => Some(ColumnType::Point),
             "path" => Some(ColumnType::Path),
             "lseg" => Some(ColumnType::Lseg),
+            "line" => Some(ColumnType::Line),
             "float4" | "real" => Some(ColumnType::Float4),
             // SP32: `numeric`/`decimal` (unconstrained here; typmod added by parser).
             "numeric" | "decimal" => Some(ColumnType::Numeric(None)),
@@ -836,6 +842,7 @@ impl ColumnType {
             ColumnType::Point => oids::POINT,
             ColumnType::Path => oids::PATH,
             ColumnType::Lseg => oids::LSEG,
+            ColumnType::Line => oids::LINE,
             ColumnType::Numeric(_) => oids::NUMERIC,
             ColumnType::Date => oids::DATE,
             ColumnType::Time => oids::TIME,
@@ -878,6 +885,7 @@ impl ColumnType {
             ColumnType::Point => "point",
             ColumnType::Path => "path",
             ColumnType::Lseg => "lseg",
+            ColumnType::Line => "line",
             ColumnType::Numeric(_) => "numeric",
             ColumnType::Date => "date",
             ColumnType::Time => "time without time zone",
@@ -918,6 +926,7 @@ impl ColumnType {
             ColumnType::Point => 16,
             ColumnType::Path => -1,
             ColumnType::Lseg => 32,
+            ColumnType::Line => 24,
             ColumnType::Numeric(_) => -1,
             ColumnType::Date => 4,
             ColumnType::Time => 8,
@@ -1009,6 +1018,8 @@ pub enum Datum {
     Path(crate::geometry::Path),
     /// PostgreSQL's `lseg`, a line segment between two endpoints.
     Lseg(crate::geometry::Lseg),
+    /// PostgreSQL's `line`, an infinite line's three coefficients.
+    Line(crate::geometry::Line),
     /// SP32: PostgreSQL `numeric` — an arbitrary-precision exact decimal, or one
     /// of the `NaN` / `±Infinity` specials.
     Numeric(NumericValue),
@@ -1403,6 +1414,7 @@ impl PartialEq for Datum {
             (Datum::Point(a), Datum::Point(b)) => a == b,
             (Datum::Path(a), Datum::Path(b)) => a == b,
             (Datum::Lseg(a), Datum::Lseg(b)) => a == b,
+            (Datum::Line(a), Datum::Line(b)) => a == b,
             // SP32: numeric grouping equality is by VALUE, ignoring scale, so
             // `1.0` and `1.00` group together (`bigdecimal`'s `==` already does
             // this), and — as in PostgreSQL's `numeric_eq` — `NaN` equals `NaN`.
@@ -1480,6 +1492,7 @@ impl std::hash::Hash for Datum {
             Datum::Point(point) => point.hash(state),
             Datum::Path(path) => path.hash(state),
             Datum::Lseg(lseg) => lseg.hash(state),
+            Datum::Line(line) => line.hash(state),
             // SP32: `NumericValue` hashes the scale-normalized form so values
             // that compare equal (`1.0` and `1.00`) hash equally.
             Datum::Numeric(d) => d.hash(state),
@@ -1526,6 +1539,7 @@ impl Datum {
             Datum::Point(_) => Some(ColumnType::Point),
             Datum::Path(_) => Some(ColumnType::Path),
             Datum::Lseg(_) => Some(ColumnType::Lseg),
+            Datum::Line(_) => Some(ColumnType::Line),
             // The runtime value carries no typmod — it is unconstrained `numeric`.
             Datum::Numeric(_) => Some(ColumnType::Numeric(None)),
             Datum::Date(_) => Some(ColumnType::Date),

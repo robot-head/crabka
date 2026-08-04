@@ -625,6 +625,15 @@ pub fn compare(a: &Datum, b: &Datum) -> Result<Option<Ordering>, TypeError> {
         // SQL arrays compare element-wise, shorter first on a common prefix.
         (Datum::Array(x), Datum::Array(y)) => compare_arrays(x, y)?,
         (Datum::OidVector(x), Datum::OidVector(y)) => compare_arrays(x, y)?,
+        // `line` supports only equality; the ordering operators are rejected
+        // before they reach here, so `Equal`/`Greater` is enough to answer `=`.
+        (Datum::Line(x), Datum::Line(y)) => {
+            if x == y {
+                Ordering::Equal
+            } else {
+                Ordering::Greater
+            }
+        }
         // `record_cmp`: field by field, left to right.
         (Datum::Record(x), Datum::Record(y)) => compare_records(x, y)?,
         // An enum orders by its labels' declared positions, which is what

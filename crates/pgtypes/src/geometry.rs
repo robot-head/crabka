@@ -55,6 +55,105 @@ impl Lseg {
     }
 }
 
+/// `PostgreSQL` `line`: the infinite line `Ax + By + C = 0`.
+#[derive(Debug, Clone, Copy)]
+pub struct Line {
+    pub a: f64,
+    pub b: f64,
+    pub c: f64,
+}
+
+impl Line {
+    /// Parse `line_in`: the coefficient form `{A,B,C}`, or any two-point
+    /// spelling `lseg_in` accepts, which is converted to coefficients.
+    ///
+    /// # Errors
+    ///
+    /// `22P02` for malformed input, for `A` and `B` both zero, and for two
+    /// equal points; `22003` for a coefficient or coordinate that overflows
+    /// `float8`, which passes through rather than being reported as syntax.
+    pub fn parse(input: &str) -> Result<Self, TypeError> {
+        let value = input.trim();
+        if let Some(inner) = value
+            .strip_prefix('{')
+            .and_then(|inner| inner.strip_suffix('}'))
+        {
+            let fields: Vec<&str> = inner.split(',').collect();
+            let [a, b, c] = fields.as_slice() else {
+                return Err(invalid_line(input));
+            };
+            let line = Self {
+                a: line_coordinate(a, input)?,
+                b: line_coordinate(b, input)?,
+                c: line_coordinate(c, input)?,
+            };
+            if line.a == 0.0 && line.b == 0.0 {
+                return Err(line_specification(
+                    "invalid line specification: A and B cannot both be zero",
+                ));
+            }
+            return Ok(line);
+        }
+        let inner = value
+            .strip_prefix('[')
+            .and_then(|inner| inner.strip_suffix(']'))
+            .or_else(|| parenthesis_wraps_whole(value).then(|| &value[1..value.len() - 1]))
+            .unwrap_or(value);
+        let points = split_points(inner).ok_or_else(|| invalid_line(input))?;
+        let [start, end] = points.as_slice() else {
+            return Err(invalid_line(input));
+        };
+        Self::from_points(line_point(start, input)?, line_point(end, input)?)
+    }
+
+    /// The line through two distinct points, as `line(point, point)` builds it.
+    ///
+    /// # Errors
+    ///
+    /// `22P02` when the points are equal.
+    pub fn from_points(start: Point, end: Point) -> Result<Self, TypeError> {
+        if start == end {
+            return Err(line_specification(
+                "invalid line specification: must be two distinct points",
+            ));
+        }
+        // A vertical line has no slope, so it is written directly; every other
+        // line is normalized to `B = -1` the way `line_construct_pts` does.
+        // `partial_cmp` is IEEE `==` without the float-comparison lint: a NaN
+        // abscissa is *not* equal to itself, so it takes the slope branch and
+        // produces NaN coefficients, exactly as PostgreSQL does.
+        if start.x.partial_cmp(&end.x) == Some(std::cmp::Ordering::Equal) {
+            return Ok(Self {
+                a: -1.0,
+                b: 0.0,
+                c: start.x,
+            });
+        }
+        let a = (end.y - start.y) / (end.x - start.x);
+        Ok(Self {
+            a,
+            b: -1.0,
+            c: start.y - a * start.x,
+        })
+    }
+}
+
+/// A coefficient or coordinate inside a `line`: an overflow is the float's own
+/// `22003`, while bad syntax names `line` rather than the inner type.
+fn line_coordinate(value: &str, whole: &str) -> Result<f64, TypeError> {
+    coordinate(value, whole).map_err(|error| match error {
+        TypeError::InvalidText { .. } => invalid_line(whole),
+        other => other,
+    })
+}
+
+fn line_point(value: &str, whole: &str) -> Result<Point, TypeError> {
+    Point::parse(value).map_err(|error| match error {
+        TypeError::InvalidText { .. } => invalid_line(whole),
+        other => other,
+    })
+}
+
 /// Whether the value's leading `(` is closed by its final `)`, which is what
 /// distinguishes the wrapper in `((1,2),(3,4))` from the first point's own
 /// parenthesis in `(1,2),(3,4)`.
@@ -206,6 +305,22 @@ fn invalid(value: &str) -> TypeError {
     }
 }
 
+fn invalid_line(value: &str) -> TypeError {
+    TypeError::InvalidText {
+        type_name: "line",
+        value: value.to_string(),
+    }
+}
+
+/// `line_in`'s two rejections that describe the line rather than its syntax.
+/// Both are 22P02 with a fixed message, as `PostgreSQL` writes them.
+fn line_specification(message: &'static str) -> TypeError {
+    TypeError::Domain {
+        sqlstate: "22P02",
+        message,
+    }
+}
+
 fn invalid_lseg(value: &str) -> TypeError {
     TypeError::InvalidText {
         type_name: "lseg",
@@ -217,6 +332,24 @@ fn invalid_path(value: &str) -> TypeError {
     TypeError::InvalidText {
         type_name: "path",
         value: value.to_string(),
+    }
+}
+
+impl PartialEq for Line {
+    /// `line_eq` compares coefficients directly, so a `NaN` coefficient equals
+    /// itself — the upstream `line` file asserts exactly that.
+    fn eq(&self, other: &Self) -> bool {
+        float_eq(self.a, other.a) && float_eq(self.b, other.b) && float_eq(self.c, other.c)
+    }
+}
+
+impl Eq for Line {}
+
+impl Hash for Line {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        float_bits(self.a).hash(state);
+        float_bits(self.b).hash(state);
+        float_bits(self.c).hash(state);
     }
 }
 
@@ -306,6 +439,87 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    /// `line_in` takes coefficients directly and converts any two-point
+    /// spelling, normalizing to `B = -1` except for a vertical line.
+    #[test]
+    fn line_input_converts_points_to_coefficients() {
+        for (spelling, expected) in [
+            (
+                "{0,-1,5}",
+                Line {
+                    a: 0.0,
+                    b: -1.0,
+                    c: 5.0,
+                },
+            ),
+            (
+                "(0,0), (6,6)",
+                Line {
+                    a: 1.0,
+                    b: -1.0,
+                    c: 0.0,
+                },
+            ),
+            (
+                "10,-10 ,-5,-4",
+                Line {
+                    a: -0.4,
+                    b: -1.0,
+                    c: -6.0,
+                },
+            ),
+            // Horizontal and vertical are the two normalized special cases.
+            (
+                "[(1,3),(2,3)]",
+                Line {
+                    a: 0.0,
+                    b: -1.0,
+                    c: 3.0,
+                },
+            ),
+            (
+                "[(3,1),(3,2)]",
+                Line {
+                    a: -1.0,
+                    b: 0.0,
+                    c: 3.0,
+                },
+            ),
+        ] {
+            assert_eq!(Line::parse(spelling), Ok(expected), "{spelling}");
+        }
+        // A NaN coefficient equals itself, which `line_eq` relies on.
+        assert_eq!(Line::parse("{NaN,NaN,NaN}"), Line::parse("{NaN,NaN,NaN}"));
+
+        for (bad, message) in [
+            ("{}", "invalid input syntax for type line: \"{}\""),
+            ("{0,0}", "invalid input syntax for type line: \"{0,0}\""),
+            (
+                "{1, 1, a}",
+                "invalid input syntax for type line: \"{1, 1, a}\"",
+            ),
+            (
+                "{0,0,1}",
+                "invalid line specification: A and B cannot both be zero",
+            ),
+            (
+                "[(1,2),(1,2)]",
+                "invalid line specification: must be two distinct points",
+            ),
+        ] {
+            let error = Line::parse(bad).expect_err(bad);
+            assert_eq!(error.sqlstate(), "22P02", "{bad}");
+            assert_eq!(error.to_string(), message, "{bad}");
+        }
+        // A coordinate overflow is the float's own 22003, not a syntax error.
+        let overflow = Line::parse("{1, 1, 1e400}").expect_err("1e400");
+        assert_eq!(overflow.sqlstate(), "22003");
+        assert_eq!(
+            overflow.to_string(),
+            "\"1e400\" is out of range for type double precision"
+        );
     }
 
     #[test]

@@ -181,6 +181,8 @@ mod type_tag {
     pub const INT2VECTOR: u8 = 30;
     /// `PostgreSQL` `lseg`. Append-only — no version bump.
     pub const LSEG: u8 = 31;
+    /// `PostgreSQL` `line`. Append-only — no version bump.
+    pub const LINE: u8 = 32;
 }
 
 #[derive(Debug)]
@@ -221,6 +223,7 @@ pub(crate) fn write_type(out: &mut Vec<u8>, ty: ColumnType) {
         ColumnType::Point => out.push(type_tag::POINT),
         ColumnType::Path => out.push(type_tag::PATH),
         ColumnType::Lseg => out.push(type_tag::LSEG),
+        ColumnType::Line => out.push(type_tag::LINE),
         ColumnType::Numeric(tm) => {
             out.push(type_tag::NUMERIC);
             match tm {
@@ -323,6 +326,7 @@ fn read_type_with(
         type_tag::POINT => ColumnType::Point,
         type_tag::PATH => ColumnType::Path,
         type_tag::LSEG => ColumnType::Lseg,
+        type_tag::LINE => ColumnType::Line,
         type_tag::NUMERIC => {
             if take_u8(cur)? == 1 {
                 let precision = u16::from_be_bytes(take_n(cur, 2)?.try_into().expect("2"));
@@ -554,6 +558,7 @@ fn write_default_value(out: &mut Vec<u8>, default: &Datum) {
         | Datum::Point(_)
         | Datum::Path(_)
         | Datum::Lseg(_)
+        | Datum::Line(_)
         | Datum::Time(_)
         | Datum::Timetz(_)
         | Datum::Timestamp(_)

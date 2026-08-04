@@ -289,6 +289,7 @@ pub fn cast_in(
         (Datum::Point(point), ColumnType::Point) => Ok(Datum::Point(*point)),
         (Datum::Path(path), ColumnType::Path) => Ok(Datum::Path(path.clone())),
         (Datum::Lseg(lseg), ColumnType::Lseg) => Ok(Datum::Lseg(*lseg)),
+        (Datum::Line(line), ColumnType::Line) => Ok(Datum::Line(*line)),
         (Datum::Text(s), Text) => Ok(Datum::Text(s.clone())),
         // The executor owns jsonpath parsing/canonicalization. Keeping only
         // identity here makes it impossible for a raw string to masquerade as
@@ -454,6 +455,7 @@ pub fn cast_in(
         (Datum::Text(s), ColumnType::Point) => crate::Point::parse(s).map(Datum::Point),
         (Datum::Text(s), ColumnType::Path) => crate::Path::parse(s).map(Datum::Path),
         (Datum::Text(s), ColumnType::Lseg) => crate::geometry::Lseg::parse(s).map(Datum::Lseg),
+        (Datum::Text(s), ColumnType::Line) => crate::geometry::Line::parse(s).map(Datum::Line),
         // `regclass` → the oid family drops the name and keeps the oid, which is
         // what `regclass::oid`/`::int` yields in PostgreSQL.
         (
