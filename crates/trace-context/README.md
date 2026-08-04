@@ -1,7 +1,6 @@
 # crabka-trace-context
 
 [![crates.io](https://img.shields.io/crates/v/crabka-trace-context.svg)](https://crates.io/crates/crabka-trace-context)
-[![docs.rs](https://docs.rs/crabka-trace-context/badge.svg)](https://docs.rs/crabka-trace-context)
 
 W3C Trace Context propagation helpers shared by Crabka's wire-protocol crates.
 
@@ -34,7 +33,6 @@ carrier.apply_to(&span);
 
 ## Documentation
 
-- [API documentation](https://docs.rs/crabka-trace-context)
 - [Crabka repository](https://github.com/robot-head/crabka)
 
 ## License
