@@ -2,19 +2,19 @@
 
 **Goal:** Make the unmodified PostgreSQL 18.4 core regression schedule pass against Gres, replacing the partial adopted-corpus percentage with a literal upstream `pg_regress` result.
 
-**Current state:** The authoritative serial result is `23/231` whole upstream
+**Current state:** The authoritative serial result is `24/231` whole upstream
 test files, not the adopted corpus's statement matches. The checked-in monotone
 floor remains `6/231`; this review is still non-monotone against that floor and
 does not ratchet it. Serial completes all 231 files with zero infrastructure
-failures, leaving 208 semantic failures across 175704 canonical changed lines
-and 4583 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
+failures, leaving 207 semantic failures across 175682 canonical changed lines
+and 4582 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
 postflight probe succeeds, and the infrastructure report is empty.
 
 The measurement immediately before this wave was `22/231` at 176686 changed
 lines / 4606 hunks, from the same runner and the same pinned corpus. The
-type-input and diagnostics wave below is therefore `+1` exact file and `-982`
-changed lines with **zero newly failing files**: 36 files improve, `int4`
-becomes exact, and 4 gain a combined 22 lines.
+waves below are therefore `+2` exact files and `-1004` changed lines with
+**zero newly failing files**: `int4` and `int2` become exact, 37 files improve,
+and 4 gain a combined 22 lines.
 
 Those 4 — `timestamptz` +12, `horology` +6, `alter_table` +2, `timestamp` +2 —
 are all one benign category: a caret correctly attached to an error Gres should
@@ -26,7 +26,7 @@ together; no over-attachment remains. (Beware isolated re-checks of the `LMT`
 cases: they depend on the run's `TimeZone`, and a bare `psql` session reproduces
 neither PostgreSQL's success nor its error.)
 
-`int4` joins the 22 previously exact files (`test_setup`, `boolean`, `varchar`,
+`int4` and `int2` join the 22 previously exact files (`test_setup`, `boolean`, `varchar`,
 `md5`, `comments`, `mvcc`, `euc_kr`, `create_function_c`, `infinite_recurse`,
 `delete`, `security_label`, `async`, `dbsize`, `collate.icu.utf8`,
 `psql_crosstab`, `collate.linux.utf8`, `collate.windows.win1252`,
