@@ -2,18 +2,18 @@
 
 **Goal:** Make the unmodified PostgreSQL 18.4 core regression schedule pass against Gres, replacing the partial adopted-corpus percentage with a literal upstream `pg_regress` result.
 
-**Current state:** The authoritative serial result is `27/231` whole upstream
+**Current state:** The authoritative serial result is `28/231` whole upstream
 test files, not the adopted corpus's statement matches. The checked-in monotone
 floor remains `6/231`; this review is still non-monotone against that floor and
 does not ratchet it. Serial completes all 231 files with zero infrastructure
-failures, leaving 204 semantic failures across 174905 canonical changed lines
-and 4566 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
+failures, leaving 203 semantic failures across 174557 canonical changed lines
+and 4568 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
 postflight probe succeeds, and the infrastructure report is empty.
 
 The measurement immediately before this wave was `22/231` at 176686 changed
 lines / 4606 hunks, from the same runner and the same pinned corpus. The
-waves below are therefore `+5` exact files and `-1781` changed lines with
-**zero newly failing files**: `int4`, `int2`, `roleattributes`, `lseg` and `line` become exact,
+waves below are therefore `+6` exact files and `-2129` changed lines with
+**zero newly failing files**: `int4`, `int2`, `roleattributes`, `lseg`, `line` and `circle` become exact,
 and 4 files gain a combined 22 lines.
 
 Those 4 — `timestamptz` +12, `horology` +6, `alter_table` +2, `timestamp` +2 —
@@ -26,7 +26,7 @@ together; no over-attachment remains. (Beware isolated re-checks of the `LMT`
 cases: they depend on the run's `TimeZone`, and a bare `psql` session reproduces
 neither PostgreSQL's success nor its error.)
 
-`int4`, `int2`, `roleattributes`, `lseg` and `line` join the 22 previously exact files (`test_setup`, `boolean`, `varchar`,
+`int4`, `int2`, `roleattributes`, `lseg`, `line` and `circle` join the 22 previously exact files (`test_setup`, `boolean`, `varchar`,
 `md5`, `comments`, `mvcc`, `euc_kr`, `create_function_c`, `infinite_recurse`,
 `delete`, `security_label`, `async`, `dbsize`, `collate.icu.utf8`,
 `psql_crosstab`, `collate.linux.utf8`, `collate.windows.win1252`,
@@ -271,7 +271,20 @@ and their certified artifact describe current conformance.
       `float8` -170, `union` -110, `aggregates` -80, `numerology` -32,
       `geometry` -24, `numeric` -20, `int8` -14, `psql` -12 and `point` -10.
       `circle` is now unblocked.
-- [ ] Add the three remaining geometry types — `box`, `circle`, `line`,
+- [x] Add the `circle` type (OID 718) with `center`/`radius`/`diameter`/`area`,
+      the `<->` distance operator and area-based ordering. Makes `circle` exact
+      and takes `geometry` down 245 lines.
+- [ ] **User relation OIDs fall inside the system-reserved range.** `CREATE
+      TABLE t; SELECT oid >= 16384 FROM pg_class WHERE relname = 't'` is `f`
+      here and `t` in PostgreSQL, so every upstream sanity query that separates
+      catalogs from user objects with `c.oid < 16384` sees user tables. The
+      `misc_sanity` varlena/toast query lists 580 rows against PostgreSQL's
+      handful of `pg_*` columns, and every table a new type introduces adds one
+      more. This is why `misc_sanity`, `type_sanity` and `psql` each tick up
+      whenever a geometry type starts working — the increments are that
+      pre-existing divergence, not the new type. Allocate user OIDs from 16384
+      up, as `FirstNormalObjectId` does.
+- [ ] Add the two remaining geometry types — `box`, `circle`, `line`,
       `polygon`. **This is the highest-value repeatable shape left**, proven by
       `lseg`: each is a bounded type (input spellings, canonical output, a
       constructor, durable/wire encodings) that makes its own upstream file
