@@ -55,6 +55,196 @@ impl Lseg {
     }
 }
 
+/// `PostgreSQL` `box`: an axis-aligned rectangle, held as its high and low
+/// corners. `box_in` normalizes per coordinate, so the stored `high` is
+/// always `(max x, max y)` whichever corners were written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Box2 {
+    pub high: Point,
+    pub low: Point,
+}
+
+impl Box2 {
+    /// Parse `box_in`: `(x1,y1),(x2,y2)`, `((x1,y1),(x2,y2))` or the bare
+    /// `x1,y1,x2,y2`, each with at most one optional outer parenthesis pair.
+    /// Square brackets are *not* accepted, unlike `lseg_in`.
+    ///
+    /// # Errors
+    ///
+    /// `22P02` for anything that is not exactly two points; `22003` for a
+    /// coordinate that overflows `float8`.
+    pub fn parse(input: &str) -> Result<Self, TypeError> {
+        let value = input.trim();
+        let inner = if parenthesis_wraps_whole(value) {
+            &value[1..value.len() - 1]
+        } else {
+            value
+        };
+        let points = split_points(inner).ok_or_else(|| invalid_box(input))?;
+        let [first, second] = points.as_slice() else {
+            return Err(invalid_box(input));
+        };
+        let corner = |text: &str| {
+            Point::parse(text).map_err(|error| match error {
+                TypeError::InvalidText { .. } => invalid_box(input),
+                other => other,
+            })
+        };
+        Ok(Self::normalized(corner(first)?, corner(second)?))
+    }
+
+    /// The box with the two corners sorted per coordinate, as `box_in` stores
+    /// them regardless of which corners were written.
+    #[must_use]
+    pub fn normalized(first: Point, second: Point) -> Self {
+        Self {
+            high: Point {
+                x: if first.x < second.x {
+                    second.x
+                } else {
+                    first.x
+                },
+                y: if first.y < second.y {
+                    second.y
+                } else {
+                    first.y
+                },
+            },
+            low: Point {
+                x: if first.x < second.x {
+                    first.x
+                } else {
+                    second.x
+                },
+                y: if first.y < second.y {
+                    first.y
+                } else {
+                    second.y
+                },
+            },
+        }
+    }
+
+    /// `width(box)` / `height(box)` / `area(box)`.
+    #[must_use]
+    pub fn width(self) -> f64 {
+        self.high.x - self.low.x
+    }
+
+    #[must_use]
+    pub fn height(self) -> f64 {
+        self.high.y - self.low.y
+    }
+
+    #[must_use]
+    pub fn area(self) -> f64 {
+        self.width() * self.height()
+    }
+}
+
+impl Box2 {
+    /// The box that bounds a value, which is what the positional operators
+    /// (`<<`, `&<`, `<<|`, …) compare. A point bounds to itself.
+    #[must_use]
+    pub fn of_point(point: Point) -> Self {
+        Self {
+            high: point,
+            low: point,
+        }
+    }
+
+    /// The box bounding a circle.
+    #[must_use]
+    pub fn of_circle(circle: Circle) -> Self {
+        Self {
+            high: Point {
+                x: circle.center.x + circle.radius,
+                y: circle.center.y + circle.radius,
+            },
+            low: Point {
+                x: circle.center.x - circle.radius,
+                y: circle.center.y - circle.radius,
+            },
+        }
+    }
+
+    /// `<<` — strictly left of: this box's right edge is left of the other's
+    /// left edge.
+    #[must_use]
+    pub fn strictly_left_of(self, other: Self) -> bool {
+        self.high.x < other.low.x
+    }
+
+    /// `>>` — strictly right of.
+    #[must_use]
+    pub fn strictly_right_of(self, other: Self) -> bool {
+        self.low.x > other.high.x
+    }
+
+    /// `&<` — does not extend to the right of.
+    #[must_use]
+    pub fn does_not_extend_right(self, other: Self) -> bool {
+        self.high.x <= other.high.x
+    }
+
+    /// `&>` — does not extend to the left of.
+    #[must_use]
+    pub fn does_not_extend_left(self, other: Self) -> bool {
+        self.low.x >= other.low.x
+    }
+
+    /// `<<|` — strictly below.
+    #[must_use]
+    pub fn strictly_below(self, other: Self) -> bool {
+        self.high.y < other.low.y
+    }
+
+    /// `|>>` — strictly above.
+    #[must_use]
+    pub fn strictly_above(self, other: Self) -> bool {
+        self.low.y > other.high.y
+    }
+
+    /// `&&` — the two boxes overlap.
+    #[must_use]
+    pub fn overlaps(self, other: Self) -> bool {
+        self.high.x >= other.low.x
+            && other.high.x >= self.low.x
+            && self.high.y >= other.low.y
+            && other.high.y >= self.low.y
+    }
+
+    /// `@>` — contains the other box entirely.
+    #[must_use]
+    pub fn contains(self, other: Self) -> bool {
+        self.high.x >= other.high.x
+            && self.low.x <= other.low.x
+            && self.high.y >= other.high.y
+            && self.low.y <= other.low.y
+    }
+
+    /// `~=` — the same box, corner for corner.
+    #[must_use]
+    pub fn same(self, other: Self) -> bool {
+        self.high == other.high && self.low == other.low
+    }
+
+    /// `<->` — the distance between two boxes, zero when they overlap.
+    #[must_use]
+    pub fn distance(self, other: Self) -> f64 {
+        if self.overlaps(other) {
+            return 0.0;
+        }
+        let dx = (other.low.x - self.high.x)
+            .max(self.low.x - other.high.x)
+            .max(0.0);
+        let dy = (other.low.y - self.high.y)
+            .max(self.low.y - other.high.y)
+            .max(0.0);
+        pg_hypot(dx, dy)
+    }
+}
+
 /// `PostgreSQL` `circle`: a centre point and a radius.
 #[derive(Debug, Clone, Copy)]
 pub struct Circle {
@@ -428,6 +618,13 @@ fn pg_hypot(x: f64, y: f64) -> f64 {
     larger * (1.0 + squared).sqrt()
 }
 
+fn invalid_box(value: &str) -> TypeError {
+    TypeError::InvalidText {
+        type_name: "box",
+        value: value.to_string(),
+    }
+}
+
 fn invalid_circle(value: &str) -> TypeError {
     TypeError::InvalidText {
         type_name: "circle",
@@ -594,6 +791,67 @@ mod tests {
     /// `circle_in` accepts every spelling, keeps a zero or NaN radius as a
     /// value, and rejects a negative one. Comparison is by area through
     /// `PostgreSQL`'s epsilon macros, so the centres are ignored.
+    /// `box_in` normalizes per coordinate, so the stored high corner is always
+    /// `(max x, max y)` whichever corners were written — and unlike `lseg_in`
+    /// it does not accept square brackets.
+    #[test]
+    fn box_input_normalizes_its_corners() {
+        use assert2::assert;
+
+        let unit = Box2 {
+            high: Point { x: 3.0, y: 3.0 },
+            low: Point { x: 1.0, y: 1.0 },
+        };
+        for spelling in [
+            "(1.0,1.0,3.0,3.0)",
+            "(3,3),(1,1)",
+            "((1,1),(3,3))",
+            "3,3,1,1",
+        ] {
+            assert!(Box2::parse(spelling) == Ok(unit), "{spelling}");
+        }
+        // Each coordinate is sorted independently, not the points as a pair.
+        assert!(
+            Box2::parse("((-8, 2), (-2, -10))")
+                == Ok(Box2 {
+                    high: Point { x: -2.0, y: 2.0 },
+                    low: Point { x: -8.0, y: -10.0 },
+                })
+        );
+        // A degenerate box is a point or a line: zero area, not a rejection.
+        assert!(
+            Box2::parse("(3,3,3,3)")
+                .expect("degenerate")
+                .area()
+                .to_bits()
+                == 0.0_f64.to_bits()
+        );
+        // These are exact in binary floating point, so compare bit patterns
+        // rather than tripping the float-comparison lint.
+        for (measured, expected) in [
+            (unit.width(), 2.0_f64),
+            (unit.height(), 2.0),
+            (unit.area(), 4.0),
+        ] {
+            assert!(measured.to_bits() == expected.to_bits());
+        }
+
+        for bad in [
+            "(2.3, 4.5)",
+            "[1, 2, 3, 4)",
+            "(1, 2, 3, 4]",
+            "asdfasdf(ad",
+            "(1, 2, 3, 4) x",
+        ] {
+            let error = Box2::parse(bad).expect_err(bad);
+            assert!(error.sqlstate() == "22P02", "{bad}");
+            assert!(
+                error.to_string() == format!("invalid input syntax for type box: \"{bad}\""),
+                "{bad}"
+            );
+        }
+    }
+
     #[test]
     fn circle_input_and_area_comparison_match_postgres() {
         use std::cmp::Ordering;

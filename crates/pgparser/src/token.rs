@@ -41,6 +41,11 @@ pub enum Token {
     /// The jsonb `#>>` operator (element at a text path, as text).
     JsonGetPathText,
     /// The jsonb/array `@>` containment operator.
+    /// The geometric `~=` (same as), `<<|` (strictly below) and `|>>`
+    /// (strictly above) operators.
+    Same,
+    StrictlyBelow,
+    StrictlyAbove,
     Contains,
     /// The jsonb/array `<@` "contained by" operator.
     ContainedBy,

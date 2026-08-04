@@ -1277,6 +1277,9 @@ pub(crate) fn apply_binary(
     {
         return Ok(result);
     }
+    if let Some(result) = apply_geometric_position(op, l, r) {
+        return Ok(result);
+    }
     match op {
         BinaryOp::Add if matches!((l, r), (Datum::Range(_), Datum::Range(_))) => {
             let (Datum::Range(a), Datum::Range(b)) = (l, r) else {
@@ -1386,7 +1389,10 @@ pub(crate) fn apply_binary(
             )),
             _ => array_fn::array_overlap(l, r),
         },
-        BinaryOp::DoesNotExtendRight
+        BinaryOp::Same
+        | BinaryOp::StrictlyBelow
+        | BinaryOp::StrictlyAbove
+        | BinaryOp::DoesNotExtendRight
         | BinaryOp::DoesNotExtendLeft
         | BinaryOp::Adjacent
         | BinaryOp::Shl
@@ -1396,7 +1402,12 @@ pub(crate) fn apply_binary(
         {
             Ok(Datum::Bool(apply_range_directional(op, l, r)?))
         }
-        BinaryOp::DoesNotExtendRight | BinaryOp::DoesNotExtendLeft | BinaryOp::Adjacent => {
+        BinaryOp::Same
+        | BinaryOp::StrictlyBelow
+        | BinaryOp::StrictlyAbove
+        | BinaryOp::DoesNotExtendRight
+        | BinaryOp::DoesNotExtendLeft
+        | BinaryOp::Adjacent => {
             if l.is_null() || r.is_null() {
                 Ok(Datum::Null)
             } else {
@@ -2086,9 +2097,63 @@ fn json_op_of(op: BinaryOp) -> Option<JsonOp> {
     })
 }
 
+/// Whether a type reduces to a bounding box for the positional operators.
+fn is_boxable(ty: ColumnType) -> bool {
+    matches!(
+        ty,
+        ColumnType::Point | ColumnType::Box | ColumnType::Circle | ColumnType::Lseg
+    )
+}
+
+/// The bounding box a geometric operand compares as. `point`, `box`, `lseg`
+/// and `circle` all reduce to a box for the positional operators, which is how
+/// PostgreSQL's `box`-based comparisons are defined.
+fn bounding_box(value: &Datum) -> Option<crabka_pgtypes::geometry::Box2> {
+    use crabka_pgtypes::geometry::Box2;
+    match value {
+        Datum::Point(point) => Some(Box2::of_point(*point)),
+        Datum::Box(value) => Some(*value),
+        Datum::Circle(circle) => Some(Box2::of_circle(*circle)),
+        Datum::Lseg(lseg) => Some(Box2::normalized(lseg.start, lseg.end)),
+        _ => None,
+    }
+}
+
+/// The geometric positional operators, which every boxable type shares:
+/// `<<`, `>>`, `&<`, `&>`, `<<|`, `|>>`, `&&`, `@>`, `<@`, `~=` and `<->`.
+/// Returns `None` when the operands are not both geometric, leaving the
+/// operator's other overloads to the caller.
+fn apply_geometric_position(op: BinaryOp, left: &Datum, right: &Datum) -> Option<Datum> {
+    // A circle pair measures centre-to-centre minus the radii, not bounding
+    // boxes, so `circle_distance` is checked before the box reduction.
+    if let (BinaryOp::Phrase, Datum::Circle(a), Datum::Circle(b)) = (op, left, right) {
+        return Some(Datum::Float8(a.distance(*b)));
+    }
+    let (a, b) = (bounding_box(left)?, bounding_box(right)?);
+    let held = match op {
+        BinaryOp::Shl => a.strictly_left_of(b),
+        BinaryOp::Shr => a.strictly_right_of(b),
+        BinaryOp::DoesNotExtendRight => a.does_not_extend_right(b),
+        BinaryOp::DoesNotExtendLeft => a.does_not_extend_left(b),
+        BinaryOp::StrictlyBelow => a.strictly_below(b),
+        BinaryOp::StrictlyAbove => a.strictly_above(b),
+        BinaryOp::Overlaps => a.overlaps(b),
+        BinaryOp::Contains => a.contains(b),
+        BinaryOp::ContainedBy => b.contains(a),
+        BinaryOp::Same => a.same(b),
+        // `<->` yields a distance rather than a predicate.
+        BinaryOp::Phrase => return Some(Datum::Float8(a.distance(b))),
+        _ => return None,
+    };
+    Some(Datum::Bool(held))
+}
+
 /// A binary operator's SQL spelling, for error messages.
 fn op_spelling(op: BinaryOp) -> &'static str {
     match op {
+        BinaryOp::Same => "~=",
+        BinaryOp::StrictlyBelow => "<<|",
+        BinaryOp::StrictlyAbove => "|>>",
         BinaryOp::Add => "+",
         BinaryOp::Sub => "-",
         BinaryOp::Mul => "*",
@@ -2718,7 +2783,7 @@ fn infer_binary_type(
             let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
             if lt == ColumnType::TsQuery && rt == ColumnType::TsQuery {
                 Ok(ColumnType::TsQuery)
-            } else if lt == ColumnType::Circle && rt == ColumnType::Circle {
+            } else if is_boxable(lt) && is_boxable(rt) {
                 Ok(ColumnType::Float8)
             } else {
                 Err(undefined_operator("<->", lt, rt))
@@ -2796,6 +2861,9 @@ fn infer_binary_type(
                 return Err(ambiguous_operator(op_spelling(op)));
             }
             let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
+            if is_boxable(lt) && is_boxable(rt) && !matches!(op, BinaryOp::Adjacent) {
+                return Ok(ColumnType::Bool);
+            }
             if range_family_compatible(lt, rt)
                 || matches!(lt, ColumnType::Range(_) | ColumnType::Multirange(_))
                     && is_unknown_literal(right)
@@ -2812,6 +2880,9 @@ fn infer_binary_type(
                 return Err(ambiguous_operator(op_spelling(op)));
             }
             let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
+            if matches!(op, BinaryOp::Shl | BinaryOp::Shr) && is_boxable(lt) && is_boxable(rt) {
+                return Ok(ColumnType::Bool);
+            }
             if matches!(op, BinaryOp::Shl | BinaryOp::Shr)
                 && (range_family_compatible(lt, rt)
                     || matches!(lt, ColumnType::Range(_) | ColumnType::Multirange(_))
@@ -2982,6 +3053,24 @@ fn json_or_array_operator_result_type(
         };
         if same_array_family {
             return Some(ColumnType::Bool);
+        }
+    }
+    // The geometric positional operators take two boxable operands and yield a
+    // predicate; `<->` yields the distance between them.
+    if is_boxable(lt) && is_boxable(rt) {
+        match op {
+            BinaryOp::Shl
+            | BinaryOp::Shr
+            | BinaryOp::DoesNotExtendRight
+            | BinaryOp::DoesNotExtendLeft
+            | BinaryOp::StrictlyBelow
+            | BinaryOp::StrictlyAbove
+            | BinaryOp::Overlaps
+            | BinaryOp::Contains
+            | BinaryOp::ContainedBy
+            | BinaryOp::Same => return Some(ColumnType::Bool),
+            BinaryOp::Phrase => return Some(ColumnType::Float8),
+            _ => {}
         }
     }
     match (op, lt, rt) {

@@ -61,6 +61,8 @@ mod tag {
     pub const LINE: u8 = 28;
     /// `PostgreSQL` `circle`. Append-only — no version bump.
     pub const CIRCLE: u8 = 29;
+    /// `PostgreSQL` `box`. Append-only — no version bump.
+    pub const BOX: u8 = 30;
 }
 
 /// Encodes one row in the current storage format.
@@ -121,6 +123,12 @@ fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
                 out.push(tag::POINT);
                 out.extend_from_slice(&point.x.to_be_bytes());
                 out.extend_from_slice(&point.y.to_be_bytes());
+            }
+            Datum::Box(value) => {
+                out.push(tag::BOX);
+                for coordinate in [value.high.x, value.high.y, value.low.x, value.low.y] {
+                    out.extend_from_slice(&coordinate.to_be_bytes());
+                }
             }
             Datum::Circle(circle) => {
                 out.push(tag::CIRCLE);
@@ -432,6 +440,22 @@ fn decode_field(cur: &mut &[u8]) -> Result<Datum, KvError> {
                 points.push(crabka_pgtypes::Point { x, y });
             }
             Datum::Path(crabka_pgtypes::Path { closed, points })
+        }
+        tag::BOX => {
+            let mut values = [0.0_f64; 4];
+            for value in &mut values {
+                *value = f64::from_be_bytes(take_n(cur, 8)?.try_into().expect("8"));
+            }
+            Datum::Box(crabka_pgtypes::geometry::Box2 {
+                high: crabka_pgtypes::Point {
+                    x: values[0],
+                    y: values[1],
+                },
+                low: crabka_pgtypes::Point {
+                    x: values[2],
+                    y: values[3],
+                },
+            })
         }
         tag::CIRCLE => {
             let mut values = [0.0_f64; 3];

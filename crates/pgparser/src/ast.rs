@@ -3236,6 +3236,11 @@ pub enum BinaryOp {
     /// array `&&`: the two arrays have at least one element in common.
     Overlaps,
     /// Range does not extend right of the other range (`&<`).
+    /// Geometric `~=` (same as), `<<|` (strictly below), `|>>` (strictly
+    /// above).
+    Same,
+    StrictlyBelow,
+    StrictlyAbove,
     DoesNotExtendRight,
     /// Range does not extend left of the other range (`&>`).
     DoesNotExtendLeft,
