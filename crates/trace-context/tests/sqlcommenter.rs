@@ -2,6 +2,9 @@ use assert2::{assert, check};
 use crabka_trace_context::{SqlCommenterTrace, TraceCarrier, extract_sqlcommenter};
 
 const TRACEPARENT: &str = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+/// A second well-formed traceparent, for cases that must prove *which* tag was
+/// read rather than merely that one was.
+const OTHER: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
 
 fn found<'a>(traceparent: &'a str, tracestate: Option<&'a str>) -> SqlCommenterTrace<'a> {
     SqlCommenterTrace {
@@ -50,8 +53,33 @@ fn extract_sqlcommenter_reads_only_genuine_comment_regions() {
     // `*/` closes the comment and `traceparent=` is left sitting in bare SQL.
     let after_nested_close =
         format!("SELECT 1 /* outer /* inner */ traceparent='{TRACEPARENT}' */");
+    // `key = value` with padding, and a key carrying no value at all — the two
+    // ends of the space-skipping that sits between the key and its `=`.
+    let padded_equals = format!("SELECT 1 /*traceparent = '{TRACEPARENT}'*/");
+    let key_without_value = "SELECT 1 /*traceparent*/";
+    // An unquoted value has to stop at the delimiter: run past it and the
+    // trailing `,tracestate=…` is swallowed into the traceparent and fails to
+    // parse. The existing unquoted case ends at the comment, so it never tests
+    // termination.
+    let unquoted_then_tracestate =
+        format!("SELECT 1 /*traceparent={TRACEPARENT},tracestate=congo=t61*/");
+    // An empty value is absent, not `Some("")`.
+    let empty_tracestate = format!("SELECT 1 /*traceparent='{TRACEPARENT}',tracestate=*/");
+    // A line comment closed by end-of-input rather than a newline, and one at
+    // offset 0 with nothing before it to step back over.
+    let line_comment_at_eof = format!("SELECT 1 --traceparent='{TRACEPARENT}'");
+    let line_comment_at_start = format!("--traceparent='{TRACEPARENT}'\nSELECT 1");
+    // A `$tag` that runs to end-of-input, reached only because the comment
+    // before it carried a malformed tag and the scan continued.
+    let dollar_at_eof = "SELECT 1 /*traceparent='00-nothex-b7ad6b7169203331-01'*/ $abc".to_owned();
+    // A string literal whose *contents* look like a tag, behind a subtraction.
+    // If `-` is mistaken for a line-comment opener the rest of the line is read
+    // as comment text and the literal's tag wins — so this pins which one was
+    // read, which a single-traceparent statement cannot.
+    let literal_tag_behind_subtraction =
+        format!("SELECT a - b, 'traceparent={OTHER}' FROM t /*traceparent='{TRACEPARENT}'*/");
 
-    let cases: [(&str, &str, Option<SqlCommenterTrace<'_>>); 21] = [
+    let cases: [(&str, &str, Option<SqlCommenterTrace<'_>>); 29] = [
         (
             "trailing block comment",
             &trailing,
@@ -118,7 +146,39 @@ fn extract_sqlcommenter_reads_only_genuine_comment_regions() {
             &after_nested_close,
             Some(found(TRACEPARENT, None)),
         ),
+        (
+            "spaces around the equals",
+            &padded_equals,
+            Some(found(TRACEPARENT, None)),
+        ),
+        (
+            "unquoted value stops at the delimiter",
+            &unquoted_then_tracestate,
+            Some(found(TRACEPARENT, Some("congo=t61"))),
+        ),
+        (
+            "line comment closed by end of input",
+            &line_comment_at_eof,
+            Some(found(TRACEPARENT, None)),
+        ),
+        (
+            "line comment at offset zero",
+            &line_comment_at_start,
+            Some(found(TRACEPARENT, None)),
+        ),
+        (
+            "a literal that looks like a tag, behind a subtraction",
+            &literal_tag_behind_subtraction,
+            Some(found(TRACEPARENT, None)),
+        ),
+        (
+            "empty tracestate is absent, not empty",
+            &empty_tracestate,
+            Some(found(TRACEPARENT, None)),
+        ),
         // The traps: none of these is a comment, or none is a traceparent.
+        ("key with no value", key_without_value, None),
+        ("dollar tag running to end of input", &dollar_at_eof, None),
         ("inside a string literal", &string_literal, None),
         ("inside a dollar-quoted body", &dollar_quoted, None),
         ("inside a quoted identifier", &quoted_identifier, None),
