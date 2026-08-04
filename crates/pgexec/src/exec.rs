@@ -9193,6 +9193,7 @@ fn lateral_join(
                     &acc,
                     &right,
                     constraint,
+                    ctx,
                     crabka_units::ByteSize::from_bytes(remaining),
                 )?)
             } else {

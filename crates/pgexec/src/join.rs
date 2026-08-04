@@ -62,9 +62,10 @@ pub(crate) fn prepare_join_index(
     left: &Relation,
     right: &Relation,
     constraint: &JoinConstraint,
+    ctx: &crate::clock::EvalCtx,
     blocking_query_memory: crabka_units::ByteSize,
 ) -> Result<PreparedJoinIndex, ExecError> {
-    let index = JoinIndex::build(left, right, constraint, blocking_query_memory)?;
+    let index = JoinIndex::build(left, right, constraint, ctx, blocking_query_memory)?;
     let estimated_bytes = index.as_ref().map_or(0, JoinIndex::estimated_bytes);
     Ok(PreparedJoinIndex {
         index,
@@ -121,7 +122,7 @@ pub(crate) fn count_join_rows(
         return Err(crate::scanner::memory_budget_exceeded());
     }
 
-    let mut index = JoinIndex::build(left, right, constraint, blocking_query_memory)?;
+    let mut index = JoinIndex::build(left, right, constraint, ctx, blocking_query_memory)?;
     if index.as_ref().is_some_and(|index| {
         crate::scanner::exceeds_query_memory(
             right_match_bytes.saturating_add(index.estimated_bytes()),
@@ -145,7 +146,8 @@ pub(crate) fn count_join_rows(
             left_row,
             &mut key_buf,
             &mut candidate_buf,
-        ) {
+            ctx,
+        )? {
             if condition.matches(left_row, &right.rows[right_index], ctx)? {
                 any = true;
                 if let Some(right_matched) = &mut right_matched {
@@ -273,7 +275,7 @@ fn join_relations_impl(
 
     let built_index = prepared
         .is_none()
-        .then(|| JoinIndex::build(&left, right, constraint, blocking_query_memory))
+        .then(|| JoinIndex::build(&left, right, constraint, ctx, blocking_query_memory))
         .transpose()?
         .flatten();
     let index = prepared.map_or(built_index.as_ref(), |prepared| prepared.index.as_ref());
@@ -285,9 +287,14 @@ fn join_relations_impl(
     match kind {
         JoinKind::Inner | JoinKind::Cross => {
             for l in &left.rows {
-                for ri in
-                    candidate_rows(index, right.rows.len(), l, &mut key_buf, &mut candidate_buf)
-                {
+                for ri in candidate_rows(
+                    index,
+                    right.rows.len(),
+                    l,
+                    &mut key_buf,
+                    &mut candidate_buf,
+                    ctx,
+                )? {
                     let r = &right.rows[ri];
                     if condition.matches(l, r, ctx)? {
                         let mut row = l.clone();
@@ -309,9 +316,14 @@ fn join_relations_impl(
             let mut right_matched = vec![false; right.rows.len()];
             for l in &left.rows {
                 let mut any = false;
-                for ri in
-                    candidate_rows(index, right.rows.len(), l, &mut key_buf, &mut candidate_buf)
-                {
+                for ri in candidate_rows(
+                    index,
+                    right.rows.len(),
+                    l,
+                    &mut key_buf,
+                    &mut candidate_buf,
+                    ctx,
+                )? {
                     let r = &right.rows[ri];
                     if condition.matches(l, r, ctx)? {
                         any = true;
@@ -396,13 +408,14 @@ fn candidate_rows<'a>(
     lrow: &[Datum],
     key_buf: &mut Vec<Datum>,
     candidate_buf: &'a mut Vec<usize>,
-) -> CandidateRows<'a> {
-    match index {
+    ctx: &crate::clock::EvalCtx,
+) -> Result<CandidateRows<'a>, ExecError> {
+    Ok(match index {
         Some(index) => {
-            CandidateRows::Indexed(index.candidates(lrow, key_buf, candidate_buf).iter())
+            CandidateRows::Indexed(index.candidates(lrow, key_buf, candidate_buf, ctx)?.iter())
         }
         None => CandidateRows::All(0..right_len),
-    }
+    })
 }
 
 enum JoinIndex {
@@ -420,6 +433,7 @@ impl JoinIndex {
         left: &Relation,
         right: &Relation,
         constraint: &JoinConstraint,
+        ctx: &crate::clock::EvalCtx,
         blocking_query_memory: crabka_units::ByteSize,
     ) -> Result<Option<Self>, ExecError> {
         let mut combined = left.scope.clone();
@@ -445,7 +459,7 @@ impl JoinIndex {
                 .saturating_mul(std::mem::size_of::<usize>());
             for disjunct in disjuncts {
                 let keys = equi_key_columns(disjunct, &combined, left.scope.width());
-                let Some(plan) = EquiIndex::plan(left, right, &keys) else {
+                let Some(plan) = EquiIndex::plan(left, right, &keys, ctx) else {
                     // A branch without a usable necessary equality can match any
                     // right row, so narrowing the union would be unsound.
                     return Ok(None);
@@ -468,7 +482,7 @@ impl JoinIndex {
         }
 
         let keys = equi_keys_for(left, right, constraint)?;
-        let Some(plan) = EquiIndex::plan(left, right, &keys) else {
+        let Some(plan) = EquiIndex::plan(left, right, &keys, ctx) else {
             return Ok(None);
         };
         if crate::scanner::exceeds_query_memory(plan.estimated_bytes, blocking_query_memory) {
@@ -509,14 +523,15 @@ impl JoinIndex {
         lrow: &[Datum],
         key_buf: &mut Vec<Datum>,
         union: &'a mut Vec<usize>,
-    ) -> &'a [usize] {
+        ctx: &crate::clock::EvalCtx,
+    ) -> Result<&'a [usize], ExecError> {
         match self {
-            Self::Conjunctive(index) => index.candidates(lrow, key_buf),
+            Self::Conjunctive(index) => index.candidates(lrow, key_buf, ctx),
             Self::Disjunctive { indexes, .. } => {
                 union.clear();
                 let mut lists = Vec::with_capacity(indexes.len());
                 for index in indexes {
-                    lists.push(index.candidates(lrow, key_buf));
+                    lists.push(index.candidates(lrow, key_buf, ctx)?);
                 }
                 let mut positions = [0usize; Self::MAX_OR_DISJUNCTS];
                 while let Some(next) = lists
@@ -532,7 +547,7 @@ impl JoinIndex {
                         }
                     }
                 }
-                union
+                Ok(union)
             }
         }
     }
@@ -542,7 +557,7 @@ fn equi_keys_for(
     left: &Relation,
     right: &Relation,
     constraint: &JoinConstraint,
-) -> Result<Vec<(usize, usize)>, ExecError> {
+) -> Result<Vec<(LeftKey, usize)>, ExecError> {
     let mut combined = left.scope.clone();
     combined.columns.extend(right.scope.columns.iter().cloned());
     match constraint {
@@ -550,7 +565,7 @@ fn equi_keys_for(
             .iter()
             .map(|column| {
                 Ok((
-                    left.scope.resolve(None, column)?,
+                    LeftKey::Column(left.scope.resolve(None, column)?),
                     right.scope.resolve(None, column)?,
                 ))
             })
@@ -559,7 +574,7 @@ fn equi_keys_for(
             .iter()
             .map(|column| {
                 Ok((
-                    left.scope.resolve(None, column)?,
+                    LeftKey::Column(left.scope.resolve(None, column)?),
                     right.scope.resolve(None, column)?,
                 ))
             })
@@ -594,13 +609,17 @@ fn collect_or_disjuncts<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
 /// keys whose values are exactly hash-comparable; the full predicate rechecks
 /// every candidate, including equality keys omitted here.
 struct EquiIndex {
-    /// Key columns, as indices into a left row.
-    left_key: Vec<usize>,
+    /// How each key's value is read from a left row.
+    left_key: Vec<LeftKey>,
+    /// The left relation's schema, so an expression key can be evaluated
+    /// against a left row during the probe.
+    left_scope: Scope,
     buckets: HashMap<Vec<Datum>, Vec<usize>>,
 }
 
 struct EquiIndexPlan {
-    keys: Vec<(usize, usize)>,
+    keys: Vec<(LeftKey, usize)>,
+    left_scope: Scope,
     estimated_bytes: usize,
 }
 
@@ -624,15 +643,40 @@ impl EquiIndex {
     /// Plan an index without allocating its buckets. The estimate assumes every
     /// right row has a distinct key, which bounds the bucket/table overhead, and
     /// includes heap-backed scalar key payloads.
-    fn plan(left: &Relation, right: &Relation, keys: &[(usize, usize)]) -> Option<EquiIndexPlan> {
+    fn plan(
+        left: &Relation,
+        right: &Relation,
+        keys: &[(LeftKey, usize)],
+        ctx: &crate::clock::EvalCtx,
+    ) -> Option<EquiIndexPlan> {
         if keys.is_empty() || left.rows.len().saturating_mul(right.rows.len()) < Self::MIN_PAIRS {
             return None;
         }
-        let keys: Vec<(usize, usize)> = keys
+        let keys: Vec<(LeftKey, usize)> = keys
             .iter()
-            .copied()
             .filter(|(li, ri)| {
-                match (key_variant(&left.rows, *li), key_variant(&right.rows, *ri)) {
+                // An expression key is materialized once here purely to check
+                // that its values hash the way they compare; the probe
+                // re-evaluates it per left row.
+                let left_values = match li {
+                    LeftKey::Column(lc) => LeftKeyValues::Column(*lc),
+                    LeftKey::Expr(expr) => {
+                        let mut values = Vec::with_capacity(left.rows.len());
+                        for row in &left.rows {
+                            match crate::eval::eval(expr, &left.scope, row, ctx) {
+                                Ok(value) => values.push(value),
+                                // An expression that cannot be evaluated off a
+                                // left row alone is left to the full predicate.
+                                Err(_) => return false,
+                            }
+                        }
+                        LeftKeyValues::Materialized(values)
+                    }
+                };
+                match (
+                    left_values.variant(&left.rows),
+                    key_variant(&right.rows, *ri),
+                ) {
                     (KeyVariant::Mixed, _) | (_, KeyVariant::Mixed) => false,
                     (KeyVariant::Uniform(l), KeyVariant::Uniform(r))
                         if std::mem::discriminant(l) != std::mem::discriminant(r)
@@ -646,6 +690,7 @@ impl EquiIndex {
                     _ => true,
                 }
             })
+            .cloned()
             .collect();
         if keys.is_empty() {
             return None;
@@ -668,6 +713,7 @@ impl EquiIndex {
         }
         Some(EquiIndexPlan {
             keys,
+            left_scope: left.scope.clone(),
             estimated_bytes,
         })
     }
@@ -685,7 +731,8 @@ impl EquiIndex {
             buckets.entry(key).or_default().push(ri);
         }
         Self {
-            left_key: keys.iter().map(|(lc, _)| *lc).collect(),
+            left_key: keys.into_iter().map(|(lc, _)| lc).collect(),
+            left_scope: plan.left_scope,
             buckets,
         }
     }
@@ -694,7 +741,12 @@ impl EquiIndex {
     /// compare Equal. Returns `None` when no index applies.
     #[cfg(test)]
     fn build(left: &Relation, right: &Relation, keys: &[(usize, usize)]) -> Option<Self> {
-        Self::plan(left, right, keys).map(|plan| Self::build_planned(right, plan))
+        let keys: Vec<(LeftKey, usize)> = keys
+            .iter()
+            .map(|(lc, rc)| (LeftKey::Column(*lc), *rc))
+            .collect();
+        let ctx = crate::clock::EvalCtx::test_default();
+        Self::plan(left, right, &keys, &ctx).map(|plan| Self::build_planned(right, plan))
     }
 
     fn estimated_bytes(&self) -> usize {
@@ -722,25 +774,38 @@ impl EquiIndex {
         )
     }
 
-    fn candidates<'a>(&'a self, lrow: &[Datum], key_buf: &mut Vec<Datum>) -> &'a [usize] {
+    fn candidates<'a>(
+        &'a self,
+        lrow: &[Datum],
+        key_buf: &mut Vec<Datum>,
+        ctx: &crate::clock::EvalCtx,
+    ) -> Result<&'a [usize], ExecError> {
         key_buf.clear();
-        for &lc in &self.left_key {
-            if lrow[lc].is_null() {
-                return &[];
+        for key in &self.left_key {
+            let value = match key {
+                LeftKey::Column(lc) => lrow[*lc].clone(),
+                LeftKey::Expr(expr) => crate::eval::eval(expr, &self.left_scope, lrow, ctx)?,
+            };
+            // A NULL key never compares Equal, so no bucket can hold a match.
+            if value.is_null() {
+                return Ok(&[]);
             }
-            key_buf.push(lrow[lc].clone());
+            key_buf.push(value);
         }
-        match self.buckets.get(key_buf.as_slice()) {
+        Ok(match self.buckets.get(key_buf.as_slice()) {
             Some(rows) => rows,
             None => &[],
-        }
+        })
     }
 }
 
 fn key_variant(rows: &[Vec<Datum>], column: usize) -> KeyVariant<'_> {
+    key_variant_of(rows.iter().map(|row| &row[column]))
+}
+
+fn key_variant_of<'a>(values: impl Iterator<Item = &'a Datum>) -> KeyVariant<'a> {
     let mut seen: Option<&Datum> = None;
-    for row in rows {
-        let value = &row[column];
+    for value in values {
         if value.is_null() {
             continue;
         }
@@ -751,6 +816,22 @@ fn key_variant(rows: &[Vec<Datum>], column: usize) -> KeyVariant<'_> {
         }
     }
     seen.map_or(KeyVariant::AllNull, KeyVariant::Uniform)
+}
+
+/// A key's left-side values during planning: read straight from a column, or
+/// materialized once from an expression so its variant can be checked.
+enum LeftKeyValues {
+    Column(usize),
+    Materialized(Vec<Datum>),
+}
+
+impl LeftKeyValues {
+    fn variant<'a>(&'a self, rows: &'a [Vec<Datum>]) -> KeyVariant<'a> {
+        match self {
+            Self::Column(column) => key_variant(rows, *column),
+            Self::Materialized(values) => key_variant_of(values.iter()),
+        }
+    }
 }
 
 /// Whether `Datum`'s `Eq`/`Hash` decide this variant exactly as `ops::compare`
@@ -785,10 +866,10 @@ pub(crate) fn hashes_like_it_compares(sample: &Datum) -> bool {
 /// side resolving into the left relation and the other into the right.
 ///
 /// These are necessary conditions for the predicate to hold, which is what makes
-/// them safe as a pre-filter. The full predicate still decides every candidate.
-/// Conjuncts of any other shape contribute no key, including `OR`, which is not
-/// a necessary condition.
-fn equi_key_columns(pred: &Expr, combined: &Scope, lw: usize) -> Vec<(usize, usize)> {
+/// them safe as a pre-filter — the full predicate still decides every candidate.
+/// Conjuncts of any other shape (including `OR`, which is not a necessary
+/// condition) contribute no key.
+fn equi_key_columns(pred: &Expr, combined: &Scope, lw: usize) -> Vec<(LeftKey, usize)> {
     let mut keys = Vec::new();
     collect_equi_key_columns(pred, combined, lw, &mut keys);
     keys
@@ -798,7 +879,7 @@ fn collect_equi_key_columns(
     pred: &Expr,
     combined: &Scope,
     lw: usize,
-    out: &mut Vec<(usize, usize)>,
+    out: &mut Vec<(LeftKey, usize)>,
 ) {
     match pred {
         Expr::Binary {
@@ -814,20 +895,37 @@ fn collect_equi_key_columns(
             left,
             right,
         } => {
-            let (Some(a), Some(b)) = (
+            match (
                 combined_column_index(left, combined),
                 combined_column_index(right, combined),
-            ) else {
-                return;
-            };
-            match (a < lw, b < lw) {
-                (true, false) => out.push((a, b - lw)),
-                (false, true) => out.push((b, a - lw)),
+            ) {
+                (Some(a), Some(b)) => match (a < lw, b < lw) {
+                    (true, false) => out.push((LeftKey::Column(a), b - lw)),
+                    (false, true) => out.push((LeftKey::Column(b), a - lw)),
+                    _ => {}
+                },
+                // One side is a bare right column and the other an expression
+                // over left columns only: `c.unique2 = coalesce(a.x, b.y)` keys
+                // the index on the expression's value, evaluated per left row.
+                (None, Some(b)) if b >= lw && reads_only_left(left, combined, lw) => {
+                    out.push((LeftKey::Expr(left.as_ref().clone()), b - lw));
+                }
+                (Some(a), None) if a >= lw && reads_only_left(right, combined, lw) => {
+                    out.push((LeftKey::Expr(right.as_ref().clone()), a - lw));
+                }
                 _ => {}
             }
         }
         _ => {}
     }
+}
+
+/// How a hash key's value is obtained from a left row: a column read, or an
+/// expression over left columns evaluated per row.
+#[derive(Clone)]
+enum LeftKey {
+    Column(usize),
+    Expr(Expr),
 }
 
 /// The combined-scope position of a bare column reference, or `None` for any
@@ -839,6 +937,24 @@ fn combined_column_index(expr: &Expr, combined: &Scope) -> Option<usize> {
         return None;
     };
     combined.resolve(table.as_deref(), name).ok()
+}
+
+/// Whether `expr` reads only left-relation columns, so its value is fixed by a
+/// left row alone and can key the hash index. Every column must resolve to the
+/// left half of the combined scope; an unresolvable or ambiguous reference
+/// disqualifies it, and so does a subquery, whose evaluation needs a planner
+/// context the probe does not carry.
+fn reads_only_left(expr: &Expr, combined: &Scope, lw: usize) -> bool {
+    let mut only_left = true;
+    crate::grouping::visit_expr(expr, &mut |node: &Expr| match node {
+        Expr::Column { table, name } => match combined.resolve(table.as_deref(), name) {
+            Ok(index) if index < lw => {}
+            _ => only_left = false,
+        },
+        Expr::ScalarSubquery(_) | Expr::Exists(_) | Expr::InSubquery { .. } => only_left = false,
+        _ => {}
+    });
+    only_left
 }
 
 fn push_bounded_join_row(
@@ -1005,6 +1121,95 @@ mod tests {
                 name: rc.into(),
             }),
         })
+    }
+
+    /// `ON right.k = <expression over left columns>` keys the hash index on the
+    /// expression's value. PostgreSQL resolves such a join the same way, and the
+    /// upstream `join` test's bug #8591 query is unusable without it: three
+    /// 10k-row scans is 10^12 pairs as a nested loop.
+    #[test]
+    fn an_expression_over_left_columns_keys_the_index() {
+        // 80x80 clears MIN_PAIRS, so the index is planned rather than skipped.
+        let left = rel(
+            "a",
+            &["x", "y"],
+            (0..80).map(|i| vec![i % 13, i % 7]).collect(),
+        );
+        let right = rel("b", &["k"], (0..80).map(|i| vec![i % 19]).collect());
+        // ON b.k = a.x + a.y
+        let constraint = JoinConstraint::On(Expr::Binary {
+            op: BinaryOp::Eq,
+            left: Box::new(Expr::Column {
+                table: Some("b".into()),
+                name: "k".into(),
+            }),
+            right: Box::new(Expr::Binary {
+                op: BinaryOp::Add,
+                left: Box::new(Expr::Column {
+                    table: Some("a".into()),
+                    name: "x".into(),
+                }),
+                right: Box::new(Expr::Column {
+                    table: Some("a".into()),
+                    name: "y".into(),
+                }),
+            }),
+        });
+
+        // The index must actually be built on the expression, not skipped.
+        let index = JoinIndex::build(
+            &left,
+            &right,
+            &constraint,
+            &tctx(),
+            crate::scanner::BLOCKING_QUERY_MEMORY,
+        )
+        .expect("valid join constraint")
+        .expect("an expression key is indexable");
+        assert2::assert!(matches!(
+            &index,
+            JoinIndex::Conjunctive(equi) if matches!(equi.left_key.as_slice(), [LeftKey::Expr(_)])
+        ));
+
+        // And it must agree with the nested loop it replaces, for every kind.
+        for kind in [JoinKind::Inner, JoinKind::Left] {
+            let expected: Vec<Vec<Datum>> =
+                brute_force_join(&left, &right, kind, |l, r| match (&l[0], &l[1], &r[0]) {
+                    (Datum::Int4(x), Datum::Int4(y), Datum::Int4(k)) => *k == x + y,
+                    _ => false,
+                });
+            let actual = join_relations(left.clone(), right.clone(), kind, &constraint, &tctx())
+                .expect("indexed join")
+                .rows;
+            assert2::assert!(actual == expected, "{kind:?}");
+        }
+    }
+
+    /// The nested loop the index is supposed to be indistinguishable from.
+    fn brute_force_join(
+        left: &Relation,
+        right: &Relation,
+        kind: JoinKind,
+        matches: impl Fn(&[Datum], &[Datum]) -> bool,
+    ) -> Vec<Vec<Datum>> {
+        let mut rows = Vec::new();
+        for l in &left.rows {
+            let mut any = false;
+            for r in &right.rows {
+                if matches(l, r) {
+                    any = true;
+                    let mut row = l.clone();
+                    row.extend(r.iter().cloned());
+                    rows.push(row);
+                }
+            }
+            if !any && kind == JoinKind::Left {
+                let mut row = l.clone();
+                row.extend(right.scope.columns.iter().map(|_| Datum::Null));
+                rows.push(row);
+            }
+        }
+        rows
     }
 
     fn on_or_eq(lq: &str, left_cols: &[&str], rq: &str, rc: &str) -> JoinConstraint {
@@ -1444,6 +1649,7 @@ mod tests {
             &left,
             &right,
             &constraint,
+            &tctx(),
             crate::scanner::BLOCKING_QUERY_MEMORY,
         )
         .expect("prepare OR index");
@@ -1488,6 +1694,7 @@ mod tests {
             &left,
             &right,
             &constraint,
+            &tctx(),
             crate::scanner::BLOCKING_QUERY_MEMORY,
         )
         .expect("valid join constraint")
@@ -1499,7 +1706,12 @@ mod tests {
         let visited: usize = left
             .rows
             .iter()
-            .map(|row| index.candidates(row, &mut key_buf, &mut union).len())
+            .map(|row| {
+                index
+                    .candidates(row, &mut key_buf, &mut union, &tctx())
+                    .expect("probe")
+                    .len()
+            })
             .sum();
 
         assert2::assert!(visited == 2 * left.rows.len());
@@ -1533,6 +1745,7 @@ mod tests {
                 &left,
                 &right,
                 &constraint,
+                &tctx(),
                 crate::scanner::BLOCKING_QUERY_MEMORY,
             )
             .expect("valid join constraint")
@@ -1593,6 +1806,7 @@ mod tests {
                 &left,
                 &right,
                 &constraint,
+                &tctx(),
                 crate::scanner::BLOCKING_QUERY_MEMORY,
             )
             .expect("valid join constraint")
@@ -1618,6 +1832,7 @@ mod tests {
                 &left,
                 &right,
                 &too_many,
+                &tctx(),
                 crate::scanner::BLOCKING_QUERY_MEMORY,
             )
             .expect("valid join constraint")
@@ -1630,6 +1845,7 @@ mod tests {
                 &left,
                 &right,
                 &bounded,
+                &tctx(),
                 crabka_units::ByteSize::from_bytes(1),
             )
             .expect("valid join constraint")
@@ -1641,8 +1857,8 @@ mod tests {
     fn index_discards_an_actual_allocation_over_the_budget() {
         let left = rel("a", &["k"], (0..80).map(|i| vec![i]).collect());
         let right = rel("b", &["k"], (0..80).map(|i| vec![i]).collect());
-        let keys = [(0, 0)];
-        let plan = EquiIndex::plan(&left, &right, &keys).expect("index plan");
+        let keys = [(LeftKey::Column(0), 0)];
+        let plan = EquiIndex::plan(&left, &right, &keys, &tctx()).expect("index plan");
         let planned_bytes = plan.estimated_bytes;
         let actual_bytes = EquiIndex::build_planned(&right, plan).estimated_bytes();
         assert2::assert!(actual_bytes > planned_bytes);
@@ -1650,8 +1866,9 @@ mod tests {
         let budget = crabka_units::ByteSize::from_bytes(
             u64::try_from(actual_bytes - 1).expect("test allocation fits u64"),
         );
-        let prepared = prepare_join_index(&left, &right, &on_eq("a", "k", "b", "k"), budget)
-            .expect("prepare index");
+        let prepared =
+            prepare_join_index(&left, &right, &on_eq("a", "k", "b", "k"), &tctx(), budget)
+                .expect("prepare index");
         assert2::assert!(prepared.index.is_none());
         assert2::assert!(prepared.estimated_bytes() == 0);
 
@@ -1677,6 +1894,7 @@ mod tests {
             &left,
             &right,
             &constraint,
+            &tctx(),
             crate::scanner::BLOCKING_QUERY_MEMORY,
         )
         .expect("valid join constraint")
@@ -1685,7 +1903,8 @@ mod tests {
         let mut key_buf = Vec::new();
         let mut union = Vec::with_capacity(index.candidate_capacity());
         let candidates = index
-            .candidates(&left.rows[0], &mut key_buf, &mut union)
+            .candidates(&left.rows[0], &mut key_buf, &mut union, &tctx())
+            .expect("probe")
             .len();
         let retained_without_union = match &index {
             JoinIndex::Disjunctive { indexes, .. } => indexes.iter().fold(
@@ -1768,9 +1987,15 @@ mod tests {
         let index =
             EquiIndex::build(&left, &right, &[(0, 0), (1, 1)]).expect("text key remains indexable");
 
-        assert2::assert!(index.left_key == vec![0]);
+        assert2::assert!(matches!(index.left_key.as_slice(), [LeftKey::Column(0)]));
         let mut key_buf = Vec::new();
-        assert2::assert!(index.candidates(&left.rows[0], &mut key_buf).len() == 10);
+        assert2::assert!(
+            index
+                .candidates(&left.rows[0], &mut key_buf, &tctx())
+                .expect("probe")
+                .len()
+                == 10
+        );
     }
 
     /// The point of the index: an equi-join on a unique key visits ONE right row
@@ -1788,7 +2013,12 @@ mod tests {
         let visited: usize = left
             .rows
             .iter()
-            .map(|row| index.candidates(row, &mut key_buf).len())
+            .map(|row| {
+                index
+                    .candidates(row, &mut key_buf, &tctx())
+                    .expect("probe")
+                    .len()
+            })
             .sum();
         assert2::assert!(visited == left.rows.len());
     }
