@@ -1971,6 +1971,7 @@ impl SqlEngine {
             date_order: crabka_pgtypes::datetime::DateOrder::default(),
             date_style: crabka_pgtypes::datetime::DateStyle::default(),
             interval_style: crabka_pgtypes::datetime::IntervalStyle::default(),
+            extra_float_digits: 1,
             current_user: "public".into(),
             session_user: "public".into(),
             // No connection was ever opened for this write, so there is no

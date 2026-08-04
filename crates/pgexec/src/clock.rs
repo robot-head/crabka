@@ -60,6 +60,9 @@ pub struct EvalCtx {
     pub date_style: crabka_pgtypes::datetime::DateStyle,
     /// The `IntervalStyle` GUC, which decides how an `interval` is spelled.
     pub interval_style: crabka_pgtypes::datetime::IntervalStyle,
+    /// `extra_float_digits`, which decides how many significant digits a float
+    /// renders with. PostgreSQL's default since v12 is 1 (shortest round trip).
+    pub extra_float_digits: i32,
     pub current_user: String,
     pub session_user: String,
     /// The session's backend process id.
@@ -164,6 +167,7 @@ impl EvalCtx {
             date_style: self.date_style,
             date_order: self.date_order,
             interval_style: self.interval_style,
+            extra_float_digits: self.extra_float_digits,
         }
     }
 }
@@ -226,6 +230,7 @@ impl EvalCtx {
             date_order: crabka_pgtypes::datetime::DateOrder::default(),
             date_style: crabka_pgtypes::datetime::DateStyle::default(),
             interval_style: crabka_pgtypes::datetime::IntervalStyle::default(),
+            extra_float_digits: 1,
             current_user: "public".into(),
             session_user: "public".into(),
             backend_pid: 0,

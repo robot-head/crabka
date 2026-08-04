@@ -2511,6 +2511,7 @@ fn datum_text(d: &Datum, ctx: &EvalCtx) -> String {
         date_style: crabka_pgtypes::datetime::DateStyle::Iso,
         date_order: ctx.date_order,
         interval_style: ctx.interval_style,
+        extra_float_digits: ctx.extra_float_digits,
     };
     String::from_utf8(crabka_pgtypes::encoding::encode_text_in(d, style))
         .expect("a Datum's text encoding is always valid UTF-8")

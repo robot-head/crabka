@@ -3217,6 +3217,12 @@ impl SqlSession {
             |_| crabka_pgtypes::datetime::IntervalStyle::default(),
             |style| crabka_pgtypes::datetime::IntervalStyle::from_setting(&style),
         );
+        let extra_float_digits = self
+            .guc
+            .effective("extra_float_digits")
+            .ok()
+            .and_then(|setting| setting.parse().ok())
+            .unwrap_or(1);
         crate::clock::EvalCtx {
             now,
             stmt_now,
@@ -3224,6 +3230,7 @@ impl SqlSession {
             date_order,
             date_style,
             interval_style,
+            extra_float_digits,
             current_user: self.current_role.clone(),
             session_user: self.session_user.clone(),
             backend_pid: self.backend_pid,

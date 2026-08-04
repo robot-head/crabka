@@ -18,6 +18,9 @@ use crate::Datum;
 #[derive(Debug, Clone, Copy)]
 pub struct OutputStyle<'a> {
     pub time_zone: &'a jiff::tz::TimeZone,
+    /// `extra_float_digits`: `>= 1` renders the shortest round-tripping float,
+    /// `<= 0` rounds to `DIG + extra_float_digits` significant digits.
+    pub extra_float_digits: i32,
     pub date_style: crate::datetime::DateStyle,
     pub date_order: crate::datetime::DateOrder,
     pub interval_style: crate::datetime::IntervalStyle,
@@ -31,6 +34,8 @@ impl<'a> OutputStyle<'a> {
     pub fn with_zone(time_zone: &'a jiff::tz::TimeZone) -> Self {
         Self {
             time_zone,
+            // PostgreSQL's default since v12.
+            extra_float_digits: 1,
             date_style: crate::datetime::DateStyle::default(),
             date_order: crate::datetime::DateOrder::default(),
             interval_style: crate::datetime::IntervalStyle::default(),
@@ -57,30 +62,30 @@ pub fn encode_text_in(d: &Datum, style: OutputStyle<'_>) -> Vec<u8> {
         Datum::Int8(n) => n.to_string().into_bytes(),
         Datum::Text(s) => s.clone().into_bytes(),
         Datum::JsonPath(s) => s.clone().into_bytes(),
-        Datum::Float4(f) => encode_float4_text(*f).into_bytes(),
-        Datum::Float8(f) => encode_float8_text(*f).into_bytes(),
+        Datum::Float4(f) => encode_float4_text(*f, style.extra_float_digits).into_bytes(),
+        Datum::Float8(f) => encode_float8_text(*f, style.extra_float_digits).into_bytes(),
         Datum::Point(point) => format!(
             "({},{})",
-            encode_float8_text(point.x),
-            encode_float8_text(point.y)
+            encode_float8_text(point.x, style.extra_float_digits),
+            encode_float8_text(point.y, style.extra_float_digits)
         )
         .into_bytes(),
         // `line_out` always writes the coefficient form.
         Datum::Line(line) => format!(
             "{{{},{},{}}}",
-            encode_float8_text(line.a),
-            encode_float8_text(line.b),
-            encode_float8_text(line.c)
+            encode_float8_text(line.a, style.extra_float_digits),
+            encode_float8_text(line.b, style.extra_float_digits),
+            encode_float8_text(line.c, style.extra_float_digits)
         )
         .into_bytes(),
         // `lseg_out` always writes the bracketed two-point form, whatever
         // spelling the input used.
         Datum::Lseg(lseg) => format!(
             "[({},{}),({},{})]",
-            encode_float8_text(lseg.start.x),
-            encode_float8_text(lseg.start.y),
-            encode_float8_text(lseg.end.x),
-            encode_float8_text(lseg.end.y)
+            encode_float8_text(lseg.start.x, style.extra_float_digits),
+            encode_float8_text(lseg.start.y, style.extra_float_digits),
+            encode_float8_text(lseg.end.x, style.extra_float_digits),
+            encode_float8_text(lseg.end.y, style.extra_float_digits)
         )
         .into_bytes(),
         Datum::Path(path) => {
@@ -90,9 +95,9 @@ pub fn encode_text_in(d: &Datum, style: OutputStyle<'_>) -> Vec<u8> {
                     out.push(',');
                 }
                 out.push('(');
-                out.push_str(&encode_float8_text(point.x));
+                out.push_str(&encode_float8_text(point.x, style.extra_float_digits));
                 out.push(',');
-                out.push_str(&encode_float8_text(point.y));
+                out.push_str(&encode_float8_text(point.y, style.extra_float_digits));
                 out.push(')');
             }
             out.push(if path.closed { ')' } else { ']' });
@@ -192,41 +197,81 @@ pub const JSONB_BINARY_VERSION: u8 = 1;
 /// Version byte used by PostgreSQL's `jsonpath_send`/`jsonpath_recv` format.
 pub const JSONPATH_BINARY_VERSION: u8 = 1;
 
-/// PostgreSQL `float8out` text rendering.
+/// Lay out a float the way `printf %g` does, which is what PostgreSQL's
+/// `float8out`/`float4out` produce: fixed-point while the decimal exponent is
+/// in `-4 .. digits`, scientific outside it with a signed two-digit exponent
+/// (`1e+16`, `1e-05`), and no trailing zeros either way.
 ///
-/// This function spells the IEEE specials exactly as PostgreSQL does
-/// (`Infinity`/`-Infinity`/`NaN`). Finite values use Rust's `f64` `Display`,
-/// which is the shortest round-tripping decimal, as PG has been since v12. The
-/// two therefore agree byte-for-byte for moderate magnitudes (`1.5`, `2.0`→`2`,
-/// `-0.0`→`-0`). The one documented divergence is scientific notation for
-/// |x| ≥ 1e16 / 0 < |x| < 1e-4, which PG emits and Rust does not.
-fn encode_float8_text(f: f64) -> String {
-    if f.is_nan() {
-        "NaN".to_string()
-    } else if f.is_infinite() {
-        if f > 0.0 { "Infinity" } else { "-Infinity" }.to_string()
-    } else {
-        format!("{f}")
+/// `shortest` supplies the `extra_float_digits >= 1` spelling — the shortest
+/// decimal that round-trips — as a `(mantissa, exponent)` pair plus its
+/// fixed-point layout, because Rust already computes both.
+fn layout_g(mantissa: &str, exponent: i32, fixed: &str, digits: i32) -> String {
+    if (-4..digits).contains(&exponent) {
+        return fixed.to_string();
     }
+    let sign = if exponent < 0 { '-' } else { '+' };
+    format!("{mantissa}e{sign}{:02}", exponent.abs())
 }
 
-/// PostgreSQL `float4out` text rendering (`extra_float_digits >= 1`, the default
-/// since PG 12).
-///
-/// The output is the shortest decimal that round-trips through `f32`, laid out
-/// like `printf %g` with precision `FLT_DIG`. It is fixed-point while the
-/// decimal exponent is in `-4 ..= 5` and scientific outside it, with a signed
-/// two-digit exponent (`1e+06`, `1e-05`, `3.4028235e+38`). The IEEE specials are
-/// spelled `Infinity` / `-Infinity` / `NaN`.
-///
-/// Rust supplies both halves: `{:e}` is the shortest round-tripping mantissa
-/// plus the decimal exponent, and `{}` is the same digits laid out fixed-point.
-fn encode_float4_text(f: f32) -> String {
+/// Round to `precision` significant digits and lay the result out like `%g`.
+/// This is the `extra_float_digits <= 0` path, where PostgreSQL formats with
+/// `%.*g` at `DIG + extra_float_digits` rather than the shortest round trip.
+fn format_g(value: f64, precision: usize) -> String {
+    let precision = precision.max(1);
+    let scientific = format!("{value:.*e}", precision - 1);
+    let (mantissa, exponent) = scientific
+        .split_once('e')
+        .expect("Rust's LowerExp always emits an `e`");
+    let exponent: i32 = exponent
+        .parse()
+        .expect("Rust's LowerExp exponent is a decimal integer");
+    let mantissa = trim_trailing_zeros(mantissa);
+    let fixed = {
+        let decimals = usize::try_from(precision as i32 - 1 - exponent).unwrap_or(0);
+        trim_trailing_zeros(&format!("{value:.decimals$}"))
+    };
+    layout_g(
+        &mantissa,
+        exponent,
+        &fixed,
+        i32::try_from(precision).unwrap_or(i32::MAX),
+    )
+}
+
+/// Drop a fractional part's trailing zeros, and the point if nothing is left —
+/// `%g`'s default behaviour, which PostgreSQL relies on.
+fn trim_trailing_zeros(value: &str) -> String {
+    if !value.contains('.') {
+        return value.to_string();
+    }
+    value
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string()
+}
+
+/// `DBL_DIG` / `FLT_DIG`: the significant digits `%g` uses at
+/// `extra_float_digits = 0`, and the exponent at which each type switches to
+/// scientific notation.
+const FLOAT8_DIG: i32 = 15;
+const FLOAT4_DIG: i32 = 6;
+
+/// PostgreSQL `float8out`. The IEEE specials are spelled exactly as PostgreSQL
+/// does (`Infinity`/`-Infinity`/`NaN`). `extra_float_digits >= 1` — the default
+/// since PG 12 — uses the shortest round-tripping decimal; `<= 0` rounds to
+/// `DBL_DIG + extra_float_digits` significant digits.
+fn encode_float8_text(f: f64, extra_float_digits: i32) -> String {
     if f.is_nan() {
         return "NaN".to_string();
     }
     if f.is_infinite() {
         return if f > 0.0 { "Infinity" } else { "-Infinity" }.to_string();
+    }
+    if extra_float_digits <= 0 {
+        return format_g(
+            f,
+            usize::try_from(FLOAT8_DIG + extra_float_digits).unwrap_or(1),
+        );
     }
     let scientific = format!("{f:e}");
     let (mantissa, exponent) = scientific
@@ -235,17 +280,32 @@ fn encode_float4_text(f: f32) -> String {
     let exponent: i32 = exponent
         .parse()
         .expect("Rust's LowerExp exponent is a decimal integer");
-    if (-4..FLOAT4_FIXED_EXPONENT_LIMIT).contains(&exponent) {
-        format!("{f}")
-    } else {
-        let sign = if exponent < 0 { '-' } else { '+' };
-        format!("{mantissa}e{sign}{:02}", exponent.abs())
-    }
+    layout_g(mantissa, exponent, &format!("{f}"), FLOAT8_DIG)
 }
 
-/// `FLT_DIG`: the decimal exponent at which `float4out` switches to scientific
-/// notation. It matches `%g`'s precision-driven threshold.
-const FLOAT4_FIXED_EXPONENT_LIMIT: i32 = 6;
+/// PostgreSQL `float4out`, the `f32` counterpart of [`encode_float8_text`].
+fn encode_float4_text(f: f32, extra_float_digits: i32) -> String {
+    if f.is_nan() {
+        return "NaN".to_string();
+    }
+    if f.is_infinite() {
+        return if f > 0.0 { "Infinity" } else { "-Infinity" }.to_string();
+    }
+    if extra_float_digits <= 0 {
+        return format_g(
+            f64::from(f),
+            usize::try_from(FLOAT4_DIG + extra_float_digits).unwrap_or(1),
+        );
+    }
+    let scientific = format!("{f:e}");
+    let (mantissa, exponent) = scientific
+        .split_once('e')
+        .expect("Rust's LowerExp always emits an `e`");
+    let exponent: i32 = exponent
+        .parse()
+        .expect("Rust's LowerExp exponent is a decimal integer");
+    layout_g(mantissa, exponent, &format!("{f}"), FLOAT4_DIG)
+}
 
 /// PostgreSQL binary-format encoding of a (non-null) value.
 pub fn encode_binary(d: &Datum) -> Vec<u8> {
