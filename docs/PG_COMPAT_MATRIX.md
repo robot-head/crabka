@@ -14,21 +14,21 @@ tools/check-pg-compat-matrix.sh
 ## Current G-1/G-2 baseline
 
 The implemented rows reflect the current parser/executor surface. The
-authoritative PostgreSQL 18.4 core-schedule score is 25 / 231 exact in serial
-under the runner's explicit 20 MiB blocking-query memory policy, leaving 206
-failures across 175597 changed lines and 4564 hunks. Both PostgreSQL
+authoritative PostgreSQL 18.4 core-schedule score is 26 / 231 exact in serial
+under the runner's explicit 20 MiB blocking-query memory policy, leaving 205
+failures across 175492 changed lines and 4571 hunks. Both PostgreSQL
 self-checks pass 231 / 231, Gres completes all 231 files with a successful
 postflight probe and an empty infrastructure report. Parallel mode has not been
 re-measured since the type-input wave; its last certified figure was 22 / 231 at
 177530 changed lines / 4608 hunks.
 
-These waves add `int4`, `int2` and `roleattributes` to the exact set
-(`+3` files, `-1089` changed lines) with zero newly failing files, by
+These waves add `int4`, `int2`, `roleattributes` and `lseg` to the exact set
+(`+4` files, `-1194` changed lines) with zero newly failing files, by
 implementing PostgreSQL's real integer input grammar — `0x`/`0o`/`0b` bases and
 `_` separators — its exact out-of-range messages for every integer and float
 width, general source positions for type-input errors, the optional `TABLE`
 object-type keyword in `GRANT`/`REVOKE`, the `TABLE t` derived-table form, the
-`int2vector` type, and `ALTER ROLE` with persisted role attributes. Four files gain 22 lines between them
+`int2vector` and `lseg` types, and `ALTER ROLE` with persisted role attributes. Four files gain 22 lines between them
 because a caret is now correctly attached to errors Gres should not raise at
 all; those disappear with the underlying rejections. The checked-in monotone
 floor remains 6 / 231 because 56 baseline fingerprints still worsen and 19

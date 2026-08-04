@@ -2,18 +2,18 @@
 
 **Goal:** Make the unmodified PostgreSQL 18.4 core regression schedule pass against Gres, replacing the partial adopted-corpus percentage with a literal upstream `pg_regress` result.
 
-**Current state:** The authoritative serial result is `25/231` whole upstream
+**Current state:** The authoritative serial result is `26/231` whole upstream
 test files, not the adopted corpus's statement matches. The checked-in monotone
 floor remains `6/231`; this review is still non-monotone against that floor and
 does not ratchet it. Serial completes all 231 files with zero infrastructure
-failures, leaving 206 semantic failures across 175597 canonical changed lines
-and 4564 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
+failures, leaving 205 semantic failures across 175492 canonical changed lines
+and 4571 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
 postflight probe succeeds, and the infrastructure report is empty.
 
 The measurement immediately before this wave was `22/231` at 176686 changed
 lines / 4606 hunks, from the same runner and the same pinned corpus. The
-waves below are therefore `+3` exact files and `-1089` changed lines with
-**zero newly failing files**: `int4`, `int2` and `roleattributes` become exact,
+waves below are therefore `+4` exact files and `-1194` changed lines with
+**zero newly failing files**: `int4`, `int2`, `roleattributes` and `lseg` become exact,
 and 4 files gain a combined 22 lines.
 
 Those 4 — `timestamptz` +12, `horology` +6, `alter_table` +2, `timestamp` +2 —
@@ -26,7 +26,7 @@ together; no over-attachment remains. (Beware isolated re-checks of the `LMT`
 cases: they depend on the run's `TimeZone`, and a bare `psql` session reproduces
 neither PostgreSQL's success nor its error.)
 
-`int4`, `int2` and `roleattributes` join the 22 previously exact files (`test_setup`, `boolean`, `varchar`,
+`int4`, `int2`, `roleattributes` and `lseg` join the 22 previously exact files (`test_setup`, `boolean`, `varchar`,
 `md5`, `comments`, `mvcc`, `euc_kr`, `create_function_c`, `infinite_recurse`,
 `delete`, `security_label`, `async`, `dbsize`, `collate.icu.utf8`,
 `psql_crosstab`, `collate.linux.utf8`, `collate.windows.win1252`,
@@ -248,6 +248,11 @@ and their certified artifact describe current conformance.
       `ALTER USER MAPPING` spelling; `PASSWORD`, `VALID UNTIL`,
       `CONNECTION LIMIT` and role-level GUCs remain unmodelled, and the
       attributes do not yet gate authorization.
+- [x] Add the `lseg` type (OID 601) with `point(float8,float8)` and
+      `lseg(point,point)`, neither of which existed. Makes `lseg` exact and
+      also improves `create_index_spgist` (-50), `polymorphism` (-12),
+      `spgist` (-9) and `gist` (-6): the geometry opclass tests need the type
+      to exist at all.
 - [ ] Match remaining exact wire-visible diagnostics.
 - [ ] Attach `22008 date/time field value out of range` and `malformed array
       literal` source positions. Neither message names its type, so the
