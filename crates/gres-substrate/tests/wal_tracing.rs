@@ -279,7 +279,15 @@ async fn commit_emits_the_wal_span_tree_and_stamps_the_record_with_the_append_co
             == Some(&Value::String(topic.clone().into()))
     );
     check!(attribute(append, "pg.wal.frames") == Some(&Value::I64(1)));
-    check!(attribute(append, "pg.wal.first_offset") == attribute(append, "pg.wal.last_offset"));
+    // Pin the offsets themselves, not just their equality: when the recorder
+    // is stubbed out both attributes are absent and `None == None` passes.
+    assert!(let Some(&Value::I64(first_offset)) = attribute(append, "pg.wal.first_offset"));
+    assert!(let Some(&Value::I64(last_offset)) = attribute(append, "pg.wal.last_offset"));
+    check!(first_offset >= 0);
+    check!(
+        first_offset == last_offset,
+        "one frame was appended, so its first and last offset coincide"
+    );
     // Success leaves the status untouched — never `"OK"`.
     check!(append.status == Status::Unset);
     check!(commit.status == Status::Unset);

@@ -78,8 +78,14 @@ fn extract_sqlcommenter_reads_only_genuine_comment_regions() {
     // read, which a single-traceparent statement cannot.
     let literal_tag_behind_subtraction =
         format!("SELECT a - b, 'traceparent={OTHER}' FROM t /*traceparent='{TRACEPARENT}'*/");
+    // A literal whose *last* character is an escaped quote (`'a'''` is the SQL
+    // value `a'`). Mid-literal doubled quotes cannot catch a mis-read of the
+    // escape: closing early at the first quote of the pair and reopening at the
+    // second covers exactly the same span. Only a pair at the very end leaves
+    // the reopened literal unterminated, which abandons the scan.
+    let literal_ending_in_escaped_quote = format!("SELECT 'a''' /*traceparent='{TRACEPARENT}'*/");
 
-    let cases: [(&str, &str, Option<SqlCommenterTrace<'_>>); 29] = [
+    let cases: [(&str, &str, Option<SqlCommenterTrace<'_>>); 30] = [
         (
             "trailing block comment",
             &trailing,
@@ -164,6 +170,11 @@ fn extract_sqlcommenter_reads_only_genuine_comment_regions() {
         (
             "line comment at offset zero",
             &line_comment_at_start,
+            Some(found(TRACEPARENT, None)),
+        ),
+        (
+            "literal ending in an escaped quote",
+            &literal_ending_in_escaped_quote,
             Some(found(TRACEPARENT, None)),
         ),
         (
