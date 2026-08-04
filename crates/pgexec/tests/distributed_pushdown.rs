@@ -166,6 +166,7 @@ use crabka_pgwire::engine::{Engine, QueryResult, Session};
 fn table() -> Table {
     Table {
         id: 42,
+        owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
         name: RelationName::public("items"),
         columns: vec![
             Column::new("id", ColumnType::Int4),
@@ -944,6 +945,7 @@ fn unsupported_predicate_fails_clearly_for_strict_pushdown() {
 fn strict_predicate_rejects_const_types_the_scanner_cannot_execute() {
     let table = Table {
         id: 99,
+        owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
         name: RelationName::public("measurements"),
         columns: vec![Column::new("reading", ColumnType::Float8)],
         sharded: true,

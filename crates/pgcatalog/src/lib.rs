@@ -527,6 +527,10 @@ pub struct TablePrivilege {
 pub struct Table {
     pub id: TableId,
     pub name: RelationName,
+    /// The role that owns the relation — `pg_class.relowner`. Set from the
+    /// creating session's `current_user` and rewritten by
+    /// `ALTER TABLE … OWNER TO`.
+    pub owner: String,
     pub columns: Vec<Column>,
     /// True when the table uses global-visibility semantics and may span ranges.
     pub sharded: bool,
@@ -745,8 +749,15 @@ pub enum OperatorFamilyMemberKey {
     },
 }
 
-/// The bootstrap superuser every object is owned by.
-const BOOTSTRAP_ROLE: &str = "postgres";
+/// The bootstrap superuser. Every object a session does not name an owner for
+/// belongs to whoever created it; this is the role a cluster starts out as, and
+/// the owner the catalog's own convenience constructors use.
+pub const BOOTSTRAP_ROLE: &str = "postgres";
+
+/// The pseudo-role every role implicitly belongs to. It has no `pg_authid`
+/// row, cannot be granted membership of anything, and cannot own an object —
+/// so a session carrying it as its user has no authenticated role at all.
+pub const PUBLIC_ROLE: &str = "public";
 
 /// `public`'s owner.
 ///
@@ -2018,7 +2029,7 @@ pub fn rename_table_ops(
         return Err(CatalogError::DuplicateTable(new_name.to_string()));
     }
 
-    let (table_id, _, _, _, _) = deserialize_schema(&schema)?;
+    let (table_id, _, _, _, _, _) = deserialize_schema(&schema)?;
     let mut ops = vec![
         WriteOp::Delete {
             key: catalog_key(name),
@@ -2072,14 +2083,14 @@ pub fn rename_table_ops(
     Ok(ops)
 }
 
-/// Build the write batch for creating a table WITHOUT writing it.
+/// Build the write batch for creating a table (schema + sequence init +
+/// `next_table_id` bump) WITHOUT writing — caller persists the ops. Returns the
+/// allocated `TableId` alongside the batch. Validation (duplicate-table check,
+/// `next_table_id` read) is identical to `create_table`.
 ///
-/// The batch holds the schema record, the sequence init and the
-/// `next_table_id` bump. The caller persists the ops. This function returns the
-/// allocated `TableId` beside the batch. The executor uses it, so that DDL
-/// writes go through the durable-write seam and get replicated. Validation is
-/// identical to `create_table`: the duplicate-table check and the
-/// `next_table_id` read.
+/// The table is created under [`BOOTSTRAP_ROLE`]. Executor DDL names the
+/// session's `current_user` instead, through
+/// [`create_table_with_options_ops`].
 ///
 /// # Errors
 ///
@@ -2095,7 +2106,7 @@ pub fn create_table_ops(
         columns,
         TableOptions::default(),
         Vec::new(),
-        TableIdSource::Counter,
+        TableCreation::bootstrap(),
     )
 }
 
@@ -2129,6 +2140,31 @@ impl TableIdSource {
     }
 }
 
+/// The two creation-time facts a new relation needs beyond its schema: who it
+/// belongs to, and where its id comes from. Bundled so the create batteries keep
+/// a workable parameter count as more of them accumulate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TableCreation<'a> {
+    /// The role the new relation is owned by — the creating session's
+    /// `current_user`.
+    pub owner: &'a str,
+    /// Where the new relation's [`TableId`] comes from.
+    pub id: TableIdSource,
+}
+
+impl TableCreation<'_> {
+    /// Creation under [`BOOTSTRAP_ROLE`] from the shared counter — what the
+    /// catalog's own convenience constructors use when no session supplies a
+    /// user.
+    #[must_use]
+    pub const fn bootstrap() -> Self {
+        Self {
+            owner: BOOTSTRAP_ROLE,
+            id: TableIdSource::Counter,
+        }
+    }
+}
+
 #[expect(
     clippy::needless_pass_by_value,
     reason = "preserves the donor catalog API shape consumed by executor DDL paths"
@@ -2144,16 +2180,16 @@ pub fn create_table_with_options_ops(
     columns: Vec<Column>,
     options: TableOptions,
     checks: Vec<CheckConstraint>,
-    id: TableIdSource,
+    creation: TableCreation<'_>,
 ) -> Result<(TableId, Vec<WriteOp>), CatalogError> {
     if relation_exists(kv, name)? {
         return Err(CatalogError::DuplicateTable(name.to_string()));
     }
-    let (next, bump) = id.allocate(kv)?;
+    let (next, bump) = creation.id.allocate(kv)?;
     let mut batch = vec![
         WriteOp::Put {
             key: catalog_key(name),
-            value: serialize_schema(next, &columns, options, None, &checks),
+            value: serialize_schema(next, &columns, options, creation.owner, None, &checks),
         },
         WriteOp::Put {
             key: key::seq_key(next),
@@ -2259,12 +2295,10 @@ pub fn put_index_ops(index: &Index) -> Vec<WriteOp> {
     ]
 }
 
-/// Build the write batch that replaces an ordinary table's column list and
-/// `CHECK` constraints.
-///
-/// The batch keeps the table's id, storage options, and foreign metadata. Every
-/// `ALTER TABLE` subcommand that only edits the schema record goes through this
-/// function, so the encoding lives in exactly one place.
+/// Build the write batch that replaces an ordinary table's column list,
+/// `CHECK` constraints and owner, preserving its id, storage options, and
+/// foreign metadata. Every `ALTER TABLE` subcommand that only edits the schema
+/// record funnels through here so the encoding lives in exactly one place.
 ///
 /// # Errors
 ///
@@ -2274,14 +2308,15 @@ pub fn replace_table_schema_ops(
     name: &RelationName,
     columns: &[Column],
     checks: &[CheckConstraint],
+    owner: &str,
 ) -> Result<Vec<WriteOp>, CatalogError> {
     let bytes = kv
         .get(&catalog_key(name))?
         .ok_or_else(|| CatalogError::UndefinedTable(name.to_string()))?;
-    let (id, _, options, foreign, _) = deserialize_schema(&bytes)?;
+    let (id, _, options, _, foreign, _) = deserialize_schema(&bytes)?;
     Ok(vec![WriteOp::Put {
         key: catalog_key(name),
-        value: serialize_schema(id, columns, options, foreign.as_ref(), checks),
+        value: serialize_schema(id, columns, options, owner, foreign.as_ref(), checks),
     }])
 }
 
@@ -2324,13 +2359,13 @@ pub fn create_table_with_sharding_ops(
     options: TableOptions,
     sharding: Option<&ShardingStrategy>,
     checks: Vec<CheckConstraint>,
-    id: TableIdSource,
+    creation: TableCreation<'_>,
 ) -> Result<(TableId, Vec<WriteOp>), CatalogError> {
     if let Some(ShardingStrategy::Hash(hash)) = sharding {
         validate_hash_sharding_column_defs(&columns, hash)?;
     }
     let (table_id, mut ops) =
-        create_table_with_options_ops(kv, name, columns, options, checks, id)?;
+        create_table_with_options_ops(kv, name, columns, options, checks, creation)?;
     if let Some(strategy) = sharding {
         ops.push(WriteOp::Put {
             key: sharding_key(name),
@@ -2375,7 +2410,7 @@ pub fn create_table_with_options(
         columns,
         options,
         Vec::new(),
-        TableIdSource::Counter,
+        TableCreation::bootstrap(),
     )?;
     kv.write_batch(&batch)?;
     Ok(next)
@@ -2436,7 +2471,7 @@ fn table_from_schema_bytes(
     name: &RelationName,
     bytes: &[u8],
 ) -> Result<Table, CatalogError> {
-    let (id, columns, options, foreign, checks) = deserialize_schema(bytes)?;
+    let (id, columns, options, owner, foreign, checks) = deserialize_schema(bytes)?;
     let sharding = kv
         .get(&sharding_key(name))?
         .map(|bytes| deserialize_sharding(&bytes))
@@ -2445,6 +2480,7 @@ fn table_from_schema_bytes(
     Ok(Table {
         id,
         name: name.clone(),
+        owner,
         columns,
         sharded: options.sharded,
         sharding,
@@ -2518,13 +2554,14 @@ pub fn complete_table_conversion_ops(
     let bytes = kv
         .get(&catalog_key(name))?
         .ok_or_else(|| CatalogError::UndefinedTable(name.to_string()))?;
-    let (id, columns, options, foreign, checks) = deserialize_schema(&bytes)?;
+    let (id, columns, options, owner, foreign, checks) = deserialize_schema(&bytes)?;
     if foreign.is_some() {
         return Err(CatalogError::NotOrdinaryTable(name.to_string()));
     }
     let table = Table {
         id,
         name: name.clone(),
+        owner,
         columns,
         sharded: options.sharded,
         sharding: get_table_sharding(kv, name)?,
@@ -2542,6 +2579,7 @@ pub fn complete_table_conversion_ops(
             id,
             &table.columns,
             TableOptions { sharded: true },
+            &table.owner,
             None,
             &table.checks,
         ),
@@ -2939,7 +2977,7 @@ pub fn set_columns_not_null_ops(
     let bytes = kv
         .get(&catalog_key(table_name))?
         .ok_or_else(|| CatalogError::UndefinedTable(table_name.to_string()))?;
-    let (id, mut columns, options, foreign, checks) = deserialize_schema(&bytes)?;
+    let (id, mut columns, options, owner, foreign, checks) = deserialize_schema(&bytes)?;
     for name in not_null_columns {
         let column = columns
             .iter_mut()
@@ -2949,7 +2987,7 @@ pub fn set_columns_not_null_ops(
     }
     Ok(vec![WriteOp::Put {
         key: catalog_key(table_name),
-        value: serialize_schema(id, &columns, options, foreign.as_ref(), &checks),
+        value: serialize_schema(id, &columns, options, &owner, foreign.as_ref(), &checks),
     }])
 }
 
@@ -3877,6 +3915,72 @@ pub fn role_can_set(kv: &dyn Kv, member: &str, role: &str) -> Result<bool, Catal
     Ok(false)
 }
 
+/// Whether `member` holds the privileges of `role` — `PostgreSQL`'s
+/// `has_privs_of_role`, the predicate a row-level-security policy's `TO` list
+/// is matched with.
+///
+/// Deliberately *not* [`role_can_set`], and the two must not be merged. `SET
+/// ROLE` asks which identities a session may assume: it counts every
+/// membership and lets the bootstrap superuser assume anything, which is
+/// correct for that question. Privilege inheritance asks which rights apply
+/// *without* a `SET ROLE`, so it follows a membership only through a role that
+/// inherits and gives the bootstrap superuser no shortcut. Answering a policy's
+/// `TO` list with the looser predicate would match a permissive policy the
+/// session cannot actually exercise, and a permissive policy that matches
+/// grants rows.
+///
+/// One half of `PostgreSQL`'s rule has nothing to read here: a membership
+/// record is a bare key with no payload, so a grant made `WITH INHERIT FALSE`
+/// is indistinguishable from a plain one and every grant is followed. The
+/// `rolinherit` attribute of each role on the path *is* stored, and is
+/// honoured — a `NOINHERIT` role contributes only the identity it is.
+///
+/// `PUBLIC` is not a membership: it is matched where a policy's role list is
+/// read, not here.
+///
+/// # Errors
+///
+/// Returns catalog storage or corruption errors.
+pub fn role_has_privs_of(kv: &dyn Kv, member: &str, role: &str) -> Result<bool, CatalogError> {
+    if member == role {
+        return Ok(true);
+    }
+    let memberships = kv.scan_prefix(ROLE_MEMBERSHIP_PREFIX)?;
+    let mut pending = vec![member.to_string()];
+    let mut seen = HashSet::new();
+    while let Some(current) = pending.pop() {
+        if !seen.insert(current.clone()) {
+            continue;
+        }
+        if !role_inherits(kv, &current)? {
+            continue;
+        }
+        for (key, _) in &memberships {
+            let Some(parts) = key::key_parts(&key[ROLE_MEMBERSHIP_PREFIX.len()..], 2) else {
+                return Err(KvError::CorruptRow("role membership key is incomplete".into()).into());
+            };
+            if parts[0] == current {
+                if parts[1] == role {
+                    return Ok(true);
+                }
+                pending.push(parts[1].to_string());
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Whether `name`'s stored `rolinherit` is set. A role that does not exist
+/// inherits nothing, which is the same answer as `NOINHERIT` for every caller
+/// of [`role_has_privs_of`].
+fn role_inherits(kv: &dyn Kv, name: &str) -> Result<bool, CatalogError> {
+    match get_role(kv, name) {
+        Ok(role) => Ok(role.attributes.has(RoleAttribute::Inherit)),
+        Err(CatalogError::UndefinedObject(_)) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 /// Look up a role by name.
 ///
 /// # Errors
@@ -4738,7 +4842,7 @@ pub fn create_foreign_table(
         value_columns,
         server,
         options,
-        TableIdSource::Counter,
+        TableCreation::bootstrap(),
     )?;
     kv.write_batch(&batch)?;
     Ok(next)
@@ -4756,7 +4860,7 @@ pub fn create_foreign_table_ops(
     value_columns: Vec<Column>,
     server: &str,
     options: Vec<(String, String)>,
-    id: TableIdSource,
+    creation: TableCreation<'_>,
 ) -> Result<(TableId, Vec<WriteOp>), CatalogError> {
     let _ = get_server(kv, server)?;
 
@@ -4764,7 +4868,7 @@ pub fn create_foreign_table_ops(
         return Err(CatalogError::DuplicateTable(name.to_string()));
     }
 
-    let (next, bump) = id.allocate(kv)?;
+    let (next, bump) = creation.id.allocate(kv)?;
     let mut columns = envelope_columns();
     columns.extend(value_columns);
 
@@ -4776,7 +4880,14 @@ pub fn create_foreign_table_ops(
     let mut batch = vec![
         WriteOp::Put {
             key: catalog_key(name),
-            value: serialize_schema(next, &columns, TableOptions::default(), Some(&meta), &[]),
+            value: serialize_schema(
+                next,
+                &columns,
+                TableOptions::default(),
+                creation.owner,
+                Some(&meta),
+                &[],
+            ),
         },
         WriteOp::Put {
             key: key::seq_key(next),
@@ -5149,7 +5260,7 @@ mod tests {
             columns.clone(),
             TableOptions::default(),
             checks.clone(),
-            TableIdSource::Counter,
+            TableCreation::bootstrap(),
         )
         .expect("create ops");
         kv.write_batch(&ops).expect("write");
@@ -5177,7 +5288,8 @@ mod tests {
             expr: "id > 0".into(),
             validated: true,
         }];
-        let ops = replace_table_schema_ops(&kv, &rel("t"), &columns, &checks).expect("replace ops");
+        let ops = replace_table_schema_ops(&kv, &rel("t"), &columns, &checks, &before.owner)
+            .expect("replace ops");
         kv.write_batch(&ops).expect("write");
 
         let after = get_table(&kv, &rel("t")).expect("table");
@@ -5616,7 +5728,7 @@ mod tests {
                 TableOptions { sharded: true },
                 Some(&hash_sharding(columns)),
                 Vec::new(),
-                TableIdSource::Counter,
+                TableCreation::bootstrap(),
             );
             assert!(created.err() == expected, "{columns:?}");
 
@@ -5654,7 +5766,7 @@ mod tests {
             TableOptions { sharded: true },
             Some(&sharding),
             Vec::new(),
-            TableIdSource::Counter,
+            TableCreation::bootstrap(),
         )
         .expect("create with sharding");
         kv.write_batch(&ops).expect("write batch");

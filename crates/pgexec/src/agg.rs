@@ -2568,6 +2568,7 @@ mod tests {
     fn table() -> Table {
         Table {
             id: 1,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             name: RelationName::public("t"),
             columns: vec![
                 Column::new("k", ColumnType::Int4),
@@ -3430,6 +3431,7 @@ mod tests {
     fn ts_table() -> Table {
         Table {
             id: 1,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             name: RelationName::public("t"),
             columns: vec![
                 Column::new("k", ColumnType::Int4),
@@ -3496,6 +3498,7 @@ mod tests {
     fn collect_table() -> Table {
         Table {
             id: 3,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             name: RelationName::public("t"),
             columns: vec![
                 Column::new("k", ColumnType::Int4),
@@ -3779,6 +3782,7 @@ mod tests {
     fn stats_table() -> Table {
         Table {
             id: 2,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             name: RelationName::public("t"),
             columns: vec![
                 Column::new("s", ColumnType::Text),

@@ -2698,6 +2698,7 @@ mod tests {
     fn table() -> Table {
         Table {
             id: 1,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             name: RelationName::public("t"),
             columns: vec![
                 Column::new("s", ColumnType::Text),
@@ -2713,6 +2714,7 @@ mod tests {
     fn table_n() -> Table {
         Table {
             id: 1,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             name: RelationName::public("t"),
             columns: vec![Column::new("qn", ColumnType::Numeric(None))],
             sharded: false,

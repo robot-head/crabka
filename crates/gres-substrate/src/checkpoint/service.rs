@@ -1238,6 +1238,7 @@ mod tests {
         );
 
         let table = |id, name: &str, group: &str| crabka_pgcatalog::Table {
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             id,
             name: crabka_pgcatalog::RelationName::public(name),
             columns: vec![crabka_pgcatalog::Column::new(

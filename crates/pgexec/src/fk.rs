@@ -3052,6 +3052,7 @@ mod tests {
     fn one_constraint_writes_a_row_once_and_another_constraint_still_writes_it() {
         let table = Table {
             id: 4,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             name: RelationName::public("c"),
             columns: columns(&[("a", ColumnType::Int4)]),
             sharded: false,

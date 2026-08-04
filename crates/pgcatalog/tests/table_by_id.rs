@@ -1,9 +1,9 @@
 use assert2::assert;
 use crabka_pgcatalog::{
-    CatalogError, Column, RelationName, Table, TableId, TableIdSource, TableOptions,
-    create_foreign_table_ops, create_schema_ops, create_server, create_table_ops,
-    create_table_with_options_ops, drop_table_ops, get_table, read_next_table_id, relation_name_of,
-    rename_table_ops, set_next_table_id_op, table_by_id,
+    BOOTSTRAP_ROLE, CatalogError, Column, RelationName, Table, TableCreation, TableId,
+    TableIdSource, TableOptions, create_foreign_table_ops, create_schema_ops, create_server,
+    create_table_ops, create_table_with_options_ops, drop_table_ops, get_table, read_next_table_id,
+    relation_name_of, rename_table_ops, set_next_table_id_op, table_by_id,
 };
 use crabka_pgkv::{Kv, MemKv, WriteOp};
 use crabka_pgtypes::ColumnType;
@@ -42,6 +42,7 @@ fn create(kv: &dyn Kv, name: &RelationName) -> TableId {
 
 fn ordinary_table(id: TableId, name: &RelationName) -> Table {
     Table {
+        owner: BOOTSTRAP_ROLE.into(),
         id,
         name: name.clone(),
         columns: columns(),
@@ -134,7 +135,7 @@ fn foreign_table_resolves_by_id() {
         vec![Column::new("value", ColumnType::Text)],
         "kafka_srv",
         vec![("topic".into(), "ft".into())],
-        TableIdSource::Counter,
+        TableCreation::bootstrap(),
     )
     .expect("create foreign table ops");
     apply(&kv, &ops);
@@ -190,7 +191,10 @@ fn table_id_source_decides_whether_the_shared_counter_moves() {
             columns(),
             TableOptions::default(),
             Vec::new(),
-            source,
+            TableCreation {
+                owner: BOOTSTRAP_ROLE,
+                id: source,
+            },
         )
         .expect("create table ops");
         let counter_key = crabka_pgkv::key::meta_next_table_id_key();

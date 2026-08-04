@@ -199,6 +199,7 @@ pub(crate) fn relation_trigger_table(kv: &dyn Kv, name: &RelationName) -> Result
         .and_then(|oid| u32::try_from(oid).ok())
         .unwrap_or(0);
     Ok(Table {
+        owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
         id,
         name: view.name,
         columns: view.columns,

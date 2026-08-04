@@ -1,14 +1,10 @@
-//! Versioned (de)serialization of a table schema.
-//!
-//! The schema is the value stored under `crabka_pgkv::key::catalog_key(name)`.
-//! The format is a version byte, `table_id` (u32 BE), and a column count
-//! (u32 BE). Each column then holds a u32 name length, the name bytes, and a
-//! type tag. Table option flags (u8) follow, then a `foreign` flag byte.
-//!
-//! A `0` flag byte means an ordinary table and adds no further payload. A `1`
-//! flag byte means a foreign table. It adds a server name length (u32), the
-//! server name bytes, and an option count (u32). Each option then follows as a
-//! key length (u32), the key bytes, a value length (u32), and the value bytes.
+//! Versioned (de)serialization of a table schema — the value stored under
+//! `crabka_pgkv::key::catalog_key(name)`. Format: version byte, `table_id`
+//! (u32 BE), column count (u32 BE), then per column: u32 name length, name bytes,
+//! type tag; table option flags (u8); the owning role (u32 length + name bytes);
+//! followed by a `foreign` flag byte: `0` = ordinary table (no further payload),
+//! `1` = foreign table (server name len u32, server name bytes, option count
+//! u32, then per option: key len u32, key bytes, value len u32, value bytes).
 //!
 //! Foreign-data-wrapper, foreign-server, and user-mapping objects use their own
 //! simple binary format, not the schema format.
@@ -27,21 +23,23 @@ use crate::{
     TableOptions, UserMapping, View,
 };
 
-/// Everything [`deserialize_schema`] recovers from a stored table schema.
+/// Everything [`deserialize_schema`] recovers from a stored table schema:
+/// `table_id`, columns, storage options, owning role, foreign metadata, and
+/// `CHECK` constraints.
 pub type DecodedSchema = (
     u32,
     Vec<Column>,
     TableOptions,
+    String,
     Option<ForeignTableMeta>,
     Vec<CheckConstraint>,
 );
 
-/// The single schema-value format version.
-///
-/// Every table carries this version byte, ordinary and foreign alike. A flag
-/// byte after the column list separates ordinary (`0`) from foreign (`1`), and
-/// a `CHECK` constraint list closes the record.
-pub const SCHEMA_VERSION: u8 = 7;
+/// The single schema-value format version. All tables (ordinary and foreign)
+/// are written with this version byte; a flag byte after the column list
+/// distinguishes ordinary (`0`) from foreign (`1`), and a `CHECK` constraint
+/// list closes the record.
+pub const SCHEMA_VERSION: u8 = 8;
 
 const TABLE_OPTION_SHARDED: u8 = 0b0000_0001;
 const SHARDING_VERSION: u8 = 1;
@@ -752,10 +750,9 @@ fn read_options(cur: &mut &[u8]) -> Result<Vec<(String, String)>, KvError> {
 
 /// Serialize a table schema, ordinary or foreign.
 ///
-/// This function always writes version byte `5`, then the column list and the
-/// table option flags. A foreign flag closes that head: `0` for an ordinary
-/// table, and `1` for a foreign table, followed by the foreign metadata
-/// payload.
+/// Always writes [`SCHEMA_VERSION`], then the column list, table option flags,
+/// the owning role, and a foreign flag: `0` for an ordinary table, `1` for a
+/// foreign table followed by the foreign metadata payload.
 ///
 /// # Panics
 ///
@@ -765,6 +762,7 @@ pub fn serialize_schema(
     table_id: u32,
     columns: &[Column],
     options: TableOptions,
+    owner: &str,
     meta: Option<&ForeignTableMeta>,
     checks: &[CheckConstraint],
 ) -> Vec<u8> {
@@ -784,6 +782,7 @@ pub fn serialize_schema(
         out.push(identity_flag(c.identity));
     }
     out.push(table_option_flags(options));
+    write_str(&mut out, owner);
     match meta {
         None => out.push(0),
         Some(m) => {
@@ -1452,14 +1451,11 @@ pub fn deserialize_sequence(bytes: &[u8]) -> Result<Sequence, KvError> {
     })
 }
 
-/// Deserialize a table schema.
+/// Deserialize a table schema into a [`DecodedSchema`].
 ///
-/// This function returns
-/// `(table_id, columns, table_options, Option<ForeignTableMeta>)`.
-///
-/// It returns `KvError::CorruptRow` if the version byte is not `5`, if the
-/// table option flags contain unknown bits, or if the foreign flag after the
-/// option flags is not `0` (ordinary) or `1` (foreign).
+/// Returns `KvError::CorruptRow` if the version byte is not [`SCHEMA_VERSION`],
+/// if the table option flags contain unknown bits, or if the foreign flag after
+/// the owner is not `0` (ordinary) or `1` (foreign).
 ///
 /// # Errors
 ///
@@ -1505,6 +1501,7 @@ pub fn deserialize_schema(bytes: &[u8]) -> Result<DecodedSchema, KvError> {
         });
     }
     let options = read_table_options(take_u8(&mut cur)?)?;
+    let owner = read_string(&mut cur)?;
     let foreign = match take_u8(&mut cur)? {
         0 => None,
         1 => {
@@ -1517,7 +1514,7 @@ pub fn deserialize_schema(bytes: &[u8]) -> Result<DecodedSchema, KvError> {
         }
     };
     let checks = read_checks(&mut cur)?;
-    Ok((table_id, columns, options, foreign, checks))
+    Ok((table_id, columns, options, owner, foreign, checks))
 }
 
 // ── Foreign-data wrapper ──────────────────────────────────────────────────────
@@ -2017,8 +2014,15 @@ mod tests {
             Column::new("flag", ColumnType::Char(Some(2))),
             Column::new("public_id", ColumnType::Uuid),
         ];
-        let bytes = serialize_schema(table_id, &columns, TableOptions::default(), None, &[]);
-        let (id, cols, options, foreign, _) = deserialize_schema(&bytes).expect("decode");
+        let bytes = serialize_schema(
+            table_id,
+            &columns,
+            TableOptions::default(),
+            "postgres",
+            None,
+            &[],
+        );
+        let (id, cols, options, _owner, foreign, _) = deserialize_schema(&bytes).expect("decode");
         assert_eq!(id, table_id);
         assert_eq!(cols, columns);
         assert!(!options.sharded);
@@ -2037,8 +2041,16 @@ mod tests {
             identity: None,
         }];
 
-        let bytes = serialize_schema(table_id, &columns, TableOptions::default(), None, &[]);
-        let (_id, decoded, _options, _foreign, _) = deserialize_schema(&bytes).expect("decode");
+        let bytes = serialize_schema(
+            table_id,
+            &columns,
+            TableOptions::default(),
+            "postgres",
+            None,
+            &[],
+        );
+        let (_id, decoded, _options, _owner, _foreign, _) =
+            deserialize_schema(&bytes).expect("decode");
 
         assert_eq!(decoded, columns);
     }
@@ -2116,8 +2128,9 @@ mod tests {
             },
         ];
 
-        let bytes = serialize_schema(31, &columns, TableOptions::default(), None, &[]);
-        let (_id, decoded, _options, _foreign, _) = deserialize_schema(&bytes).expect("decode");
+        let bytes = serialize_schema(31, &columns, TableOptions::default(), "postgres", None, &[]);
+        let (_id, decoded, _options, _owner, _foreign, _) =
+            deserialize_schema(&bytes).expect("decode");
 
         assert!(decoded == columns);
     }
@@ -2132,8 +2145,15 @@ mod tests {
             Column::new("fired_utc", ColumnType::Timestamptz),
             Column::new("duration", ColumnType::Interval),
         ];
-        let bytes = serialize_schema(table_id, &columns, TableOptions::default(), None, &[]);
-        let (id, cols, options, foreign, _) = deserialize_schema(&bytes).expect("decode");
+        let bytes = serialize_schema(
+            table_id,
+            &columns,
+            TableOptions::default(),
+            "postgres",
+            None,
+            &[],
+        );
+        let (id, cols, options, _owner, foreign, _) = deserialize_schema(&bytes).expect("decode");
         assert_eq!(id, table_id);
         assert_eq!(cols, columns);
         assert!(!options.sharded);
@@ -2165,8 +2185,15 @@ mod tests {
             "ranges",
             ColumnType::Array(ElemType::Range(range)),
         ));
-        let bytes = serialize_schema(table_id, &columns, TableOptions::default(), None, &[]);
-        let (id, cols, _options, _foreign, _) = deserialize_schema(&bytes).expect("decode");
+        let bytes = serialize_schema(
+            table_id,
+            &columns,
+            TableOptions::default(),
+            "postgres",
+            None,
+            &[],
+        );
+        let (id, cols, _options, _owner, _foreign, _) = deserialize_schema(&bytes).expect("decode");
         assert!(id == table_id);
         assert!(cols == columns);
     }
@@ -2179,7 +2206,8 @@ mod tests {
             "arr",
             ColumnType::Array(crabka_pgtypes::ElemType::Int4),
         )];
-        let mut bytes = serialize_schema(3, &columns, TableOptions::default(), None, &[]);
+        let mut bytes =
+            serialize_schema(3, &columns, TableOptions::default(), "postgres", None, &[]);
         // The element code is the byte after the ARRAY tag; corrupt it.
         let tag_at = bytes
             .iter()
@@ -2300,10 +2328,11 @@ mod tests {
             table_id,
             &columns,
             TableOptions::default(),
+            "postgres",
             Some(&meta),
             &[],
         );
-        let (id, cols, options, foreign, _) = deserialize_schema(&bytes).expect("decode");
+        let (id, cols, options, _owner, foreign, _) = deserialize_schema(&bytes).expect("decode");
         assert_eq!(id, table_id);
         assert_eq!(cols, columns);
         assert!(!options.sharded);
@@ -2416,8 +2445,8 @@ mod tests {
     #[test]
     fn ordinary_table_flag_zero_roundtrip() {
         let columns = vec![Column::new("x", ColumnType::Int4)];
-        let bytes = serialize_schema(1, &columns, TableOptions::default(), None, &[]);
-        let (_, _, options, foreign, _) =
+        let bytes = serialize_schema(1, &columns, TableOptions::default(), "postgres", None, &[]);
+        let (_, _, options, _owner, foreign, _) =
             deserialize_schema(&bytes).expect("ordinary table decode");
         assert!(!options.sharded, "ordinary table has no sharded flag");
         assert!(foreign.is_none(), "ordinary table has no foreign meta");
@@ -2426,8 +2455,16 @@ mod tests {
     #[test]
     fn sharded_option_roundtrips() {
         let columns = vec![Column::new("x", ColumnType::Int4)];
-        let bytes = serialize_schema(1, &columns, TableOptions { sharded: true }, None, &[]);
-        let (_, _, options, foreign, _) = deserialize_schema(&bytes).expect("sharded decode");
+        let bytes = serialize_schema(
+            1,
+            &columns,
+            TableOptions { sharded: true },
+            "postgres",
+            None,
+            &[],
+        );
+        let (_, _, options, _owner, foreign, _) =
+            deserialize_schema(&bytes).expect("sharded decode");
         assert!(options.sharded);
         assert!(foreign.is_none());
     }
@@ -2703,17 +2740,29 @@ mod tests {
     #[test]
     fn unknown_flag_byte_errors() {
         let columns = vec![Column::new("x", ColumnType::Int4)];
-        let mut bytes = serialize_schema(1, &columns, TableOptions::default(), None, &[]);
-        let last = bytes.last_mut().expect("foreign flag byte exists");
-        *last = 2;
+        let mut bytes =
+            serialize_schema(1, &columns, TableOptions::default(), "postgres", None, &[]);
+        // The foreign flag is the byte before the trailing `CHECK` count.
+        let foreign_flag = bytes.len() - 5;
+        bytes[foreign_flag] = 2;
         assert!(deserialize_schema(&bytes).is_err());
     }
 
+    /// The reader must refuse an option bit it does not know rather than
+    /// treating it as clear: a later version puts row-level security in one of
+    /// those bits, and reading it as "off" is a silent security bypass.
     #[test]
     fn unknown_table_option_flags_error() {
         let columns = vec![Column::new("x", ColumnType::Int4)];
-        let mut bytes = serialize_schema(1, &columns, TableOptions::default(), None, &[]);
-        let option_flag_offset = bytes.len() - 2;
+        let encode = |options| serialize_schema(1, &columns, options, "postgres", None, &[]);
+        let mut bytes = encode(TableOptions::default());
+        // The one option the encoder knows changes exactly one byte, which
+        // locates the flags without restating the layout here.
+        let option_flag_offset = bytes
+            .iter()
+            .zip(encode(TableOptions { sharded: true }))
+            .position(|(clear, set)| *clear != set)
+            .expect("a set option changes the record");
         bytes[option_flag_offset] = 0b1000_0000;
         assert!(deserialize_schema(&bytes).is_err());
     }

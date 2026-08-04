@@ -152,6 +152,7 @@ mod tests {
     fn tbl(name: &str, cols: &[(&str, ColumnType)]) -> Table {
         Table {
             id: 1,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             name: RelationName::public(name),
             columns: cols.iter().map(|(n, t)| Column::new(*n, *t)).collect(),
             sharded: false,

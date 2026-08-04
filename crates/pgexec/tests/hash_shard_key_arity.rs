@@ -62,7 +62,7 @@ fn engine_with_catalog_sharding(
         TableOptions { sharded: true },
         Some(sharding),
         Vec::new(),
-        crabka_pgcatalog::TableIdSource::Counter,
+        crabka_pgcatalog::TableCreation::bootstrap(),
     )
     .expect("catalog write batch");
     kv.write_batch(&ops).expect("attach sharding");
@@ -210,7 +210,7 @@ fn the_catalog_api_refuses_a_multi_column_hash_shard_key() {
             TableOptions { sharded: true },
             Some(&hash_sharding(&["a", "b"])),
             Vec::new(),
-            crabka_pgcatalog::TableIdSource::Counter,
+            crabka_pgcatalog::TableCreation::bootstrap(),
         )
         .expect_err("a multi-column hash shard key has no row encoding"),
         crabka_pgcatalog::set_table_sharding_ops(

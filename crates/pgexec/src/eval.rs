@@ -3583,6 +3583,7 @@ mod tests {
     fn table() -> Table {
         Table {
             id: 1,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             name: RelationName::public("t"),
             columns: vec![
                 Column::new("a", ColumnType::Int4),
@@ -4084,6 +4085,7 @@ mod tests {
         // infer_type agrees on the result types for these cells (no plan/eval drift).
         let tstz_col = Table {
             id: 9,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             name: RelationName::public("tz"),
             columns: vec![
                 Column::new("ts", ColumnType::Timestamptz),
@@ -4322,6 +4324,7 @@ mod tests {
         // a float8 column → bool has no defined cast.
         let ft = Table {
             id: 1,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             name: RelationName::public("t"),
             columns: vec![Column::new("a", ColumnType::Float8)],
             sharded: false,
@@ -4417,6 +4420,7 @@ mod tests {
     fn jt() -> Table {
         Table {
             id: 2,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             name: RelationName::public("jt"),
             columns: vec![
                 Column::new("j", ColumnType::Jsonb),

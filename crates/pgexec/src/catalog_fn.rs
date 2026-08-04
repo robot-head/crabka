@@ -1962,6 +1962,7 @@ mod tests {
         ] {
             let table = Table {
                 id: 1,
+                owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
                 name: RelationName::public("size_domains"),
                 columns: vec![Column::new("v", ty)],
                 sharded: false,
@@ -1983,6 +1984,7 @@ mod tests {
         let int4_domain = domain(900_103, "size_int4_domain", ColumnType::Int4);
         let table = Table {
             id: 1,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             name: RelationName::public("size_domains"),
             columns: vec![Column::new("v", int4_domain)],
             sharded: false,

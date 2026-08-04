@@ -174,6 +174,7 @@ mod tests {
     fn raw_value_table() -> Table {
         Table {
             id: 1,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             name: crabka_pgcatalog::RelationName::public("events"),
             columns: vec![
                 Column::new("_partition", ColumnType::Int4),

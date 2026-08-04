@@ -108,6 +108,31 @@ impl ForeignCtx<'_> {
                 crabka_pgcatalog::TableIdSource::Reserved,
             )
     }
+
+    /// The role a relation this session creates belongs to.
+    ///
+    /// `PUBLIC` is a pseudo-role: it owns nothing, and a session carries it as
+    /// the placeholder for "no role was authenticated". Such a connection is
+    /// acting as the bootstrap superuser, so that is the role its relations are
+    /// recorded under — never `public`, which no `pg_authid` row and no
+    /// `pg_get_userbyid` answer corresponds to.
+    fn owner(&self) -> &str {
+        if self.current_user == crabka_pgcatalog::PUBLIC_ROLE {
+            crabka_pgcatalog::BOOTSTRAP_ROLE
+        } else {
+            self.current_user
+        }
+    }
+
+    /// Ownership and id allocation for a relation this statement creates. Every
+    /// `CREATE` path in `execute_ddl` goes through here, so a new relation
+    /// cannot acquire an owner other than the session's own without naming one.
+    fn table_creation(&self) -> crabka_pgcatalog::TableCreation<'_> {
+        crabka_pgcatalog::TableCreation {
+            owner: self.owner(),
+            id: self.table_id(),
+        }
+    }
 }
 
 /// Map a refused blocking acquire to its statement-level error (both 40P01).
@@ -476,7 +501,7 @@ pub(crate) fn execute_ddl(
                 crabka_pgcatalog::TableOptions { sharded: *sharded },
                 sharding.as_ref(),
                 checks.clone(),
-                fctx.table_id(),
+                fctx.table_creation(),
             )?;
             if let Some(tablespace) = tablespace {
                 let oid = resolve_relation_tablespace_oid(kv, tablespace)?;
@@ -485,6 +510,7 @@ pub(crate) fn execute_ddl(
             let table = crabka_pgcatalog::Table {
                 id,
                 name: name.clone(),
+                owner: fctx.owner().to_string(),
                 columns: cols,
                 sharded: *sharded,
                 sharding,
@@ -723,15 +749,7 @@ pub(crate) fn execute_ddl(
             if_exists,
             actions,
         } => match resolve_relation(kv, resolution, table, SchemaDisposition::Utility) {
-            Ok(name) => alter_table_ops(
-                kv,
-                resolution,
-                &name,
-                *if_exists,
-                actions,
-                fctx.own_xid,
-                fctx.catalog,
-            ),
+            Ok(name) => alter_table_ops(kv, &name, *if_exists, actions, fctx),
             // `ALTER TABLE IF EXISTS nope.t` skips rather than reporting the
             // schema, as PostgreSQL does.
             Err(error) if *if_exists && is_missing_schema(&error) => {
@@ -1207,7 +1225,7 @@ pub(crate) fn execute_ddl(
                 cols,
                 server,
                 options.clone(),
-                fctx.table_id(),
+                fctx.table_creation(),
             )?;
             Ok((command("CREATE FOREIGN TABLE"), ops))
         }
@@ -1290,7 +1308,10 @@ pub(crate) fn execute_ddl(
                     table.columns,
                     &srv.name,
                     table.options,
-                    crabka_pgcatalog::TableIdSource::Reserved(id),
+                    crabka_pgcatalog::TableCreation {
+                        owner: fctx.owner(),
+                        id: crabka_pgcatalog::TableIdSource::Reserved(id),
+                    },
                 )?;
                 ops.append(&mut table_ops);
             }
@@ -13207,6 +13228,7 @@ fn virtual_table(name: &str) -> Option<&'static str> {
 fn virtual_catalog_table(name: &str) -> Table {
     Table {
         id: virtual_relation_oid(name) as u32,
+        owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
         name: crabka_pgcatalog::RelationName::new(
             virtual_relation_schema(name),
             virtual_relation_name(name),
@@ -13632,6 +13654,11 @@ fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         .iter()
         .map(|index| index.table_id)
         .collect::<std::collections::BTreeSet<_>>();
+    let role_oids = crate::catalog_rel::role_oids(catalog_kv)?;
+    // An index is owned by whoever owns the table it indexes, so the table
+    // pass records what the index pass needs rather than reading the catalog
+    // again per index.
+    let mut table_owner_oids = std::collections::BTreeMap::new();
     let mut rows = Vec::new();
     for table in crabka_pgcatalog::list_tables(catalog_kv)? {
         let partitioned = crate::partition::is_partitioned(catalog_kv, &table.name)?;
@@ -13653,6 +13680,8 @@ fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         row.relispartition = crate::partition::parent_of(catalog_kv, &table.name)?.is_some();
         row.relpersistence = crabka_pgcatalog::relpersistence_of(&table.name.schema);
         row.reltablespace = crabka_pgcatalog::relation_tablespace_oid(catalog_kv, &table.name)?;
+        row.relowner = role_oid_of(&role_oids, &table.owner);
+        table_owner_oids.insert(table.name.clone(), row.relowner);
         rows.push(row.build()?);
     }
     for view in crabka_pgcatalog::list_views(catalog_kv)? {
@@ -13752,9 +13781,23 @@ fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         row.relpersistence = crabka_pgcatalog::relpersistence_of(&index.table.schema);
         row.reltablespace =
             crabka_pgcatalog::relation_tablespace_oid(catalog_kv, &index.qualified_name())?;
+        row.relowner = table_owner_oids
+            .get(&index.table)
+            .copied()
+            .unwrap_or(crate::catalog_fn::BOOTSTRAP_ROLE_OID);
         rows.push(row.build()?);
     }
     Ok(rows)
+}
+
+/// The `pg_authid.oid` an owning role projects as. A name no role row answers
+/// to — the role was dropped out from under the relation — falls back to the
+/// bootstrap superuser, which is the same fallback `pg_tablespace` takes.
+fn role_oid_of(role_oids: &std::collections::BTreeMap<String, i32>, owner: &str) -> i32 {
+    role_oids
+        .get(owner)
+        .copied()
+        .unwrap_or(crate::catalog_fn::BOOTSTRAP_ROLE_OID)
 }
 
 /// PostgreSQL catalogs are base relations except for its SQL views. Relation-
@@ -13812,6 +13855,10 @@ struct PgClassRow<'a> {
     relfilenode: i32,
     relispartition: bool,
     reltablespace: u32,
+    /// The `pg_authid.oid` of the owning role. Only stored relations carry a
+    /// real owner; the catalog's own relations belong to the bootstrap
+    /// superuser, which is the default here.
+    relowner: i32,
     /// `p` for an ordinary relation, `t` for one in a session's temporary
     /// namespace. That is where every temporary relation is, so the schema is
     /// the whole fact and nothing stores it twice.
@@ -13839,6 +13886,7 @@ impl<'a> PgClassRow<'a> {
             relfilenode,
             relispartition: false,
             reltablespace: 0,
+            relowner: crate::catalog_fn::BOOTSTRAP_ROLE_OID,
             relpersistence: 'p',
         }
     }
@@ -13854,7 +13902,7 @@ impl<'a> PgClassRow<'a> {
             int(self.relnamespace),
             int(self.reltype),
             int(0),
-            int(crate::catalog_fn::BOOTSTRAP_ROLE_OID),
+            int(self.relowner),
             int(self.relam),
             int(self.relfilenode),
             int(i32::try_from(self.reltablespace)
@@ -13918,6 +13966,7 @@ fn pg_attribute_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> 
             .map_err(|_| ExecError::Unsupported("composite relation oid exceeds int4".into()))?;
         let table = crabka_pgcatalog::Table {
             id: 0,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             name: crabka_pgcatalog::RelationName::new(ty.schema.clone(), ty.name.clone()),
             columns: fields
                 .iter()
@@ -14683,6 +14732,7 @@ fn builtin_catalog_index_table(index: &BuiltinCatalogOidIndex) -> Table {
         .expect("catalog oid index refers to a catalog with an oid column");
     Table {
         id: u32::try_from(index.oid).expect("built-in index oid is positive"),
+        owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
         name: crabka_pgcatalog::RelationName::new(crate::search_path::PG_CATALOG, index.name),
         columns: vec![oid_column],
         sharded: false,
@@ -17636,6 +17686,7 @@ fn create_table_definition(
     // unknown column is a 42703 at DDL time rather than at the first INSERT.
     let table_for_validation = Table {
         id: 0,
+        owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
         name: name.clone(),
         columns: cols.clone(),
         sharded: false,
@@ -18506,6 +18557,7 @@ impl AlterTableState {
             &self.table.name,
             &self.table.columns,
             &self.table.checks,
+            &self.table.owner,
         )?;
         ops.extend_from_slice(&self.ops);
         Ok(StagedKv::new(kv, &ops))
@@ -18585,14 +18637,14 @@ fn validate_alter_constraint_columns(
 /// `ALTER TABLE [IF EXISTS] name <action> [, …]`.
 fn alter_table_ops(
     kv: &dyn Kv,
-    resolution: &crate::relname::ResolutionScope,
     table_name: &crabka_pgcatalog::RelationName,
     if_exists: bool,
     actions: &[crabka_pgparser::ast::AlterTableAction],
-    own_xid: Option<u64>,
-    catalog: Option<&Arc<dyn Kv>>,
+    fctx: ForeignCtx<'_>,
 ) -> Result<(QueryResult, Vec<crabka_pgkv::WriteOp>), ExecError> {
     use crabka_pgparser::ast::AlterTableAction as Action;
+
+    let resolution = fctx.resolution;
 
     // RENAME TO is a statement of its own in PostgreSQL's grammar, so it never
     // shares a comma list and keeps its dedicated catalog path.
@@ -18657,7 +18709,7 @@ fn alter_table_ops(
     let mut ordered_actions = actions.iter().collect::<Vec<_>>();
     ordered_actions.sort_by_key(|action| alter_table_action_pass(action));
     for action in ordered_actions {
-        alter_table_action_ops(kv, resolution, &mut state, action, own_xid, catalog)?;
+        alter_table_action_ops(kv, &mut state, action, fctx)?;
     }
 
     // The schema record is written once, after every action has folded into the
@@ -18667,6 +18719,7 @@ fn alter_table_ops(
         table_name,
         &state.table.columns,
         &state.table.checks,
+        &state.table.owner,
     )?;
     if let Some(rows) = state.rows {
         for (key, xmin, xmax, row) in rows {
@@ -18759,14 +18812,15 @@ fn alter_action_label(action: &crabka_pgparser::ast::AlterTableAction) -> &'stat
 )]
 fn alter_table_action_ops(
     kv: &dyn Kv,
-    resolution: &crate::relname::ResolutionScope,
     state: &mut AlterTableState,
     action: &crabka_pgparser::ast::AlterTableAction,
-    own_xid: Option<u64>,
-    catalog: Option<&Arc<dyn Kv>>,
+    fctx: ForeignCtx<'_>,
 ) -> Result<(), ExecError> {
     use crabka_pgparser::ast::AlterTableAction as Action;
 
+    let resolution = fctx.resolution;
+    let own_xid = fctx.own_xid;
+    let catalog = fctx.catalog;
     let ddl_ctx = crate::clock::EvalCtx::for_ddl(resolution, catalog);
     let table_name = state.table.name.clone();
     match action {
@@ -19238,18 +19292,30 @@ fn alter_table_action_ops(
                 table: table_name.to_string(),
             })
         }
-        // Heap storage parameters and ownership have no counterpart in Crabka's
-        // storage/role model, and PostgreSQL's observable outcome for a table
-        // that has neither is the same: the command succeeds and changes no
-        // queryable state.
+        // Heap storage parameters have no counterpart in Crabka's storage
+        // model, and PostgreSQL's observable outcome for a table that has none
+        // is the same: the command succeeds and changes no queryable state.
         Action::SetStorageParameters(_) | Action::ResetStorageParameters(_) => Ok(()),
         Action::OwnerTo(role) => {
-            if crabka_pgcatalog::role_exists(kv, role)? || role == "current_user" {
-                return Ok(());
+            // `CURRENT_USER`/`USER` in an owner position name the session's
+            // role, the same spelling `ALTER TABLESPACE … OWNER TO` accepts.
+            let role = match role.as_str() {
+                "current_user" | "user" => fctx.owner(),
+                named => named,
+            };
+            // `PUBLIC` is a pseudo-role with no `pg_authid` row, so PostgreSQL
+            // answers a handover to it the same way it answers a handover to a
+            // name nobody holds. Letting it through would leave a relation
+            // owned by something no ownership test can ever match.
+            if role == crabka_pgcatalog::PUBLIC_ROLE || !crabka_pgcatalog::role_exists(kv, role)? {
+                return Err(ExecError::UndefinedObject(format!(
+                    "role \"{role}\" does not exist"
+                )));
             }
-            Err(ExecError::UndefinedObject(format!(
-                "role \"{role}\" does not exist"
-            )))
+            // The schema record is rewritten once, after every action; folding
+            // the new owner into the working table is what makes it durable.
+            state.table.owner = role.to_string();
+            Ok(())
         }
         Action::SetTriggerMode { selector, mode } => {
             state.ops.extend(crate::trigger::set_table_trigger_mode(
@@ -23804,6 +23870,7 @@ mod tests {
         // Table id 1, single int4 column "val".
         let table = Table {
             id: 1,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             name: RelationName::public("t"),
             columns: vec![Column::new("val", ColumnType::Int4)],
             sharded: false,
@@ -24859,6 +24926,7 @@ mod tests {
 
         let table = crabka_pgcatalog::Table {
             id: 1,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             name: RelationName::public("t"),
             columns: vec![Column::new("k", ColumnType::Jsonb)],
             sharded: true,
@@ -24951,6 +25019,7 @@ mod tests {
 
         let table = crabka_pgcatalog::Table {
             id: 1,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             name: RelationName::public("t"),
             columns: vec![
                 Column::new("a", ColumnType::Int4),
@@ -25170,6 +25239,7 @@ mod tests {
     ) -> (crabka_pgcatalog::Table, Vec<crabka_pgcatalog::Index>) {
         let table = crabka_pgcatalog::Table {
             id: 1,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             name: RelationName::public("t"),
             columns: columns
                 .iter()

@@ -2356,6 +2356,7 @@ mod cursor_contract_tests {
         };
         let table = Table {
             id: 42,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             name: RelationName::public("items"),
             columns: vec![Column::new("id", ColumnType::Int8)],
             sharded: true,
@@ -2399,6 +2400,7 @@ mod cursor_contract_tests {
         };
         let table = Table {
             id: 42,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             name: RelationName::public("items"),
             columns: vec![Column::new("id", ColumnType::Int8)],
             sharded: false,
@@ -2476,6 +2478,7 @@ mod streaming_aggregate_tests {
     fn table() -> Table {
         Table {
             id: 42,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             name: RelationName::public("items"),
             columns: vec![Column::new("v", ColumnType::Int8)],
             sharded: false,

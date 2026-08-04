@@ -4356,6 +4356,7 @@ mod tests {
     fn sharded_table() -> Table {
         Table {
             id: 11,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             name: crabka_pgcatalog::RelationName::public("t11"),
             columns: vec![Column::new("id", ColumnType::Int4)],
             sharded: true,

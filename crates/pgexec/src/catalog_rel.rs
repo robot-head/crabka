@@ -2362,7 +2362,7 @@ fn pg_tables_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             vec![
                 text(&table.name.schema),
                 text(&table.name.name),
-                text(crate::catalog_fn::OBJECT_OWNER),
+                text(&table.owner),
                 Datum::Null,
                 Datum::Bool(indexed.contains(&table.name)),
                 Datum::Bool(false),
@@ -3664,7 +3664,7 @@ mod tests {
                 expr: "c > 0".to_string(),
                 validated: true,
             }],
-            crabka_pgcatalog::TableIdSource::Counter,
+            crabka_pgcatalog::TableCreation::bootstrap(),
         )
         .expect("table ops");
         kv.write_batch(&ops).expect("write table");
