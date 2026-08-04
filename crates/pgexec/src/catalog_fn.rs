@@ -1075,7 +1075,9 @@ fn relation_size_bytes(catalog_kv: &dyn Kv, data_kv: &dyn Kv, oid: i32) -> Resul
 fn indexes_size_bytes(catalog_kv: &dyn Kv, data_kv: &dyn Kv, oid: i32) -> Result<i64, ExecError> {
     let Some(table_id) = crabka_pgcatalog::list_tables(catalog_kv)?
         .into_iter()
-        .find_map(|table| (i32::try_from(table.id).ok() == Some(oid)).then_some(table.id))
+        .find_map(|table| {
+            (crate::catalog_rel::table_relation_oid(table.id).ok() == Some(oid)).then_some(table.id)
+        })
     else {
         return Ok(0);
     };
@@ -1275,7 +1277,7 @@ pub(crate) fn relation_name_by_oid(kv: &dyn Kv, oid: i32) -> Result<Option<Strin
         }
     }
     for table in crabka_pgcatalog::list_tables(kv)? {
-        if i64::from(oid) == i64::from(table.id) {
+        if crate::catalog_rel::table_relation_oid(table.id)? == oid {
             return Ok(Some(quote_relation_name(&table.name)));
         }
     }
@@ -1402,7 +1404,7 @@ fn description(
     }
     let oid = resolve_relation_oid(kv, scope, object)?;
     for table in crabka_pgcatalog::list_tables(kv)? {
-        if i64::from(oid) != i64::from(table.id) {
+        if crate::catalog_rel::table_relation_oid(table.id)? != oid {
             continue;
         }
         if subid == 0 {
@@ -2122,7 +2124,8 @@ mod tests {
             crate::catalog_rel::index_relation_oid(ordinary_id).expect("index oid");
         let expression_relation_oid =
             crate::catalog_rel::index_relation_oid(expression_id).expect("expression index oid");
-        let table_relation_oid = i32::try_from(table_id).expect("table oid");
+        let table_relation_oid =
+            crate::catalog_rel::table_relation_oid(table_id).expect("table oid");
         assert!(
             relation_size(&catalog, &data, &scope, &Datum::Int4(ordinary_relation_oid),)
                 .expect("ordinary size")

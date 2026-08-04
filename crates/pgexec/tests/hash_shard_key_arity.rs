@@ -166,7 +166,9 @@ async fn a_regclass_shard_key_hashes_on_the_relation_oid() {
         .await
         .expect("a regclass shard key has a write-path encoding");
 
-    let target_oid = i32::try_from(
+    // A `regclass` value carries the table's `pg_class` oid, which is its
+    // catalog id inside the table oid band — not the bare id.
+    let target_oid = crabka_pgexec::table_relation_oid(
         engine
             .catalog_table(&RelationName::public("target"))
             .expect("catalog")

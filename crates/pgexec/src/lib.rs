@@ -118,6 +118,9 @@ use std::{
     sync::{Arc, Mutex, OnceLock, Weak, atomic::AtomicU64},
 };
 
+/// The `pg_class` oid of a table, derived from its catalog id. Exposed because
+/// the oid a `regclass` value carries is this, not the bare catalog id.
+pub use catalog_rel::table_relation_oid;
 pub use commit::{Committer, LocalCommitter};
 use crabka_pgkv::{FjallKv, Kv, MemKv};
 use crabka_pgwire::engine::Engine;

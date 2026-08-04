@@ -975,7 +975,7 @@ pub(crate) fn event_trigger_context(
             let Ok(table) = crabka_pgcatalog::get_table(kv, &name) else {
                 continue;
             };
-            i32::try_from(table.id).unwrap_or_default()
+            crate::catalog_rel::table_relation_oid(table.id).unwrap_or_default()
         };
         let (object_type, object_name) = if sequence.is_some() {
             ("sequence", name.name.as_str())

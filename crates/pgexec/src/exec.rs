@@ -13477,7 +13477,7 @@ fn pg_inherits_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         for (index, parent) in parents.into_iter().enumerate() {
             let parent = crabka_pgcatalog::get_table(catalog_kv, &parent)?;
             rows.push(vec![
-                int(oid_i32(table.id)?),
+                int(crate::catalog_rel::table_relation_oid(table.id)?),
                 int(oid_i32(parent.id)?),
                 int(i32::try_from(index + 1).unwrap_or(i32::MAX)),
                 Datum::Bool(false),
@@ -13505,7 +13505,7 @@ fn pg_partitioned_table_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exe
             .collect::<Vec<_>>()
             .join(" ");
         rows.push(vec![
-            int(oid_i32(table.id)?),
+            int(crate::catalog_rel::table_relation_oid(table.id)?),
             text(scheme.strategy.code()),
             Datum::Int2(natts),
             int(0),
@@ -13569,7 +13569,7 @@ fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             (false, false) => "r",
         };
         let mut row = PgClassRow::new(
-            oid_i32(table.id)?,
+            crate::catalog_rel::table_relation_oid(table.id)?,
             &table.name.name,
             relkind,
             crate::catalog_rel::namespace_oid(&table.name.schema),
@@ -13821,7 +13821,10 @@ impl<'a> PgClassRow<'a> {
 fn pg_attribute_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut rows = Vec::new();
     for table in crabka_pgcatalog::list_tables(catalog_kv)? {
-        rows.extend(attribute_rows_for_table(oid_i32(table.id)?, &table)?);
+        rows.extend(attribute_rows_for_table(
+            crate::catalog_rel::table_relation_oid(table.id)?,
+            &table,
+        )?);
     }
     for virtual_table in virtual_table_names() {
         let table = virtual_catalog_table(virtual_table);
@@ -14636,7 +14639,7 @@ fn pg_index_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 .map_err(|_| ExecError::Unsupported("indnatts exceeds int2 range".into()))?;
             Ok(vec![
                 int(catalog_index_oid(index.id)?),
-                int(oid_i32(index.table_id)?),
+                int(crate::catalog_rel::table_relation_oid(index.table_id)?),
                 Datum::Int2(natts),
                 Datum::Int2(natts),
                 Datum::Bool(index.unique),
@@ -15201,7 +15204,7 @@ pub(crate) fn resolve_base_relation(
         return Ok(virtual_relation_oid(&key));
     }
     let table = crabka_pgcatalog::get_table(catalog_kv, name)?;
-    oid_i32(table.id)
+    crate::catalog_rel::table_relation_oid(table.id)
 }
 
 pub(crate) fn virtual_relation_oid(name: &str) -> i32 {

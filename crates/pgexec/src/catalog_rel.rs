@@ -29,6 +29,12 @@ use crabka_pgtypes::{ColumnType, Datum, ElemType};
 
 use crate::error::ExecError;
 
+/// First oid of the band reserved for ordinary table relations. It sits above
+/// PostgreSQL's `FirstNormalObjectId` (16384) so the upstream sanity queries
+/// that separate catalogs from user objects with `c.oid < 16384` classify a
+/// crabka table the way they classify a PostgreSQL one, and below the index
+/// band so the two cannot overlap.
+const TABLE_OID_BASE: i32 = 20_000;
 /// First oid of the band reserved for view relations.
 const VIEW_OID_BASE: i32 = 60_000;
 /// First oid of the band reserved for sequence relations.
@@ -539,9 +545,18 @@ pub(crate) fn index_relation_oid(index_id: u32) -> Result<i32, ExecError> {
         .ok_or_else(|| ExecError::Unsupported("index oid leaves its band".into()))
 }
 
-/// The `pg_class` oid of a table, which is its catalog id.
-fn table_relation_oid(table_id: u32) -> Result<i32, ExecError> {
-    i32::try_from(table_id).map_err(|_| ExecError::Unsupported("oid exceeds int4 range".into()))
+/// The `pg_class` oid of a table: its catalog id inside the table band.
+///
+/// # Errors
+///
+/// Returns `0A000` when the catalog id is wider than the band, which would
+/// otherwise let a table's oid collide with the index band above it.
+pub fn table_relation_oid(table_id: u32) -> Result<i32, ExecError> {
+    i32::try_from(table_id)
+        .ok()
+        .filter(|id| *id < OID_BAND_WIDTH)
+        .and_then(|id| TABLE_OID_BASE.checked_add(id))
+        .ok_or_else(|| ExecError::Unsupported("table oid leaves its band".into()))
 }
 
 /// Build a column list from `(name, type)` pairs.
@@ -1435,8 +1450,7 @@ fn pg_language_rows() -> Vec<Vec<Datum>> {
 fn pg_attrdef_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut rows = Vec::new();
     for table in crabka_pgcatalog::list_tables(kv)? {
-        let relid = i32::try_from(table.id)
-            .map_err(|_| ExecError::Unsupported("oid exceeds int4 range".into()))?;
+        let relid = table_relation_oid(table.id)?;
         let keys = table
             .columns
             .iter()
@@ -1979,8 +1993,7 @@ fn pg_description_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             .collect::<Result<Vec<_>, ExecError>>()?,
     );
     for table in crabka_pgcatalog::list_tables(kv)? {
-        let relid = i32::try_from(table.id)
-            .map_err(|_| ExecError::Unsupported("oid exceeds int4 range".into()))?;
+        let relid = table_relation_oid(table.id)?;
         if let Some(comment) =
             crabka_pgcatalog::get_comment(kv, "table", CommentObject::Relation(&table.name))?
         {
@@ -3264,7 +3277,7 @@ mod tests {
     }
 
     fn oid_of(table_id: TableId) -> Datum {
-        int(i32::try_from(table_id).expect("relation oid"))
+        int(table_relation_oid(table_id).expect("relation oid"))
     }
 
     /// Every `pg_constraint` column of a foreign-key row, in PostgreSQL 18.4's
