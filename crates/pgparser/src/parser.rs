@@ -3722,7 +3722,9 @@ impl Parser {
                 grantees,
             });
         }
-        self.expect(&Token::Keyword(Keyword::Table))?;
+        // PostgreSQL's `TABLE` object-type keyword is optional: `GRANT SELECT ON
+        // t TO r` names a table exactly as `... ON TABLE t ...` does.
+        self.eat_keyword(Keyword::Table);
         let table = self.relation_ref()?;
         self.expect(&Token::Keyword(Keyword::To))?;
         let grantees = self.object_name_list()?;
@@ -3747,7 +3749,7 @@ impl Parser {
                 grantees,
             });
         }
-        self.expect(&Token::Keyword(Keyword::Table))?;
+        self.eat_keyword(Keyword::Table);
         let table = self.relation_ref()?;
         self.expect(&Token::Keyword(Keyword::From))?;
         let grantees = self.object_name_list()?;
@@ -12052,6 +12054,35 @@ mod tests {
         let mut v = parse(sql).expect("parse");
         assert_eq!(v.len(), 1);
         v.pop().expect("one statement")
+    }
+
+    /// `PostgreSQL`'s `TABLE` object-type keyword is optional, so `GRANT SELECT
+    /// ON t TO r` names a table exactly as the explicit spelling does. `SCHEMA`
+    /// still takes its keyword, because a bare name means a table.
+    #[test]
+    fn grant_and_revoke_accept_an_implicit_table_object_type() {
+        use assert2::assert;
+        for (implicit, explicit) in [
+            ("GRANT SELECT ON t TO r", "GRANT SELECT ON TABLE t TO r"),
+            (
+                "GRANT SELECT, UPDATE ON s.t TO PUBLIC",
+                "GRANT SELECT, UPDATE ON TABLE s.t TO PUBLIC",
+            ),
+            (
+                "REVOKE SELECT ON t FROM CURRENT_USER",
+                "REVOKE SELECT ON TABLE t FROM CURRENT_USER",
+            ),
+        ] {
+            assert!(one(implicit) == one(explicit), "{implicit}");
+        }
+        assert!(matches!(
+            one("GRANT USAGE ON SCHEMA s TO r"),
+            Statement::GrantSchemaPrivileges { .. }
+        ));
+        assert!(matches!(
+            one("REVOKE USAGE ON SCHEMA s FROM r"),
+            Statement::RevokeSchemaPrivileges { .. }
+        ));
     }
 
     fn only_query(sql: &str) -> crate::ast::QueryExpr {
