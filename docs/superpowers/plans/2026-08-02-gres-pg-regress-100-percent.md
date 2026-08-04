@@ -2,18 +2,18 @@
 
 **Goal:** Make the unmodified PostgreSQL 18.4 core regression schedule pass against Gres, replacing the partial adopted-corpus percentage with a literal upstream `pg_regress` result.
 
-**Current state:** The authoritative serial result is `26/231` whole upstream
+**Current state:** The authoritative serial result is `27/231` whole upstream
 test files, not the adopted corpus's statement matches. The checked-in monotone
 floor remains `6/231`; this review is still non-monotone against that floor and
 does not ratchet it. Serial completes all 231 files with zero infrastructure
-failures, leaving 205 semantic failures across 175492 canonical changed lines
-and 4571 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
+failures, leaving 204 semantic failures across 175377 canonical changed lines
+and 4570 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
 postflight probe succeeds, and the infrastructure report is empty.
 
 The measurement immediately before this wave was `22/231` at 176686 changed
 lines / 4606 hunks, from the same runner and the same pinned corpus. The
-waves below are therefore `+4` exact files and `-1194` changed lines with
-**zero newly failing files**: `int4`, `int2`, `roleattributes` and `lseg` become exact,
+waves below are therefore `+5` exact files and `-1309` changed lines with
+**zero newly failing files**: `int4`, `int2`, `roleattributes`, `lseg` and `line` become exact,
 and 4 files gain a combined 22 lines.
 
 Those 4 — `timestamptz` +12, `horology` +6, `alter_table` +2, `timestamp` +2 —
@@ -26,7 +26,7 @@ together; no over-attachment remains. (Beware isolated re-checks of the `LMT`
 cases: they depend on the run's `TimeZone`, and a bare `psql` session reproduces
 neither PostgreSQL's success nor its error.)
 
-`int4`, `int2`, `roleattributes` and `lseg` join the 22 previously exact files (`test_setup`, `boolean`, `varchar`,
+`int4`, `int2`, `roleattributes`, `lseg` and `line` join the 22 previously exact files (`test_setup`, `boolean`, `varchar`,
 `md5`, `comments`, `mvcc`, `euc_kr`, `create_function_c`, `infinite_recurse`,
 `delete`, `security_label`, `async`, `dbsize`, `collate.icu.utf8`,
 `psql_crosstab`, `collate.linux.utf8`, `collate.windows.win1252`,
@@ -253,7 +253,17 @@ and their certified artifact describe current conformance.
       also improves `create_index_spgist` (-50), `polymorphism` (-12),
       `spgist` (-9) and `gist` (-6): the geometry opclass tests need the type
       to exist at all.
-- [ ] Add the four remaining geometry types — `box`, `circle`, `line`,
+- [x] Add the `line` type (OID 628) with `line(point,point)`, equality without
+      ordering, and carets on its two specification errors. Makes `line` exact.
+      Note what it exposed rather than caused: `geometry` +9 because its
+      queries now run and reach `operator does not exist: point <-> line`
+      instead of stopping at a missing relation, and `psql` +11 because
+      `line_tbl` joins a `\d` listing that *already* diverges — expected
+      `psql.out` contains no `kd_point_tbl` while Gres's contains four, so
+      Gres enumerates tables PostgreSQL's listing does not. Both are the next
+      layer surfacing, not new defects; the psql listing divergence is its own
+      pre-existing item.
+- [ ] Add the three remaining geometry types — `box`, `circle`, `line`,
       `polygon`. **This is the highest-value repeatable shape left**, proven by
       `lseg`: each is a bounded type (input spellings, canonical output, a
       constructor, durable/wire encodings) that makes its own upstream file
