@@ -1920,6 +1920,42 @@ mod tests {
         DEFAULT_PART_MAX_SIZE, InMemoryCheckpointStore, Manifest, write_checkpoint,
     };
 
+    /// A well-formed W3C traceparent for the link-collector tests.
+    const VALID_TRACEPARENT: &str = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+
+    /// `is_empty` has to track `record`, not merely mirror `len`.
+    ///
+    /// It has no production caller — it exists because `len` does, and clippy
+    /// requires the pair — so nothing else pins it. A collector that always
+    /// reported itself empty would still attach links, but any caller trusting
+    /// the predicate to skip that work would silently stop linking.
+    #[test]
+    fn the_link_collector_reports_emptiness_from_what_it_recorded() {
+        // `Default` is unarmed, so `record` is a no-op regardless of headers —
+        // that is the "recovery exports no spans" path.
+        let mut unarmed = WalTraceLinks::default();
+        unarmed.record([("traceparent", VALID_TRACEPARENT.as_bytes())]);
+        assert!(unarmed.is_empty());
+        assert!(unarmed.len() == 0);
+
+        let mut armed = WalTraceLinks {
+            armed: true,
+            ..WalTraceLinks::default()
+        };
+        assert!(armed.is_empty(), "nothing offered yet");
+        armed.record([("traceparent", VALID_TRACEPARENT.as_bytes())]);
+        assert!(!armed.is_empty(), "a recorded carrier is not empty");
+        assert!(armed.len() == 1);
+
+        // A record with no usable header must not make the collector non-empty.
+        let mut untraced = WalTraceLinks {
+            armed: true,
+            ..WalTraceLinks::default()
+        };
+        untraced.record([("other", b"value".as_slice())]);
+        assert!(untraced.is_empty());
+    }
+
     #[test]
     fn recovery_read_policy_owns_defaults() {
         let policy = RecoveryReadPolicy::default();

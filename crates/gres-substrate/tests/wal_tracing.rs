@@ -211,6 +211,20 @@ impl TransactionalWalWriter for SlowWalWriter {
 /// error the writer must classify as indeterminate.
 struct OnceAfterCommit(AtomicBool);
 
+/// Fails before the first record is sent, with a caller-chosen producer error.
+/// `BeforeFirstSend` is a clean rejection — unlike `AfterCommit`, whose outcome
+/// is indeterminate — so the writer maps the error and answers its caller.
+///
+/// Holds a constructor rather than an error: `ProducerError` is not `Clone`,
+/// and the injector may be consulted more than once.
+struct FailFirstSend(fn() -> ProducerError);
+
+impl WalWriterFaultInjector for FailFirstSend {
+    fn inject(&self, stage: WalWriterFaultStage) -> Option<ProducerError> {
+        (stage == WalWriterFaultStage::BeforeFirstSend).then(self.0)
+    }
+}
+
 impl WalWriterFaultInjector for OnceAfterCommit {
     fn inject(&self, stage: WalWriterFaultStage) -> Option<ProducerError> {
         (stage == WalWriterFaultStage::AfterCommit && !self.0.swap(true, Ordering::SeqCst))
@@ -234,7 +248,8 @@ async fn commit_emits_the_wal_span_tree_and_stamps_the_record_with_the_append_co
     let first_seq = recovered.next_journal_seq;
     let kv: Arc<dyn Kv> = store;
     let writer = Arc::new(ProducerWalWriter::new(recovered.producer, topic.clone()));
-    let committer = SubstrateCommitter::new(kv, writer, recovered.generation, first_seq);
+    let generation = recovered.generation;
+    let committer = SubstrateCommitter::new(kv, writer, generation, first_seq);
 
     let caller = tracing::info_span!("test.caller");
     committer
@@ -294,6 +309,13 @@ async fn commit_emits_the_wal_span_tree_and_stamps_the_record_with_the_append_co
 
     let records = wal_records(&bootstrap, &topic).await;
     assert!(let Some(record) = records.last());
+    // The record key is the writer generation, big-endian. It is what fences a
+    // superseded writer's appends, so a record that loses it is not merely
+    // untraced — it is unfenced.
+    check!(
+        record.key.as_deref() == Some(&generation.0.to_be_bytes()[..]),
+        "the WAL record carries its writer generation as the partition key"
+    );
     assert!(let Some(traceparent) = header(record, "traceparent"));
     let expected = format!(
         "00-{}-{}-01",
@@ -409,4 +431,76 @@ async fn an_indeterminate_append_exports_an_error_span_before_the_compute_dies()
     check!(description.contains("flush"));
 
     broker.shutdown().await;
+}
+
+/// Drive one append that fails before its first send and return the
+/// `error.type` its span recorded, plus whether the writer classified the
+/// failure as fenced.
+async fn failed_append_error_type(
+    label: &str,
+    make_error: fn() -> ProducerError,
+) -> (Option<String>, bool) {
+    drain_spans();
+    let (_broker, bootstrap, _dir) = boot().await;
+    let store = Arc::new(MemKv::default());
+    let recovered = recover_live(&bootstrap, label, None, store.as_ref())
+        .await
+        .expect("recover");
+    let generation = recovered.generation;
+    let journal_seq = recovered.next_journal_seq;
+    let writer = ProducerWalWriter::new(recovered.producer, format!("__gres_wal.{label}.r0"))
+        .with_fault_injector(Arc::new(FailFirstSend(make_error)));
+
+    let outcome = writer
+        .commit_group(GroupCommitRequest {
+            generation,
+            frames: vec![WalFrame {
+                journal_seq,
+                ops: vec![put(b"row/failed", b"?")],
+            }],
+        })
+        .await;
+    let fenced = matches!(outcome, Err(SubstrateError::Fenced));
+    assert!(outcome.is_err(), "the append must fail");
+
+    let spans = drain_spans();
+    // Recovery's own fencing append succeeds, so select the failed one.
+    let recorded = spans
+        .iter()
+        .find(|span| span.name == "gres.wal_append" && span.status != Status::Unset)
+        .and_then(|span| match attribute(span, "error.type") {
+            Some(Value::String(value)) => Some(value.to_string()),
+            _ => None,
+        });
+    (recorded, fenced)
+}
+
+/// A fenced producer is reported as such, not as a generic failure.
+///
+/// `map_producer_error` collapses a fenced producer to [`SubstrateError::Fenced`]
+/// and everything else to `Unavailable`, so a span carrying a constant would
+/// tell an operator nothing: "another writer took the generation" and "the WAL
+/// is unreachable" are different incidents with different responses.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fenced_append_is_named_fenced() {
+    let _serial = SERIAL.lock().await;
+    let (error_type, fenced) =
+        failed_append_error_type("trace-fenced", || ProducerError::FencedProducer).await;
+    check!(fenced, "a fenced producer maps to SubstrateError::Fenced");
+    check!(error_type.as_deref() == Some("fenced"));
+}
+
+/// Every other *cleanly rejected* append is reported as unavailable.
+///
+/// `TransactionAborted`, not something like `FlushTimeout`: only
+/// `classify_commit_failure`'s `Rejected` shapes answer the caller at all.
+/// Anything else is indeterminate by design and terminates the compute instead
+/// of returning, which is covered by its own test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn any_other_failed_append_is_named_unavailable() {
+    let _serial = SERIAL.lock().await;
+    let (error_type, fenced) =
+        failed_append_error_type("trace-unavailable", || ProducerError::TransactionAborted).await;
+    check!(!fenced, "only a fenced producer maps to Fenced");
+    check!(error_type.as_deref() == Some("unavailable"));
 }
