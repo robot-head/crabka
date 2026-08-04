@@ -781,14 +781,17 @@ fn pg_trigger_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             }
             Ok(vec![
                 int(i32::try_from(trigger.oid).unwrap_or(0)),
-                int(i32::try_from(trigger.table_id).unwrap_or(0)),
+                int(table_relation_oid(trigger.table_id)?),
                 int(i32::try_from(trigger.parent_oid).unwrap_or(0)),
                 text(&trigger.name),
                 int(i32::try_from(trigger.function_oid).unwrap_or(0)),
                 small(ty),
                 text(&trigger.enabled.catalog_code().to_string()),
                 Datum::Bool(trigger.is_internal),
-                int(i32::try_from(trigger.referenced_table_id.unwrap_or(0)).unwrap_or(0)),
+                match trigger.referenced_table_id {
+                    Some(referenced) => int(table_relation_oid(referenced)?),
+                    None => int(0),
+                },
                 int(0),
                 int(i32::try_from(trigger.constraint_oid).unwrap_or(0)),
                 Datum::Bool(trigger.deferrable),
@@ -826,7 +829,7 @@ fn pg_depend_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             int(oid),
             int(0),
             int(relation_class),
-            int(i32::try_from(trigger.table_id).unwrap_or(0)),
+            int(table_relation_oid(trigger.table_id)?),
             int(0),
             text("a"),
         ]);
