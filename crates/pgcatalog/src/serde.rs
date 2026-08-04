@@ -183,6 +183,8 @@ mod type_tag {
     pub const LSEG: u8 = 31;
     /// `PostgreSQL` `line`. Append-only — no version bump.
     pub const LINE: u8 = 32;
+    /// `PostgreSQL` `circle`. Append-only — no version bump.
+    pub const CIRCLE: u8 = 33;
 }
 
 #[derive(Debug)]
@@ -224,6 +226,7 @@ pub(crate) fn write_type(out: &mut Vec<u8>, ty: ColumnType) {
         ColumnType::Path => out.push(type_tag::PATH),
         ColumnType::Lseg => out.push(type_tag::LSEG),
         ColumnType::Line => out.push(type_tag::LINE),
+        ColumnType::Circle => out.push(type_tag::CIRCLE),
         ColumnType::Numeric(tm) => {
             out.push(type_tag::NUMERIC);
             match tm {
@@ -327,6 +330,7 @@ fn read_type_with(
         type_tag::PATH => ColumnType::Path,
         type_tag::LSEG => ColumnType::Lseg,
         type_tag::LINE => ColumnType::Line,
+        type_tag::CIRCLE => ColumnType::Circle,
         type_tag::NUMERIC => {
             if take_u8(cur)? == 1 {
                 let precision = u16::from_be_bytes(take_n(cur, 2)?.try_into().expect("2"));
@@ -559,6 +563,7 @@ fn write_default_value(out: &mut Vec<u8>, default: &Datum) {
         | Datum::Path(_)
         | Datum::Lseg(_)
         | Datum::Line(_)
+        | Datum::Circle(_)
         | Datum::Time(_)
         | Datum::Timetz(_)
         | Datum::Timestamp(_)

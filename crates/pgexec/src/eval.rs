@@ -1403,7 +1403,10 @@ pub(crate) fn apply_binary(
                 Err(undefined_operator_for(op, l, r))
             }
         }
+        // `<->` is the tsquery phrase operator and the geometric distance
+        // operator; the operand types pick the overload.
         BinaryOp::Phrase => match (l, r) {
+            (Datum::Circle(left), Datum::Circle(right)) => Ok(Datum::Float8(left.distance(*right))),
             (Datum::TsQuery(left), Datum::TsQuery(right)) => Ok(Datum::TsQuery(
                 crabka_pgtypes::TsQuery::Phrase(Box::new(left.clone()), Box::new(right.clone()), 1),
             )),
@@ -2715,6 +2718,8 @@ fn infer_binary_type(
             let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
             if lt == ColumnType::TsQuery && rt == ColumnType::TsQuery {
                 Ok(ColumnType::TsQuery)
+            } else if lt == ColumnType::Circle && rt == ColumnType::Circle {
+                Ok(ColumnType::Float8)
             } else {
                 Err(undefined_operator("<->", lt, rt))
             }

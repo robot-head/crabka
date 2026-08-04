@@ -70,6 +70,14 @@ pub fn encode_text_in(d: &Datum, style: OutputStyle<'_>) -> Vec<u8> {
             encode_float8_text(point.y, style.extra_float_digits)
         )
         .into_bytes(),
+        // `circle_out` always writes the angle-bracket form.
+        Datum::Circle(circle) => format!(
+            "<({},{}),{}>",
+            encode_float8_text(circle.center.x, style.extra_float_digits),
+            encode_float8_text(circle.center.y, style.extra_float_digits),
+            encode_float8_text(circle.radius, style.extra_float_digits)
+        )
+        .into_bytes(),
         // `line_out` always writes the coefficient form.
         Datum::Line(line) => format!(
             "{{{},{},{}}}",
@@ -376,6 +384,14 @@ pub fn encode_binary(d: &Datum) -> Vec<u8> {
             let mut out = Vec::with_capacity(16);
             out.extend_from_slice(&point.x.to_be_bytes());
             out.extend_from_slice(&point.y.to_be_bytes());
+            out
+        }
+        // `circle_send`: centre x, centre y, radius.
+        Datum::Circle(circle) => {
+            let mut out = Vec::with_capacity(24);
+            for value in [circle.center.x, circle.center.y, circle.radius] {
+                out.extend_from_slice(&value.to_be_bytes());
+            }
             out
         }
         // `line_send`: three float8 coefficients.

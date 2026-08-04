@@ -7336,6 +7336,7 @@ fn datum_hash_bytes(value: &Datum) -> Option<Vec<u8>> {
         | Datum::Path(_)
         | Datum::Lseg(_)
         | Datum::Line(_)
+        | Datum::Circle(_)
         | Datum::Numeric(_)
         | Datum::Date(_)
         | Datum::Time(_)

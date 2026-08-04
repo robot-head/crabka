@@ -10887,6 +10887,17 @@ fn decode_binary_value(
                 y: f64::from_be_bytes(bytes[8..].try_into().expect("8 bytes")),
             }))
         }
+        // `circle_recv`: centre x, centre y, radius.
+        ColumnType::Circle => {
+            let bytes: [u8; 24] = value.try_into().map_err(|_| malformed_binary_parameter())?;
+            let at = |index: usize| {
+                f64::from_be_bytes(bytes[index * 8..index * 8 + 8].try_into().expect("8 bytes"))
+            };
+            Ok(Datum::Circle(crabka_pgtypes::geometry::Circle {
+                center: crabka_pgtypes::Point { x: at(0), y: at(1) },
+                radius: at(2),
+            }))
+        }
         // `line_recv`: three float8 coefficients.
         ColumnType::Line => {
             let coefficients: [u8; 24] =

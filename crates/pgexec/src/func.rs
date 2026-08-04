@@ -115,6 +115,11 @@ enum ScalarFunc {
     LsegConstructor,
     /// `line(point, point)` — the line through two distinct points.
     LineConstructor,
+    /// `center(circle)`, `radius(circle)`, `diameter(circle)`, `area(circle)`.
+    CircleCenter,
+    CircleRadius,
+    CircleDiameter,
+    CircleArea,
     RangeConstructor(RangeRef),
     MultirangeConstructor(MultirangeRef),
     GenericMultirangeConstructor,
@@ -240,6 +245,10 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "point" => ScalarFunc::PointConstructor,
         "lseg" => ScalarFunc::LsegConstructor,
         "line" => ScalarFunc::LineConstructor,
+        "center" => ScalarFunc::CircleCenter,
+        "radius" => ScalarFunc::CircleRadius,
+        "diameter" => ScalarFunc::CircleDiameter,
+        "area" => ScalarFunc::CircleArea,
         "isempty" => ScalarFunc::IsEmpty,
         "lower_inc" => ScalarFunc::LowerInc,
         "lower_inf" => ScalarFunc::LowerInf,
@@ -701,6 +710,14 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
         ScalarFunc::LineConstructor => {
             require_arity(fc, n == 2)?;
             Ok(ColumnType::Line)
+        }
+        ScalarFunc::CircleCenter => {
+            require_arity(fc, n == 1)?;
+            Ok(ColumnType::Point)
+        }
+        ScalarFunc::CircleRadius | ScalarFunc::CircleDiameter | ScalarFunc::CircleArea => {
+            require_arity(fc, n == 1)?;
+            Ok(ColumnType::Float8)
         }
         ScalarFunc::RangeConstructor(range) => {
             require_arity(fc, (1..=3).contains(&n))?;
@@ -1609,6 +1626,21 @@ fn eval_eager(
                 start: endpoint(&vals[0])?,
                 end: endpoint(&vals[1])?,
             }))
+        }
+        accessor @ (ScalarFunc::CircleCenter
+        | ScalarFunc::CircleRadius
+        | ScalarFunc::CircleDiameter
+        | ScalarFunc::CircleArea) => {
+            require_arity(fc, vals.len() == 1)?;
+            let Datum::Circle(circle) = &vals[0] else {
+                return Err(undefined_function(&fc.name));
+            };
+            Ok(match accessor {
+                ScalarFunc::CircleCenter => Datum::Point(circle.center),
+                ScalarFunc::CircleRadius => Datum::Float8(circle.radius),
+                ScalarFunc::CircleDiameter => Datum::Float8(circle.radius * 2.0),
+                _ => Datum::Float8(circle.area()),
+            })
         }
         ScalarFunc::LineConstructor => {
             require_arity(fc, vals.len() == 2)?;

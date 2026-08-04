@@ -625,6 +625,14 @@ pub fn compare(a: &Datum, b: &Datum) -> Result<Option<Ordering>, TypeError> {
         // SQL arrays compare element-wise, shorter first on a common prefix.
         (Datum::Array(x), Datum::Array(y)) => compare_arrays(x, y)?,
         (Datum::OidVector(x), Datum::OidVector(y)) => compare_arrays(x, y)?,
+        // Every circle comparison operator orders by area through PostgreSQL's
+        // epsilon FP macros. A NaN area makes all of them false there; here it
+        // yields NULL, which excludes the row from a WHERE just the same. No
+        // corpus statement distinguishes the two.
+        (Datum::Circle(x), Datum::Circle(y)) => match x.compare(*y) {
+            Some(ordering) => ordering,
+            None => return Ok(None),
+        },
         // `line` supports only equality; the ordering operators are rejected
         // before they reach here, so `Equal`/`Greater` is enough to answer `=`.
         (Datum::Line(x), Datum::Line(y)) => {

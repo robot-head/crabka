@@ -55,6 +55,105 @@ impl Lseg {
     }
 }
 
+/// `PostgreSQL` `circle`: a centre point and a radius.
+#[derive(Debug, Clone, Copy)]
+pub struct Circle {
+    pub center: Point,
+    pub radius: f64,
+}
+
+impl Circle {
+    /// Parse `circle_in`: `<(x,y),r>`, `((x,y),r)`, `(x,y),r` or `x,y,r`.
+    ///
+    /// # Errors
+    ///
+    /// `22P02` for malformed input and for a negative radius; `22003` for a
+    /// coordinate that overflows `float8`.
+    pub fn parse(input: &str) -> Result<Self, TypeError> {
+        let value = input.trim();
+        // One optional wrapper: `<…>` always wraps, `(…)` only when its opening
+        // parenthesis closes at the very end — otherwise it opens the centre.
+        let inner = value
+            .strip_prefix('<')
+            .and_then(|inner| inner.strip_suffix('>'))
+            .or_else(|| parenthesis_wraps_whole(value).then(|| &value[1..value.len() - 1]))
+            .unwrap_or(value)
+            .trim();
+        let (center, radius) = if inner.starts_with('(') {
+            let end = inner.find(')').ok_or_else(|| invalid_circle(input))?;
+            let rest = inner[end + 1..]
+                .trim_start()
+                .strip_prefix(',')
+                .ok_or_else(|| invalid_circle(input))?;
+            (&inner[..=end], rest)
+        } else {
+            // `x,y,r`: the radius is everything after the second comma.
+            let first = inner.find(',').ok_or_else(|| invalid_circle(input))?;
+            let second = first
+                + 1
+                + inner[first + 1..]
+                    .find(',')
+                    .ok_or_else(|| invalid_circle(input))?;
+            (&inner[..second], &inner[second + 1..])
+        };
+        let circle = Self {
+            center: Point::parse(center).map_err(|error| match error {
+                TypeError::InvalidText { .. } => invalid_circle(input),
+                other => other,
+            })?,
+            radius: coordinate(radius, input).map_err(|error| match error {
+                TypeError::InvalidText { .. } => invalid_circle(input),
+                other => other,
+            })?,
+        };
+        // `circle_in` rejects a negative radius as bad input; zero and NaN are
+        // values.
+        if circle.radius < 0.0 {
+            return Err(invalid_circle(input));
+        }
+        Ok(circle)
+    }
+
+    /// `area(circle)` — `pi * r^2`, which is also how circles order.
+    #[must_use]
+    pub fn area(self) -> f64 {
+        std::f64::consts::PI * self.radius * self.radius
+    }
+
+    /// SQL ordering for circles: every comparison operator works on *area*
+    /// through `PostgreSQL`'s `FPeq`/`FPlt` macros, so areas within `EPSILON`
+    /// compare equal and the centres are ignored entirely. `None` means the
+    /// comparison is undefined because an area is NaN, where `PostgreSQL`'s C
+    /// macros make every operator false.
+    #[must_use]
+    pub fn compare(self, other: Self) -> Option<std::cmp::Ordering> {
+        /// `PostgreSQL`'s `EPSILON` from `geo_decls.h`.
+        const EPSILON: f64 = 1.0E-06;
+        let (left, right) = (self.area(), other.area());
+        if left.is_nan() || right.is_nan() {
+            return None;
+        }
+        if (left - right).abs() < EPSILON {
+            return Some(std::cmp::Ordering::Equal);
+        }
+        left.partial_cmp(&right)
+    }
+
+    /// `circle <-> circle`: the gap between their boundaries, clamped at zero
+    /// when they overlap, as `circle_distance` computes it.
+    #[must_use]
+    pub fn distance(self, other: Self) -> f64 {
+        // `circle_distance` subtracts the radii as one sum, and the centre
+        // distance comes from `pg_hypot`; both groupings are load-bearing for
+        // the last digit.
+        let gap = pg_hypot(
+            self.center.x - other.center.x,
+            self.center.y - other.center.y,
+        ) - (self.radius + other.radius);
+        if gap < 0.0 { 0.0 } else { gap }
+    }
+}
+
 /// `PostgreSQL` `line`: the infinite line `Ax + By + C = 0`.
 #[derive(Debug, Clone, Copy)]
 pub struct Line {
@@ -305,6 +404,37 @@ fn invalid(value: &str) -> TypeError {
     }
 }
 
+/// `PostgreSQL`'s own `pg_hypot`, which is `x * sqrt(1 + (y/x)^2)` rather than
+/// libm's `hypot`. The two disagree in the last digit, and `PostgreSQL`'s
+/// expected output records its own.
+fn pg_hypot(x: f64, y: f64) -> f64 {
+    if x.is_infinite() || y.is_infinite() {
+        return f64::INFINITY;
+    }
+    if x.is_nan() || y.is_nan() {
+        return f64::NAN;
+    }
+    let (mut larger, mut smaller) = (x.abs(), y.abs());
+    if larger < smaller {
+        std::mem::swap(&mut larger, &mut smaller);
+    }
+    if larger == 0.0 {
+        return 0.0;
+    }
+    let ratio = smaller / larger;
+    // Deliberately not `mul_add`: C rounds the multiply and the add
+    // separately, and a fused multiply-add can differ in the last digit.
+    let squared = ratio * ratio;
+    larger * (1.0 + squared).sqrt()
+}
+
+fn invalid_circle(value: &str) -> TypeError {
+    TypeError::InvalidText {
+        type_name: "circle",
+        value: value.to_string(),
+    }
+}
+
 fn invalid_line(value: &str) -> TypeError {
     TypeError::InvalidText {
         type_name: "line",
@@ -332,6 +462,24 @@ fn invalid_path(value: &str) -> TypeError {
     TypeError::InvalidText {
         type_name: "path",
         value: value.to_string(),
+    }
+}
+
+impl PartialEq for Circle {
+    /// Structural identity, for storage keys and hashing. SQL's `=` is a
+    /// different relation — see [`Circle::compare`] — so the two are kept
+    /// apart: an epsilon relation is not transitive and cannot back `Hash`.
+    fn eq(&self, other: &Self) -> bool {
+        self.center == other.center && float_eq(self.radius, other.radius)
+    }
+}
+
+impl Eq for Circle {}
+
+impl Hash for Circle {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.center.hash(state);
+        float_bits(self.radius).hash(state);
     }
 }
 
@@ -443,6 +591,68 @@ mod tests {
 
     /// `line_in` takes coefficients directly and converts any two-point
     /// spelling, normalizing to `B = -1` except for a vertical line.
+    /// `circle_in` accepts every spelling, keeps a zero or NaN radius as a
+    /// value, and rejects a negative one. Comparison is by area through
+    /// `PostgreSQL`'s epsilon macros, so the centres are ignored.
+    #[test]
+    fn circle_input_and_area_comparison_match_postgres() {
+        use std::cmp::Ordering;
+
+        use assert2::assert;
+
+        let expected = Circle {
+            center: Point { x: 1.0, y: 2.0 },
+            radius: 3.0,
+        };
+        for spelling in [
+            "<(1,2),3>",
+            "((1,2),3)",
+            "(1,2),3",
+            "1,2,3",
+            " ( ( 1 , 2 ) , 3 ) ",
+        ] {
+            assert!(Circle::parse(spelling) == Ok(expected), "{spelling}");
+        }
+        // A zero radius is a value, not a rejection.
+        assert!(
+            Circle::parse("<(3,5),0>")
+                .expect("zero radius")
+                .radius
+                .to_bits()
+                == 0.0_f64.to_bits()
+        );
+        assert!(
+            Circle::parse("<(3,5),NaN>")
+                .expect("NaN radius")
+                .radius
+                .is_nan()
+        );
+        for bad in [
+            "<(-100,0),-100>",
+            "<(100,200),10",
+            "<(100,200),10> x",
+            "1abc,3,5",
+            "(3,(1,2),3)",
+        ] {
+            let error = Circle::parse(bad).expect_err(bad);
+            assert!(error.sqlstate() == "22P02", "{bad}");
+            assert!(
+                error.to_string() == format!("invalid input syntax for type circle: \"{bad}\""),
+                "{bad}"
+            );
+        }
+
+        let unit = Circle::parse("<(0,0),1>").expect("unit");
+        // Areas within EPSILON are equal however far apart the centres are.
+        assert!(
+            unit.compare(Circle::parse("<(9,9),1.0000001>").expect("near"))
+                == Some(Ordering::Equal)
+        );
+        assert!(unit.compare(Circle::parse("<(9,9),1.001>").expect("far")) == Some(Ordering::Less));
+        // A NaN area leaves every operator undefined.
+        assert!(unit.compare(Circle::parse("<(3,5),NaN>").expect("nan")) == None);
+    }
+
     #[test]
     fn line_input_converts_points_to_coefficients() {
         for (spelling, expected) in [

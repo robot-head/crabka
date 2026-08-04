@@ -59,6 +59,8 @@ mod tag {
     pub const LSEG: u8 = 27;
     /// `PostgreSQL` `line`. Append-only — no version bump.
     pub const LINE: u8 = 28;
+    /// `PostgreSQL` `circle`. Append-only — no version bump.
+    pub const CIRCLE: u8 = 29;
 }
 
 /// Encodes one row in the current storage format.
@@ -119,6 +121,12 @@ fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
                 out.push(tag::POINT);
                 out.extend_from_slice(&point.x.to_be_bytes());
                 out.extend_from_slice(&point.y.to_be_bytes());
+            }
+            Datum::Circle(circle) => {
+                out.push(tag::CIRCLE);
+                for value in [circle.center.x, circle.center.y, circle.radius] {
+                    out.extend_from_slice(&value.to_be_bytes());
+                }
             }
             Datum::Line(line) => {
                 out.push(tag::LINE);
@@ -424,6 +432,19 @@ fn decode_field(cur: &mut &[u8]) -> Result<Datum, KvError> {
                 points.push(crabka_pgtypes::Point { x, y });
             }
             Datum::Path(crabka_pgtypes::Path { closed, points })
+        }
+        tag::CIRCLE => {
+            let mut values = [0.0_f64; 3];
+            for value in &mut values {
+                *value = f64::from_be_bytes(take_n(cur, 8)?.try_into().expect("8"));
+            }
+            Datum::Circle(crabka_pgtypes::geometry::Circle {
+                center: crabka_pgtypes::Point {
+                    x: values[0],
+                    y: values[1],
+                },
+                radius: values[2],
+            })
         }
         tag::LINE => {
             let mut coefficients = [0.0_f64; 3];

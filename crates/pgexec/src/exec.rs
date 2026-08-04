@@ -14150,6 +14150,7 @@ fn format_default_value(value: &Datum, ty: ColumnType) -> String {
         | Datum::Path(_)
         | Datum::Lseg(_)
         | Datum::Line(_)
+        | Datum::Circle(_)
         | Datum::Time(_)
         | Datum::Timetz(_)
         | Datum::Timestamp(_)
