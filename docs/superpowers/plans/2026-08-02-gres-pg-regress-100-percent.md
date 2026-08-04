@@ -6,13 +6,13 @@
 test files, not the adopted corpus's statement matches. The checked-in monotone
 floor remains `6/231`; this review is still non-monotone against that floor and
 does not ratchet it. Serial completes all 231 files with zero infrastructure
-failures, leaving 204 semantic failures across 175377 canonical changed lines
-and 4570 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
+failures, leaving 204 semantic failures across 174905 canonical changed lines
+and 4566 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
 postflight probe succeeds, and the infrastructure report is empty.
 
 The measurement immediately before this wave was `22/231` at 176686 changed
 lines / 4606 hunks, from the same runner and the same pinned corpus. The
-waves below are therefore `+5` exact files and `-1309` changed lines with
+waves below are therefore `+5` exact files and `-1781` changed lines with
 **zero newly failing files**: `int4`, `int2`, `roleattributes`, `lseg` and `line` become exact,
 and 4 files gain a combined 22 lines.
 
@@ -263,6 +263,14 @@ and their certified artifact describe current conformance.
       Gres enumerates tables PostgreSQL's listing does not. Both are the next
       layer surfacing, not new defects; the psql listing divergence is its own
       pre-existing item.
+- [x] Honor `extra_float_digits` and give `float8out` its scientific threshold.
+      The GUC was registered and accepted but never reached the encoder, and
+      `float8` never switched to scientific notation. Both are now `%g`. Found
+      while sizing `circle`, which depends on it — the dependency was worth more
+      than the type: `-472` changed lines with **no file worsened**, across
+      `float8` -170, `union` -110, `aggregates` -80, `numerology` -32,
+      `geometry` -24, `numeric` -20, `int8` -14, `psql` -12 and `point` -10.
+      `circle` is now unblocked.
 - [ ] Add the three remaining geometry types — `box`, `circle`, `line`,
       `polygon`. **This is the highest-value repeatable shape left**, proven by
       `lseg`: each is a bounded type (input spellings, canonical output, a
