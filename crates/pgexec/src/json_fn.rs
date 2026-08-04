@@ -1686,6 +1686,7 @@ fn to_jsonb(d: &Datum, ctx: &EvalCtx) -> Result<JsonbValue, ExecError> {
         | Datum::JsonPath(_)
         | Datum::Point(_)
         | Datum::Path(_)
+        | Datum::Lseg(_)
         | Datum::Date(_)
         | Datum::Time(_)
         | Datum::Timetz(_)

@@ -10880,6 +10880,22 @@ fn decode_binary_value(
                 y: f64::from_be_bytes(bytes[8..].try_into().expect("8 bytes")),
             }))
         }
+        // `lseg_recv`: four float8s, start then end.
+        ColumnType::Lseg => {
+            let coordinates: [u8; 32] =
+                value.try_into().map_err(|_| malformed_binary_parameter())?;
+            let at = |index: usize| {
+                f64::from_be_bytes(
+                    coordinates[index * 8..index * 8 + 8]
+                        .try_into()
+                        .expect("8 bytes"),
+                )
+            };
+            Ok(Datum::Lseg(crabka_pgtypes::geometry::Lseg {
+                start: crabka_pgtypes::Point { x: at(0), y: at(1) },
+                end: crabka_pgtypes::Point { x: at(2), y: at(3) },
+            }))
+        }
         ColumnType::Path => {
             let Some((&closed, body)) = value.split_first() else {
                 return Err(malformed_binary_parameter());

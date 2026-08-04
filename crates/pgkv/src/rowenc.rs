@@ -55,6 +55,8 @@ mod tag {
     pub const MULTIRANGE: u8 = 25;
     /// `jsonpath`, stored as canonical UTF-8 text. Append-only.
     pub const JSONPATH: u8 = 26;
+    /// `PostgreSQL` `lseg`. Append-only — no version bump.
+    pub const LSEG: u8 = 27;
 }
 
 /// Encodes one row in the current storage format.
@@ -115,6 +117,12 @@ fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
                 out.push(tag::POINT);
                 out.extend_from_slice(&point.x.to_be_bytes());
                 out.extend_from_slice(&point.y.to_be_bytes());
+            }
+            Datum::Lseg(lseg) => {
+                out.push(tag::LSEG);
+                for coordinate in [lseg.start.x, lseg.start.y, lseg.end.x, lseg.end.y] {
+                    out.extend_from_slice(&coordinate.to_be_bytes());
+                }
             }
             Datum::Path(path) => {
                 out.push(tag::PATH);
@@ -408,6 +416,22 @@ fn decode_field(cur: &mut &[u8]) -> Result<Datum, KvError> {
                 points.push(crabka_pgtypes::Point { x, y });
             }
             Datum::Path(crabka_pgtypes::Path { closed, points })
+        }
+        tag::LSEG => {
+            let mut coordinates = [0.0_f64; 4];
+            for coordinate in &mut coordinates {
+                *coordinate = f64::from_be_bytes(take_n(cur, 8)?.try_into().expect("8"));
+            }
+            Datum::Lseg(crabka_pgtypes::geometry::Lseg {
+                start: crabka_pgtypes::Point {
+                    x: coordinates[0],
+                    y: coordinates[1],
+                },
+                end: crabka_pgtypes::Point {
+                    x: coordinates[2],
+                    y: coordinates[3],
+                },
+            })
         }
         tag::BYTEA => {
             let len = take_u32_len(cur)?;

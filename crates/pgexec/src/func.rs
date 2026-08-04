@@ -109,6 +109,10 @@ enum ScalarFunc {
     /// Regression helper exposing PostgreSQL's `IsBinaryCoercible`.
     BinaryCoercible,
     PgNumaAvailable,
+    /// `point(float8, float8)` — the two-coordinate constructor.
+    PointConstructor,
+    /// `lseg(point, point)` — the two-endpoint constructor.
+    LsegConstructor,
     RangeConstructor(RangeRef),
     MultirangeConstructor(MultirangeRef),
     GenericMultirangeConstructor,
@@ -231,6 +235,8 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "pg_input_is_valid" => ScalarFunc::PgInputIsValid,
         "binary_coercible" => ScalarFunc::BinaryCoercible,
         "pg_numa_available" => ScalarFunc::PgNumaAvailable,
+        "point" => ScalarFunc::PointConstructor,
+        "lseg" => ScalarFunc::LsegConstructor,
         "isempty" => ScalarFunc::IsEmpty,
         "lower_inc" => ScalarFunc::LowerInc,
         "lower_inf" => ScalarFunc::LowerInf,
@@ -680,6 +686,14 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
         ScalarFunc::PgNumaAvailable => {
             require_arity(fc, n == 0)?;
             Ok(ColumnType::Bool)
+        }
+        ScalarFunc::PointConstructor => {
+            require_arity(fc, n == 2)?;
+            Ok(ColumnType::Point)
+        }
+        ScalarFunc::LsegConstructor => {
+            require_arity(fc, n == 2)?;
+            Ok(ColumnType::Lseg)
         }
         ScalarFunc::RangeConstructor(range) => {
             require_arity(fc, (1..=3).contains(&n))?;
@@ -1570,6 +1584,24 @@ fn eval_eager(
         ScalarFunc::PgNumaAvailable => {
             require_arity(fc, vals.is_empty())?;
             Ok(Datum::Bool(false))
+        }
+        ScalarFunc::PointConstructor => {
+            require_arity(fc, vals.len() == 2)?;
+            Ok(Datum::Point(crabka_pgtypes::Point {
+                x: as_f64(&vals[0])?,
+                y: as_f64(&vals[1])?,
+            }))
+        }
+        ScalarFunc::LsegConstructor => {
+            require_arity(fc, vals.len() == 2)?;
+            let endpoint = |value: &Datum| match value {
+                Datum::Point(point) => Ok(*point),
+                _ => Err(undefined_function("lseg")),
+            };
+            Ok(Datum::Lseg(crabka_pgtypes::geometry::Lseg {
+                start: endpoint(&vals[0])?,
+                end: endpoint(&vals[1])?,
+            }))
         }
         ScalarFunc::PgTableIsVisible => {
             require_arity(fc, vals.len() == 1)?;

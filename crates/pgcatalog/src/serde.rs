@@ -179,6 +179,8 @@ mod type_tag {
     pub const JSONPATH: u8 = 29;
     /// `PostgreSQL` `int2vector`. Append-only — no version bump.
     pub const INT2VECTOR: u8 = 30;
+    /// `PostgreSQL` `lseg`. Append-only — no version bump.
+    pub const LSEG: u8 = 31;
 }
 
 #[derive(Debug)]
@@ -218,6 +220,7 @@ pub(crate) fn write_type(out: &mut Vec<u8>, ty: ColumnType) {
         ColumnType::Float8 => out.push(type_tag::FLOAT8),
         ColumnType::Point => out.push(type_tag::POINT),
         ColumnType::Path => out.push(type_tag::PATH),
+        ColumnType::Lseg => out.push(type_tag::LSEG),
         ColumnType::Numeric(tm) => {
             out.push(type_tag::NUMERIC);
             match tm {
@@ -319,6 +322,7 @@ fn read_type_with(
         type_tag::FLOAT8 => ColumnType::Float8,
         type_tag::POINT => ColumnType::Point,
         type_tag::PATH => ColumnType::Path,
+        type_tag::LSEG => ColumnType::Lseg,
         type_tag::NUMERIC => {
             if take_u8(cur)? == 1 {
                 let precision = u16::from_be_bytes(take_n(cur, 2)?.try_into().expect("2"));
@@ -549,6 +553,7 @@ fn write_default_value(out: &mut Vec<u8>, default: &Datum) {
         Datum::Date(_)
         | Datum::Point(_)
         | Datum::Path(_)
+        | Datum::Lseg(_)
         | Datum::Time(_)
         | Datum::Timetz(_)
         | Datum::Timestamp(_)

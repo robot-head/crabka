@@ -18,6 +18,94 @@ pub struct Path {
     pub points: Vec<Point>,
 }
 
+/// `PostgreSQL` `lseg`: a line segment between two endpoints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Lseg {
+    pub start: Point,
+    pub end: Point,
+}
+
+impl Lseg {
+    /// Parse `lseg_in`'s spellings: `[(x,y),(x,y)]`, `((x,y),(x,y))`,
+    /// `(x,y),(x,y)` and the bare `x,y,x,y`, each optionally bracketed.
+    ///
+    /// # Errors
+    ///
+    /// Returns `22P02` for anything that is not exactly two points, and the
+    /// same coordinate errors as [`Point::parse`].
+    pub fn parse(input: &str) -> Result<Self, TypeError> {
+        let value = input.trim();
+        // Strip one optional outer delimiter pair. `lseg_in` accepts `[…]` and
+        // `(…)` alike, but only one level — and a leading `(` may instead open
+        // the *first point*, as in `(1,2),(3,4)`, so parentheses count as a
+        // wrapper only when the opening one closes at the very end.
+        let inner = value
+            .strip_prefix('[')
+            .and_then(|inner| inner.strip_suffix(']'))
+            .or_else(|| parenthesis_wraps_whole(value).then(|| &value[1..value.len() - 1]))
+            .unwrap_or(value);
+        let points = split_points(inner).ok_or_else(|| invalid_lseg(input))?;
+        let [start, end] = points.as_slice() else {
+            return Err(invalid_lseg(input));
+        };
+        Ok(Self {
+            start: Point::parse(start).map_err(|_| invalid_lseg(input))?,
+            end: Point::parse(end).map_err(|_| invalid_lseg(input))?,
+        })
+    }
+}
+
+/// Whether the value's leading `(` is closed by its final `)`, which is what
+/// distinguishes the wrapper in `((1,2),(3,4))` from the first point's own
+/// parenthesis in `(1,2),(3,4)`.
+fn parenthesis_wraps_whole(value: &str) -> bool {
+    let mut depth = 0_usize;
+    for (index, byte) in value.bytes().enumerate() {
+        match byte {
+            b'(' => depth += 1,
+            b')' => match depth.checked_sub(1) {
+                Some(remaining) => {
+                    depth = remaining;
+                    if depth == 0 {
+                        return index + 1 == value.len();
+                    }
+                }
+                None => return false,
+            },
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Split a two-point body into its two point texts. A parenthesized body
+/// splits on the comma *between* the points; a bare `x,y,x,y` splits at its
+/// second comma so each half is an `x,y` pair.
+fn split_points(inner: &str) -> Option<Vec<&str>> {
+    let trimmed = inner.trim();
+    if !trimmed.starts_with('(') {
+        let first = trimmed.find(',')?;
+        let second = first + 1 + trimmed[first + 1..].find(',')?;
+        return Some(vec![&trimmed[..second], &trimmed[second + 1..]]);
+    }
+    let mut points = Vec::new();
+    let mut rest = trimmed;
+    while !rest.is_empty() {
+        let start = rest.strip_prefix('(')?;
+        let end = start.find(')')?;
+        points.push(&start[..end]);
+        rest = start[end + 1..].trim_start();
+        if rest.is_empty() {
+            break;
+        }
+        rest = rest.strip_prefix(',')?.trim_start();
+        if rest.is_empty() {
+            return None;
+        }
+    }
+    Some(points)
+}
+
 impl Path {
     /// Parse `path_in`'s bracketed (open) or parenthesized (closed) spelling.
     ///
@@ -118,6 +206,13 @@ fn invalid(value: &str) -> TypeError {
     }
 }
 
+fn invalid_lseg(value: &str) -> TypeError {
+    TypeError::InvalidText {
+        type_name: "lseg",
+        value: value.to_string(),
+    }
+}
+
 fn invalid_path(value: &str) -> TypeError {
     TypeError::InvalidText {
         type_name: "path",
@@ -170,6 +265,47 @@ mod tests {
         assert_eq!(Point::parse("10,20"), Ok(Point { x: 10.0, y: 20.0 }));
         assert_eq!(Point::parse("(10 20)").unwrap_err().sqlstate(), "22P02");
         assert_eq!(Point::parse("(10,1e500)").unwrap_err().sqlstate(), "22003");
+    }
+
+    /// `lseg_in` accepts every spelling `PostgreSQL` does and rejects anything
+    /// that is not exactly two points.
+    #[test]
+    fn lseg_input_accepts_every_two_point_spelling() {
+        let expected = Lseg {
+            start: Point { x: 1.0, y: 2.0 },
+            end: Point { x: 3.0, y: 4.0 },
+        };
+        for spelling in [
+            "[(1,2),(3,4)]",
+            "((1,2),(3,4))",
+            "(1,2),(3,4)",
+            "1,2,3,4",
+            "[1,2,3, 4]",
+            "  [ (1,2) , (3,4) ]  ",
+        ] {
+            assert_eq!(Lseg::parse(spelling), Ok(expected), "{spelling}");
+        }
+        // NaN coordinates are values, not errors.
+        let nan = Lseg::parse("[(NaN,1),(NaN,90)]").expect("NaN endpoints");
+        assert!(nan.start.x.is_nan() && nan.end.x.is_nan());
+
+        for bad in [
+            "(3asdf,2 ,3,4r2)",
+            "[1,2,3, 4",
+            "[(,2),(3,4)]",
+            "[(1,2),(3,4)",
+            "[(1,2),(3)]",
+            "[(1,2),(3,4),(5,6)]",
+            "[(1,2)]",
+        ] {
+            let error = Lseg::parse(bad).expect_err(bad);
+            assert_eq!(error.sqlstate(), "22P02", "{bad}");
+            assert_eq!(
+                error.to_string(),
+                format!("invalid input syntax for type lseg: \"{bad}\""),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

@@ -65,6 +65,16 @@ pub fn encode_text_in(d: &Datum, style: OutputStyle<'_>) -> Vec<u8> {
             encode_float8_text(point.y)
         )
         .into_bytes(),
+        // `lseg_out` always writes the bracketed two-point form, whatever
+        // spelling the input used.
+        Datum::Lseg(lseg) => format!(
+            "[({},{}),({},{})]",
+            encode_float8_text(lseg.start.x),
+            encode_float8_text(lseg.start.y),
+            encode_float8_text(lseg.end.x),
+            encode_float8_text(lseg.end.y)
+        )
+        .into_bytes(),
         Datum::Path(path) => {
             let mut out = String::from(if path.closed { "(" } else { "[" });
             for (index, point) in path.points.iter().enumerate() {
@@ -298,6 +308,14 @@ pub fn encode_binary(d: &Datum) -> Vec<u8> {
             let mut out = Vec::with_capacity(16);
             out.extend_from_slice(&point.x.to_be_bytes());
             out.extend_from_slice(&point.y.to_be_bytes());
+            out
+        }
+        // `lseg_send`: four float8s, start then end.
+        Datum::Lseg(lseg) => {
+            let mut out = Vec::with_capacity(32);
+            for coordinate in [lseg.start.x, lseg.start.y, lseg.end.x, lseg.end.y] {
+                out.extend_from_slice(&coordinate.to_be_bytes());
+            }
             out
         }
         Datum::Path(path) => {
