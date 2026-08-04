@@ -966,49 +966,106 @@ fn text_to_bool(s: &str) -> Result<Datum, TypeError> {
     Ok(Datum::Bool(v))
 }
 
-/// `text → int4` / `int8`, matching PostgreSQL integer input: leading/trailing
-/// whitespace trimmed, an optional leading sign, then digits only (no decimal
-/// point, no exponent). Bad syntax is 22P02; a syntactically-valid value that
-/// does not fit the target width is 22003.
 /// `text → int2` (PostgreSQL `int2in`). Out of range reports the *original*
 /// string, spaces and all, exactly as `pg_strtoint16_safe` does.
 fn text_to_i16(s: &str) -> Result<Datum, TypeError> {
-    require_int_syntax(s, "smallint")?;
-    s.trim()
-        .parse::<i16>()
+    let value = parse_pg_integer(s, "smallint")?;
+    i16::try_from(value)
         .map(Datum::Int2)
         .map_err(|_| TypeError::value_out_of_range(s, "smallint"))
 }
 
 fn text_to_i32(s: &str) -> Result<Datum, TypeError> {
-    require_int_syntax(s, "integer")?;
-    s.trim()
-        .parse::<i32>()
+    let value = parse_pg_integer(s, "integer")?;
+    i32::try_from(value)
         .map(Datum::Int4)
-        .map_err(|_| TypeError::Overflow)
+        .map_err(|_| TypeError::value_out_of_range(s, "integer"))
 }
 
 fn text_to_i64(s: &str) -> Result<Datum, TypeError> {
-    require_int_syntax(s, "bigint")?;
-    s.trim()
-        .parse::<i64>()
-        .map(Datum::Int8)
-        .map_err(|_| TypeError::Overflow)
+    parse_pg_integer(s, "bigint").map(Datum::Int8)
 }
 
-/// 22P02 unless the trimmed text is `[+-]?[0-9]+`. A separate syntax check ahead
-/// of the width parse lets an out-of-range-but-well-formed value (e.g.
-/// `'99999999999'`) report 22003 instead of 22P02.
-fn require_int_syntax(s: &str, type_name: &'static str) -> Result<(), TypeError> {
-    let t = s.trim();
-    let digits = t.strip_prefix(['+', '-']).unwrap_or(t);
-    if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
-        Ok(())
+/// PostgreSQL's `pg_strtoint{16,32,64}_safe` grammar: optional surrounding
+/// whitespace, an optional sign, an optional `0x`/`0o`/`0b` base prefix (either
+/// case), then digits of that base which `_` may separate. Every `_` must be
+/// immediately followed by a digit, so `1__0`, `100_`, and `_100` are all bad
+/// syntax while `1_0` and `0x_10` are values. Without a prefix the first
+/// character after the sign must itself be a digit.
+///
+/// The magnitude accumulates *negatively* so that `-0x8000000000000000` reaches
+/// [`i64::MIN`] rather than overflowing one step short of it. Bad syntax is
+/// 22P02; a well-formed value too wide for the target is 22003, quoting the
+/// original text.
+fn parse_pg_integer(text: &str, type_name: &'static str) -> Result<i64, TypeError> {
+    let invalid = || TypeError::InvalidText {
+        type_name,
+        value: text.to_string(),
+    };
+    let out_of_range = || TypeError::value_out_of_range(text, type_name);
+
+    let bytes = text.trim().as_bytes();
+    let mut index = 0;
+    let negative = match bytes.first() {
+        Some(b'-') => {
+            index = 1;
+            true
+        }
+        Some(b'+') => {
+            index = 1;
+            false
+        }
+        _ => false,
+    };
+
+    let mut radix = 10;
+    if bytes.get(index) == Some(&b'0')
+        && let Some(prefix) = bytes.get(index + 1)
+    {
+        radix = match prefix.to_ascii_lowercase() {
+            b'x' => 16,
+            b'o' => 8,
+            b'b' => 2,
+            _ => 10,
+        };
+        if radix != 10 {
+            index += 2;
+        }
+    }
+    // Only the prefixed forms may open with a separator: `0x_10` is a value but
+    // `_100` is not.
+    if radix == 10 && !bytes.get(index).is_some_and(u8::is_ascii_digit) {
+        return Err(invalid());
+    }
+
+    let mut accumulated: i64 = 0;
+    let mut digits = 0_u32;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'_' {
+            let follows = bytes.get(index + 1).copied().ok_or_else(invalid)?;
+            if char::from(follows).to_digit(radix).is_none() {
+                return Err(invalid());
+            }
+            index += 1;
+            continue;
+        }
+        let digit = char::from(byte).to_digit(radix).ok_or_else(invalid)?;
+        accumulated = accumulated
+            .checked_mul(i64::from(radix))
+            .and_then(|scaled| scaled.checked_sub(i64::from(digit)))
+            .ok_or_else(out_of_range)?;
+        digits += 1;
+        index += 1;
+    }
+    if digits == 0 {
+        return Err(invalid());
+    }
+
+    if negative {
+        Ok(accumulated)
     } else {
-        Err(TypeError::InvalidText {
-            type_name,
-            value: s.to_string(),
-        })
+        accumulated.checked_neg().ok_or_else(out_of_range)
     }
 }
 
@@ -1020,14 +1077,20 @@ fn require_int_syntax(s: &str, type_name: &'static str) -> Result<(), TypeError>
 /// [`crate::ops::float_literal`], whose grammar has no infinity spelling.
 fn text_to_f64(s: &str) -> Result<Datum, TypeError> {
     let t = s.trim();
-    match t.parse::<f64>() {
-        Ok(v) if v.is_infinite() && !is_infinity_spelling(t) => Err(TypeError::Overflow),
-        Ok(v) => Ok(Datum::Float8(v)),
-        Err(_) => Err(TypeError::InvalidText {
+    let Ok(parsed) = t.parse::<f64>() else {
+        return Err(TypeError::InvalidText {
             type_name: "double precision",
             value: s.to_string(),
-        }),
+        });
+    };
+    // `strtod` reports overflow and underflow alike through `ERANGE`, so a
+    // finite literal that reaches infinity and one that flushes a non-zero
+    // magnitude to zero are equally out of range, quoting the trimmed text.
+    let underflowed = parsed == 0.0 && has_nonzero_digit(t);
+    if underflowed || (parsed.is_infinite() && !is_infinity_spelling(t)) {
+        return Err(TypeError::float_text_out_of_range(t, "double precision"));
     }
+    Ok(Datum::Float8(parsed))
 }
 
 /// `text → float4`, which matches PostgreSQL `float4in`: trimmed,
@@ -1862,6 +1925,19 @@ mod tests {
                 "22003",
                 "\"1e-400\" is out of range for type real",
             ),
+            // float8 names itself the same way, for overflow and underflow.
+            (
+                Datum::Text(" 1e999 ".into()),
+                ColumnType::Float8,
+                "22003",
+                "\"1e999\" is out of range for type double precision",
+            ),
+            (
+                Datum::Text("1e-400".into()),
+                ColumnType::Float8,
+                "22003",
+                "\"1e-400\" is out of range for type double precision",
+            ),
             (
                 Datum::Text("1.2.3".into()),
                 Float4,
@@ -1886,8 +1962,124 @@ mod tests {
         }
     }
 
-    /// int2/float4 join the numeric family for casting, but neither gains a
-    /// `bool` cast: only `int4` has one, as in PostgreSQL.
+    /// PostgreSQL's integer input accepts `0x`/`0o`/`0b` bases and `_` digit
+    /// separators, and reports a too-wide but well-formed value as 22003
+    /// quoting the original text — including for `int4`/`int8`, which used to
+    /// fall back to the bare arithmetic `... out of range` message.
+    #[test]
+    fn integer_input_accepts_postgres_bases_and_separators() {
+        use ColumnType::{Int2, Int4, Int8};
+        use assert2::assert;
+        let tz = utc();
+        let values: &[(&str, ColumnType, Datum)] = &[
+            ("0x42F", Int4, Datum::Int4(1071)),
+            ("0X10", Int4, Datum::Int4(16)),
+            ("0o17", Int4, Datum::Int4(15)),
+            ("0b1010", Int4, Datum::Int4(10)),
+            ("1_000_000", Int4, Datum::Int4(1_000_000)),
+            // A separator may open the digits only after a base prefix.
+            ("0x_10", Int4, Datum::Int4(16)),
+            (" 0x10 ", Int4, Datum::Int4(16)),
+            ("-0x10", Int4, Datum::Int4(-16)),
+            ("0b100101", Int2, Datum::Int2(37)),
+            ("0x7fff", Int2, Datum::Int2(32767)),
+            // The magnitude accumulates negatively, so MIN is reachable.
+            ("-0x8000", Int2, Datum::Int2(i16::MIN)),
+            ("-0x80000000", Int4, Datum::Int4(i32::MIN)),
+            ("-0x8000000000000000", Int8, Datum::Int8(i64::MIN)),
+            ("0b1_1", Int8, Datum::Int8(3)),
+        ];
+        for (text, target, expected) in values {
+            let actual = cast(&Datum::Text((*text).into()), *target, &tz);
+            assert!(actual.as_ref() == Ok(expected), "{text:?} -> {target:?}");
+        }
+
+        let errors: &[(&str, ColumnType, &str, &str)] = &[
+            (
+                "0x8000000000000000",
+                Int8,
+                "22003",
+                "value \"0x8000000000000000\" is out of range for type bigint",
+            ),
+            (
+                "1000000000000",
+                Int4,
+                "22003",
+                "value \"1000000000000\" is out of range for type integer",
+            ),
+            (
+                "0b1000000000000000",
+                Int2,
+                "22003",
+                "value \"0b1000000000000000\" is out of range for type smallint",
+            ),
+            // Every `_` must be followed by a digit of the same base.
+            (
+                "1__0",
+                Int4,
+                "22P02",
+                "invalid input syntax for type integer: \"1__0\"",
+            ),
+            (
+                "100_",
+                Int4,
+                "22P02",
+                "invalid input syntax for type integer: \"100_\"",
+            ),
+            (
+                "_100",
+                Int4,
+                "22P02",
+                "invalid input syntax for type integer: \"_100\"",
+            ),
+            (
+                "0x__1",
+                Int4,
+                "22P02",
+                "invalid input syntax for type integer: \"0x__1\"",
+            ),
+            (
+                "0x",
+                Int4,
+                "22P02",
+                "invalid input syntax for type integer: \"0x\"",
+            ),
+            // Digits must belong to the declared base.
+            (
+                "0b12",
+                Int4,
+                "22P02",
+                "invalid input syntax for type integer: \"0b12\"",
+            ),
+            (
+                "0o8",
+                Int4,
+                "22P02",
+                "invalid input syntax for type integer: \"0o8\"",
+            ),
+            (
+                "00x10",
+                Int4,
+                "22P02",
+                "invalid input syntax for type integer: \"00x10\"",
+            ),
+            (
+                "    ",
+                Int2,
+                "22P02",
+                "invalid input syntax for type smallint: \"    \"",
+            ),
+        ];
+        for (text, target, sqlstate, message) in errors {
+            let err = cast(&Datum::Text((*text).into()), *target, &tz)
+                .expect_err("bad syntax or out of range");
+            assert!(err.sqlstate() == *sqlstate, "{text:?} -> {target:?}");
+            assert!(err.to_string() == *message, "{text:?} -> {target:?}");
+        }
+    }
+
+    /// int2/float4 join the numeric family for casting, but — like PostgreSQL —
+    /// neither gains a `bool` cast: only `int4` has one.
     #[test]
     fn int2_and_float4_cast_matrix_excludes_bool() {
         use ColumnType::{Bool, Float4, Float8, Int2, Int4, Int8, Text};
@@ -2103,7 +2295,9 @@ mod tests {
             Datum::Int8(9_000_000_000)
         );
         // Bad syntax (decimal point, letters, empty, lone sign) → 22P02.
-        for s in ["1.5", "abc", "", "  ", "-", "1e3", "0x10"] {
+        // `0x10` is a hexadecimal *value*; see
+        // `integer_input_accepts_postgres_bases_and_separators`.
+        for s in ["1.5", "abc", "", "  ", "-", "1e3"] {
             assert!(
                 matches!(
                     cast(&Datum::Text(s.into()), ColumnType::Int4, &tz),
@@ -2112,19 +2306,24 @@ mod tests {
                 "{s:?} should be 22P02"
             );
         }
-        // Well-formed but out of range → 22003 (NOT 22P02).
-        assert!(matches!(
-            cast(&Datum::Text("99999999999".into()), ColumnType::Int4, &tz),
-            Err(TypeError::Overflow)
-        ));
-        assert!(matches!(
-            cast(
-                &Datum::Text("99999999999999999999".into()),
-                ColumnType::Int8,
-                &tz,
+        // Well-formed but out of range → 22003 (NOT 22P02), quoting the input
+        // the way PostgreSQL's integer input functions do.
+        for (text, target, message) in [
+            (
+                "99999999999",
+                ColumnType::Int4,
+                "value \"99999999999\" is out of range for type integer",
             ),
-            Err(TypeError::Overflow)
-        ));
+            (
+                "99999999999999999999",
+                ColumnType::Int8,
+                "value \"99999999999999999999\" is out of range for type bigint",
+            ),
+        ] {
+            let err = cast(&Datum::Text(text.into()), target, &tz).expect_err("out of range");
+            assert!(err.sqlstate() == "22003", "{text:?}");
+            assert!(err.to_string() == message, "{text:?}: {err}");
+        }
     }
 
     // ---- text → float8 ----
@@ -2157,11 +2356,15 @@ mod tests {
             cast(&Datum::Text("nan".into()), ColumnType::Float8, &tz),
             Ok(Datum::Float8(f)) if f.is_nan()
         ));
-        // A finite literal that overflows to ∞ is 22003, NOT the value Infinity.
-        assert!(matches!(
-            cast(&Datum::Text("1e400".into()), ColumnType::Float8, &tz),
-            Err(TypeError::Overflow)
-        ));
+        // A finite literal that overflows to ∞ is 22003, NOT the value Infinity,
+        // and it names the type the way PostgreSQL's `float8in` does.
+        let overflow = cast(&Datum::Text("1e400".into()), ColumnType::Float8, &tz)
+            .expect_err("1e400 overflows");
+        assert_eq!(overflow.sqlstate(), "22003");
+        assert_eq!(
+            overflow.to_string(),
+            "\"1e400\" is out of range for type double precision"
+        );
         // Garbage is 22P02.
         assert!(matches!(
             cast(&Datum::Text("1.2.3".into()), ColumnType::Float8, &tz),

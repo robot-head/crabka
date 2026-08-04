@@ -190,9 +190,13 @@ fn arith(a: &Datum, b: &Datum, op: NumericOp) -> Result<Datum, TypeError> {
             .map(Datum::Int2)
             .ok_or_else(|| TypeError::out_of_range_for("smallint")),
         _ => match (as_i32(a), as_i32(b)) {
-            (Some(x), Some(y)) => (op.i4)(x, y).map(Datum::Int4).ok_or(TypeError::Overflow),
+            (Some(x), Some(y)) => (op.i4)(x, y)
+                .map(Datum::Int4)
+                .ok_or_else(|| TypeError::out_of_range_for("integer")),
             _ => match (as_i64(a), as_i64(b)) {
-                (Some(x), Some(y)) => (op.i8)(x, y).map(Datum::Int8).ok_or(TypeError::Overflow),
+                (Some(x), Some(y)) => (op.i8)(x, y)
+                    .map(Datum::Int8)
+                    .ok_or_else(|| TypeError::out_of_range_for("bigint")),
                 _ => Err(TypeError::TypeMismatch {
                     message: "operator requires integer operands".into(),
                 }),
@@ -1164,10 +1168,24 @@ mod tests {
             add(&Datum::Int4(1), &Datum::Int8(2)).expect("ok"),
             Datum::Int8(3)
         );
-        assert!(matches!(
-            add(&Datum::Int4(i32::MAX), &Datum::Int4(1)),
-            Err(TypeError::Overflow)
-        ));
+        // Each width names itself, exactly as PostgreSQL's `int*_pl` do.
+        for (a, b, message) in [
+            (
+                Datum::Int2(i16::MAX),
+                Datum::Int2(1),
+                "smallint out of range",
+            ),
+            (
+                Datum::Int4(i32::MAX),
+                Datum::Int4(1),
+                "integer out of range",
+            ),
+            (Datum::Int8(i64::MAX), Datum::Int8(1), "bigint out of range"),
+        ] {
+            let err = add(&a, &b).expect_err("overflow");
+            assert_eq!(err.to_string(), message);
+            assert_eq!(err.sqlstate(), "22003");
+        }
         assert!(matches!(
             div(&Datum::Int4(1), &Datum::Int4(0)),
             Err(TypeError::DivisionByZero)
