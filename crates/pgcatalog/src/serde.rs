@@ -177,6 +177,8 @@ mod type_tag {
     pub const REGPROCEDURE: u8 = 28;
     /// `PostgreSQL` `jsonpath`. Append-only — no version bump.
     pub const JSONPATH: u8 = 29;
+    /// `PostgreSQL` `int2vector`. Append-only — no version bump.
+    pub const INT2VECTOR: u8 = 30;
 }
 
 #[derive(Debug)]
@@ -254,6 +256,7 @@ pub(crate) fn write_type(out: &mut Vec<u8>, ty: ColumnType) {
         ColumnType::Regtype => out.push(type_tag::REGTYPE),
         ColumnType::Regprocedure => out.push(type_tag::REGPROCEDURE),
         ColumnType::OidVector => out.push(type_tag::OIDVECTOR),
+        ColumnType::Int2Vector => out.push(type_tag::INT2VECTOR),
         ColumnType::TsVector => out.push(type_tag::TSVECTOR),
         ColumnType::TsQuery => out.push(type_tag::TSQUERY),
         ColumnType::Jsonb => out.push(type_tag::JSONB),
@@ -367,6 +370,7 @@ fn read_type_with(
         type_tag::REGTYPE => ColumnType::Regtype,
         type_tag::REGPROCEDURE => ColumnType::Regprocedure,
         type_tag::OIDVECTOR => ColumnType::OidVector,
+        type_tag::INT2VECTOR => ColumnType::Int2Vector,
         type_tag::TSVECTOR => ColumnType::TsVector,
         type_tag::TSQUERY => ColumnType::TsQuery,
         type_tag::JSONB => ColumnType::Jsonb,

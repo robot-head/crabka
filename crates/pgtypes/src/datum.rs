@@ -31,6 +31,9 @@ pub mod oids {
     /// datum, the same representation the catalog's oid-valued columns use.
     pub const OID: u32 = 26;
     pub const OIDVECTOR: u32 = 30;
+    /// PostgreSQL `int2vector` — a zero-based `int2` array with the same
+    /// space-separated text form `oidvector` uses.
+    pub const INT2VECTOR: u32 = 22;
     /// PostgreSQL `regclass` — a relation's `pg_class` oid with name-based
     /// text input; values live in the `Int4` datum like `oid`.
     pub const REGCLASS: u32 = 2205;
@@ -270,6 +273,7 @@ impl ElemType {
             | ColumnType::Regclass
             | ColumnType::Regprocedure
             | ColumnType::OidVector
+            | ColumnType::Int2Vector
             | ColumnType::TsVector
             | ColumnType::TsQuery
             | ColumnType::Array(_)
@@ -608,6 +612,9 @@ pub enum ColumnType {
     /// PostgreSQL `oidvector` (OID 30), an oid array with lower bound zero and
     /// a space-separated text representation.
     OidVector,
+    /// PostgreSQL `int2vector` (OID 22), a zero-based `int2` array sharing
+    /// `oidvector`'s space-separated text form.
+    Int2Vector,
     /// PostgreSQL's normalized full-text document and query types.
     TsVector,
     TsQuery,
@@ -742,6 +749,7 @@ impl ColumnType {
             "regtype" => Some(ColumnType::Regtype),
             "regprocedure" => Some(ColumnType::Regprocedure),
             "oidvector" => Some(ColumnType::OidVector),
+            "int2vector" => Some(ColumnType::Int2Vector),
             "tsvector" => Some(ColumnType::TsVector),
             "tsquery" => Some(ColumnType::TsQuery),
             // `json` is an input alias for `jsonb`: values are stored decomposed
@@ -803,6 +811,7 @@ impl ColumnType {
         match self {
             ColumnType::Array(elem) => Some(elem),
             ColumnType::OidVector => Some(ElemType::Int4),
+            ColumnType::Int2Vector => Some(ElemType::Int2),
             _ => None,
         }
     }
@@ -833,6 +842,7 @@ impl ColumnType {
             ColumnType::Regtype => oids::REGTYPE,
             ColumnType::Regprocedure => oids::REGPROCEDURE,
             ColumnType::OidVector => oids::OIDVECTOR,
+            ColumnType::Int2Vector => oids::INT2VECTOR,
             ColumnType::TsVector => oids::TSVECTOR,
             ColumnType::TsQuery => oids::TSQUERY,
             ColumnType::Jsonb => oids::JSONB,
@@ -873,6 +883,7 @@ impl ColumnType {
             ColumnType::Regtype => "regtype",
             ColumnType::Regprocedure => "regprocedure",
             ColumnType::OidVector => "oidvector",
+            ColumnType::Int2Vector => "int2vector",
             ColumnType::TsVector => "tsvector",
             ColumnType::TsQuery => "tsquery",
             ColumnType::Jsonb => "jsonb",
@@ -910,7 +921,7 @@ impl ColumnType {
             ColumnType::Regclass => 4,
             ColumnType::Regtype => 4,
             ColumnType::Regprocedure => 4,
-            ColumnType::OidVector => -1,
+            ColumnType::OidVector | ColumnType::Int2Vector => -1,
             ColumnType::TsVector | ColumnType::TsQuery => -1,
             // jsonb, jsonpath, arrays and composites are variable-length.
             ColumnType::Jsonb

@@ -333,6 +333,21 @@ pub fn cast_in(
                 elem, elems, raw.dims,
             )))
         }
+        // `int2vector` shares `oidvector`'s zero-based, space-separated form;
+        // element failures report the element type, as PostgreSQL's
+        // `int2vector_in` does.
+        (Datum::Text(s), ColumnType::Int2Vector) => {
+            let elems = s
+                .split_whitespace()
+                .map(text_to_i16)
+                .collect::<Result<Vec<_>, _>>()?;
+            let len = i32::try_from(elems.len()).unwrap_or(i32::MAX);
+            Ok(Datum::OidVector(crate::datum::ArrayValue::with_dims(
+                crate::ElemType::Int2,
+                elems,
+                vec![crate::ArrayDim::new(0, len)],
+            )))
+        }
         (Datum::Text(s), ColumnType::OidVector) => {
             let elems = s
                 .split_whitespace()
@@ -2075,6 +2090,40 @@ mod tests {
                 .expect_err("bad syntax or out of range");
             assert!(err.sqlstate() == *sqlstate, "{text:?} -> {target:?}");
             assert!(err.to_string() == *message, "{text:?} -> {target:?}");
+        }
+    }
+
+    /// `int2vector` shares `oidvector`'s zero-based, space-separated form, and
+    /// reports a bad element the way the element type's input function does.
+    #[test]
+    fn int2vector_parses_the_space_separated_zero_based_form() {
+        use assert2::assert;
+        let tz = utc();
+        let parsed =
+            cast(&Datum::Text(" 1 3  5 ".into()), ColumnType::Int2Vector, &tz).expect("int2vector");
+        let Datum::OidVector(vector) = parsed else {
+            panic!("int2vector is the shared zero-based vector datum")
+        };
+        assert!(vector.elem == crate::ElemType::Int2);
+        assert!(vector.dims == vec![crate::ArrayDim::new(0, 3)]);
+        assert!(vector.elems == vec![Datum::Int2(1), Datum::Int2(3), Datum::Int2(5)]);
+
+        for (text, sqlstate, message) in [
+            (
+                "1 asdf",
+                "22P02",
+                "invalid input syntax for type smallint: \"asdf\"",
+            ),
+            (
+                "50000",
+                "22003",
+                "value \"50000\" is out of range for type smallint",
+            ),
+        ] {
+            let err = cast(&Datum::Text(text.into()), ColumnType::Int2Vector, &tz)
+                .expect_err("bad element");
+            assert!(err.sqlstate() == sqlstate, "{text}");
+            assert!(err.to_string() == message, "{text}: {err}");
         }
     }
 

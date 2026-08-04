@@ -10770,6 +10770,7 @@ fn param_column_type(param: &BoundParam) -> Result<Option<ColumnType>, PgError> 
         Some(crabka_pgtypes::oids::REGTYPE) => Ok(Some(ColumnType::Regtype)),
         Some(crabka_pgtypes::oids::REGPROCEDURE) => Ok(Some(ColumnType::Regprocedure)),
         Some(crabka_pgtypes::oids::OIDVECTOR) => Ok(Some(ColumnType::OidVector)),
+        Some(crabka_pgtypes::oids::INT2VECTOR) => Ok(Some(ColumnType::Int2Vector)),
         Some(crabka_pgtypes::oids::INT8) => Ok(Some(ColumnType::Int8)),
         Some(crabka_pgtypes::oids::TEXT) => Ok(Some(ColumnType::Text)),
         Some(crabka_pgtypes::oids::VARCHAR) => Ok(Some(ColumnType::Varchar(None))),
@@ -10959,15 +10960,18 @@ fn decode_binary_value(
                 .map_err(ExecError::into_pg)
         }
         ColumnType::Array(elem) => decode_array_binary(value, elem, elem.oid(), time_zone),
-        ColumnType::OidVector => {
-            decode_array_binary(value, ElemType::Int4, crabka_pgtypes::oids::OID, time_zone).map(
-                |value| {
-                    let Datum::Array(array) = value else {
-                        unreachable!("array decoder returns an array")
-                    };
-                    Datum::OidVector(array)
-                },
-            )
+        ColumnType::OidVector | ColumnType::Int2Vector => {
+            let (elem, elem_oid) = if ty == ColumnType::Int2Vector {
+                (ElemType::Int2, crabka_pgtypes::oids::INT2)
+            } else {
+                (ElemType::Int4, crabka_pgtypes::oids::OID)
+            };
+            decode_array_binary(value, elem, elem_oid, time_zone).map(|value| {
+                let Datum::Array(array) = value else {
+                    unreachable!("array decoder returns an array")
+                };
+                Datum::OidVector(array)
+            })
         }
         ColumnType::Range(range) => decode_range_binary(value, range, time_zone),
         ColumnType::Multirange(multirange) => {
