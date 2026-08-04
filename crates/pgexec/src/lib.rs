@@ -3224,6 +3224,80 @@ mod point_type_tests {
         assert_eq!(row_count(&all), 2);
         assert_eq!(row_count(&only), 1);
     }
+
+    fn scanned_rows(results: &[QueryResult]) -> usize {
+        match results.last() {
+            Some(QueryResult::Rows { rows, .. }) => rows.len(),
+            other => panic!("expected rows, got {other:?}"),
+        }
+    }
+
+    /// Multiple inheritance makes the tree a DAG, so a grandchild is reachable
+    /// from the root by more than one path. Reading the root must still see each
+    /// of its rows once.
+    #[tokio::test]
+    async fn a_diamond_descendant_is_scanned_once() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE TABLE dia_root (id int4); \
+                 CREATE TABLE dia_left () INHERITS (dia_root); \
+                 CREATE TABLE dia_right () INHERITS (dia_root); \
+                 CREATE TABLE dia_bottom () INHERITS (dia_left, dia_right); \
+                 INSERT INTO dia_root VALUES (1); \
+                 INSERT INTO dia_bottom VALUES (2)",
+            )
+            .await
+            .expect("build the diamond");
+
+        let all = session
+            .simple_query("SELECT id FROM dia_root")
+            .await
+            .expect("scan the diamond root");
+        // `dia_bottom` is reachable via both `dia_left` and `dia_right`; without
+        // a visited set its single row is returned once per path.
+        assert2::assert!(scanned_rows(&all) == 2);
+    }
+
+    /// Dropping either end of an inheritance link must leave no dangling half:
+    /// a stale child entry makes the surviving parent unreadable, and a stale
+    /// parent entry breaks `pg_inherits` for every relation, not just this one.
+    #[tokio::test]
+    async fn dropping_either_end_of_an_inheritance_link_leaves_no_dangling_half() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE TABLE drop_keep (id int4); \
+                 CREATE TABLE drop_child () INHERITS (drop_keep); \
+                 INSERT INTO drop_keep VALUES (1); \
+                 CREATE TABLE drop_gone (id int4); \
+                 CREATE TABLE drop_orphan () INHERITS (drop_gone); \
+                 DROP TABLE drop_child; \
+                 DROP TABLE drop_gone",
+            )
+            .await
+            .expect("drop each end of an inheritance link");
+
+        let parent = session
+            .simple_query("SELECT id FROM drop_keep")
+            .await
+            .expect("a parent stays readable after its child is dropped");
+        assert2::assert!(scanned_rows(&parent) == 1);
+
+        let inherits = session
+            .simple_query("SELECT inhrelid FROM pg_inherits")
+            .await
+            .expect("pg_inherits stays readable after a parent is dropped");
+        assert2::assert!(scanned_rows(&inherits) == 0);
+
+        let orphan = session
+            .simple_query("SELECT id FROM drop_orphan")
+            .await
+            .expect("the orphaned child stays readable");
+        assert2::assert!(scanned_rows(&orphan) == 0);
+    }
 }
 
 pub(crate) fn checkpoint_garbage_horizon(

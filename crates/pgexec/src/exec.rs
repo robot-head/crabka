@@ -6000,8 +6000,10 @@ fn drop_table_and_dependents_ops(
         }
         ops.extend(crabka_pgcatalog::drop_table_ops(kv, &descendant)?);
         ops.extend(crate::partition::drop_metadata_ops(kv, &descendant)?);
+        ops.extend(crate::inheritance::drop_metadata_ops(kv, &descendant)?);
     }
     ops.extend(crate::partition::drop_metadata_ops(kv, name)?);
+    ops.extend(crate::inheritance::drop_metadata_ops(kv, name)?);
     ops.extend(crabka_pgcatalog::trigger::drop_triggers_for_table_ops(
         kv, table.id,
     )?);

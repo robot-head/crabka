@@ -23,7 +23,7 @@ fn child_index_key(parent: &RelationName, child: &RelationName) -> Vec<u8> {
     key
 }
 
-pub(crate) fn attach_ops(child: &RelationName, parents: &[RelationName]) -> Vec<WriteOp> {
+fn encode_parents(parents: &[RelationName]) -> Vec<u8> {
     let mut value = vec![VERSION];
     value.extend_from_slice(
         &u32::try_from(parents.len())
@@ -34,9 +34,13 @@ pub(crate) fn attach_ops(child: &RelationName, parents: &[RelationName]) -> Vec<
         write_string(&mut value, &parent.schema);
         write_string(&mut value, &parent.name);
     }
+    value
+}
+
+pub(crate) fn attach_ops(child: &RelationName, parents: &[RelationName]) -> Vec<WriteOp> {
     let mut ops = vec![WriteOp::Put {
         key: relation_key(PARENTS_PREFIX, child),
-        value,
+        value: encode_parents(parents),
     }];
     ops.extend(parents.iter().map(|parent| WriteOp::Put {
         key: child_index_key(parent, child),
@@ -93,17 +97,70 @@ pub(crate) fn children_of(
         .collect()
 }
 
+/// Every relation below `parent`, each named once.
+///
+/// The visited set is load-bearing rather than defensive: multiple inheritance
+/// makes the graph a DAG, so `d INHERITS (b, c)` under `b, c INHERITS a` is
+/// reachable from `a` by two paths. Yielding `d` twice makes
+/// [`inherited_scan`](crate::exec) read its rows twice, and `SELECT * FROM a`
+/// silently returns duplicates.
 pub(crate) fn descendants(
     kv: &dyn Kv,
     parent: &RelationName,
 ) -> Result<Vec<RelationName>, ExecError> {
     let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     let mut pending = children_of(kv, parent)?;
     while let Some(child) = pending.pop() {
+        if !seen.insert(child.clone()) {
+            continue;
+        }
         pending.extend(children_of(kv, &child)?);
         out.push(child);
     }
     Ok(out)
+}
+
+/// Remove every inheritance link that mentions `name`, so dropping a relation
+/// cannot leave a dangling one behind.
+///
+/// Three link kinds have to go, and missing any one breaks a *different* read:
+/// the relation's own parent list, the index entry each parent holds pointing
+/// at it (leaving that behind makes the surviving parent unreadable, because
+/// scanning it resolves a child that no longer exists), and the parent list of
+/// every child, which names the relation being dropped and would otherwise make
+/// `pg_inherits` — and so psql's `\d` — fail for the whole database.
+pub(crate) fn drop_metadata_ops(
+    kv: &dyn Kv,
+    name: &RelationName,
+) -> Result<Vec<WriteOp>, ExecError> {
+    let mut ops = vec![WriteOp::Delete {
+        key: relation_key(PARENTS_PREFIX, name),
+    }];
+    for parent in parents_of(kv, name)? {
+        ops.push(WriteOp::Delete {
+            key: child_index_key(&parent, name),
+        });
+    }
+    for child in children_of(kv, name)? {
+        ops.push(WriteOp::Delete {
+            key: child_index_key(name, &child),
+        });
+        let remaining: Vec<RelationName> = parents_of(kv, &child)?
+            .into_iter()
+            .filter(|parent| parent != name)
+            .collect();
+        let key = relation_key(PARENTS_PREFIX, &child);
+        ops.push(if remaining.is_empty() {
+            WriteOp::Delete { key }
+        } else {
+            WriteOp::Put {
+                key,
+                value: encode_parents(&remaining),
+            }
+        });
+    }
+    Ok(ops)
 }
 
 fn write_string(out: &mut Vec<u8>, value: &str) {
