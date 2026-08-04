@@ -232,7 +232,7 @@ start_gres() {
         command+=("TOKIO_WORKER_THREADS=1")
     fi
     command+=("$GRES_BIN" --listen "${GRES_HOST}:${GRES_PORT}" \
-        --pgexec-blocking-query-memory=20MiB)
+        "--pgexec-blocking-query-memory=${GRES_PG_REGRESS_BLOCKING_QUERY_MEMORY:-20MiB}")
     printf '%q ' "${command[@]}" >"${output}/server-command.txt"
     printf '\n' >>"${output}/server-command.txt"
     "${command[@]}" >"${output}/server.log" 2>&1 &

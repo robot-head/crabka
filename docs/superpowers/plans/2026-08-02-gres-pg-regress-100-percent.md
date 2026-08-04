@@ -346,8 +346,26 @@ and their certified artifact describe current conformance.
       (7969 -> 17962) and `cluster` (333 -> 5308) alone account for ~15k of it
       and already stood at those values in this program's first measurement,
       before any change here. Total against the seeded gate is 172573 -> 173731.
-      Do not re-seed: that would erase the record of the inherited regressions.
-      Find what changed `join` and `cluster` between `179158c39` and here.
+      Do not re-seed blindly. **Diagnosed:** the runner flag
+      `--pgexec-blocking-query-memory=20MiB` did not exist when the baseline was
+      seeded -- it arrived later, in `1a1d00376`. The baseline and every run
+      since were therefore measured under *different policies*, so "55 files
+      worsened" is not by itself a code-regression signal.
+      A/B on one snapshot, `join` replayed under each budget: at 20 MiB it
+      finishes in seconds at 17505 changed lines; at 4 GiB it had emitted 4238
+      of the 9947 expected lines after **2h41m** at 100% CPU and was still
+      running, so it does not terminate in practical time. A full 4 GiB serial
+      run hit the runner's 3600s timeout at test 92 of 231.
+      So the drift is the "unblocked statements fail longer" effect at scale:
+      as Gres gained features, more of `join`'s statements began to *attempt*
+      execution instead of failing early on a missing feature, and now hit the
+      memory cap -- each producing a memory error plus a cascade of
+      `current transaction is aborted` (14 and 75 respectively in `join`).
+      Nobody broke anything; the measurement basis moved.
+      The real fix is spill-to-disk for the blocking operators: PostgreSQL never
+      errors on `work_mem`, it spills. Until sorts/hashes spill, `join` and
+      `cluster` cannot converge, and the baseline cannot honestly be ratcheted
+      past them. Ratchet the other 53 files only after that lands.
 - [ ] Finish the geometry cluster. `box` and `point` still need their
       remaining functions (`box(point,point)`, `area`, `center`, `height`,
       `width` on more shapes) and `polygon` needs its type plus SP-GiST quad
