@@ -11984,18 +11984,141 @@ fn attach_known_runtime_diagnostics(sql: &str, stmt: &Statement, error: PgError)
     let error = attach_hidden_target_alias_diagnostic(sql, stmt, error);
     attach_undefined_function_position(
         sql,
-        attach_range_literal_position(sql, attach_bool_literal_position(sql, error)),
+        attach_range_literal_position(sql, attach_type_input_literal_position(sql, error)),
     )
 }
 
-/// PostgreSQL resolves the legacy `bool 'literal'` type-input syntax during
-/// analysis and points at that literal when `boolin` rejects it. Attach the
-/// position only when the source contains one exact matching bool literal;
-/// ordinary text-to-boolean casts remain runtime errors without a caret.
-fn attach_bool_literal_position(sql: &str, error: PgError) -> PgError {
+/// The rejected value and target type of a type-input error, for the three
+/// message shapes PostgreSQL's input functions produce.
+fn rejected_input_value(message: &str) -> Option<(&str, &str)> {
+    if let Some(rest) = message.strip_prefix("invalid input syntax for type ") {
+        let (type_name, quoted) = rest.split_once(": \"")?;
+        return Some((quoted.strip_suffix('"')?, type_name));
+    }
+    let quoted = message
+        .strip_prefix("value \"")
+        .or_else(|| message.strip_prefix('"'))?;
+    let (value, type_name) = quoted.rsplit_once("\" is out of range for type ")?;
+    Some((value, type_name))
+}
+
+/// PostgreSQL's canonical name for a type however it is spelled, so a written
+/// `int2` compares equal to the `smallint` an input error reports.
+fn canonical_type_key(name: &str) -> String {
+    let lowered = name.trim().to_ascii_lowercase();
+    match lowered.as_str() {
+        "int2" => "smallint".to_owned(),
+        "int" | "int4" => "integer".to_owned(),
+        "int8" => "bigint".to_owned(),
+        "bool" => "boolean".to_owned(),
+        "float4" => "real".to_owned(),
+        "float8" => "double precision".to_owned(),
+        "decimal" => "numeric".to_owned(),
+        "varchar" => "character varying".to_owned(),
+        "bpchar" => "character".to_owned(),
+        "timestamptz" => "timestamp with time zone".to_owned(),
+        "timetz" => "time with time zone".to_owned(),
+        _ => lowered,
+    }
+}
+
+/// The type a source literal is *directly* coerced to, when the statement
+/// states one next to it: `int2 '1'`, `'1'::int2`, or `CAST('1' AS int2)`.
+/// A literal in a `VALUES` row states none, and takes its type from the target
+/// column instead.
+fn literal_target_type(
+    tokens: &[(crabka_pgparser::token::Token, usize)],
+    index: usize,
+) -> Option<&str> {
+    use crabka_pgparser::token::{Keyword, Token};
+
+    // `'x'::type` binds tighter than an enclosing call, so
+    // `to_timestamp('x'::date, …)` is still a coercion of the literal.
+    if let (Some((Token::TypeCast, _)), Some((Token::Ident(name), _))) =
+        (tokens.get(index + 1), tokens.get(index + 2))
+    {
+        return Some(name);
+    }
+    // `CAST('x' AS type)`. The `AS` must belong to a cast rather than a column
+    // alias: `SELECT bool 'test' AS error` names the *output column* `error`,
+    // not a target type.
+    if matches!(
+        (
+            index.checked_sub(2).map(|open| &tokens[open].0),
+            index.checked_sub(1).map(|open| &tokens[open].0),
+            tokens.get(index + 1).map(|next| &next.0),
+        ),
+        (
+            Some(Token::Keyword(Keyword::Cast)),
+            Some(Token::LParen),
+            Some(Token::Keyword(Keyword::As))
+        )
+    ) && let Some((Token::Ident(name), _)) = tokens.get(index + 2)
+    {
+        return Some(name);
+    }
+    // The legacy `type 'literal'` spelling.
+    if let Some((Token::Ident(name), _)) = index.checked_sub(1).and_then(|prev| tokens.get(prev)) {
+        return Some(name);
+    }
+    None
+}
+
+/// Whether the literal at `index` sits inside a function call's argument list.
+///
+/// A function receives the literal as an already-typed value and raises its own
+/// error at execution time — `to_timestamp('97/Feb/16', 'YYMonDD')` reports
+/// `invalid value "/Feb/16" for "Mon"` with no position at all — so these must
+/// stay undecorated. A `VALUES` row is not a call: its parenthesis follows the
+/// `VALUES` keyword rather than a function name, and PostgreSQL does position
+/// the coercion of each item to its target column.
+fn encloses_function_call(tokens: &[(crabka_pgparser::token::Token, usize)], index: usize) -> bool {
     use crabka_pgparser::token::Token;
 
-    if error.code != "22P02"
+    let mut depth = 0_usize;
+    for cursor in (0..index).rev() {
+        match tokens[cursor].0 {
+            Token::RParen => depth += 1,
+            Token::LParen => {
+                if let Some(open) = depth.checked_sub(1) {
+                    depth = open;
+                } else {
+                    // The parenthesis that opens the literal's own argument list.
+                    return matches!(
+                        cursor.checked_sub(1).map(|prev| &tokens[prev].0),
+                        Some(Token::Ident(_))
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// PostgreSQL's input functions run during parse analysis for a *constant*, so
+/// it points its caret at the source literal that failed — for every spelling
+/// of the cast (`int2 '34.5'`, `'34.5'::int2`, `CAST('zz' AS int4)`, and a
+/// `VALUES` item coerced to the target column). A value that was computed
+/// rather than written, such as `('12'||'x')::int4`, has no source literal and
+/// correctly gets no caret.
+///
+/// A literal coerced through an intermediate type, as in
+/// `'  tru e '::text::boolean`, reaches the failing input function at execution
+/// time instead, and PostgreSQL gives it no caret — so require that any type
+/// the source states next to the literal *is* the type that rejected it.
+///
+/// Attach the position only when exactly one string literal in the statement
+/// carries the rejected value; a repeated literal stays undecorated rather than
+/// guessing which occurrence failed.
+fn attach_type_input_literal_position(sql: &str, error: PgError) -> PgError {
+    use crabka_pgparser::token::Token;
+
+    // 22P02 invalid_text_representation, 22003 numeric_value_out_of_range, and
+    // 22007 invalid_datetime_format all name their type in the message, which is
+    // what proves the literal was coerced directly. 22008 and the array-literal
+    // messages carry no type name and are left undecorated.
+    if !matches!(error.code.as_str(), "22P02" | "22003" | "22007")
         || error
             .diagnostics
             .as_ref()
@@ -12003,23 +12126,23 @@ fn attach_bool_literal_position(sql: &str, error: PgError) -> PgError {
     {
         return error;
     }
-    let Some(value) = error
-        .message
-        .strip_prefix("invalid input syntax for type boolean: \"")
-        .and_then(|message| message.strip_suffix('"'))
-    else {
+    let Some((value, type_name)) = rejected_input_value(&error.message) else {
         return error;
     };
     let Ok(tokens) = crabka_pgparser::lexer::lex(sql) else {
         return error;
     };
+    let reported = canonical_type_key(type_name);
     let positions: Vec<usize> = tokens
-        .windows(2)
-        .filter_map(|pair| match (&pair[0].0, &pair[1].0) {
-            (Token::Ident(type_name), Token::StringLit(candidate))
-                if matches!(type_name.as_str(), "bool" | "boolean") && candidate == value =>
-            {
-                Some(sql[..pair[1].1].chars().count() + 1)
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (token, offset))| match token {
+            Token::StringLit(candidate) if candidate == value => {
+                let coerced = match literal_target_type(&tokens, index) {
+                    Some(stated) => canonical_type_key(stated) == reported,
+                    None => !encloses_function_call(&tokens, index),
+                };
+                coerced.then(|| sql[..*offset].chars().count() + 1)
             }
             _ => None,
         })
@@ -18319,50 +18442,63 @@ mod session_conformance_tests {
         }
     }
 
+    /// Every spelling of a failing constant cast carries PostgreSQL's caret at
+    /// the source literal, for any scalar type — while a value that no literal
+    /// spells stays undecorated.
     #[tokio::test]
-    async fn legacy_bool_input_errors_point_at_the_literal() {
+    async fn type_input_errors_point_at_the_source_literal() {
         let engine = SqlEngine::new();
         let mut session = engine.connect();
-        for (sql, position) in [
-            ("SELECT bool 'test'", 13),
-            ("INSERT INTO missing VALUES (bool 'XXX')", 34),
+        session
+            .simple_query("CREATE TABLE missing (value bool)")
+            .await
+            .expect("table");
+        for (sql, code, position) in [
+            ("SELECT bool 'test'", "22P02", Some(13)),
+            // The alias `AS` must not be read as a cast's target type.
+            ("SELECT bool 'test' AS error", "22P02", Some(13)),
+            ("SELECT '34.5'::int2 AS bad", "22P02", Some(8)),
+            ("INSERT INTO missing VALUES (bool 'XXX')", "22P02", Some(34)),
+            // An ordinary cast is analyzed the same way as the legacy spelling.
+            ("SELECT 'x'::boolean", "22P02", Some(8)),
+            ("SELECT '34.5'::int2", "22P02", Some(8)),
+            ("SELECT CAST('zz' AS int4)", "22P02", Some(13)),
+            // Out of range is positioned too, not just bad syntax.
+            ("SELECT '100000'::int2", "22003", Some(8)),
+            // The datetime family reports 22007 and is positioned the same way.
+            ("SELECT 'zz'::interval", "22007", Some(8)),
+            ("SELECT date 'bad'", "22007", Some(13)),
+            ("SELECT 'bad'::timestamptz", "22007", Some(8)),
+            ("SELECT 'bad'::text::date", "22007", None),
+            // No literal spells "12x", so there is nothing to point at.
+            ("SELECT ('12'||'x')::int4", "22P02", None),
+            // A function argument is raised inside the function, with no
+            // position — but a cast written on that argument still counts.
+            ("SELECT to_timestamp('97/Feb/16', 'YYMonDD')", "22007", None),
+            (
+                "SELECT length(upper('zz'::interval::text))",
+                "22007",
+                Some(21),
+            ),
+            // Coerced through `text`, so `boolin` runs at execution time and
+            // PostgreSQL reports no position.
+            ("SELECT '  tru e '::text::boolean", "22P02", None),
+            ("SELECT ''::text::boolean", "22P02", None),
+            ("SELECT CAST('zz' AS text)::int4", "22P02", None),
+            // A repeated literal is ambiguous and is not guessed.
+            ("SELECT '34.5'::int2, '34.5'::int2", "22P02", None),
         ] {
-            let error = if sql.starts_with("INSERT") {
-                // Isolate the type-input error from relation lookup.
-                session
-                    .simple_query("CREATE TABLE missing (value bool)")
-                    .await
-                    .expect("table");
-                session.simple_query(sql).await.expect_err("invalid bool")
-            } else {
-                session.simple_query(sql).await.expect_err("invalid bool")
-            };
-            assert!(error.code == "22P02", "{sql}: {error:?}");
+            let error = session.simple_query(sql).await.expect_err("input error");
+            assert!(error.code == code, "{sql}: {error:?}");
             assert!(
                 error
                     .diagnostics
                     .as_ref()
                     .and_then(|diagnostics| diagnostics.position)
-                    == Some(position),
+                    == position,
                 "{sql}: {error:?}"
             );
         }
-
-        let ambiguous = super::attach_bool_literal_position(
-            "SELECT bool 'bad', bool 'bad'",
-            crabka_pgwire::error::PgError::error(
-                "22P02",
-                "invalid input syntax for type boolean: \"bad\"",
-            ),
-        );
-        assert!(
-            ambiguous
-                .diagnostics
-                .as_ref()
-                .and_then(|diagnostics| diagnostics.position)
-                .is_none(),
-            "an ambiguous literal is not guessed"
-        );
     }
 
     #[tokio::test]
