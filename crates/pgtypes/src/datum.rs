@@ -56,8 +56,6 @@ pub mod oids {
     pub const LINE: u32 = 628;
     /// PostgreSQL `circle` — a centre point and a radius.
     pub const CIRCLE: u32 = 718;
-    /// PostgreSQL `box` — an axis-aligned rectangle.
-    pub const BOX: u32 = 603;
     /// SP32: arbitrary-precision `numeric`/`decimal`.
     pub const NUMERIC: u32 = 1700;
     /// SP37: `date`: days since 2000-01-01, stored as i32.
@@ -281,7 +279,6 @@ impl ElemType {
             | ColumnType::Lseg
             | ColumnType::Line
             | ColumnType::Circle
-            | ColumnType::Box
             | ColumnType::Regclass
             | ColumnType::Regprocedure
             | ColumnType::OidVector
@@ -595,8 +592,6 @@ pub enum ColumnType {
     Line,
     /// PostgreSQL `circle` (OID 718): a centre point and a radius.
     Circle,
-    /// PostgreSQL `box` (OID 603): an axis-aligned rectangle.
-    Box,
     /// SP32: PostgreSQL `numeric`/`decimal`. The `Typmod` (precision, scale) is
     /// significant only when storing/casting; OID/name/typlen ignore it.
     Numeric(Option<Typmod>),
@@ -755,7 +750,6 @@ impl ColumnType {
             "lseg" => Some(ColumnType::Lseg),
             "line" => Some(ColumnType::Line),
             "circle" => Some(ColumnType::Circle),
-            "box" => Some(ColumnType::Box),
             "float4" | "real" => Some(ColumnType::Float4),
             // SP32: `numeric`/`decimal` (unconstrained here; typmod added by parser).
             "numeric" | "decimal" => Some(ColumnType::Numeric(None)),
@@ -856,7 +850,6 @@ impl ColumnType {
             ColumnType::Lseg => oids::LSEG,
             ColumnType::Line => oids::LINE,
             ColumnType::Circle => oids::CIRCLE,
-            ColumnType::Box => oids::BOX,
             ColumnType::Numeric(_) => oids::NUMERIC,
             ColumnType::Date => oids::DATE,
             ColumnType::Time => oids::TIME,
@@ -901,7 +894,6 @@ impl ColumnType {
             ColumnType::Lseg => "lseg",
             ColumnType::Line => "line",
             ColumnType::Circle => "circle",
-            ColumnType::Box => "box",
             ColumnType::Numeric(_) => "numeric",
             ColumnType::Date => "date",
             ColumnType::Time => "time without time zone",
@@ -944,7 +936,6 @@ impl ColumnType {
             ColumnType::Lseg => 32,
             ColumnType::Line => 24,
             ColumnType::Circle => 24,
-            ColumnType::Box => 32,
             ColumnType::Numeric(_) => -1,
             ColumnType::Date => 4,
             ColumnType::Time => 8,
@@ -1040,8 +1031,6 @@ pub enum Datum {
     Line(crate::geometry::Line),
     /// PostgreSQL's `circle`, a centre point and a radius.
     Circle(crate::geometry::Circle),
-    /// PostgreSQL's `box`, an axis-aligned rectangle's two corners.
-    Box(crate::geometry::Box2),
     /// SP32: PostgreSQL `numeric` — an arbitrary-precision exact decimal, or one
     /// of the `NaN` / `±Infinity` specials.
     Numeric(NumericValue),
@@ -1438,7 +1427,6 @@ impl PartialEq for Datum {
             (Datum::Lseg(a), Datum::Lseg(b)) => a == b,
             (Datum::Line(a), Datum::Line(b)) => a == b,
             (Datum::Circle(a), Datum::Circle(b)) => a == b,
-            (Datum::Box(a), Datum::Box(b)) => a == b,
             // SP32: numeric grouping equality is by VALUE, ignoring scale, so
             // `1.0` and `1.00` group together (`bigdecimal`'s `==` already does
             // this), and — as in PostgreSQL's `numeric_eq` — `NaN` equals `NaN`.
@@ -1518,7 +1506,6 @@ impl std::hash::Hash for Datum {
             Datum::Lseg(lseg) => lseg.hash(state),
             Datum::Line(line) => line.hash(state),
             Datum::Circle(circle) => circle.hash(state),
-            Datum::Box(value) => value.hash(state),
             // SP32: `NumericValue` hashes the scale-normalized form so values
             // that compare equal (`1.0` and `1.00`) hash equally.
             Datum::Numeric(d) => d.hash(state),
@@ -1567,7 +1554,6 @@ impl Datum {
             Datum::Lseg(_) => Some(ColumnType::Lseg),
             Datum::Line(_) => Some(ColumnType::Line),
             Datum::Circle(_) => Some(ColumnType::Circle),
-            Datum::Box(_) => Some(ColumnType::Box),
             // The runtime value carries no typmod — it is unconstrained `numeric`.
             Datum::Numeric(_) => Some(ColumnType::Numeric(None)),
             Datum::Date(_) => Some(ColumnType::Date),

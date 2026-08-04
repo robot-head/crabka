@@ -1689,7 +1689,6 @@ fn to_jsonb(d: &Datum, ctx: &EvalCtx) -> Result<JsonbValue, ExecError> {
         | Datum::Lseg(_)
         | Datum::Line(_)
         | Datum::Circle(_)
-        | Datum::Box(_)
         | Datum::Date(_)
         | Datum::Time(_)
         | Datum::Timetz(_)

@@ -120,9 +120,6 @@ enum ScalarFunc {
     CircleRadius,
     CircleDiameter,
     CircleArea,
-    /// `width(box)` and `height(box)`.
-    BoxWidth,
-    BoxHeight,
     RangeConstructor(RangeRef),
     MultirangeConstructor(MultirangeRef),
     GenericMultirangeConstructor,
@@ -252,8 +249,6 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "radius" => ScalarFunc::CircleRadius,
         "diameter" => ScalarFunc::CircleDiameter,
         "area" => ScalarFunc::CircleArea,
-        "width" => ScalarFunc::BoxWidth,
-        "height" => ScalarFunc::BoxHeight,
         "isempty" => ScalarFunc::IsEmpty,
         "lower_inc" => ScalarFunc::LowerInc,
         "lower_inf" => ScalarFunc::LowerInf,
@@ -720,11 +715,7 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
             require_arity(fc, n == 1)?;
             Ok(ColumnType::Point)
         }
-        ScalarFunc::CircleRadius
-        | ScalarFunc::CircleDiameter
-        | ScalarFunc::CircleArea
-        | ScalarFunc::BoxWidth
-        | ScalarFunc::BoxHeight => {
+        ScalarFunc::CircleRadius | ScalarFunc::CircleDiameter | ScalarFunc::CircleArea => {
             require_arity(fc, n == 1)?;
             Ok(ColumnType::Float8)
         }
@@ -1634,16 +1625,6 @@ fn eval_eager(
             Ok(Datum::Lseg(crabka_pgtypes::geometry::Lseg {
                 start: endpoint(&vals[0])?,
                 end: endpoint(&vals[1])?,
-            }))
-        }
-        side @ (ScalarFunc::BoxWidth | ScalarFunc::BoxHeight) => {
-            require_arity(fc, vals.len() == 1)?;
-            let Datum::Box(value) = &vals[0] else {
-                return Err(undefined_function(&fc.name));
-            };
-            Ok(Datum::Float8(match side {
-                ScalarFunc::BoxWidth => value.width(),
-                _ => value.height(),
             }))
         }
         accessor @ (ScalarFunc::CircleCenter

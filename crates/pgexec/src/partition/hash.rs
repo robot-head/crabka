@@ -110,7 +110,6 @@ fn column_hash(value: &Datum, seed: u64) -> Result<Option<u64>, ExecError> {
         Datum::Lseg(_) => return Err(unsupported("lseg")),
         Datum::Line(_) => return Err(unsupported("line")),
         Datum::Circle(_) => return Err(unsupported("circle")),
-        Datum::Box(_) => return Err(unsupported("box")),
         Datum::Numeric(_) => return Err(unsupported("numeric")),
         Datum::Timetz(_) => return Err(unsupported("time with time zone")),
         Datum::Interval(_) => return Err(unsupported("interval")),

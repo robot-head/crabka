@@ -291,7 +291,6 @@ pub fn cast_in(
         (Datum::Lseg(lseg), ColumnType::Lseg) => Ok(Datum::Lseg(*lseg)),
         (Datum::Line(line), ColumnType::Line) => Ok(Datum::Line(*line)),
         (Datum::Circle(circle), ColumnType::Circle) => Ok(Datum::Circle(*circle)),
-        (Datum::Box(value), ColumnType::Box) => Ok(Datum::Box(*value)),
         (Datum::Text(s), Text) => Ok(Datum::Text(s.clone())),
         // The executor owns jsonpath parsing/canonicalization. Keeping only
         // identity here makes it impossible for a raw string to masquerade as
@@ -461,7 +460,6 @@ pub fn cast_in(
         (Datum::Text(s), ColumnType::Circle) => {
             crate::geometry::Circle::parse(s).map(Datum::Circle)
         }
-        (Datum::Text(s), ColumnType::Box) => crate::geometry::Box2::parse(s).map(Datum::Box),
         // `regclass` → the oid family drops the name and keeps the oid, which is
         // what `regclass::oid`/`::int` yields in PostgreSQL.
         (

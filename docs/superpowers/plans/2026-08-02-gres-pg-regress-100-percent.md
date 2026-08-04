@@ -296,6 +296,24 @@ and their certified artifact describe current conformance.
       whenever a geometry type starts working — the increments are that
       pre-existing divergence, not the new type. Allocate user OIDs from 16384
       up, as `FirstNormalObjectId` does.
+- [ ] Add `box` and `polygon` **together with the geometric operator family**,
+      not before it. The `box` type alone was implemented, verified
+      byte-identical to the oracle (per-coordinate corner normalization, square
+      brackets rejected) and then **reverted**, because certifying it showed the
+      failure surface *growing* by 132 lines: `box` -54 and several index files
+      improved, but `psql` +174, `gist` +30, `geometry` +10 and
+      `create_index_spgist` +8. The statements a bare type unblocks do not then
+      succeed — they reach `function box(...) does not exist` (3 lines with a
+      caret) where they used to stop at `type "box" does not exist` (1 line),
+      and every new table lands in the already-divergent `\d` listings. The
+      plan's gate is that each reviewed wave strictly shrinks the surface, so
+      the type must land with `box(point,point)` and the operators
+      (`<->`, `<@`, `@>`, `&<`, `&>`, `<<`, `>>`, `<<|`, `|>>`, `~=`, `&&`).
+      That operator family is the shared root for `box` 541, `polygon` 278,
+      `point` 387 and `geometry` 4872 — in `geometry` about 72 statements fail
+      on operators against roughly 36 on missing types. `polygon` additionally
+      needs SP-GiST quad-index support. The reverted implementation is in the
+      history if it helps: `feat(pgtypes): add PostgreSQL's box type`.
 - [ ] Add the two remaining geometry types — `box`, `circle`, `line`,
       `polygon`. **This is the highest-value repeatable shape left**, proven by
       `lseg`: each is a bounded type (input spellings, canonical output, a
