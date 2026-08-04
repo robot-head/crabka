@@ -379,6 +379,33 @@ and their certified artifact describe current conformance.
       does build hash indexes. This misled this program's own root-cause
       analysis twice, and it caps how far `join`, `memoize`, `incremental_sort`
       and the other plan-printing files can converge.
+- [ ] **Triage of what actually remains** (measured on the wave-21 run, so it
+      supersedes any earlier guess). The fourteen largest files and what gates
+      each -- none is a wave, every one is a feature:
+
+      | lines | file | gated on |
+      |------:|------|----------|
+      | 17989 | `join` | `EXPLAIN` fidelity; `(<join>) alias` scoping |
+      |  8397 | `psql` | `\\d` listing fidelity, grows with every new table |
+      |  5308 | `cluster` | `CLUSTER` itself; cascading aborts after 8 parse errors |
+      |  4871 | `geometry` | `polygon`/`path` types, `box` ordering, SP-GiST |
+      |  4305 | `partition_join` | partitionwise join planning |
+      |  4149 | `partition_prune` | pruning + its `EXPLAIN` output |
+      |  4109 | `rowsecurity` | row-level security (see below) |
+      |  3399 | `timestamptz` | timezone-database breadth |
+      |  3137 | `inherit` | table inheritance |
+      |  2949 | `updatable_views` | auto-updatable view rules |
+      |  2922 | `horology` | datetime formatting breadth |
+      |  2864 | `rules` | the rewrite system |
+      |  2842 | `alter_table` | inheritance catalog (`attinhcount` reads 0, not 1) |
+      |  2571 | `window` | window-frame breadth |
+
+      `rowsecurity`'s 125 parse errors are `CREATE POLICY` (65),
+      `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` (21) and `ALTER POLICY` (12).
+      Do **not** land the parser half alone: a parsed-but-unenforced policy
+      returns rows it should hide, which is a worse failure than the syntax
+      error, and this program has already shipped one RLS information leak (see
+      the pushdown entry above). Parse and enforce together, or not at all.
 - [ ] Ratchet or repair the committed serial baseline. The gate in
       `crates/gres-conformance/pg-regress-baseline.json` was seeded once, in
       `179158c39`, and has never been ratcheted; `baseline.py update` correctly
