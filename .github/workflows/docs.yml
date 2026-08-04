@@ -224,9 +224,12 @@ jobs:
           # grouped regex are parsed as a shell subshell/pipe and error out.
           # `--exclude codspeed.io`: the external badge host can time out from
           # GitHub runners; CodSpeed reports through its dedicated PR check.
-          # `--exclude www.sigstore.dev`: the Sigstore homepage is a valid
-          # external reference for chart provenance, but it intermittently times
-          # out from GitHub-hosted runners and makes PR docs builds flaky.
+          # `--exclude www.sigstore.dev` / `--exclude slsa.dev`: both are valid
+          # external references for image provenance — they sit in the same
+          # sentence of `packaging/README.md` — but both intermittently time out
+          # from GitHub-hosted runners and make PR docs builds flaky. (`slsa.dev`
+          # answered 200 in ~0.3s from a developer machine on the run that failed
+          # CI, so the timeout is the runner's egress, not a dead link.)
           # `--exclude hub.docker.com`: Docker Hub rate-limits and 503s
           # anonymous requests from GitHub-hosted runners (observed timeout
           # then 503 on consecutive runs), making image-page links flaky.
@@ -251,6 +254,7 @@ jobs:
             --exclude 127\.0\.0\.1
             --exclude codspeed\.io
             --exclude www\.sigstore\.dev
+            --exclude slsa\.dev
             --exclude hub\.docker\.com
             --remap "https://robot-head\.github\.io/crabka/ file://${{ github.workspace }}/website/public/"
             --include-fragments
