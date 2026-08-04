@@ -1216,6 +1216,38 @@ fn coerce_untyped_literal_operands(
                 _ => None,
             };
         }
+        // A geometric counterpart resolves the literal to its own type, which is
+        // how `p.f1 << '(0,0)'` and `p.f1 ~= '(5.1,34.5)'` pick an operator.
+        let geometric_type = match other {
+            Datum::Point(_) => Some(ColumnType::Point),
+            Datum::Box(_) => Some(ColumnType::Box),
+            Datum::Circle(_) => Some(ColumnType::Circle),
+            Datum::Lseg(_) => Some(ColumnType::Lseg),
+            Datum::Line(_) => Some(ColumnType::Line),
+            _ => None,
+        };
+        if let Some(geometric_type) = geometric_type {
+            return match op {
+                BinaryOp::Shl
+                | BinaryOp::Shr
+                | BinaryOp::DoesNotExtendRight
+                | BinaryOp::DoesNotExtendLeft
+                | BinaryOp::StrictlyBelow
+                | BinaryOp::StrictlyAbove
+                | BinaryOp::Overlaps
+                | BinaryOp::Contains
+                | BinaryOp::ContainedBy
+                | BinaryOp::Same
+                | BinaryOp::Phrase
+                | BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge => Some(geometric_type),
+                _ => None,
+            };
+        }
         if !matches!(other, Datum::Jsonb(_)) {
             return match (op, other) {
                 (BinaryOp::JsonPathMatch, Datum::TsVector(_)) => Some(ColumnType::TsQuery),
@@ -2109,6 +2141,44 @@ fn is_boxable(ty: ColumnType) -> bool {
     )
 }
 
+/// The result type when a geometric operator has one bare `unknown` literal.
+/// PostgreSQL resolves the literal from its sibling, so `p.f1 << '(0,0)'` picks
+/// the `point` operator; the literal's *value* is converted to the sibling's
+/// type later, by `coerce_untyped_literal_operands`.
+fn geometric_literal_operator(
+    op: BinaryOp,
+    left: &Expr,
+    right: &Expr,
+    scope: &Scope,
+) -> Result<Option<ColumnType>, ExecError> {
+    let unknown_left = is_unknown_literal(left);
+    if unknown_left == is_unknown_literal(right) {
+        return Ok(None);
+    }
+    let sibling = if unknown_left {
+        infer_type(right, scope)?
+    } else {
+        infer_type(left, scope)?
+    };
+    if !is_boxable(sibling) {
+        return Ok(None);
+    }
+    Ok(match op {
+        BinaryOp::Shl
+        | BinaryOp::Shr
+        | BinaryOp::DoesNotExtendRight
+        | BinaryOp::DoesNotExtendLeft
+        | BinaryOp::StrictlyBelow
+        | BinaryOp::StrictlyAbove
+        | BinaryOp::Overlaps
+        | BinaryOp::Contains
+        | BinaryOp::ContainedBy
+        | BinaryOp::Same => Some(ColumnType::Bool),
+        BinaryOp::Phrase => Some(ColumnType::Float8),
+        _ => None,
+    })
+}
+
 /// The bounding box a geometric operand compares as. `point`, `box`, `lseg`
 /// and `circle` all reduce to a box for the positional operators, which is how
 /// PostgreSQL's `box`-based comparisons are defined.
@@ -2740,6 +2810,9 @@ fn infer_binary_type(
     scope: &Scope,
 ) -> Result<ColumnType, ExecError> {
     reject_jsonpath_comparison(op, left, right, scope)?;
+    if let Some(resolved) = geometric_literal_operator(op, left, right, scope)? {
+        return Ok(resolved);
+    }
     match op {
         BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div => {
             if is_unknown_literal(left) && is_unknown_literal(right) {
@@ -3547,6 +3620,36 @@ mod tests {
     /// rejects a non-boolean boolean test.
     fn infer_err(sql: &str) -> ExecError {
         infer_type(&pexpr(sql).expect("parse"), &Scope::empty()).expect_err("must fail")
+    }
+
+    /// PostgreSQL resolves an `unknown` literal from its geometric sibling, so
+    /// `p.f1 << '(0,0)'` picks the `point` operator rather than failing to find
+    /// one. The literal adopts the sibling's own type — `circle @> '(0.5,0)'`
+    /// reads the literal as a *circle*, not as the point it looks like.
+    #[test]
+    fn a_bare_literal_adopts_its_geometric_siblings_type() {
+        // (expression, result) — verified against PostgreSQL 18.4.
+        let cases: &[(&str, Datum)] = &[
+            ("point '(1,2)' << '(3,4)'", Datum::Bool(true)),
+            ("'(3,4)' >> point '(1,2)'", Datum::Bool(true)),
+            ("point '(1,2)' >> '(3,4)'", Datum::Bool(false)),
+            ("point '(1,2)' <<| '(3,4)'", Datum::Bool(true)),
+            ("point '(1,2)' |>> '(3,4)'", Datum::Bool(false)),
+            ("point '(5.1,34.5)' ~= '(5.1,34.5)'", Datum::Bool(true)),
+            ("point '(0,0)' <-> '(3,4)'", Datum::Float8(5.0)),
+            ("box '((0,0),(2,2))' && '((1,1),(3,3))'", Datum::Bool(true)),
+        ];
+        for (sql, expected) in cases {
+            assert2::assert!(ev(sql, None, &[]) == *expected, "{sql}");
+        }
+        // The literal is read as the sibling's type, so a point-shaped literal
+        // against a circle is a circle syntax error, not a silent point.
+        assert2::assert!(
+            ev_err("circle '<(0,0),1>' @> '(0.5,0)'")
+                .into_pg()
+                .message
+                .contains("invalid input syntax for type circle")
+        );
     }
 
     #[test]

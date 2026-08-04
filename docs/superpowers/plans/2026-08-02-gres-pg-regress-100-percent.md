@@ -6,13 +6,13 @@
 test files, not the adopted corpus's statement matches. The checked-in monotone
 floor remains `6/231`; this review is still non-monotone against that floor and
 does not ratchet it. Serial completes all 231 files with zero infrastructure
-failures, leaving 203 semantic failures across 174080 canonical changed lines
-and 4624 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
+failures, leaving 203 semantic failures across 173731 canonical changed lines
+and 4659 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
 postflight probe succeeds, and the infrastructure report is empty.
 
 The measurement immediately before this wave was `22/231` at 176686 changed
 lines / 4606 hunks, from the same runner and the same pinned corpus. The
-waves below are therefore `+6` exact files and `-2606` changed lines with
+waves below are therefore `+6` exact files and `-2270` changed lines with
 **zero newly failing files**: `int4`, `int2`, `roleattributes`, `lseg`, `line` and `circle` become exact,
 and 4 files gain a combined 22 lines.
 
@@ -329,6 +329,25 @@ and their certified artifact describe current conformance.
 - [x] Add `&<|`, `|&>`, `box(point,point)` and the box overloads of `area` and
       `center`: `geometry` -80, `box` -46, `index_including_gist` -38,
       `spgist` -5, nothing worsened.
+- [x] Resolve a bare `unknown` literal from its geometric sibling in
+      `infer_binary_type`, and convert the literal's value to that type in
+      `coerce_untyped_literal_operands`: `create_index_spgist` -109,
+      `create_index` -107, `box` -46 (wave 17) then -73, `point` -17.
+      `geometry` rises `+6` because three `polygon(int, circle)` calls that
+      used to stop at `cannot compare circle and text` now resolve the
+      comparison and fail one error later, printing a caret line each -- the
+      same "unblocked statements fail longer" effect that made the `box` type
+      measure `+132` on its own in wave 15. It reverses when `polygon` lands.
+- [ ] Ratchet or repair the committed serial baseline. The gate in
+      `crates/gres-conformance/pg-regress-baseline.json` was seeded once, in
+      `179158c39`, and has never been ratcheted; `baseline.py update` correctly
+      refuses ("would grow or replace the mismatch surface") because 55 files
+      are worse than it. That drift is *not* from the waves above -- `join`
+      (7969 -> 17962) and `cluster` (333 -> 5308) alone account for ~15k of it
+      and already stood at those values in this program's first measurement,
+      before any change here. Total against the seeded gate is 172573 -> 173731.
+      Do not re-seed: that would erase the record of the inherited regressions.
+      Find what changed `join` and `cluster` between `179158c39` and here.
 - [ ] Finish the geometry cluster. `box` and `point` still need their
       remaining functions (`box(point,point)`, `area`, `center`, `height`,
       `width` on more shapes) and `polygon` needs its type plus SP-GiST quad
