@@ -24,7 +24,8 @@ environment:
 # every binary used by docker-compose.yml. Crabka service binaries are built
 # with heap profiling enabled so their /debug/pprof/heap endpoints exist; the
 # demo app is built separately without heap-profiling because its dependency
-# graph already owns a global allocator.
+# graph already owns a global allocator, and crabka-gres because it defines no
+# such feature (it exposes no admin port to serve a heap profile from).
 pipeline:
   - name: Install pinned Rust toolchain
     runs: |
@@ -57,12 +58,13 @@ pipeline:
 
       cargo build --release \
         -p crabka-cli \
+        -p crabka-gres \
         -p observability-demo-app
 
       mkdir -p dist
       for bin in crabka-broker crabka crabka-metrics crabka-metrics-service \
                  crabka-traces crabka-observability crabka-profiles \
-                 crabka-schema-registry observability-demo-app; do
+                 crabka-schema-registry crabka-gres observability-demo-app; do
         install -m 0755 "$target/release/$bin" "dist/$bin"
       done
       strip --strip-debug dist/*
@@ -71,6 +73,6 @@ pipeline:
     runs: |
       for bin in crabka-broker crabka crabka-metrics crabka-metrics-service \
                  crabka-traces crabka-observability crabka-profiles \
-                 crabka-schema-registry observability-demo-app; do
+                 crabka-schema-registry crabka-gres observability-demo-app; do
         install -D -m 0755 "dist/$bin" "${{targets.destdir}}/usr/bin/$bin"
       done

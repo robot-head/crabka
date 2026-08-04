@@ -37,6 +37,9 @@ crabka-protocol = { version = "0.3.9", path = "../protocol" }
 crabka-security = { workspace = true }
 crabka-gres-ranges = { version = "0.3.9", path = "../gres-ranges" }
 crabka-object-store = { version = "0.3.8", path = "../object-store" }
+# W3C trace-context propagation only. Deliberately *not* `crabka-telemetry`,
+# which drags in axum/clap/pprof/tonic/opentelemetry-otlp.
+crabka-trace-context = { version = "0.3.9", path = "../trace-context" }
 crabka-units = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
@@ -57,7 +60,10 @@ proptest = { workspace = true }
 crabka-broker = { version = "0.3.9", path = "../broker", features = ["test-helpers"] }
 crabka-raft = { version = "0.3.8", path = "../raft" }
 crabka-pgtypes = { version = "0.3.9", path = "../pgtypes" }
+opentelemetry = { workspace = true, features = ["trace"] }
+opentelemetry_sdk = { workspace = true, features = ["trace", "testing"] }
 stateright = { workspace = true }
+tracing-opentelemetry = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
 tracing-subscriber = { workspace = true }

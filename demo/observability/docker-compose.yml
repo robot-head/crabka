@@ -96,6 +96,10 @@ x-demo-res: &demo-res
   mem_limit: ${CRABKA_DEMO_MEM:-1g}
   memswap_limit: ${CRABKA_DEMO_MEM:-1g}
   cpus: ${CRABKA_DEMO_CPUS:-1}
+x-gres-res: &gres-res
+  mem_limit: ${CRABKA_GRES_MEM:-1g}
+  memswap_limit: ${CRABKA_GRES_MEM:-1g}
+  cpus: ${CRABKA_GRES_CPUS:-2}
 x-setup-res: &setup-res
   mem_limit: ${CRABKA_SETUP_MEM:-512m}
   memswap_limit: ${CRABKA_SETUP_MEM:-512m}
@@ -524,6 +528,83 @@ services:
       # producer/stream roles do.
       schema-registry: { condition: service_healthy }
 
+  # ---- GRES (PostgreSQL-compatible SQL engine over the broker) ----
+  # Single-node substrate mode: one compute that owns every range, with the
+  # broker as its write-ahead log and a local cache for the read model. That is
+  # deliberately the simplest topology that still produces the query waterfall
+  # — session → statement → executor → WAL append. A multi-range cluster
+  # additionally needs mTLS material between the computes
+  # (--range-tls-cert/key/ca), which no repo tooling generates, so it is not
+  # part of the demo; see README.md.
+
+  # One-shot: write the `demo` tenant's registry record to `__gres_cfg.demo`.
+  # gres refuses to start in substrate mode without it — the record carries the
+  # tenant's range layout and its SCRAM verifier, so it is also what sets the
+  # SQL password. Idempotent: `describe` succeeds once the record exists.
+  gres-setup:
+    image: ghcr.io/robot-head/crabka-demo:latest
+    <<: *setup-res
+    restart: "no"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >
+        crabka gres describe --bootstrap broker:9092 --name demo >/dev/null 2>&1 && exit 0;
+        printf '%s' "${CRABKA_GRES_PASSWORD:-demo}" | crabka gres create-tenant
+        --bootstrap broker:9092 --name demo --user demo --password-stdin
+    depends_on:
+      broker: { condition: service_healthy }
+
+  gres:
+    <<: [*crabka-image, *gres-res]
+    command: ["crabka-gres", "--listen=0.0.0.0:5433", "--substrate-bootstrap=broker:9092", "--tenant=demo", "--cache-dir=/data"]
+    environment:
+      <<: *otlp-env
+      OTEL_SERVICE_NAME: gres
+      # Full sampling, unlike every other service here. The 0.05 in x-otlp-env
+      # exists to damp the traces pipeline's self-observation feedback loop;
+      # gres is a database, not a trace backend, so its spans never re-enter
+      # their own ingest path and cannot amplify. Head-sampling a query
+      # waterfall at 5% would drop 19 of every 20 traces the demo exists to
+      # show.
+      CRABKA_OTLP_SAMPLE_RATIO: "1.0"
+      # Verbatim SQL (`db.query.text`) on statement spans. OFF by default: the
+      # query text carries literals, so it is the one setting here that can
+      # export personal data or secrets. Spans still carry db.query.summary
+      # ("SELECT demo_orders") plus operation/collection/namespace either way.
+      CRABKA_OTLP_SQL_TEXT: "${CRABKA_GRES_OTLP_SQL_TEXT:-false}"
+    ports: ["5433:5433"]
+    volumes: ["gres-cache:/data"]
+    depends_on:
+      broker: { condition: service_healthy }
+      gres-setup: { condition: service_completed_successfully }
+    # No healthcheck on purpose. gres has no admin/metrics port, so the only
+    # probe available is a TCP connect — and every connect opens a pgwire
+    # session, which is itself a `gres.session` span. A probe on a timer would
+    # bury the workload's traces under empty single-span sessions in exactly
+    # the view this service exists to demonstrate. gres-workload waits for
+    # readiness by retrying `SELECT 1` instead.
+
+  # A gres with no clients emits no spans. This runs a small SQL loop —
+  # INSERT, aggregate, point SELECT, plus one query carrying a client-supplied
+  # W3C traceparent — so `docker compose up` produces a trace waterfall without
+  # anyone having to open psql. Set CRABKA_GRES_WORKLOAD_INTERVAL=0 to make it
+  # spin as fast as gres will answer; raise it to quieten the demo.
+  gres-workload:
+    image: mirror.gcr.io/library/postgres:18-alpine
+    <<: *demo-res
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/workload.sh"]
+    environment:
+      PGCONNECT_TIMEOUT: "5"
+      PGPASSWORD: "${CRABKA_GRES_PASSWORD:-demo}"
+      CRABKA_GRES_WORKLOAD_INTERVAL: "${CRABKA_GRES_WORKLOAD_INTERVAL:-5}"
+      CRABKA_GRES_WORKLOAD_CONNINFO: "host=gres port=5433 user=demo dbname=demo"
+    volumes: ["./gres/workload.sh:/workload.sh:ro"]
+    depends_on:
+      gres: { condition: service_started }
+
 volumes:
   broker-data:
   rustfs-data:
+  gres-cache:

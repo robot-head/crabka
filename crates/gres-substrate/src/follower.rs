@@ -10,7 +10,10 @@ use crate::{
     ReplayItem, WalFrame,
     checkpoint::{CheckpointStore, restore_latest},
     error::SubstrateError,
-    recovery::{CommittedWalReader, FetchedWalPartition, LiveEndDialer, LiveRecoveryConfig},
+    recovery::{
+        CommittedWalReader, FetchedWalPartition, LiveEndDialer, LiveRecoveryConfig,
+        WAL_APPLY_FOLLOWER_BOOTSTRAP, wal_apply_span,
+    },
 };
 
 /// Samples the committed end of a WAL topic after a barrier call begins.
@@ -245,9 +248,18 @@ impl ReadOnlyRange0Follower {
         let start = applied_offset.checked_add(1).ok_or_else(|| {
             SubstrateError::Unavailable("range-0 follower replay offset overflowed".into())
         })?;
-        for item in &reader.committed_from(start).await? {
-            follower.apply_committed(item)?;
-        }
+        let traced = reader.committed_from_traced(start).await?;
+        let apply = wal_apply_span(
+            WAL_APPLY_FOLLOWER_BOOTSTRAP,
+            traced.items.len(),
+            &traced.links,
+        );
+        apply.in_scope(|| {
+            for item in &traced.items {
+                follower.apply_committed(item)?;
+            }
+            Ok::<(), SubstrateError>(())
+        })?;
         Ok(follower)
     }
 

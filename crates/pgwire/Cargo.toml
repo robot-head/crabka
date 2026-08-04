@@ -23,6 +23,13 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+# W3C trace-context ingress. The only tracing crate a *published* wire-protocol
+# crate may depend on: `crabka-telemetry` is `publish = false` and drags in a web
+# server, a CLI parser and a profiler.
+crabka-trace-context = { version = "0.3.9", path = "../trace-context" }
+# Exact, lint-clean `f64 -> u64` truncation for the `TraceIdRatioBased`
+# resampling bound, which has to agree bit-for-bit with `opentelemetry_sdk`.
+num-traits = { workspace = true }
 rustls = { workspace = true }
 tokio-rustls = { workspace = true }
 sha2 = { workspace = true }
@@ -38,3 +45,10 @@ tokio-postgres = { workspace = true }
 proptest = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 sqlx = { workspace = true }
+# Trace assertions run against exported `SpanData`, not live `Span` handles:
+# `tracing-opentelemetry` resolves a re-parented span's trace id when the span
+# closes, so a live handle reports the wrong parent even when the export is right.
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
+tracing-opentelemetry = { workspace = true }
+tracing-subscriber = { workspace = true }

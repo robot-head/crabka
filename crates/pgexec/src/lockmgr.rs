@@ -32,6 +32,66 @@ pub enum LockMode {
     Exclusive,
 }
 
+impl LockMode {
+    /// The mode's name as a span attribute — a fixed pair of strings, so
+    /// `pg.lock.mode` stays a discriminator rather than free text.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Shared => "shared",
+            Self::Exclusive => "exclusive",
+        }
+    }
+}
+
+/// `40P01` — `deadlock_detected`, which is what a caller maps both
+/// [`AcquireError`] variants onto. Recorded here so a lock span carries the
+/// same discriminator the statement span will.
+const DEADLOCK_SQLSTATE: &str = "40P01";
+
+/// Build the span covering a *blocked* lock acquisition.
+///
+/// Created only from the conflict arm of [`RowLockManager::acquire_key`], and
+/// deliberately so: an uncontended acquire happens once per row a write
+/// touches, so a span each would bury the statement's trace under thousands of
+/// zero-duration spans. What an operator wants from a lock is the wait, and a
+/// span exists here exactly when there was one.
+///
+/// TRACE, because even contended acquires are frequent on a hot key.
+fn wait_span(key: &LockKey, mode: LockMode, my_xid: u64) -> tracing::Span {
+    let span = tracing::trace_span!(
+        target: crate::telemetry::EXEC_TARGET,
+        "pg.lock.row",
+        otel.kind = "internal",
+        otel.status_code = tracing::field::Empty,
+        otel.status_description = tracing::field::Empty,
+        db.response.status_code = tracing::field::Empty,
+        "error.type" = tracing::field::Empty,
+        pg.table_id = tracing::field::Empty,
+        pg.rowid = tracing::field::Empty,
+        pg.lock.key_kind = tracing::field::Empty,
+        pg.lock.mode = mode.as_str(),
+        pg.lock.waited = true,
+        pg.lock.holder_xid = tracing::field::Empty,
+        pg.lock.outcome = tracing::field::Empty,
+        pg.txn.xid = crate::telemetry::integer(my_xid),
+    );
+    match key {
+        LockKey::Row(table, rowid) => {
+            span.record("pg.lock.key_kind", "row");
+            span.record("pg.table_id", crate::telemetry::integer(*table));
+            span.record("pg.rowid", crate::telemetry::integer(*rowid));
+        }
+        // A unique-key lock names an index entry rather than a row, so it
+        // carries neither a table id nor a rowid — the encoded key itself is
+        // both high-cardinality and derived from user data, so it is not
+        // recorded at all.
+        LockKey::UniqueKey(_) => {
+            span.record("pg.lock.key_kind", "unique_key");
+        }
+    }
+    span
+}
+
 /// Result of a non-blocking lock attempt.
 pub enum Acquire {
     Acquired,
@@ -194,20 +254,38 @@ impl RowLockManager {
         wait_cap: Option<Duration>,
     ) -> Result<(), AcquireError> {
         let deadline = wait_cap.map(|cap| tokio::time::Instant::now() + cap);
+        // Opened lazily, and only once a conflict has actually forced a wait —
+        // see [`wait_span`]. An uncontended acquire leaves this `Span::none()`,
+        // which allocates nothing and records nothing.
+        let mut wait = tracing::Span::none();
         loop {
             let (notify, holder) = {
                 let mut g = self.inner.lock().expect("lockmgr");
                 match try_acquire_locked(&mut g, key.clone(), mode, my_xid) {
                     Acquire::Acquired => {
                         g.wait_for.remove(&my_xid); // no longer waiting
+                        wait.record("pg.lock.outcome", "granted");
                         return Ok(());
                     }
                     Acquire::Conflict(holder) => {
+                        if wait.is_none() {
+                            wait = wait_span(&key, mode, my_xid);
+                        }
+                        // The holder can differ between rounds, so this names
+                        // the transaction most recently waited on rather than
+                        // the first one.
+                        wait.record("pg.lock.holder_xid", crate::telemetry::integer(holder));
                         if matches!(
                             check_cycle(&g.wait_for, holder, my_xid),
                             CycleCheck::Deadlock
                         ) {
                             g.wait_for.remove(&my_xid);
+                            wait.record("pg.lock.outcome", "deadlock");
+                            crate::telemetry::record_error(
+                                &wait,
+                                DEADLOCK_SQLSTATE,
+                                "deadlock detected",
+                            );
                             return Err(AcquireError::Deadlock);
                         }
                         g.wait_for.insert(my_xid, holder);
@@ -240,6 +318,12 @@ impl RowLockManager {
                                 g.waiters.remove(&holder);
                             }
                         }
+                        wait.record("pg.lock.outcome", "cap_expired");
+                        crate::telemetry::record_error(
+                            &wait,
+                            DEADLOCK_SQLSTATE,
+                            "canceling statement due to a lock wait timeout",
+                        );
                         return Err(AcquireError::CapExpired);
                     }
                 }

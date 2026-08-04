@@ -510,4 +510,55 @@ exclude_re = [
     # `< -> <=` exclusion above. The non-equivalent `< -> ==` / `< -> >`
     # mutations on the same line are still generated and caught.
     "broker/src/partition_writer\\.rs.*replace < with <= in run$",
+    # Non-terminating mutants: each stops a cursor advancing, so the mutated
+    # program loops forever rather than answering wrongly. All are `+= -> *=`,
+    # `+= -> -=` or `-= -> /=` on a loop counter, or a scan helper stubbed to a
+    # fixed position that its caller then rescans from.
+    #
+    # The suite *does* detect them — the hang is the detection — but the outcome
+    # is recorded as a timeout rather than a kill, the same
+    # detected-but-unreportable shape as the `BatchedTsoClient` flusher entries
+    # above. No assertion can be written for a state the correct code cannot
+    # reach: forward progress in each of these loops is structural.
+    #
+    # Pinned to `line:col` deliberately. The same operator appears elsewhere in
+    # these functions on paths that DO terminate — `depth += 1` in
+    # `block_comment_end`, for one, which mis-nests rather than hangs and is
+    # caught by the nested-comment case — so a description-only pattern would
+    # silently exclude ten catchable mutants along with these. If a future edit
+    # shifts a line the pattern simply stops matching and the mutant returns,
+    # which is the safe direction.
+    #
+    # Only termination is excluded. Every *decision* these scanners make — which
+    # regions are comments, where a value ends, whether a quote is escaped, where
+    # a UTF-8 boundary falls — remains mutation-tested and caught.
+    "gres-ranges/src/telemetry\\.rs:170:13: replace -= with /= in truncate",
+    "gres-substrate/src/telemetry\\.rs:172:13: replace -= with /= in truncate_on_char_boundary",
+    "trace-context/src/sqlcommenter\\.rs:116:25: replace \\+ with \\* in find_field",
+    "trace-context/src/sqlcommenter\\.rs:148:13: replace \\+= with \\*= in read_value",
+    "trace-context/src/sqlcommenter\\.rs:155:15: replace \\+= with \\*= in skip_spaces",
+    "trace-context/src/sqlcommenter\\.rs:172:5: replace skip_quoted -> Option<usize> with Some\\(0\\)",
+    "trace-context/src/sqlcommenter\\.rs:172:5: replace skip_quoted -> Option<usize> with Some\\(1\\)",
+    "trace-context/src/sqlcommenter\\.rs:175:19: replace \\+= with \\*= in skip_quoted",
+    "trace-context/src/sqlcommenter\\.rs:177:19: replace \\+= with -= in skip_quoted",
+    "trace-context/src/sqlcommenter\\.rs:189:5: replace dollar_quote_delimiter -> Option<&str> with Some\\(\"\"\\)",
+    "trace-context/src/sqlcommenter\\.rs:195:13: replace \\+= with \\*= in dollar_quote_delimiter",
+    "trace-context/src/sqlcommenter\\.rs:202:15: replace \\+= with \\*= in line_comment_end",
+    "trace-context/src/sqlcommenter\\.rs:217:20: replace \\+= with -= in block_comment_end",
+    "trace-context/src/sqlcommenter\\.rs:225:20: replace \\+= with \\*= in block_comment_end",
+    "trace-context/src/sqlcommenter\\.rs:225:20: replace \\+= with -= in block_comment_end",
+    "trace-context/src/sqlcommenter\\.rs:61:31: replace \\+= with \\*= in scan_comments",
+    "trace-context/src/sqlcommenter\\.rs:61:31: replace \\+= with -= in scan_comments",
+    "trace-context/src/sqlcommenter\\.rs:85:24: replace \\+= with \\*= in scan_comments",
+    # NB: `delete field partition from struct ProducerRecord` in
+    # `gres-substrate/src/writer.rs` is also an equivalent mutant — the WAL topic
+    # is created with exactly one partition (`WAL_TOPIC_PARTITIONS`), so an
+    # explicit `partition: Some(0)` and the partitioner's choice under `None`
+    # resolve to the same partition. It is deliberately NOT listed here: as the
+    # `crates/broker/src/bin/**` note above records, name-regex exclusions do not
+    # reliably match struct-field-deletion mutants, and the alternatives — a file
+    # glob, or `#[mutants::skip]` on `append_group` — would drop the trace-header
+    # injection and the generation `key` (which fences a superseded writer, and
+    # IS caught) along with it. Left generated rather than silently no-op
+    # excluded.
 ]

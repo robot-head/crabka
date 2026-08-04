@@ -189,6 +189,9 @@ fn cluster_options_for_run(
         binaries: config.binaries.clone(),
         registry_policy: config.registry_policy.clone(),
         runtime_policy: config.runtime_policy,
+        // Scenario runs measure throughput and latency; the nodes inherit the
+        // harness's environment and add nothing to it.
+        node_env: std::collections::BTreeMap::new(),
     }
 }
 

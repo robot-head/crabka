@@ -107,6 +107,11 @@ name = "crabka-security"
 publish = true
 release = true
 
+[[package]]
+name = "crabka-trace-context"
+publish = true
+release = true
+
 # Internal services, domain crates, build/dev tooling, demos, and experiments are
 # never published to crates.io and are not released independently.
 [[package]]

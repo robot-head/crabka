@@ -32,6 +32,11 @@ allowlist = {
     "crabka-protocol",
     "crabka-schema-serde",
     "crabka-security",
+    # Published because the published `crabka-pgwire` and `crabka-pgexec` need
+    # the W3C trace-context helpers: a crate on crates.io cannot depend on one
+    # that is not. `crabka-telemetry`, which owns the rest of the OTLP
+    # pipeline, stays private.
+    "crabka-trace-context",
     "crabka-units",
 }
 

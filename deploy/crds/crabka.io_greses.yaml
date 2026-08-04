@@ -711,6 +711,78 @@ spec:
                 - listenPort
                 - replicas
                 type: object
+              tracing:
+                description: |-
+                  Distributed-tracing wiring for this fleet's tenant compute pods.
+
+                  When set, the `GresTenant` reconciler renders the `CRABKA_OTLP_*` /
+                  `OTEL_SERVICE_NAME` env contract on every compute container and
+                  `crabka-gres` installs the OTLP exporter at startup. When absent no
+                  OTLP env var is emitted at all, which is what leaves tracing off: an
+                  empty endpoint would still switch the exporter on and then fail to
+                  reach a collector.
+
+                  The schema is the one `Kafka.spec.tracing` uses, so the two fleets have
+                  one shape, one validation path, and the field names an operator already
+                  knows.
+
+                  Deliberately fleet-scoped rather than per-`GresTenant`: the collector
+                  endpoint, protocol and export timeout are cluster infrastructure, and a
+                  tenant-writable copy would make telemetry routing a tenant decision.
+                nullable: true
+                properties:
+                  otlp:
+                    description: OTLP-backend tuning. Required when `kind == Otlp`.
+                    nullable: true
+                    properties:
+                      endpoint:
+                        description: |-
+                          Required. OTLP collector endpoint (`scheme://host:port`).
+                          Rendered as `CRABKA_OTLP_ENDPOINT`; turning the field on
+                          implicitly sets `CRABKA_OTLP_ENABLED=true` as well.
+                        type: string
+                      protocol:
+                        description: |-
+                          OTLP wire protocol selector. Mirrors the broker's
+                          internal `OtlpProtocol` enum and the `OTEL_EXPORTER_OTLP_PROTOCOL`
+                          spec values.
+                        enum:
+                        - grpc
+                        - http_protobuf
+                        nullable: true
+                        type: string
+                      sampleRatio:
+                        description: |-
+                          Optional sampling ratio in `[0.0, 1.0]`. Rendered as
+                          `CRABKA_OTLP_SAMPLE_RATIO`. Unset leaves the binary's own default
+                          of `1.0` (sample every trace).
+                        format: double
+                        nullable: true
+                        type: number
+                      serviceName:
+                        description: |-
+                          Optional `service.name` resource attribute. Rendered as
+                          `OTEL_SERVICE_NAME`. Unset leaves the binary's own name —
+                          `"crabka-broker"` for `Kafka`, `"crabka-gres"` for `Gres`.
+                        nullable: true
+                        type: string
+                      timeout:
+                        description: |-
+                          Optional export timeout. Rendered as `CRABKA_OTLP_TIMEOUT`.
+                          Unset leaves the binary's own default of `10s`.
+                        nullable: true
+                        type: string
+                    required:
+                    - endpoint
+                    type: object
+                  type:
+                    description: Tracing backend selector.
+                    enum:
+                    - Otlp
+                    type: string
+                required:
+                - type
+                type: object
             required:
             - kafkaCluster
             - pgdog

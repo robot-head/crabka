@@ -1,7 +1,8 @@
 //! Generate the operator CRD reference pages from `K::crd()`.
 
 use crabka_operator::crd::{
-    Kafka, KafkaNodePool, KafkaRebalance, KafkaTopic, KafkaUser, SchemaRegistry,
+    Gres, GresTenant, Kafka, KafkaGrpcGateway, KafkaNodePool, KafkaRebalance, KafkaTopic,
+    KafkaUser, SchemaRegistry,
 };
 use kube::CustomResourceExt;
 use serde_json::Value;
@@ -24,7 +25,15 @@ pub fn crd_pages() -> Vec<CrdPage> {
         page::<KafkaTopic>(),
         page::<KafkaUser>(),
         page::<KafkaRebalance>(),
+        page::<KafkaGrpcGateway>(),
         page::<SchemaRegistry>(),
+        // Order is the only thing setting each page's weight (`emit` assigns
+        // `(index + 1) * 10`), so this list is grouped the way the nav should
+        // read: the Kafka family, then the standalone services, then Gres.
+        // Reordering only moves pages in the nav — a page's URL comes from its
+        // slug, so no links break.
+        page::<Gres>(),
+        page::<GresTenant>(),
     ]
 }
 
@@ -94,7 +103,7 @@ mod tests {
             "expected kafkaVersion field in kafka spec table:\n{}",
             kafka.body
         );
-        assert2::assert!(pages.len() == 6);
+        assert2::assert!(pages.len() == 9);
         let slugs: Vec<&str> = pages.iter().map(|p| p.slug.as_str()).collect();
         for e in [
             "kafka",
@@ -102,9 +111,67 @@ mod tests {
             "kafkatopic",
             "kafkauser",
             "kafkarebalance",
+            "kafkagrpcgateway",
             "schemaregistry",
+            "gres",
+            "grestenant",
         ] {
             assert2::assert!(slugs.contains(&e));
         }
+    }
+
+    /// The pages added after the original six, each guarded the way the Kafka
+    /// page is: a concrete field must appear, so `render_field_table` silently
+    /// emitting an empty table fails here rather than shipping a blank page.
+    #[test]
+    fn the_later_pages_have_spec_fields() {
+        let pages = crd_pages();
+        for (slug, title, field) in [
+            // `tracing` is the field the Gres page was added to surface;
+            // `ranges` and `replicas` are long-standing, so together they catch
+            // both an empty table and a page built from a stale schema.
+            ("gres", "Gres", "| `tracing` |"),
+            ("grestenant", "GresTenant", "| `ranges` |"),
+            ("kafkagrpcgateway", "KafkaGrpcGateway", "| `replicas` |"),
+        ] {
+            let page = pages
+                .iter()
+                .find(|p| p.slug == slug)
+                .unwrap_or_else(|| panic!("{slug} page"));
+            check!(page.title == title);
+            check!(
+                page.body
+                    .contains("| Field | Type | Required | Default | Description |"),
+                "expected a field table on {slug}:\n{}",
+                page.body
+            );
+            check!(
+                page.body.contains(field),
+                "expected {field} in {slug} spec table:\n{}",
+                page.body
+            );
+        }
+    }
+
+    /// `emit` derives each page's weight from its index, so a reordering that
+    /// looks harmless silently renumbers every page after it and reshuffles the
+    /// site nav. Pin the order rather than just the membership.
+    #[test]
+    fn page_order_fixes_the_generated_weights() {
+        let slugs: Vec<String> = crd_pages().into_iter().map(|p| p.slug).collect();
+        check!(
+            slugs
+                == [
+                    "kafka",
+                    "kafkanodepool",
+                    "kafkatopic",
+                    "kafkauser",
+                    "kafkarebalance",
+                    "kafkagrpcgateway",
+                    "schemaregistry",
+                    "gres",
+                    "grestenant",
+                ]
+        );
     }
 }

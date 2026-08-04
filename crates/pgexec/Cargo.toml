@@ -25,6 +25,10 @@ crabka-pgmvcc = { version = "0.3.9", path = "../pgmvcc" }
 crabka-pgcatalog = { version = "0.3.9", path = "../pgcatalog" }
 crabka-pgparser = { version = "0.3.9", path = "../pgparser" }
 crabka-pgwire = { version = "0.3.9", path = "../pgwire" }
+# W3C trace-context parsing for the `crabka.traceparent` GUC ingress. A leaf
+# crate by design: `crabka-telemetry` is `publish = false`, and this crate is
+# published.
+crabka-trace-context = { version = "0.3.9", path = "../trace-context" }
 bytes = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
@@ -47,3 +51,10 @@ assert2 = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-postgres = { workspace = true }
 tempfile = { workspace = true }
+# Span assertions run against exported `SpanData`, not live `Span` handles:
+# `tracing-opentelemetry` resolves a re-parented span's trace id when the span
+# closes, so a live handle reports the wrong one.
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true, features = ["trace", "testing"] }
+tracing-opentelemetry = { workspace = true }
+tracing-subscriber = { workspace = true }

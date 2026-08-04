@@ -9,20 +9,23 @@ use std::{
 };
 
 use bytes::Bytes;
-use crabka_client_producer::{OwnedTransaction, Producer, ProducerError, ProducerRecord};
+use crabka_client_producer::{Header, OwnedTransaction, Producer, ProducerError, ProducerRecord};
 use crabka_gres_ranges::tso::{
     EpochHeartbeat, HeartbeatVerdict, MAX_TS_KEY, TsoError, TsoHorizonCommitter, TsoTimestamp,
 };
 use crabka_pgexec::{Committer, ExecError, Linearizer};
 use crabka_pgkv::{Kv, KvSnapshot, SnapshotKv, WriteOp};
+use crabka_trace_context::TraceCarrier;
 use crabka_units::{ByteSize, convert::ByteSizeExt as _, mebibytes};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tracing::Instrument as _;
 
 use crate::{
     apply::apply_frame,
     checkpoint::{CheckpointSnapshot, CheckpointStats},
     error::SubstrateError,
     frame::WalFrame,
+    telemetry,
 };
 
 /// Default upper bound for an encoded `GRW1` frame.
@@ -605,8 +608,55 @@ impl ProducerWalWriter {
         &self,
         request: GroupCommitRequest,
     ) -> Result<GroupCommitAck, SubstrateError> {
+        let span =
+            telemetry::wal_append_span(&self.topic, request.generation, request.frames.len());
+        // `let` first, not a `match` scrutinee: a scrutinee's temporaries live
+        // until the end of the `match`, which would keep the `Instrumented`
+        // future's borrow of `span` alive and block the `drop(span)` below.
+        let outcome = self
+            .append_group(request, &span)
+            .instrument(span.clone())
+            .await;
+        match outcome {
+            Ok(ack) => {
+                record_append_offsets(&span, &ack);
+                Ok(ack)
+            }
+            Err(AppendFailure::Rejected(error)) => {
+                if matches!(error, SubstrateError::Fenced) {
+                    span.record("pg.wal.fenced", true);
+                }
+                telemetry::record_error(&span, append_error_type(&error), &error);
+                Err(error)
+            }
+            Err(AppendFailure::Indeterminate(error)) => {
+                // The commit outcome is unknown and the handler is about to
+                // terminate this compute, so the `pending()` below never
+                // resolves. Record the status and drop the span *first* — a
+                // span still open when the process dies is never exported, and
+                // this is precisely the span an operator needs.
+                telemetry::record_error(&span, "indeterminate", &error);
+                drop(span);
+                (self.indeterminate_handler)(&error);
+                std::future::pending::<()>().await;
+                unreachable!("indeterminate WAL handler must terminate the compute");
+            }
+        }
+    }
+
+    /// Append and commit one group inside the open Kafka transaction.
+    ///
+    /// Split out of [`Self::commit_group_while_permitted`] so that every
+    /// "broker outcome unknown" exit is an [`AppendFailure::Indeterminate`]
+    /// value rather than an inline `pending()` await: the caller then owns the
+    /// single site that closes the span before the compute is terminated.
+    async fn append_group(
+        &self,
+        request: GroupCommitRequest,
+        span: &tracing::Span,
+    ) -> Result<GroupCommitAck, AppendFailure> {
         if self.fenced.load(Ordering::SeqCst) {
-            return Err(SubstrateError::Fenced);
+            return Err(AppendFailure::Rejected(SubstrateError::Fenced));
         }
 
         let transaction = self
@@ -614,24 +664,40 @@ impl ProducerWalWriter {
             .clone()
             .begin_transaction_owned()
             .await
-            .map_err(|error| self.map_producer_error(&error))?;
+            .map_err(|error| AppendFailure::Rejected(self.map_producer_error(&error)))?;
         if let Some(error) = self.inject_fault(WalWriterFaultStage::BeforeFirstSend) {
             return self.abort_after_send_error(transaction, error).await;
         }
+        // Hoisted out of the per-frame loop: capturing the current context runs
+        // the W3C propagator, and one group commit can carry many frames.
+        let trace = TraceCarrier::capture_current();
+        let headers: Vec<Header> = trace
+            .headers()
+            .map(|(key, value)| Header {
+                key: key.to_owned(),
+                value: Some(Bytes::copy_from_slice(value)),
+            })
+            .collect();
         let mut sent = Vec::with_capacity(request.frames.len());
+        let mut encoded_bytes = 0_u64;
         for frame in &request.frames {
+            let encoded = Bytes::from(frame.encode());
+            encoded_bytes =
+                encoded_bytes.saturating_add(u64::try_from(encoded.len()).unwrap_or(u64::MAX));
             let pending = self
                 .producer
                 .send(ProducerRecord {
                     topic: self.topic.clone(),
                     partition: Some(0),
                     key: Some(Bytes::copy_from_slice(&request.generation.0.to_be_bytes())),
-                    value: Some(Bytes::from(frame.encode())),
+                    value: Some(encoded),
+                    headers: headers.clone(),
                     ..ProducerRecord::default()
                 })
                 .await;
             sent.push((frame.journal_seq, pending));
         }
+        span.record("pg.wal.bytes", telemetry::integer(encoded_bytes));
 
         let mut frames = Vec::with_capacity(sent.len());
         for (journal_seq, pending) in sent {
@@ -666,20 +732,53 @@ impl ProducerWalWriter {
                         .abort_with_error(error.transaction, substrate_error)
                         .await;
                 }
-                CommitFailure::Rejected => return Err(substrate_error),
+                CommitFailure::Rejected => return Err(AppendFailure::Rejected(substrate_error)),
                 CommitFailure::Indeterminate => {
-                    (self.indeterminate_handler)(&error.source);
-                    std::future::pending::<()>().await;
-                    unreachable!("indeterminate WAL handler must terminate the compute");
+                    return Err(AppendFailure::Indeterminate(error.source));
                 }
             }
         }
         if let Some(error) = self.inject_fault(WalWriterFaultStage::AfterCommit) {
-            (self.indeterminate_handler)(&error);
-            std::future::pending::<()>().await;
-            unreachable!("indeterminate WAL handler must terminate the compute");
+            return Err(AppendFailure::Indeterminate(error));
         }
         Ok(GroupCommitAck { frames })
+    }
+}
+
+/// How one group-commit attempt ended, separating broker rejections (which the
+/// caller reports as an error) from an unknown outcome (which terminates the
+/// compute, because no SQL client may be told a durable write failed).
+#[derive(Debug)]
+enum AppendFailure {
+    /// The broker proved the transaction did not commit.
+    Rejected(SubstrateError),
+    /// The commit outcome is unknown; the compute must not continue.
+    Indeterminate(ProducerError),
+}
+
+/// The low-cardinality `error.type` for a refused WAL append.
+///
+/// The append path only ever yields these two shapes:
+/// [`ProducerWalWriter::map_producer_error`] maps a fenced producer to
+/// [`SubstrateError::Fenced`] and everything else to
+/// [`SubstrateError::Unavailable`].
+fn append_error_type(error: &SubstrateError) -> &'static str {
+    if matches!(error, SubstrateError::Fenced) {
+        "fenced"
+    } else {
+        "unavailable"
+    }
+}
+
+fn record_append_offsets(span: &tracing::Span, ack: &GroupCommitAck) {
+    if span.is_disabled() {
+        return;
+    }
+    if let Some(first) = ack.frames.first() {
+        span.record("pg.wal.first_offset", first.offset);
+    }
+    if let Some(last) = ack.frames.last() {
+        span.record("pg.wal.last_offset", last.offset);
     }
 }
 
@@ -729,14 +828,14 @@ impl TransactionalWalWriter for ProducerWalWriter {
         request: GroupCommitRequest,
     ) -> Result<GroupCommitAck, SubstrateError> {
         if self.is_pause_reserved() {
-            return Err(SubstrateError::Unavailable("WAL writer is paused".into()));
+            return Err(self.reject_paused(&request));
         }
         let _permit = Arc::clone(&self.commit_gate)
             .acquire_owned()
             .await
             .map_err(|_| SubstrateError::Unavailable("WAL commit gate closed".into()))?;
         if self.is_pause_reserved() {
-            return Err(SubstrateError::Unavailable("WAL writer is paused".into()));
+            return Err(self.reject_paused(&request));
         }
         self.commit_group_while_permitted(request).await
     }
@@ -747,6 +846,19 @@ impl ProducerWalWriter {
         self.fault_injector
             .as_ref()
             .and_then(|injector| injector.inject(stage))
+    }
+
+    /// Refuse an append because a pause barrier owns the writer, emitting the
+    /// `gres.wal_append` span that says so. The attempt is a real, observable
+    /// rejection, so it gets its own (very short) producer span rather than
+    /// vanishing.
+    fn reject_paused(&self, request: &GroupCommitRequest) -> SubstrateError {
+        let error = SubstrateError::Unavailable("WAL writer is paused".into());
+        let span =
+            telemetry::wal_append_span(&self.topic, request.generation, request.frames.len());
+        span.record("pg.wal.paused", true);
+        telemetry::record_error(&span, "paused", &error);
+        error
     }
 
     fn is_pause_reserved(&self) -> bool {
@@ -761,7 +873,7 @@ impl ProducerWalWriter {
         &self,
         transaction: OwnedTransaction,
         error: ProducerError,
-    ) -> Result<GroupCommitAck, SubstrateError> {
+    ) -> Result<GroupCommitAck, AppendFailure> {
         let substrate_error = self.map_producer_error(&error);
         if matches!(
             error,
@@ -771,7 +883,7 @@ impl ProducerWalWriter {
             // guard cannot be cleanly aborted once the producer is fenced,
             // but this is not ambiguous: no record from it can become durable.
             drop(transaction);
-            return Err(substrate_error);
+            return Err(AppendFailure::Rejected(substrate_error));
         }
         self.abort_with_error(transaction, substrate_error).await
     }
@@ -780,19 +892,13 @@ impl ProducerWalWriter {
         &self,
         transaction: OwnedTransaction,
         substrate_error: SubstrateError,
-    ) -> Result<GroupCommitAck, SubstrateError> {
+    ) -> Result<GroupCommitAck, AppendFailure> {
         if let Some(error) = self.inject_fault(WalWriterFaultStage::BeforeAbort) {
-            (self.indeterminate_handler)(&error);
-            std::future::pending::<()>().await;
-            unreachable!("indeterminate WAL handler must terminate the compute");
+            return Err(AppendFailure::Indeterminate(error));
         }
         match transaction.abort().await {
-            Ok(()) => Err(substrate_error),
-            Err(error) => {
-                (self.indeterminate_handler)(&error.source);
-                std::future::pending::<()>().await;
-                unreachable!("indeterminate WAL handler must terminate the compute");
-            }
+            Ok(()) => Err(AppendFailure::Rejected(substrate_error)),
+            Err(error) => Err(AppendFailure::Indeterminate(error.source)),
         }
     }
 
@@ -838,6 +944,18 @@ impl FenceLease for ProducerWalWriter {
 ///
 /// Returns an error when the requested operation cannot be completed.
 pub fn chunk_wal_batch(
+    ops: Vec<WriteOp>,
+    first_journal_seq: u64,
+    max_frame_size: ByteSize,
+) -> Result<Vec<WalFrame>, SubstrateError> {
+    let span = telemetry::chunk_span(ops.len(), first_journal_seq);
+    let _entered = span.enter();
+    let frames = chunk_frames(ops, first_journal_seq, max_frame_size)?;
+    span.record("wal.chunk.frames", telemetry::integer(frames.len()));
+    Ok(frames)
+}
+
+fn chunk_frames(
     ops: Vec<WriteOp>,
     first_journal_seq: u64,
     max_frame_size: ByteSize,
@@ -1073,10 +1191,42 @@ where
     W: TransactionalWalWriter + 'static,
 {
     async fn commit(&self, ops: Vec<WriteOp>) -> Result<(), ExecError> {
+        let span = telemetry::commit_span(ops.len());
+        let result = self
+            .commit_in_span(ops, &span)
+            .instrument(span.clone())
+            .await;
+        if let Err(error) = &result {
+            // `into_pg` consumes, and the SQLSTATE is exactly the
+            // low-cardinality discriminator the OTel convention wants.
+            let rendered = error.clone().into_pg();
+            telemetry::record_error(&span, &rendered.code, &rendered.message);
+        }
+        result
+    }
+}
+
+impl<W> SubstrateCommitter<W>
+where
+    W: TransactionalWalWriter + 'static,
+{
+    /// The commit body, run inside the `pg.commit` span so the WAL append and
+    /// the local applies attach to it as children.
+    async fn commit_in_span(
+        &self,
+        ops: Vec<WriteOp>,
+        span: &tracing::Span,
+    ) -> Result<(), ExecError> {
+        // `Instant::now` is not free, so only pay for it when someone is
+        // listening; `pg.gate_wait_ms` must cover the permit wait alone.
+        let gate_started = (!span.is_disabled()).then(std::time::Instant::now);
         let _permit = Arc::clone(&self.commit_gate)
             .acquire_owned()
             .await
             .map_err(|_| ExecError::Unavailable)?;
+        if let Some(started) = gate_started {
+            span.record("pg.gate_wait_ms", started.elapsed().as_secs_f64() * 1_000.0);
+        }
         let next = self.next_journal_seq.load(Ordering::SeqCst);
         let frames = chunk_wal_batch(ops, next, self.max_frame_size)?;
         let ack = self
@@ -1089,12 +1239,20 @@ where
         for frame in &frames {
             apply_frame(self.kv.as_ref(), &frame.ops)?;
         }
-        if let Some(stats) = &self.checkpoint_stats {
-            let frame_count = u64::try_from(frames.len()).map_err(|_| ExecError::Unavailable)?;
-            let byte_count = frames.iter().try_fold(0_u64, |total, frame| {
+        // Summing encoded lengths walks every frame, so compute it only when
+        // the checkpointer or the span will actually consume it.
+        let byte_count = if self.checkpoint_stats.is_some() || !span.is_disabled() {
+            Some(frames.iter().try_fold(0_u64, |total, frame| {
                 let len = u64::try_from(frame.encoded_len()).map_err(|_| ExecError::Unavailable)?;
                 total.checked_add(len).ok_or(ExecError::Unavailable)
-            })?;
+            })?)
+        } else {
+            None
+        };
+        let frame_count = u64::try_from(frames.len()).map_err(|_| ExecError::Unavailable)?;
+        if let Some(stats) = &self.checkpoint_stats
+            && let Some(byte_count) = byte_count
+        {
             stats.record_committed(frame_count, byte_count);
         }
         if let Some(source) = &self.checkpoint_snapshot_source
@@ -1102,10 +1260,16 @@ where
         {
             source.record_commit(last_ack);
         }
-        let next = next
-            .checked_add(u64::try_from(frames.len()).map_err(|_| ExecError::Unavailable)?)
+        let next_after = next
+            .checked_add(frame_count)
             .ok_or(ExecError::Unavailable)?;
-        self.next_journal_seq.store(next, Ordering::SeqCst);
+        self.next_journal_seq.store(next_after, Ordering::SeqCst);
+        if !span.is_disabled() {
+            span.record("pg.commit.frames", telemetry::integer(frame_count));
+            span.record("pg.commit.bytes", byte_count.map(telemetry::integer));
+            span.record("pg.journal_seq.first", telemetry::integer(next));
+            span.record("pg.journal_seq.next", telemetry::integer(next_after));
+        }
         Ok(())
     }
 }

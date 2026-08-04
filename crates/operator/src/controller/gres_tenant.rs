@@ -60,7 +60,9 @@ use crate::{
     },
     crd::{
         Gres, GresTenant, GresTenantRangeKey, GresTenantRangeSpec, Kafka, SecretKeyRef,
-        TenantDefaults, gres::EffectiveGresComputePolicy,
+        TenantDefaults,
+        gres::EffectiveGresComputePolicy,
+        kafka::{Tracing, TracingType},
     },
 };
 
@@ -131,6 +133,9 @@ struct ReadyTenant {
     compute_policy: EffectiveGresComputePolicy,
     direct_bootstrap_grace: Time,
     kafka_sasl: bool,
+    /// Validated `Gres.spec.tracing`, cloned off the fleet object so the
+    /// render path never re-reads it.
+    tracing: Option<Tracing>,
 }
 
 enum TenantPreparation {
@@ -220,6 +225,12 @@ async fn prepare_tenant(
         )
         .map_err(ReconcileError::Malformed)?;
     let compute_image = effective_compute_image(obj, &ctx.config)?;
+    // Shape-validate the fleet's tracing block before anything renders a pod,
+    // so a malformed OTLP spec surfaces as a reconcile error rather than as a
+    // compute container that boots with a broken exporter.
+    if let Some(tracing) = gres.spec.tracing.as_ref() {
+        tracing.validate().map_err(ReconcileError::TracingInvalid)?;
+    }
     let cluster = gres.spec.kafka_cluster.clone();
     let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &namespace);
     let Some(kafka) = kafka_api.get_opt(&cluster).await? else {
@@ -284,6 +295,7 @@ async fn prepare_tenant(
             i64::try_from(pgdog_policy.direct_bootstrap_grace.into_value()).unwrap_or(i64::MAX),
         ),
         kafka_sasl: kafka_internal_listener_requires_sasl(&kafka),
+        tracing: gres.spec.tracing,
     })))
 }
 
@@ -330,6 +342,7 @@ async fn reconcile_inner(
         compute_policy,
         direct_bootstrap_grace,
         kafka_sasl,
+        tracing,
     } = *ready;
     let (wal_topic, cfg_topic) = (wal_topic(&tenant_name), tenant_config_topic(&tenant_name));
     let spec_ranges = effective_ranges(&obj.spec.ranges)?;
@@ -431,6 +444,7 @@ async fn reconcile_inner(
                     kafka_sasl,
                     range_control_enabled,
                     range_tls_hash: range_tls_hash.as_deref(),
+                    tracing: tracing.as_ref(),
                 },
             )
             .await?;
@@ -485,6 +499,7 @@ async fn reconcile_inner(
             kafka_sasl,
             range_control_enabled,
             range_tls_hash: range_tls_hash.as_deref(),
+            tracing: tracing.as_ref(),
         })
         .await
     }
@@ -694,6 +709,7 @@ struct ComputeStatusConfig<'a> {
     kafka_sasl: bool,
     range_control_enabled: bool,
     range_tls_hash: Option<&'a str>,
+    tracing: Option<&'a Tracing>,
 }
 
 async fn reconcile_compute_and_status(
@@ -715,6 +731,7 @@ async fn reconcile_compute_and_status(
             kafka_sasl: config.kafka_sasl,
             range_control_enabled: config.range_control_enabled,
             range_tls_hash: config.range_tls_hash,
+            tracing: config.tracing,
         },
     )
     .await?;
@@ -832,6 +849,7 @@ struct ComputeDeploymentConfig<'a> {
     kafka_sasl: bool,
     range_control_enabled: bool,
     range_tls_hash: Option<&'a str>,
+    tracing: Option<&'a Tracing>,
 }
 
 async fn reconcile_compute_deployments(
@@ -863,6 +881,7 @@ async fn reconcile_compute_deployments(
                 kafka_sasl: config.kafka_sasl,
                 range_control_enabled: config.range_control_enabled,
                 range_tls_hash: config.range_tls_hash,
+                tracing: config.tracing,
             },
         )?;
         apply_object(
@@ -2053,6 +2072,50 @@ struct DeploymentRenderConfig<'a> {
     kafka_sasl: bool,
     range_control_enabled: bool,
     range_tls_hash: Option<&'a str>,
+    tracing: Option<&'a Tracing>,
+}
+
+/// Append the `CRABKA_OTLP_*` / `OTEL_SERVICE_NAME` env a compute container
+/// needs to export traces, reading the fleet's `Gres.spec.tracing`.
+///
+/// Same shape as the broker renderer in [`super::kafka_node_pool`]: both ends
+/// consume the one `OtlpConfig::from_env` contract, so the env names, the
+/// implicit `CRABKA_OTLP_ENABLED=true`, and the "only render what was
+/// configured" rule have to agree.
+///
+/// Nothing at all is appended when the fleet has no `spec.tracing`. That is
+/// load-bearing rather than tidiness: `CRABKA_OTLP_ENDPOINT=""` still counts as
+/// an endpoint to `OtlpConfig::from_env`, so a renderer that always emitted the
+/// pair would silently start an exporter that can never reach a collector.
+fn push_otlp_env(env: &mut Vec<serde_json::Value>, tracing: Option<&Tracing>) {
+    if let Some(tracing) = tracing
+        && let TracingType::Otlp = tracing.kind
+        && let Some(otlp) = tracing.otlp.as_ref()
+    {
+        env.push(json!({ "name": "CRABKA_OTLP_ENABLED", "value": "true" }));
+        env.push(json!({ "name": "CRABKA_OTLP_ENDPOINT", "value": otlp.endpoint }));
+        if let Some(protocol) = otlp.protocol {
+            env.push(json!({
+                "name": "CRABKA_OTLP_PROTOCOL",
+                "value": protocol.as_env_value(),
+            }));
+        }
+        if let Some(ratio) = otlp.sample_ratio {
+            env.push(json!({
+                "name": "CRABKA_OTLP_SAMPLE_RATIO",
+                "value": ratio.to_string(),
+            }));
+        }
+        if let Some(service_name) = otlp.service_name.as_deref() {
+            env.push(json!({ "name": "OTEL_SERVICE_NAME", "value": service_name }));
+        }
+        if let Some(timeout) = otlp.timeout {
+            env.push(json!({
+                "name": "CRABKA_OTLP_TIMEOUT",
+                "value": timeout.human().to_string(),
+            }));
+        }
+    }
 }
 
 /// The `--registry-*` flags a compute pod inherits from the shared policy.
@@ -2442,6 +2505,7 @@ fn render_deployment(
     if let Some(secret_key) = &config.operator_config.gres_checkpoint_secret_access_key {
         env.push(json!({ "name": "AWS_SECRET_ACCESS_KEY", "value": secret_key }));
     }
+    push_otlp_env(&mut env, config.tracing);
     let mut ports =
         vec![json!({ "name": "postgres", "containerPort": COMPUTE_PORT, "protocol": "TCP" })];
     let (range_tls_mounts, range_tls_volumes) = if config.range_control_enabled {
@@ -2906,6 +2970,26 @@ mod tests {
         range_control_enabled: bool,
         range_tls_hash: Option<&str>,
     ) -> Deployment {
+        render_test_deployment_with_tracing(
+            obj,
+            range,
+            all_ranges,
+            kafka_sasl,
+            range_control_enabled,
+            range_tls_hash,
+            None,
+        )
+    }
+
+    fn render_test_deployment_with_tracing(
+        obj: &GresTenant,
+        range: &GresTenantRangeSpec,
+        all_ranges: &[GresTenantRangeSpec],
+        kafka_sasl: bool,
+        range_control_enabled: bool,
+        range_tls_hash: Option<&str>,
+        tracing: Option<&Tracing>,
+    ) -> Deployment {
         let operator_config = ConfigArgs::parse_from(["operator"]).config;
         let compute_policy = crate::crd::gres::GresComputeSpec::default()
             .effective_policy()
@@ -2928,6 +3012,7 @@ mod tests {
                 kafka_sasl,
                 range_control_enabled,
                 range_tls_hash,
+                tracing,
             },
         )
         .expect("render deployment")
@@ -3250,6 +3335,7 @@ mod tests {
                         kafka_sasl: false,
                         range_control_enabled,
                         range_tls_hash: None,
+                        tracing: None,
                     },
                 )
                 .expect("render deployment");
@@ -3346,6 +3432,7 @@ mod tests {
                     kafka_sasl: false,
                     range_control_enabled,
                     range_tls_hash: None,
+                    tracing: None,
                 },
             )
             .expect("render deployment");
@@ -3402,6 +3489,7 @@ mod tests {
                 kafka_sasl: false,
                 range_control_enabled: false,
                 range_tls_hash: None,
+                tracing: None,
             },
         )
         .expect("render defaults");
@@ -3473,6 +3561,7 @@ mod tests {
                         kafka_sasl: false,
                         range_control_enabled,
                         range_tls_hash: None,
+                        tracing: None,
                     },
                 )
                 .expect("render deployment");
@@ -3552,6 +3641,7 @@ mod tests {
                         kafka_sasl: false,
                         range_control_enabled,
                         range_tls_hash: None,
+                        tracing: None,
                     },
                 )
                 .expect("render deployment");
@@ -3625,6 +3715,7 @@ mod tests {
                             kafka_sasl: false,
                             range_control_enabled,
                             range_tls_hash: None,
+                            tracing: None,
                         },
                     )
                     .expect("render deployment");
@@ -3698,6 +3789,7 @@ mod tests {
                             kafka_sasl: false,
                             range_control_enabled,
                             range_tls_hash: None,
+                            tracing: None,
                         },
                     )
                     .expect("render deployment");
@@ -3762,6 +3854,7 @@ mod tests {
                         kafka_sasl: false,
                         range_control_enabled,
                         range_tls_hash: None,
+                        tracing: None,
                     },
                 )
                 .expect("render deployment");
@@ -3844,6 +3937,7 @@ mod tests {
                             kafka_sasl: false,
                             range_control_enabled,
                             range_tls_hash: None,
+                            tracing: None,
                         },
                     )
                     .expect("render deployment");
@@ -3914,6 +4008,7 @@ mod tests {
                         kafka_sasl: false,
                         range_control_enabled,
                         range_tls_hash: None,
+                        tracing: None,
                     },
                 )
                 .expect("render deployment");
@@ -4008,6 +4103,7 @@ mod tests {
                 kafka_sasl: false,
                 range_control_enabled: true,
                 range_tls_hash: None,
+                tracing: None,
             },
         )
         .expect("render deployment");
@@ -4576,5 +4672,137 @@ mod tests {
                 .any(|pair| pair == ["--range-hlc-horizon-headroom", "128ms"])
         );
         assert!(args.len() == 52);
+    }
+
+    // ── OTLP tracing env rendering ───────────────────────────────────
+
+    fn otlp_fixture() -> crate::crd::kafka::OtlpTracing {
+        crate::crd::kafka::OtlpTracing {
+            endpoint: "http://otel:4317".into(),
+            protocol: Some(crate::crd::kafka::OtlpProtocol::HttpProtobuf),
+            sample_ratio: Some(0.25),
+            service_name: Some("gres-analytics".into()),
+            timeout: Some(crabka_units::secs(7)),
+        }
+    }
+
+    fn container_env(deployment: &Deployment) -> Vec<(String, Option<String>)> {
+        deployment
+            .spec
+            .as_ref()
+            .expect("spec")
+            .template
+            .spec
+            .as_ref()
+            .expect("pod spec")
+            .containers
+            .iter()
+            .find(|container| container.name == "gres")
+            .expect("gres container")
+            .env
+            .as_ref()
+            .expect("env")
+            .iter()
+            .map(|entry| (entry.name.clone(), entry.value.clone()))
+            .collect()
+    }
+
+    /// Base env of a single-range, no-SASL tenant. Every tracing case below is
+    /// this list plus (or exactly) nothing, so the assertions compare whole
+    /// collections instead of probing one variable at a time.
+    fn base_compute_env() -> Vec<(String, Option<String>)> {
+        [
+            ("KAFKA_BOOTSTRAP_SERVERS", "k:9092"),
+            ("GRES_TENANT", "tenant-a"),
+            ("GRES_WAL_TOPIC", "__gres_wal.tenant-a.r0"),
+            ("GRES_CONFIG_TOPIC", "__gres_cfg.tenant-a"),
+            ("GRES_RANGES", "0:0"),
+            ("GRES_HOST_RANGES", "r0"),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.to_owned(), Some(value.to_owned())))
+        .collect()
+    }
+
+    fn render_with_tracing(tracing: Option<&Tracing>) -> Deployment {
+        let mut obj = tenant();
+        obj.metadata.namespace = Some("ns".into());
+        obj.metadata.uid = Some("uid".into());
+        let range = GresTenantRangeSpec {
+            range_id: 0,
+            end_key: None,
+        };
+        let all = [range.clone()];
+        render_test_deployment_with_tracing(&obj, &range, &all, false, false, None, tracing)
+    }
+
+    #[test]
+    fn compute_env_carries_the_full_otlp_contract_when_tracing_is_configured() {
+        let tracing = Tracing {
+            kind: TracingType::Otlp,
+            otlp: Some(otlp_fixture()),
+        };
+        let mut expected = base_compute_env();
+        expected.extend(
+            [
+                ("CRABKA_OTLP_ENABLED", "true"),
+                ("CRABKA_OTLP_ENDPOINT", "http://otel:4317"),
+                ("CRABKA_OTLP_PROTOCOL", "http/protobuf"),
+                ("CRABKA_OTLP_SAMPLE_RATIO", "0.25"),
+                ("OTEL_SERVICE_NAME", "gres-analytics"),
+                ("CRABKA_OTLP_TIMEOUT", "7s"),
+            ]
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), Some(value.to_owned()))),
+        );
+
+        assert!(container_env(&render_with_tracing(Some(&tracing))) == expected);
+    }
+
+    #[test]
+    fn compute_env_renders_only_the_required_pair_when_optional_knobs_are_unset() {
+        let tracing = Tracing {
+            kind: TracingType::Otlp,
+            otlp: Some(crate::crd::kafka::OtlpTracing {
+                endpoint: "http://otel:4317".into(),
+                protocol: None,
+                sample_ratio: None,
+                service_name: None,
+                timeout: None,
+            }),
+        };
+        let mut expected = base_compute_env();
+        expected.extend(
+            [
+                ("CRABKA_OTLP_ENABLED", "true"),
+                ("CRABKA_OTLP_ENDPOINT", "http://otel:4317"),
+            ]
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), Some(value.to_owned()))),
+        );
+
+        assert!(container_env(&render_with_tracing(Some(&tracing))) == expected);
+    }
+
+    /// The failure this pins is an always-on renderer that emits
+    /// `CRABKA_OTLP_ENDPOINT=""`: `OtlpConfig::from_env` reads any set endpoint
+    /// as "export enabled", so the pod would start a permanently failing
+    /// exporter instead of staying quiet.
+    #[test]
+    fn compute_env_has_no_otlp_variable_at_all_when_tracing_is_absent() {
+        assert!(container_env(&render_with_tracing(None)) == base_compute_env());
+    }
+
+    #[test]
+    fn tenant_reconcile_rejects_a_malformed_fleet_tracing_spec() {
+        let invalid = Tracing {
+            kind: TracingType::Otlp,
+            otlp: None,
+        };
+        let error = invalid.validate().expect_err("otlp block is required");
+        assert!(
+            ReconcileError::TracingInvalid(error).to_string()
+                == "tracing: type=Otlp requires `otlp` (endpoint at minimum)"
+        );
     }
 }

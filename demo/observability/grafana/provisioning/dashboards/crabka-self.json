@@ -16,7 +16,7 @@
       "id": 2, "type": "logs", "title": "Recent warnings and errors",
       "datasource": { "type": "loki", "uid": "crabka-loki" },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
-      "targets": [ { "refId": "A", "expr": "{service_name=~\"broker|demo-produce|demo-stream|demo-consume\"} |~ \"WARN|ERROR|anomalous|error\"" } ]
+      "targets": [ { "refId": "A", "expr": "{service_name=~\"broker|demo-produce|demo-stream|demo-consume|gres\"} |~ \"WARN|ERROR|anomalous|error\"" } ]
     },
     {
       "id": 3, "type": "table", "title": "Recent traces",

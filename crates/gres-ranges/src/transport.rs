@@ -3,6 +3,7 @@
 #[cfg(test)]
 use std::net::SocketAddr;
 use std::{
+    borrow::Cow,
     collections::{BTreeSet, HashMap},
     future::Future,
     pin::Pin,
@@ -13,6 +14,7 @@ use std::{
 
 use async_trait::async_trait;
 use crabka_pgwire::engine::{ResultPage, ResultSink};
+use crabka_trace_context::TraceCarrier;
 use crabka_units::{
     ByteSize, Time,
     convert::{ByteSizeExt as _, StdDurationExt as _, TimeExt as _},
@@ -26,12 +28,310 @@ use tokio::{
     net::{TcpListener, TcpStream},
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector};
+use tracing::Instrument as _;
 
-use crate::RangeId;
+use crate::{RangeId, telemetry};
 
 /// Hard limit on one encoded frame, enforced by both the encoder and the
 /// decoder.
 const MAX_FRAME: ByteSize = mebibytes(1);
+
+/// Bytes of [`MAX_FRAME`] reserved for what [`RangeEnvelope`] adds around a
+/// request.
+///
+/// A W3C `traceparent` is 55 bytes and `crabka-trace-context` caps `tracestate`
+/// at 512; the rest is the envelope's own JSON keys and quoting. Callers that
+/// size a payload against the frame limit — [`JoinRangeReq::fits_transport_frame`]
+/// is the one that matters — must subtract this, or a request sized to exactly
+/// one frame turns a clean domain error into a [`TransportError::FrameTooLarge`]
+/// the moment it is wrapped.
+const ENVELOPE_RESERVE: ByteSize = kibibytes(1);
+
+/// One request as it travels on the wire: the caller's trace context alongside
+/// the request itself.
+///
+/// Private on purpose, constructed where a frame is written and destructured
+/// where one is read, so neither the [`FramedTcpClient`] call sites nor any
+/// [`RangeService`] implementation knows it exists.
+///
+/// `request` is a [`Cow`] so the write path borrows the caller's request rather
+/// than deep-cloning it — a `JoinRange` payload runs to megabytes, and this is
+/// the hot path for every cross-node scan. Decoding always yields
+/// [`Cow::Owned`].
+///
+/// [`PartialEq`] is deliberately not derived. `RangeRequest` equality must stay
+/// a pure function of the payload, and derived envelope equality would make two
+/// identical requests compare unequal because they were traced differently.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RangeEnvelope<'a> {
+    /// Omitted entirely when nothing is being traced, which is the common case
+    /// and the hot path. A payload-size optimisation, **not** a compatibility
+    /// shim — Crabka keeps none, see `CLAUDE.md`.
+    #[serde(default, skip_serializing_if = "TraceCarrier::is_empty")]
+    trace: TraceCarrier,
+    request: Cow<'a, RangeRequest>,
+}
+
+impl<'a> RangeEnvelope<'a> {
+    /// Wrap `request` with the trace context of the currently active span.
+    ///
+    /// The carrier is empty when nothing is being traced — no active span, an
+    /// unsampled one, or OTLP switched off — which costs two `None`s and
+    /// serialises to nothing.
+    fn outgoing(request: &'a RangeRequest) -> Self {
+        Self {
+            trace: TraceCarrier::capture_current(),
+            request: Cow::Borrowed(request),
+        }
+    }
+}
+
+/// `rpc.system` for every span this module emits. Constant, and the attribute an
+/// operator filters on to isolate range RPC from the rest of the gateway tier.
+const RPC_SYSTEM: &str = "crabka.range";
+
+/// The `rpc.method` for a request: its [`RangeRequest`] variant name.
+///
+/// A closed set of `&'static str`, so the attribute stays low-cardinality and
+/// costs nothing to derive on a disabled callsite.
+const fn request_method(request: &RangeRequest) -> &'static str {
+    match request {
+        RangeRequest::Sql { .. } => "Sql",
+        RangeRequest::Ddl { .. } => "Ddl",
+        RangeRequest::Range0Barrier => "Range0Barrier",
+        RangeRequest::SessionOpen { .. } => "SessionOpen",
+        RangeRequest::Session { .. } => "Session",
+        RangeRequest::SessionClose { .. } => "SessionClose",
+        RangeRequest::GlobalDecision { .. } => "GlobalDecision",
+        RangeRequest::GlobalBegin { .. } => "GlobalBegin",
+        RangeRequest::RecoverGlobal { .. } => "RecoverGlobal",
+        RangeRequest::ScanRange(_) => "ScanRange",
+        RangeRequest::JoinRange(_) => "JoinRange",
+        RangeRequest::ScanCursor(_) => "ScanCursor",
+        RangeRequest::Txn(_) => "Txn",
+        RangeRequest::Tso(_) => "Tso",
+        RangeRequest::ResolveTxn(_) => "ResolveTxn",
+        RangeRequest::TimestampPrewrite(_) => "TimestampPrewrite",
+        RangeRequest::TimestampPrimaryAck(_) => "TimestampPrimaryAck",
+        RangeRequest::TimestampResolve(_) => "TimestampResolve",
+        RangeRequest::TimestampRecover(_) => "TimestampRecover",
+        RangeRequest::TimestampPrimaryRecover(_) => "TimestampPrimaryRecover",
+        RangeRequest::TimestampPrimaryInspect(_) => "TimestampPrimaryInspect",
+        RangeRequest::InspectDurableRecords(_) => "InspectDurableRecords",
+        RangeRequest::Control(_) => "Control",
+    }
+}
+
+/// The range a request names, when it names one.
+///
+/// `None` for the requests addressed to a node rather than to a range — the
+/// timestamp-oracle and primary-authenticated recovery RPCs, which carry a
+/// transaction identity instead.
+fn request_range_id(request: &RangeRequest) -> Option<RangeId> {
+    match request {
+        RangeRequest::Sql { range_id, .. }
+        | RangeRequest::SessionOpen { range_id, .. }
+        | RangeRequest::Session { range_id, .. }
+        | RangeRequest::SessionClose { range_id, .. }
+        | RangeRequest::GlobalDecision { range_id, .. }
+        | RangeRequest::GlobalBegin { range_id }
+        | RangeRequest::RecoverGlobal { range_id, .. } => Some(*range_id),
+        RangeRequest::Ddl { .. } | RangeRequest::Range0Barrier => Some(RangeId::COORDINATOR),
+        RangeRequest::ScanRange(request) => Some(request.range_id),
+        RangeRequest::JoinRange(request) => Some(request.range_id),
+        RangeRequest::ScanCursor(request) => Some(request.scan.range_id),
+        RangeRequest::TimestampPrewrite(request) => Some(request.range_id),
+        RangeRequest::TimestampResolve(request) => Some(request.range_id),
+        RangeRequest::TimestampRecover(request) => Some(request.range_id),
+        RangeRequest::Control(request) => Some(request.range_id),
+        RangeRequest::Txn(request) => Some(match request {
+            TxnReq::Prepare { range_id, .. }
+            | TxnReq::Commit { range_id, .. }
+            | TxnReq::Abort { range_id, .. }
+            | TxnReq::Barrier { range_id } => *range_id,
+        }),
+        RangeRequest::Tso(_)
+        | RangeRequest::ResolveTxn(_)
+        | RangeRequest::TimestampPrimaryAck(_)
+        | RangeRequest::TimestampPrimaryRecover(_)
+        | RangeRequest::TimestampPrimaryInspect(_)
+        | RangeRequest::InspectDurableRecords(_) => None,
+    }
+}
+
+/// The `error.type` for a failed RPC: the [`TransportError`] discriminant.
+///
+/// A transport failure has no SQLSTATE — `TransportError::Sql` is the one
+/// variant that carries one, and it is the peer's, already visible in the
+/// status description. The discriminant is the low-cardinality thing to group
+/// by, which is what `error.type` is for.
+const fn transport_error_kind(error: &TransportError) -> &'static str {
+    match error {
+        TransportError::FrameTooLarge { .. } => "frame_too_large",
+        TransportError::Json(_) => "json",
+        TransportError::Io(_) => "io",
+        TransportError::Timeout(_) => "timeout",
+        TransportError::Remote { .. } => "remote",
+        TransportError::Sql { .. } => "sql",
+        TransportError::UnexpectedResponse => "unexpected_response",
+        TransportError::Protocol(_) => "protocol",
+        TransportError::Tls(_) => "tls",
+        TransportError::UnauthorizedPeer { .. } => "unauthorized_peer",
+    }
+}
+
+/// Record `error` on `span` under the `OTel` status contract.
+fn record_rpc_error(span: &tracing::Span, error: &TransportError) {
+    telemetry::record_error(span, transport_error_kind(error), &error.to_string());
+}
+
+/// Frame bytes moved by one client RPC.
+///
+/// Accumulated by the framing loop and recorded once when it returns. A span per
+/// result page would emit hundreds of spans for one large scan, all of which the
+/// exporter would drop; two counters answer the same question.
+#[derive(Debug, Default)]
+struct RpcBytes {
+    request: usize,
+    response: usize,
+}
+
+impl RpcBytes {
+    fn record(&self, span: &tracing::Span) {
+        if span.is_disabled() {
+            return;
+        }
+        span.record("pg.request_bytes", telemetry::integer(self.request));
+        span.record("pg.response_bytes", telemetry::integer(self.response));
+    }
+}
+
+/// Build the client span covering one range RPC.
+///
+/// Every field is a constant or a field read, so the callsite needs no
+/// `enabled!` guard. Building it here rather than at the ~two dozen call sites
+/// is what keeps the change small — and what lets
+/// [`TraceCarrier::capture_current`] inside the framing loop pick up a
+/// client-kind parent without any of those callers knowing.
+fn range_rpc_span(endpoint: &str, request: &RangeRequest) -> tracing::Span {
+    let method = request_method(request);
+    let span = tracing::debug_span!(
+        target: telemetry::ROUTE_TARGET,
+        "gres.range_rpc",
+        otel.kind = "client",
+        otel.name = method,
+        otel.status_code = tracing::field::Empty,
+        otel.status_description = tracing::field::Empty,
+        error.type = tracing::field::Empty,
+        rpc.system = RPC_SYSTEM,
+        rpc.method = method,
+        server.address = endpoint,
+        pg.range_id = tracing::field::Empty,
+        pg.request_bytes = tracing::field::Empty,
+        pg.response_bytes = tracing::field::Empty,
+        pg.pooled_connection = tracing::field::Empty,
+    );
+    if let Some(range_id) = request_range_id(request) {
+        span.record("pg.range_id", telemetry::integer(range_id.as_u32()));
+    }
+    span
+}
+
+/// The authenticated identity of one served connection, recorded on every
+/// `gres.range_serve` span it produces.
+///
+/// The peer certificate is validated once when the connection is established,
+/// so the principal is constant for the connection's lifetime and is carried
+/// here rather than re-extracted per request.
+#[derive(Debug, Default)]
+struct ServePeer {
+    principal: String,
+    tenant: String,
+}
+
+/// Build the server span covering one served range RPC.
+///
+/// The caller makes this the child of the client's `gres.range_rpc` span with
+/// [`TraceCarrier::apply_to`], which is the hop that makes a distributed trace
+/// distributed.
+fn range_serve_span(request: &RangeRequest, peer: &ServePeer) -> tracing::Span {
+    let method = request_method(request);
+    let span = tracing::debug_span!(
+        target: telemetry::ROUTE_TARGET,
+        "gres.range_serve",
+        otel.kind = "server",
+        otel.name = method,
+        otel.status_code = tracing::field::Empty,
+        otel.status_description = tracing::field::Empty,
+        error.type = tracing::field::Empty,
+        rpc.system = RPC_SYSTEM,
+        rpc.method = method,
+        pg.principal = peer.principal.as_str(),
+        pg.tenant = peer.tenant.as_str(),
+        pg.range_id = tracing::field::Empty,
+        pg.response_bytes = tracing::field::Empty,
+    );
+    if let Some(range_id) = request_range_id(request) {
+        span.record("pg.range_id", telemetry::integer(range_id.as_u32()));
+    }
+    span
+}
+
+/// A stream that counts the bytes written through it.
+///
+/// Wrapped around the response half of one served request so `pg.response_bytes`
+/// covers the streaming SQL path too, where the service writes result pages
+/// straight to the socket. Counting here rather than at each write site is what
+/// lets `gres.range_serve` report the whole response without a span per page.
+struct CountingStream<'a, S> {
+    inner: &'a mut S,
+    written: usize,
+}
+
+impl<S> AsyncRead for CountingStream<'_, S>
+where
+    S: AsyncRead + Unpin,
+{
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut *self.inner).poll_read(context, buffer)
+    }
+}
+
+impl<S> AsyncWrite for CountingStream<'_, S>
+where
+    S: AsyncWrite + Unpin,
+{
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let written = std::task::ready!(Pin::new(&mut *self.inner).poll_write(context, buffer));
+        if let Ok(written) = &written {
+            self.written = self.written.saturating_add(*written);
+        }
+        Poll::Ready(written)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut *self.inner).poll_flush(context)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut *self.inner).poll_shutdown(context)
+    }
+}
+
 /// Request sent between range computes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(
@@ -841,10 +1141,18 @@ impl JoinRangeReq {
 
     /// Whether the fully materialized request, including enum/request JSON
     /// overhead, fits the production bounded frame.
+    ///
+    /// Sized against the frame limit less a reserve, because the frame the
+    /// request actually rides in also carries the caller's trace context.
+    /// Ignoring that reserve would let a join sized to exactly one frame pass
+    /// here and then fail on the wire with a
+    /// [`TransportError::FrameTooLarge`] instead of the planner's
+    /// `JoinValidationError`.
     #[must_use]
     pub fn fits_transport_frame(&self) -> bool {
+        let limit = (MAX_FRAME - ENVELOPE_RESERVE).bytes_usize();
         serde_json::to_vec(&RangeRequest::JoinRange(self.clone()))
-            .is_ok_and(|bytes| bytes.len() <= MAX_FRAME.bytes_usize())
+            .is_ok_and(|bytes| bytes.len() <= limit)
     }
 
     pub(crate) fn to_pgexec(&self) -> crabka_pgexec::JoinRangeRequest {
@@ -1471,7 +1779,27 @@ impl FramedTcpClient {
         endpoint: &str,
         request: &RangeRequest,
     ) -> Result<RangeResponse, TransportError> {
-        let mut stream = self.checkout(endpoint).await?;
+        let span = range_rpc_span(endpoint, request);
+        let outcome = self
+            .call_traced(endpoint, request)
+            .instrument(span.clone())
+            .await;
+        if let Err(error) = &outcome {
+            record_rpc_error(&span, error);
+        }
+        outcome
+    }
+
+    /// The body of [`FramedTcpClient::call`], run inside its `gres.range_rpc`
+    /// span so the trace context captured while framing names that span as the
+    /// remote parent.
+    async fn call_traced(
+        &self,
+        endpoint: &str,
+        request: &RangeRequest,
+    ) -> Result<RangeResponse, TransportError> {
+        let (mut stream, pooled) = self.checkout(endpoint).await?;
+        tracing::Span::current().record("pg.pooled_connection", pooled);
         let response = call_stream(&mut stream, request, self.timeout, self.max_frame).await?;
         self.pool
             .put(endpoint, stream, self.max_idle_per_endpoint, self.idle_ttl);
@@ -1491,7 +1819,27 @@ impl FramedTcpClient {
         request: &RangeRequest,
         sink: &mut dyn ResultSink,
     ) -> Result<(), TransportError> {
-        let mut stream = self.checkout(endpoint).await?;
+        let span = range_rpc_span(endpoint, request);
+        let outcome = self
+            .call_sql_into_traced(endpoint, request, sink)
+            .instrument(span.clone())
+            .await;
+        if let Err(error) = &outcome {
+            record_rpc_error(&span, error);
+        }
+        outcome
+    }
+
+    /// The body of [`FramedTcpClient::call_sql_into`], run inside its
+    /// `gres.range_rpc` span.
+    async fn call_sql_into_traced(
+        &self,
+        endpoint: &str,
+        request: &RangeRequest,
+        sink: &mut dyn ResultSink,
+    ) -> Result<(), TransportError> {
+        let (mut stream, pooled) = self.checkout(endpoint).await?;
+        tracing::Span::current().record("pg.pooled_connection", pooled);
         call_sql_stream_into(&mut stream, request, self.timeout, self.max_frame, sink).await?;
         self.pool
             .put(endpoint, stream, self.max_idle_per_endpoint, self.idle_ttl);
@@ -1499,11 +1847,15 @@ impl FramedTcpClient {
     }
 
     /// Take a healthy pooled connection or dial and handshake a fresh one.
-    async fn checkout(&self, endpoint: &str) -> Result<RangeStream, TransportError> {
+    ///
+    /// The flag says which happened, and becomes `pg.pooled_connection`: a
+    /// dialled connection pays a TCP and TLS handshake the pooled one does not,
+    /// which is usually the whole explanation for an outlier RPC.
+    async fn checkout(&self, endpoint: &str) -> Result<(RangeStream, bool), TransportError> {
         if let Some(stream) = self.pool.take(endpoint, self.idle_ttl) {
-            return Ok(stream);
+            return Ok((stream, true));
         }
-        self.dial(endpoint).await
+        self.dial(endpoint).await.map(|stream| (stream, false))
     }
 
     async fn dial(&self, endpoint: &str) -> Result<RangeStream, TransportError> {
@@ -1544,10 +1896,31 @@ async fn call_sql_stream_into<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
-    timeout(wait, write_frame_with_limit(stream, request, max_frame)).await??;
+    let mut bytes = RpcBytes::default();
+    let outcome = call_sql_stream_frames(stream, request, wait, max_frame, sink, &mut bytes).await;
+    bytes.record(&tracing::Span::current());
+    outcome
+}
+
+async fn call_sql_stream_frames<S>(
+    stream: &mut S,
+    request: &RangeRequest,
+    wait: Time,
+    max_frame: ByteSize,
+    sink: &mut dyn ResultSink,
+    bytes: &mut RpcBytes,
+) -> Result<(), TransportError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    let envelope = RangeEnvelope::outgoing(request);
+    bytes.request = timeout(wait, write_frame_counted(stream, &envelope, max_frame)).await??;
     timeout(wait, stream.flush()).await??;
     loop {
-        match timeout(wait, read_frame_with_limit(stream, max_frame)).await?? {
+        let (response, frame_bytes) =
+            timeout(wait, read_frame_counted(stream, max_frame)).await??;
+        bytes.response = bytes.response.saturating_add(frame_bytes);
+        match response {
             RangeResponse::SqlResultsChunk { chunk } => {
                 sink.send(wire_chunk_to_result_page(chunk)?)
                     .await
@@ -1694,11 +2067,16 @@ pub async fn serve_tls_with_policy(
                     .ok_or_else(|| TransportError::UnauthorizedPeer {
                         tenant: tenant.clone(),
                     })?;
+                let peer = ServePeer {
+                    principal: principal.clone(),
+                    tenant: tenant.clone(),
+                };
                 serve_frames_with_idle_timeout(
                     &mut stream,
                     &service,
                     server_idle_timeout,
                     max_frame,
+                    &peer,
                     |request: &RangeRequest| {
                         if principal_authorized_for_request(
                             &principal,
@@ -1755,6 +2133,7 @@ where
         service,
         crate::RangeRuntimePolicy::default().rpc_server_idle_timeout,
         crate::RangeRuntimePolicy::default().rpc_frame_max,
+        &ServePeer::default(),
         authorize,
     )
     .await
@@ -1765,6 +2144,7 @@ async fn serve_frames_with_idle_timeout<S, F>(
     service: &std::sync::Weak<dyn RangeService>,
     server_idle_timeout: Time,
     max_frame: ByteSize,
+    peer: &ServePeer,
     authorize: F,
 ) -> Result<(), TransportError>
 where
@@ -1777,18 +2157,48 @@ where
             read_request_or_eof_with_limit(stream, max_frame),
         )
         .await;
-        let request = match next {
+        let envelope = match next {
             // Idle past the deadline, or a clean peer disconnect: close quietly.
             Err(_) | Ok(Ok(None)) => return Ok(()),
-            Ok(Ok(Some(request))) => request,
+            Ok(Ok(Some(envelope))) => envelope,
             Ok(Err(error)) => return Err(error),
         };
-        authorize(&request)?;
+        let RangeEnvelope { trace, request } = envelope;
+        let request = request.into_owned();
+
+        // This is the cross-node hop: the caller's `gres.range_rpc` span becomes
+        // the remote parent of the work this node is about to do, so one trace
+        // spans both processes.
+        let span = range_serve_span(&request, peer);
+        trace.apply_to(&span);
+
+        // Authorization is re-checked per request because it is request-type
+        // dependent, and it is recorded on the span: a rejected peer is exactly
+        // the thing an operator goes looking for.
+        if let Err(error) = authorize(&request) {
+            record_rpc_error(&span, &error);
+            return Err(error);
+        }
         let Some(service) = service.upgrade() else {
             // The listener was torn down; close as if the server went away.
             return Ok(());
         };
-        handle_request_on_stream_with_limit(stream, &service, request, max_frame).await?;
+        let mut counted = CountingStream {
+            inner: stream,
+            written: 0,
+        };
+        let outcome =
+            handle_request_on_stream_with_limit(&mut counted, &service, request, max_frame)
+                .instrument(span.clone())
+                .await;
+        let written = counted.written;
+        if !span.is_disabled() {
+            span.record("pg.response_bytes", telemetry::integer(written));
+        }
+        if let Err(error) = &outcome {
+            record_rpc_error(&span, error);
+        }
+        outcome?;
     }
 }
 
@@ -1830,9 +2240,27 @@ async fn call_stream<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
-    timeout(wait, write_frame_with_limit(stream, request, max_frame)).await??;
+    let mut bytes = RpcBytes::default();
+    let outcome = call_stream_frames(stream, request, wait, max_frame, &mut bytes).await;
+    bytes.record(&tracing::Span::current());
+    outcome
+}
+
+async fn call_stream_frames<S>(
+    stream: &mut S,
+    request: &RangeRequest,
+    wait: Time,
+    max_frame: ByteSize,
+    bytes: &mut RpcBytes,
+) -> Result<RangeResponse, TransportError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    let envelope = RangeEnvelope::outgoing(request);
+    bytes.request = timeout(wait, write_frame_counted(stream, &envelope, max_frame)).await??;
     timeout(wait, stream.flush()).await??;
-    let first = timeout(wait, read_frame_with_limit(stream, max_frame)).await??;
+    let (first, frame_bytes) = timeout(wait, read_frame_counted(stream, max_frame)).await??;
+    bytes.response = bytes.response.saturating_add(frame_bytes);
     let chunk = match first {
         RangeResponse::SqlResultsChunk { chunk } => chunk,
         RangeResponse::SqlResultsDone => return Ok(RangeResponse::SqlResults { results: vec![] }),
@@ -1841,7 +2269,10 @@ where
     let mut results = Vec::new();
     consume_sql_chunk(&mut results, chunk)?;
     loop {
-        match timeout(wait, read_frame_with_limit(stream, max_frame)).await?? {
+        let (response, frame_bytes) =
+            timeout(wait, read_frame_counted(stream, max_frame)).await??;
+        bytes.response = bytes.response.saturating_add(frame_bytes);
+        match response {
             RangeResponse::SqlResultsChunk { chunk } => consume_sql_chunk(&mut results, chunk)?,
             RangeResponse::SqlResultsDone => return Ok(RangeResponse::SqlResults { results }),
             RangeResponse::SqlError { code, message } => {
@@ -2145,6 +2576,22 @@ where
     W: AsyncWrite + Unpin + ?Sized,
     T: Serialize,
 {
+    write_frame_counted(writer, value, max_frame)
+        .await
+        .map(drop)
+}
+
+/// Write one length-prefixed frame and report the bytes it put on the wire,
+/// prefix included, for `pg.request_bytes`.
+async fn write_frame_counted<W, T>(
+    writer: &mut W,
+    value: &T,
+    max_frame: ByteSize,
+) -> Result<usize, TransportError>
+where
+    W: AsyncWrite + Unpin + ?Sized,
+    T: Serialize,
+{
     let bytes = serialize_json_bounded(value, max_frame)?;
     let len = u32::try_from(bytes.len()).map_err(|_| TransportError::FrameTooLarge {
         actual: bytes.len(),
@@ -2152,7 +2599,7 @@ where
     })?;
     writer.write_u32(len).await?;
     writer.write_all(&bytes).await?;
-    Ok(())
+    Ok(bytes.len().saturating_add(std::mem::size_of::<u32>()))
 }
 
 fn serialize_json_bounded<T>(value: &T, limit: ByteSize) -> Result<Vec<u8>, TransportError>
@@ -2198,8 +2645,8 @@ where
     Ok(writer.bytes)
 }
 
-/// Read one length-prefixed request, or `None` when the peer disconnected at
-/// a frame boundary.
+/// Read one length-prefixed request envelope, or `None` when the peer
+/// disconnected at a frame boundary.
 ///
 /// A clean EOF before any prefix byte, and an abrupt close reported before
 /// any prefix byte (pooled TLS clients drop idle connections without sending
@@ -2208,7 +2655,7 @@ where
 async fn read_request_or_eof_with_limit<R>(
     reader: &mut R,
     max_frame: ByteSize,
-) -> Result<Option<RangeRequest>, TransportError>
+) -> Result<Option<RangeEnvelope<'static>>, TransportError>
 where
     R: AsyncRead + Unpin,
 {
@@ -2256,13 +2703,17 @@ where
     R: AsyncRead + Unpin,
     T: for<'de> Deserialize<'de>,
 {
-    read_frame_with_limit(reader, MAX_FRAME).await
+    read_frame_counted(reader, MAX_FRAME)
+        .await
+        .map(|(value, _)| value)
 }
 
-async fn read_frame_with_limit<R, T>(
+/// Read one length-prefixed frame and report the bytes it took off the wire,
+/// prefix included, for `pg.response_bytes`.
+async fn read_frame_counted<R, T>(
     reader: &mut R,
     max_frame: ByteSize,
-) -> Result<T, TransportError>
+) -> Result<(T, usize), TransportError>
 where
     R: AsyncRead + Unpin,
     T: for<'de> Deserialize<'de>,
@@ -2281,7 +2732,8 @@ where
     }
     let mut bytes = vec![0; len];
     reader.read_exact(&mut bytes).await?;
-    Ok(serde_json::from_slice(&bytes)?)
+    let value = serde_json::from_slice(&bytes)?;
+    Ok((value, len.saturating_add(std::mem::size_of::<u32>())))
 }
 
 async fn timeout<T>(wait: Time, task: impl Future<Output = T>) -> Result<T, TransportError> {
@@ -2465,6 +2917,124 @@ mod tests {
         let error = serialize_json_bounded(&RangeRequest::JoinRange(request), MAX_FRAME)
             .expect_err("frame must be bounded");
         assert!(matches!(error, TransportError::FrameTooLarge { .. }));
+    }
+
+    /// The wire shape, pinned. Every request now rides inside a `RangeEnvelope`
+    /// under a `request` key, and an RPC made with no active span must carry no
+    /// `trace` key at all — not an empty object, and above all not a
+    /// placeholder `traceparent` a peer would then try to parse.
+    #[tokio::test]
+    async fn untraced_request_frames_carry_the_request_and_no_trace_context() {
+        use assert2::assert;
+        let request = RangeRequest::Sql {
+            range_id: RangeId::new(4),
+            sql: "select 1".to_string(),
+        };
+        let mut frame = Vec::new();
+
+        write_frame(&mut frame, &RangeEnvelope::outgoing(&request))
+            .await
+            .expect("write untraced frame");
+
+        let json =
+            serde_json::from_slice::<serde_json::Value>(&frame[4..]).expect("frame body is JSON");
+        assert!(
+            json == serde_json::json!({
+                "request": {"type": "sql", "range_id": 4, "sql": "select 1"}
+            })
+        );
+    }
+
+    /// The backstop for "we forgot to inject": with a span active, the frame's
+    /// JSON must carry *that* span's trace id and its sampled flag. Asserting a
+    /// `traceparent` merely exists survives a mutant that injects a constant.
+    #[tokio::test]
+    async fn traced_request_frames_carry_the_active_trace_id() {
+        use assert2::assert;
+        use opentelemetry::trace::{TraceContextExt as _, TracerProvider as _};
+        use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+        use tracing_subscriber::{Layer as _, layer::SubscriberExt as _};
+
+        opentelemetry::global::set_text_map_propagator(
+            opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+        );
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_sampler(opentelemetry_sdk::trace::Sampler::AlwaysOn)
+            .build();
+        let layer = tracing_opentelemetry::layer()
+            .with_tracer(provider.tracer("transport-envelope"))
+            .with_filter(tracing_subscriber::EnvFilter::new(
+                "crabka_gres_ranges::route=debug",
+            ));
+        let subscriber = tracing_subscriber::registry().with(layer);
+
+        let (trace_id, frame) = tracing::subscriber::with_default(subscriber, || {
+            let span = range_rpc_span("range-7.internal:7443", &RangeRequest::Range0Barrier);
+            let _guard = span.enter();
+            let trace_id = tracing::Span::current()
+                .context()
+                .span()
+                .span_context()
+                .trace_id()
+                .to_string();
+            let envelope = RangeEnvelope::outgoing(&RangeRequest::Range0Barrier);
+            let frame = serde_json::to_value(&envelope).expect("encode traced envelope");
+            (trace_id, frame)
+        });
+
+        let traceparent = frame["trace"]["traceparent"]
+            .as_str()
+            .expect("traced frame carries a traceparent");
+        assert!(traceparent.contains(&trace_id));
+        assert!(traceparent.ends_with("-01"));
+        assert!(frame["request"] == serde_json::json!({"type": "range0_barrier"}));
+    }
+
+    /// The reserve exists so a join accepted by the planner still fits once the
+    /// envelope wraps it. Sized against the worst case the carrier permits: a
+    /// 55-byte `traceparent` plus the 512-byte `tracestate` ceiling
+    /// `crabka-trace-context` enforces.
+    #[test]
+    fn largest_accepted_join_still_fits_a_worst_case_traced_frame() {
+        use assert2::assert;
+        let mut request = join_request_fixture();
+        request.broadcast_rows = Some(vec![JoinRangeRow {
+            tuple: vec![0; largest_fitting_join_payload()],
+        }]);
+        assert!(request.fits_transport_frame());
+
+        let request = RangeRequest::JoinRange(request);
+        let envelope = RangeEnvelope {
+            trace: TraceCarrier {
+                traceparent: Some("0".repeat(55)),
+                tracestate: Some("x".repeat(512)),
+            },
+            request: Cow::Borrowed(&request),
+        };
+
+        assert!(serialize_json_bounded(&envelope, MAX_FRAME).is_ok());
+    }
+
+    /// The largest `broadcast_rows` payload [`JoinRangeReq::fits_transport_frame`]
+    /// still accepts, found by bisection so the test pins the real boundary
+    /// rather than a copy of the arithmetic under test.
+    fn largest_fitting_join_payload() -> usize {
+        let mut request = join_request_fixture();
+        request.broadcast_rows = Some(vec![JoinRangeRow { tuple: vec![] }]);
+        let mut low = 0usize;
+        let mut high = MAX_FRAME.bytes_usize();
+        while low < high {
+            let mid = low + (high - low).div_ceil(2);
+            request.broadcast_rows.as_mut().expect("broadcast")[0]
+                .tuple
+                .resize(mid, 0);
+            if request.fits_transport_frame() {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+        low
     }
 
     #[test]
@@ -3231,7 +3801,9 @@ mod tests {
                 counter.fetch_add(1, Ordering::SeqCst);
                 let service = Arc::clone(&service);
                 tokio::spawn(async move {
-                    if let Ok(request) = read_frame::<_, RangeRequest>(&mut stream).await {
+                    if let Ok(envelope) = read_frame::<_, RangeEnvelope<'static>>(&mut stream).await
+                    {
+                        let request = envelope.request.into_owned();
                         let _ = handle_request_on_stream(&mut stream, &service, request).await;
                     }
                 });
@@ -3396,7 +3968,7 @@ mod tests {
                     if accepted == 1 {
                         // Read the request, then drop the connection without
                         // responding.
-                        let _ = read_frame::<_, RangeRequest>(&mut stream).await;
+                        let _ = read_frame::<_, RangeEnvelope<'static>>(&mut stream).await;
                     } else {
                         let _ = handle_stream(stream, Arc::new(EchoService::default())).await;
                     }

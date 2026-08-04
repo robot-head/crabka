@@ -4,11 +4,13 @@
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
+use crabka_trace_context::TraceCarrier;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     sync::mpsc,
 };
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument as _;
 
 use crate::{
     engine::{
@@ -21,6 +23,7 @@ use crate::{
         frontend::{self, FrontendMessage},
     },
     server::{SessionActivity, SessionCancel},
+    telemetry::{self, IngressTracePolicy, StatementProtocol},
 };
 
 #[derive(Debug, Clone)]
@@ -44,6 +47,9 @@ pub struct SessionConfig {
     /// `ParameterStatus` values announced at session start. Clients parse
     /// `server_version` and rely on `client_encoding=UTF8`.
     pub server_params: Vec<(String, String)>,
+    /// How much of a client-supplied W3C trace context statements on this
+    /// connection may inherit. See [`IngressTracePolicy`].
+    pub ingress_trace: IngressTracePolicy,
 }
 
 impl SessionConfig {
@@ -53,6 +59,7 @@ impl SessionConfig {
             auth: AuthMode::Trust,
             max_message_len: crate::messages::frontend::MAX_MESSAGE_LEN,
             server_params: default_server_params(),
+            ingress_trace: IngressTracePolicy::default(),
         }
     }
 }
@@ -79,6 +86,33 @@ pub fn default_server_params() -> Vec<(String, String)> {
 struct ExtendedState {
     /// True after an error in the extended phase: skip messages until Sync.
     failed: bool,
+    /// Client trace context read from the sqlcommenter tag on the most recent
+    /// `Parse`, which is the only extended-protocol message carrying SQL.
+    ///
+    /// Cleared at `Sync` alongside [`ExtendedState::failed`], and that lifetime
+    /// is the point: an *unnamed* prepared statement is a one-shot pipelined
+    /// batch — what every ORM emits — so its Parse-time trace is exactly the
+    /// trace its `Execute` belongs to. A *named* statement that survives a
+    /// `Sync` is genuinely being reused, and the trace it was prepared under is
+    /// stale by the time it runs again.
+    trace: TraceCarrier,
+}
+
+/// The trace context an `Execute`-raised `gres.statement` span hangs from.
+///
+/// `Bind` and `Execute` carry no SQL, so there is no sqlcommenter tag to read at
+/// execution time. The precedence is:
+///
+/// 1. a `crabka.traceparent` GUC — the only genuinely per-execution channel, and
+///    the one an application can set once per request. Reading it needs an
+///    engine-side seam that lands with the pgexec statement tier; **this
+///    function does not consult it yet** and is the single place that changes
+///    when it does.
+/// 2. the carrier captured from the `Parse` that prepared the statement, held on
+///    [`ExtendedState`] until the next `Sync`.
+/// 3. nothing, leaving the statement span a trace root.
+fn resolve_execute_parent(ext: &ExtendedState) -> &TraceCarrier {
+    &ext.trace
 }
 
 #[derive(Debug)]
@@ -223,17 +257,35 @@ fn fail_extended(ext: &mut ExtendedState, out: &mut BytesMut, e: &PgError) {
     backend::error_response(out, e);
 }
 
+/// Prepare a statement, returning the client trace context its SQL carried so
+/// the matching `Execute` can join the same trace.
+///
+/// `Parse` earns a span of its own because it is not always local: for a sharded
+/// table the gateway forwards the prepare to the range owner, a real network hop
+/// that is otherwise invisible.
 async fn handle_parse<Sess: Session>(
     session: &mut Sess,
     name: String,
     sql: String,
     param_types: Vec<u32>,
+    policy: IngressTracePolicy,
     out: &mut BytesMut,
-) -> Result<(), PgError> {
-    count_positional_parameters(&sql)?;
-    session.parse(&name, &sql, &param_types).await?;
+) -> Result<TraceCarrier, PgError> {
+    let span = telemetry::parse_span(&name);
+    let carrier = telemetry::ingress_from_sql(policy, &sql, &span);
+    let prepared: Result<(), PgError> = async {
+        count_positional_parameters(&sql)?;
+        session.parse(&name, &sql, &param_types).await?;
+        Ok(())
+    }
+    .instrument(span.clone())
+    .await;
+    if let Err(error) = &prepared {
+        telemetry::record_error(&span, error);
+    }
+    prepared?;
     backend::parse_complete(out);
-    Ok(())
+    Ok(carrier)
 }
 
 async fn handle_bind<Sess: Session>(
@@ -245,19 +297,29 @@ async fn handle_bind<Sess: Session>(
     result_formats: &[i16],
     out: &mut BytesMut,
 ) -> Result<(), PgError> {
-    let param_formats = resolve_param_formats(param_formats, params.len())?;
-    let params = params
-        .into_iter()
-        .zip(param_formats)
-        .map(|(value, format)| BoundParam {
-            type_oid: None,
-            format,
-            value,
-        })
-        .collect::<Vec<_>>();
-    session
-        .bind(&portal, statement, &params, result_formats)
-        .await?;
+    let span = telemetry::bind_span(&portal, statement);
+    let bound: Result<(), PgError> = async {
+        let param_formats = resolve_param_formats(param_formats, params.len())?;
+        let params = params
+            .into_iter()
+            .zip(param_formats)
+            .map(|(value, format)| BoundParam {
+                type_oid: None,
+                format,
+                value,
+            })
+            .collect::<Vec<_>>();
+        session
+            .bind(&portal, statement, &params, result_formats)
+            .await?;
+        Ok(())
+    }
+    .instrument(span.clone())
+    .await;
+    if let Err(error) = &bound {
+        telemetry::record_error(&span, error);
+    }
+    bound?;
     backend::bind_complete(out);
     Ok(())
 }
@@ -268,33 +330,42 @@ async fn handle_describe<Sess: Session>(
     name: &str,
     out: &mut BytesMut,
 ) -> Result<(), PgError> {
-    match kind {
-        b'S' => {
-            let description = session.describe_statement(name).await?;
-            backend::parameter_description(out, &description.parameter_types);
-            if description.fields.is_empty() {
-                backend::no_data(out);
-            } else {
-                backend::row_description(out, &description.fields);
+    let span = telemetry::describe_span(kind, name);
+    let described: Result<(), PgError> = async {
+        match kind {
+            b'S' => {
+                let description = session.describe_statement(name).await?;
+                backend::parameter_description(out, &description.parameter_types);
+                if description.fields.is_empty() {
+                    backend::no_data(out);
+                } else {
+                    backend::row_description(out, &description.fields);
+                }
+            }
+            b'P' => {
+                let description = session.describe_portal(name).await?;
+                if description.fields.is_empty() {
+                    backend::no_data(out);
+                } else {
+                    // Describe(portal) reports the formats the portal will use.
+                    backend::row_description(out, &description.fields);
+                }
+            }
+            other => {
+                return Err(PgError::protocol(format!(
+                    "invalid describe kind {:?}",
+                    other as char
+                )));
             }
         }
-        b'P' => {
-            let description = session.describe_portal(name).await?;
-            if description.fields.is_empty() {
-                backend::no_data(out);
-            } else {
-                // Describe(portal) reports the formats the portal will use.
-                backend::row_description(out, &description.fields);
-            }
-        }
-        other => {
-            return Err(PgError::protocol(format!(
-                "invalid describe kind {:?}",
-                other as char
-            )));
-        }
+        Ok(())
     }
-    Ok(())
+    .instrument(span.clone())
+    .await;
+    if let Err(error) = &described {
+        telemetry::record_error(&span, error);
+    }
+    described
 }
 
 /// Returns `Some(CopyInState)` when the portal is a COPY FROM STDIN: the
@@ -334,6 +405,12 @@ async fn handle_execute<Sess: Session>(
             },
             chunks: Vec::new(),
         }));
+    }
+    if let ExecuteOutcome::Rows { rows, .. } = &outcome {
+        // One `Execute` yields at most one batch, so this *is* the caller's page
+        // loop — the current span is the `gres.statement` the call was
+        // instrumented with.
+        telemetry::record_statement_rows(&tracing::Span::current(), rows.len(), 1);
     }
     encode_execute_outcome(out, outcome)?;
     Ok(None)
@@ -626,6 +703,13 @@ where
 {
     let mut out = BytesMut::with_capacity(1024);
 
+    // The enclosing `gres.session` span is created by `server::serve_conn`,
+    // which is where the peer address lives; the startup packet is the first
+    // point at which the rest of its attributes are known. A session driven
+    // without that wrapper simply records onto a disabled span.
+    let session_span = tracing::Span::current();
+    telemetry::record_session_startup(&session_span, &startup_params, cancel.pid);
+
     if !authenticate(&mut stream, &startup_params, &config, &mut out, &mut inbuf).await? {
         return Ok(());
     }
@@ -796,11 +880,22 @@ where
                 FrontendMessage::Terminate => return Ok(()),
                 FrontendMessage::Query { sql } => {
                     let _statement_activity = activity.begin_statement().await;
+                    let statement_span = telemetry::statement_span(StatementProtocol::Simple);
+                    // The simple protocol carries its SQL, so this is where a
+                    // sqlcommenter tag is read. The text itself is left alone:
+                    // the parser skips comments without emitting a token, and it
+                    // keeps the original string so a syntax error's byte offset
+                    // still points where the client expects.
+                    let _ingress = telemetry::ingress_from_sql(
+                        config.ingress_trace,
+                        &sql,
+                        &statement_span,
+                    );
                     let token = cancel.begin_query();
                     let copy_start = tokio::select! {
                         biased;
                         () = token.cancelled() => None,
-                        r = session.begin_copy_in(&sql) => Some(r),
+                        r = session.begin_copy_in(&sql).instrument(statement_span.clone()) => Some(r),
                     };
                     let copy_start = if let Some(copy_start) = copy_start {
                         copy_start
@@ -822,6 +917,7 @@ where
                         }
                         Ok(None) => {}
                         Err(e) => {
+                            telemetry::record_statement_error(&statement_span, &e);
                             write_notices(&mut out, notices.as_mut());
                             backend::error_response(&mut out, &e);
                             write_ready(
@@ -839,25 +935,38 @@ where
                     let mut sink = WireResultSink {
                         out: &mut out,
                         notices: notices.as_mut(),
+                        rows: 0,
+                        pages: 0,
                     };
                     let outcome = tokio::select! {
                         // biased + cancellation-first; see handle_execute.
                         biased;
                         () = token.cancelled() => None,
-                        r = session.simple_query_into(&sql, 1024, &mut sink) => Some(r),
+                        r = session
+                            .simple_query_into(&sql, 1024, &mut sink)
+                            .instrument(statement_span.clone()) => Some(r),
                     };
+                    // Read off the sink's running totals before it is dropped:
+                    // the pages themselves get no spans, only this one summary.
+                    let (rows, pages) = (sink.rows, sink.pages);
                     let outcome = if let Some(outcome) = outcome {
                         outcome
                     } else {
                         session.cancel_current_query().await;
                         Err(query_canceled())
                     };
+                    telemetry::record_statement_rows(&statement_span, rows, pages);
                     match outcome {
                         Ok(()) => {}
                         Err(e) => {
+                            telemetry::record_statement_error(&statement_span, &e);
                             write_notices(&mut out, notices.as_mut());
                             backend::error_response(&mut out, &e);
                             if e.severity == Severity::Fatal {
+                                // A fatal diagnostic ends the connection, so it
+                                // is the session's outcome too — the only thing
+                                // that marks `gres.session` failed.
+                                telemetry::record_error(&session_span, &e);
                                 stream.write_all(&out).await?;
                                 return Ok(());
                             }
@@ -874,6 +983,9 @@ where
                         backend::error_response(&mut out, &e);
                     }
                     ext.failed = false;
+                    // A statement that outlives a `Sync` is genuinely being
+                    // reused; the trace it was prepared under is stale.
+                    ext.trace = TraceCarrier::default();
                     write_ready(&mut out, &session, notices.as_mut(), notifications.as_mut());
                     stream.write_all(&out).await?;
                     out.clear();
@@ -888,10 +1000,18 @@ where
                     if ext.failed {
                         continue;
                     }
-                    if let Err(e) =
-                        handle_parse(&mut session, name, sql, param_types, &mut out).await
-                    {
-                        fail_extended(&mut ext, &mut out, &e);
+                    let prepared = handle_parse(
+                        &mut session,
+                        name,
+                        sql,
+                        param_types,
+                        config.ingress_trace,
+                        &mut out,
+                    )
+                    .await;
+                    match prepared {
+                        Ok(carrier) => ext.trace = carrier,
+                        Err(e) => fail_extended(&mut ext, &mut out, &e),
                     }
                     stream.write_all(&out).await?;
                     out.clear();
@@ -937,9 +1057,13 @@ where
                         continue;
                     }
                     let _statement_activity = activity.begin_statement().await;
+                    let statement_span = telemetry::statement_span(StatementProtocol::Extended);
+                    config
+                        .ingress_trace
+                        .attach(resolve_execute_parent(&ext), &statement_span);
                     // Cancel window: between extended messages no engine future runs; the pending flag in CancelRegistry makes a cancel received there fire on the next engine call.
                     let token = cancel.begin_query();
-                    match handle_execute(
+                    let executed = handle_execute(
                         &mut session,
                         &portal,
                         max_rows,
@@ -947,11 +1071,13 @@ where
                         notices.as_mut(),
                         &mut out,
                     )
-                    .await
-                    {
+                    .instrument(statement_span.clone())
+                    .await;
+                    match executed {
                         Ok(Some(copy_start)) => copy_in = Some(copy_start),
                         Ok(None) => {}
                         Err(e) => {
+                            telemetry::record_statement_error(&statement_span, &e);
                             write_notices(&mut out, notices.as_mut());
                             fail_extended(&mut ext, &mut out, &e);
                         }
@@ -1010,6 +1136,12 @@ where
 struct WireResultSink<'a> {
     out: &'a mut BytesMut,
     notices: Option<&'a mut mpsc::Receiver<PgError>>,
+    /// Rows written to the wire so far, folded onto `gres.statement` once the
+    /// statement finishes. The sink itself raises no spans: a 100k-row result
+    /// would emit a hundred page spans that the exporter throws away.
+    rows: usize,
+    /// Row pages written so far, the companion to [`WireResultSink::rows`].
+    pages: usize,
 }
 
 #[async_trait::async_trait]
@@ -1020,6 +1152,8 @@ impl ResultSink for WireResultSink<'_> {
             ResultPage::Rows {
                 fields, rows, tag, ..
             } => {
+                self.rows += rows.len();
+                self.pages += 1;
                 if let Some(fields) = fields {
                     backend::row_description(self.out, &fields);
                 }

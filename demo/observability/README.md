@@ -5,6 +5,10 @@ backends (metrics, traces, logs, profiles). Crabka exports all four of its own
 signals into those backends, and an instrumented `crabka-client-streams` orders
 pipeline runs its Kafka traffic on Crabka.
 
+`crabka-gres`, the PostgreSQL-compatible SQL engine whose write-ahead log lives
+in the same broker, runs alongside them and exports a per-query trace
+waterfall. See [Gres query traces](#gres-query-traces).
+
 A single `crabka-broker` is triple-duty: the demo app's event bus, the
 write-ahead log for all four telemetry backends, and a self-observed subject.
 One Grafana Alloy collects every signal from both sources (Crabka's own
@@ -27,8 +31,18 @@ block-builders flush their first blocks (give it ~3–5 min on a cold start). Th
 queriers refresh their indexes automatically.
 
 Tune the load with `CRABKA_DEMO_ORDERS_PER_SEC` on the `demo-produce` service
-(default `50`; `0` pauses production). Lower it on a constrained host. Plan on
-**≥ 8 GB** of Docker memory (~21 containers).
+(default `50`; `0` pauses production), and the SQL load with
+`CRABKA_GRES_WORKLOAD_INTERVAL` on `gres-workload` (default `5` seconds between
+passes). Lower both on a constrained host. Plan on **≥ 8 GB** of Docker memory
+(~23 containers).
+
+Gres listens on `localhost:5433` as the `demo` tenant, with the SQL password
+from `CRABKA_GRES_PASSWORD` (default `demo`):
+
+```bash
+PGPASSWORD=demo psql 'host=localhost port=5433 user=demo dbname=demo' \
+  -c 'SELECT count(*) FROM demo_orders'
+```
 
 The service binaries run under the jemalloc allocator with heap profiling active
 at a coarse sample rate (`lg_prof_sample:25`, roughly one sample per 32 MiB) and
@@ -124,11 +138,122 @@ Actions workflow (Actions → *publish-demo-image* → *Run workflow* → image 
   observability services also self-instrument their ingest/compaction: a
   `*_ingest` span on each distributor and a `*_block_build` / `*_compaction`
   span on each block-builder/compactor, linked across the WAL so you can see a
-  distributor → broker (WAL) → block-builder trace.
+  distributor → broker (WAL) → block-builder trace. Gres contributes a
+  per-query waterfall — search `{ resource.service.name = "gres" }` — described
+  in [Gres query traces](#gres-query-traces).
 - **Explore → Crabka Profiles** (Pyroscope): Crabka services — CPU + heap flamegraphs; demo app roles — CPU flamegraphs.
 - The **”Crabka observes Crabka”** dashboard (folder *Crabka*) shows one panel
   per signal plus querier heap flamegraphs; the **”Crabka — Orders Demo”**
   dashboard visualises the demo pipeline's business metrics.
+
+## Gres query traces
+
+`crabka-gres` is a PostgreSQL-compatible SQL engine whose write-ahead log is a
+topic on the same broker. The demo runs one in single-node substrate mode on
+`localhost:5433`; `gres-setup` writes the tenant's registry record first (gres
+refuses to start without one), and `gres-workload` drives a small SQL loop
+against it (insert, aggregate, point read, periodic delete) so there is always
+a fresh trace to open. The **Crabka — Gres Query Traces** dashboard is the
+quickest way in; TraceQL `{ resource.service.name = "gres" }` in Explore works
+too.
+
+Both services need a demo image built after gres joined it. If `gres-setup`
+reports `unrecognized subcommand 'gres'`, or `gres` cannot find `crabka-gres`,
+the local image predates the change — [rebuild it from
+source](#rebuild-from-source).
+
+One statement produces a waterfall roughly like this:
+
+```text
+gres.session                     the pgwire connection
+└─ gres.statement                one frontend Query or Execute
+   ├─ pg.parse.sql
+   └─ SELECT demo_orders         the engine's statement span (see the naming note)
+      └─ pg.select
+         ├─ pg.timestamp.read    read timestamp acquisition
+         ├─ gres.wal_append      durable produce into the broker
+         └─ gres.exec_read       the executor body
+```
+
+The statement span carries `db.query.summary`, `db.operation.name`,
+`db.collection.name`, `db.namespace` and `pg.table_id`; `pg.select` carries
+`pg.read_ts` and the MVCC snapshot bounds; `gres.wal_append` carries
+`pg.wal.frames` / `bytes` / `first_offset` / `last_offset`. A write adds
+`pg.write` and `pg.commit`, and `pg.commit` carries `pg.gate_wait_ms` — time
+spent waiting for the group-commit gate, usually the first field to look at
+when commits are slow.
+
+`pg.blocking_worker`, `pg.scan`, `pg.read_context` and the contended-row-lock
+spans sit at `TRACE` and are off by default; add
+`crabka_pgexec::exec=trace` to `CRABKA_OTLP_FILTER` on the `gres` service to
+see them.
+
+**Naming note.** The statement spans set `otel.name` to the query summary, so
+they export as `SELECT demo_orders`, not as `db.statement`. Select them by
+attribute — `{ span.db.system.name = "postgresql" }` — never by span name. The
+other span names in the tree are fixed and safe to match: `gres.session`,
+`gres.parse`, `pg.select`, `pg.write`, `pg.commit`, `pg.scan`,
+`pg.blocking_worker`, `gres.exec_read`, `pg.route`, `pg.timestamp_scatter`,
+`pg.prewrite`, `pg.resolve`, `gres.wal_append`, `gres.wal_apply`, `kv.apply`,
+`wal.chunk`, `tso.grant`, `range.barrier`. A multi-range cluster adds
+`gres.range_rpc` / `gres.range_serve` for the cross-node hop; the demo is
+single-node and shows neither (see [Single node only](#single-node-only)).
+
+### Joining your own trace
+
+Append a sqlcommenter comment carrying a W3C `traceparent` and gres makes your
+span the parent of the whole query tree:
+
+```bash
+PGPASSWORD=demo psql 'host=localhost port=5433 user=demo dbname=demo' -c \
+  "SELECT count(*) FROM demo_orders /*traceparent='00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01'*/"
+```
+
+Then search that trace id in Explore → Crabka Traces. The comment is `00-`,
+a 32-hex trace id, a 16-hex span id, and 2 hex flags; `01` means sampled. It is
+ignored by the SQL parser, so the statement runs unchanged, and a malformed one
+is dropped silently rather than failing the query. OTel-instrumented Postgres
+drivers emit exactly this shape on every statement, which is what makes an
+application request and the queries it caused land in one trace.
+`SET crabka.traceparent = '…'` does the same thing for a whole session, and is
+the only channel that works for the extended protocol, where `Execute` carries
+no SQL to comment on.
+
+Gres re-derives the sampling decision from the incoming trace id at its own
+ratio, so a client cannot force export by setting the sampled flag on every
+statement. Because the ratio is a pure function of the trace id, a client and
+gres configured alike still agree and traces stay whole.
+
+### Verbatim SQL is off by default
+
+`CRABKA_OTLP_SQL_TEXT=true` (exposed as `CRABKA_GRES_OTLP_SQL_TEXT` in `.env`)
+attaches the statement as sent — literals included — as `db.query.text`. It is
+off because it is the one setting here that exports personal data or secrets:
+`INSERT INTO users VALUES ('123-45-6789', …)`, `ALTER ROLE app PASSWORD …`.
+Anything that reaches the collector reaches everyone who can read the trace
+backend. With it off, spans still carry `db.query.summary`
+(`"SELECT demo_orders"`), `db.operation.name`, `db.collection.name`,
+`db.namespace` and `pg.table_id` — enough to group and attribute latency
+without reproducing a single literal.
+
+### Sampling
+
+Every other service here head-samples at 5% (`CRABKA_OTLP_SAMPLE_RATIO` in the
+`x-otlp-env` anchor), because the traces pipeline traces its own span ingest and
+the resulting feedback loop diverges at 1.0. Gres is a database, not a trace
+backend: its spans never re-enter their own ingest path, so it overrides the
+anchor and samples at 1.0. Sampling gres at 5% would discard 19 of every 20
+query waterfalls.
+
+### Single node only
+
+The demo runs one gres that owns every range. That exercises the whole tree
+except the cross-node hop; a multi-range cluster needs mTLS material shared
+between the computes (`--range-tls-cert` / `--range-tls-key` / `--range-tls-ca`
+/ `--range-tls-server-name`, plus `--ranges`, `--host-ranges` and
+`--range-listen`). Nothing in the repo generates that material outside the Rust
+test harnesses, so a cluster profile would have to grow its own certificate
+step — a failure mode a demo that must start on the first try does not need.
 
 ## Dashboards & alerts
 
@@ -154,6 +279,9 @@ Provisioned dashboards (folder *Crabka*):
 - **Crabka — Metrics / Logs / Traces / Profiles** — per-subsystem RED: ingest
   rate/bytes/errors/latency (distributor) and query rate/errors/p99 latency by
   route (querier), plus WAL append failures and per-role liveness.
+- **Crabka — Gres Query Traces** — the SQL engine's query waterfall: recent
+  traces, statement spans, slow and failed statements, executor reads, commits
+  and WAL appends, plus a panel explaining how to join your own trace.
 
 Provisioned Grafana-managed alerts (folder *Crabka Alerts*,
 `grafana/provisioning/alerting/`): broker (no active controller, offline
@@ -177,6 +305,10 @@ curl -s -H 'X-Scope-OrgID: demo' \
 # profiles (Pyroscope) — lists process_cpu + memory (heap) types
 curl -s -H 'X-Scope-OrgID: demo' -X POST -H 'content-type: application/json' \
   'http://localhost:4040/querier.v1.QuerierService/ProfileTypes' -d '{}' | head -c 200
+# gres query traces (TraceQL) — statement spans, matched by attribute not name
+curl -s -H 'X-Scope-OrgID: demo' --get 'http://localhost:3200/api/search' \
+  --data-urlencode 'q={ resource.service.name = "gres" && span.db.system.name = "postgresql" }' \
+  | head -c 200
 ```
 
 ## Layout
@@ -186,5 +318,6 @@ curl -s -H 'X-Scope-OrgID: demo' -X POST -H 'content-type: application/json' \
 - `../../packaging/apko/crabka-demo.yaml` — assembles the demo OCI image from that package
 - `alloy/config.alloy` — Alloy collects all four signals from both sources and
   scrapes cAdvisor container resource metrics
-- `grafana/provisioning/` — datasources, dashboards (overview + broker + one per subsystem), and alert rules
+- `grafana/provisioning/` — datasources, dashboards (overview + broker + one per subsystem + gres query traces), and alert rules
 - `rustfs/bootstrap.sh` — creates one bucket per signal (`crabka-metrics`, `crabka-traces`, `crabka-logs`, `crabka-profiles`)
+- `gres/workload.sh` — the SQL loop that keeps gres producing query traces

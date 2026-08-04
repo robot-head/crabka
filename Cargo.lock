@@ -2756,6 +2756,7 @@ dependencies = [
  "crabka-pgwire",
  "crabka-protocol",
  "crabka-security",
+ "crabka-telemetry",
  "crabka-units",
  "futures-util",
  "rand 0.10.2",
@@ -2901,6 +2902,7 @@ version = "0.3.9"
 dependencies = [
  "anyhow",
  "assert2",
+ "async-trait",
  "clap",
  "crabka-client-admin",
  "crabka-client-core",
@@ -2909,6 +2911,7 @@ dependencies = [
  "crabka-units",
  "futures",
  "hdrhistogram",
+ "opentelemetry-proto",
  "rand 0.10.2",
  "refined_type",
  "rustix 1.1.4",
@@ -2919,6 +2922,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tokio-postgres",
+ "tonic",
  "tracing",
  "tracing-subscriber",
 ]
@@ -2941,8 +2945,11 @@ dependencies = [
  "crabka-pgtypes",
  "crabka-pgwire",
  "crabka-security",
+ "crabka-trace-context",
  "crabka-units",
  "derive_more",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "proptest",
  "refined_type",
  "rustls",
@@ -2956,6 +2963,8 @@ dependencies = [
  "tokio-postgres",
  "tokio-rustls",
  "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2979,9 +2988,12 @@ dependencies = [
  "crabka-protocol",
  "crabka-raft",
  "crabka-security",
+ "crabka-trace-context",
  "crabka-units",
  "hex",
  "object_store",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "proptest",
  "refined_type",
  "rustix 1.1.4",
@@ -2993,6 +3005,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tracing",
+ "tracing-opentelemetry",
  "tracing-subscriber",
  "uuid",
 ]
@@ -3470,10 +3483,13 @@ dependencies = [
  "crabka-pgparser",
  "crabka-pgtypes",
  "crabka-pgwire",
+ "crabka-trace-context",
  "crabka-units",
  "hex",
  "jiff",
  "md-5 0.11.0",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "regex",
  "rust-stemmers",
  "sha2 0.11.0",
@@ -3482,6 +3498,8 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
  "unicode-normalization",
  "zerocopy",
 ]
@@ -3546,7 +3564,11 @@ dependencies = [
  "async-trait",
  "base64 0.23.0",
  "bytes",
+ "crabka-trace-context",
  "hmac",
+ "num-traits",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "pbkdf2",
  "proptest",
  "rand 0.10.2",
@@ -3560,6 +3582,8 @@ dependencies = [
  "tokio-rustls",
  "tokio-util",
  "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -4022,6 +4046,7 @@ dependencies = [
  "axum",
  "clap",
  "crabka-logfmt",
+ "crabka-trace-context",
  "crabka-units",
  "flate2",
  "jemalloc_pprof",
@@ -4052,6 +4077,22 @@ dependencies = [
  "proptest",
  "qubit-clock",
  "stateright",
+]
+
+[[package]]
+name = "crabka-trace-context"
+version = "0.3.9"
+dependencies = [
+ "assert2",
+ "crabka-pgparser",
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -9340,6 +9381,7 @@ dependencies = [
  "portable-atomic",
  "rand 0.9.5",
  "thiserror 2.0.19",
+ "tokio",
 ]
 
 [[package]]

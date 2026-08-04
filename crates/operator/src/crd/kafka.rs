@@ -1347,10 +1347,11 @@ impl TopicMetadataManagerSpec {
     }
 }
 
-/// Cluster-wide distributed-tracing configuration. Maps to
-/// the broker's `CRABKA_OTLP_*` env-var contract: the operator
-/// renders one env entry per populated field on every broker pod, and
-/// the broker's `TelemetryConfig::from_env` picks them up at startup.
+/// Fleet-wide distributed-tracing configuration, shared by
+/// `Kafka.spec.tracing` and `Gres.spec.tracing`. Maps to the
+/// `CRABKA_OTLP_*` env-var contract: the operator renders one env entry
+/// per populated field onto every pod of the fleet, and that binary's
+/// telemetry pipeline picks them up from the environment at startup.
 ///
 /// The `type` discriminator is reserved for future tracing backends; for
 /// now only `Otlp` is meaningful, and the matching `otlp` block is
@@ -1376,7 +1377,7 @@ pub enum TracingType {
 }
 
 /// OTLP-specific tracing parameters. Each populated field is
-/// rendered as a separate env var on every broker pod.
+/// rendered as a separate env var on every pod of the owning fleet.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct OtlpTracing {
@@ -1384,23 +1385,23 @@ pub struct OtlpTracing {
     /// Rendered as `CRABKA_OTLP_ENDPOINT`; turning the field on
     /// implicitly sets `CRABKA_OTLP_ENABLED=true` as well.
     pub endpoint: String,
-    /// Optional protocol. Defaults to `Grpc` (matches Kafka /
-    /// OpenTelemetry SDK convention). Rendered as
+    /// Optional protocol. Unset leaves the binary's own default,
+    /// `Grpc` (matches the OpenTelemetry SDK convention). Rendered as
     /// `CRABKA_OTLP_PROTOCOL`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol: Option<OtlpProtocol>,
     /// Optional sampling ratio in `[0.0, 1.0]`. Rendered as
-    /// `CRABKA_OTLP_SAMPLE_RATIO`. Defaults to the broker's `1.0`
-    /// (sample every trace).
+    /// `CRABKA_OTLP_SAMPLE_RATIO`. Unset leaves the binary's own default
+    /// of `1.0` (sample every trace).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sample_ratio: Option<f64>,
     /// Optional `service.name` resource attribute. Rendered as
-    /// `OTEL_SERVICE_NAME`. Defaults to the broker's
-    /// `"crabka-broker"`.
+    /// `OTEL_SERVICE_NAME`. Unset leaves the binary's own name —
+    /// `"crabka-broker"` for `Kafka`, `"crabka-gres"` for `Gres`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_name: Option<String>,
     /// Optional export timeout. Rendered as `CRABKA_OTLP_TIMEOUT`.
-    /// Defaults to the broker's `10s`.
+    /// Unset leaves the binary's own default of `10s`.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",

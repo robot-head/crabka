@@ -136,6 +136,14 @@ pub struct ClusterOptions {
     pub registry_policy: RegistryPolicy,
     /// Harness-owned process and proxy policy.
     pub runtime_policy: LoadtestRuntimePolicy,
+    /// Extra environment applied to every `crabka-gres` child on top of the
+    /// harness's own environment, and re-applied identically on restart.
+    ///
+    /// The nodes are separate processes, so anything they read from the
+    /// environment — the OTLP endpoint and sampling ratio, say — cannot be set
+    /// by the harness calling `std::env::set_var` on itself: that is `unsafe`
+    /// in edition 2024 and would leak into every other test in the binary.
+    pub node_env: BTreeMap<String, String>,
 }
 
 /// Connection parameters for a node's SQL front door (via its chaos proxy).
@@ -219,6 +227,7 @@ impl Cluster {
             binaries,
             registry_policy,
             runtime_policy,
+            node_env,
         } = options;
         ensure!(topology.nodes >= 1, "topology needs at least one node");
         ensure!(topology.ranges >= 1, "topology needs at least one range");
@@ -299,6 +308,7 @@ impl Cluster {
             tls: &tls,
             cpu_allocation: allocation.as_ref(),
             registry_policy: &registry_policy,
+            node_env: &node_env,
         };
         let node_specs: Vec<NodeSpec> = (0..topology.nodes)
             .map(|node| node_spec(node, &context))
@@ -580,6 +590,9 @@ struct NodeSpec {
     /// fixed-capacity nodes.
     cpuset: Option<String>,
     registry_policy: RegistryPolicy,
+    /// Extra environment for this node's process, applied on every spawn so a
+    /// restart is configured identically to the original.
+    env: BTreeMap<String, String>,
 }
 
 /// Default CPUs pinned to the broker when `cpus_per_node` pinning is
@@ -713,6 +726,7 @@ struct SpecContext<'a> {
     tls: &'a TlsPaths,
     cpu_allocation: Option<&'a CpuAllocation>,
     registry_policy: &'a RegistryPolicy,
+    node_env: &'a BTreeMap<String, String>,
 }
 
 /// The SQL endpoint clients use for a given listener address.
@@ -886,7 +900,27 @@ fn build_spec(
         log_path: context.log_dir.join(format!("{label}.log")),
         cpuset,
         registry_policy: context.registry_policy.clone(),
+        env: node_environment(label, context.node_env),
     }
+}
+
+/// The environment variable naming a process in the trace backend.
+const SERVICE_INSTANCE_ID_ENV: &str = "OTEL_SERVICE_INSTANCE_ID";
+
+/// One node's environment: the caller's, plus a `service.instance.id` naming
+/// the node unless the caller pinned one.
+///
+/// `crabka-gres` derives that id from its advertised range endpoint, which the
+/// harness sets to `127.0.0.1:0` so the OS assigns the port — meaning every node
+/// in a harness cluster would derive the same id and their spans would collapse
+/// into one process in the trace backend. The node label is the identity the
+/// harness uses everywhere else (logs, the process roster, reports), so it is
+/// the right name here too.
+fn node_environment(label: &str, node_env: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let mut env = node_env.clone();
+    env.entry(SERVICE_INSTANCE_ID_ENV.to_owned())
+        .or_insert_with(|| label.to_owned());
+    env
 }
 
 fn registry_policy_args(policy: &RegistryPolicy) -> [String; 20] {
@@ -923,6 +957,7 @@ fn spawn_node(gres_binary: &Path, spec: &NodeSpec) -> anyhow::Result<NodeProcess
     command
         .args(&spec.args)
         .args(registry_policy_args(&spec.registry_policy))
+        .envs(&spec.env)
         .stdout(Stdio::piped())
         .stderr(Stdio::from(stderr))
         .kill_on_drop(true);
@@ -1445,6 +1480,27 @@ mod tests {
     }
 
     #[test]
+    fn node_environment_names_each_node_unless_pinned() {
+        let caller = BTreeMap::from([("CRABKA_OTLP_SAMPLE_RATIO".to_owned(), "1.0".to_owned())]);
+        // Distinct ids per node, or every node's spans collapse into one
+        // process in the trace backend.
+        let node0 = node_environment("node0", &caller);
+        let node1 = node_environment("node1", &caller);
+        assert!(node0.get("OTEL_SERVICE_INSTANCE_ID").map(String::as_str) == Some("node0"));
+        assert!(node1.get("OTEL_SERVICE_INSTANCE_ID").map(String::as_str) == Some("node1"));
+        assert!(node0.get("CRABKA_OTLP_SAMPLE_RATIO").map(String::as_str) == Some("1.0"));
+
+        // A caller-supplied id wins: the default is a fallback, not a policy.
+        let pinned = BTreeMap::from([("OTEL_SERVICE_INSTANCE_ID".to_owned(), "pinned".to_owned())]);
+        assert!(
+            node_environment("node0", &pinned)
+                .get("OTEL_SERVICE_INSTANCE_ID")
+                .map(String::as_str)
+                == Some("pinned")
+        );
+    }
+
+    #[test]
     fn roster_appends_in_order_and_clones_share_state() {
         let roster = ProcessRoster::default();
         let clone = roster.clone();
@@ -1581,6 +1637,7 @@ mod tests {
         let allocation = cpu_allocation(2, 3, 2, 16).expect("fits");
         let tls = test_tls();
         let registry_policy = RegistryPolicy::default();
+        let node_env = BTreeMap::new();
         let context = SpecContext {
             topology: &topology,
             mode: ModeSpec::LogicalTso,
@@ -1590,6 +1647,7 @@ mod tests {
             tls: &tls,
             cpu_allocation: Some(&allocation),
             registry_policy: &registry_policy,
+            node_env: &node_env,
         };
         assert!(node_spec(0, &context).cpuset.as_deref() == Some("2-4"));
         assert!(node_spec(1, &context).cpuset.as_deref() == Some("5-7"));
@@ -1622,6 +1680,13 @@ mod tests {
             crabka_client_core::ClientFrameMax::try_from(crabka_units::kibibytes(32)).unwrap(),
             crabka_client_core::FetchMinBytes::try_from(crabka_units::bytes(3)).unwrap(),
         );
+        let node_env = BTreeMap::from([
+            (
+                "CRABKA_OTLP_ENDPOINT".to_owned(),
+                "http://127.0.0.1:4317".to_owned(),
+            ),
+            ("CRABKA_OTLP_SAMPLE_RATIO".to_owned(), "1.0".to_owned()),
+        ]);
         let context = SpecContext {
             topology: &topology,
             mode: ModeSpec::LogicalTso,
@@ -1631,11 +1696,19 @@ mod tests {
             tls: &tls,
             cpu_allocation: None,
             registry_policy: &policy,
+            node_env: &node_env,
         };
         let node0 = node_spec(0, &context);
         let mut spawned_args = node0.args.clone();
         spawned_args.extend(registry_policy_args(&node0.registry_policy));
         assert!(node0.registry_policy == *context.registry_policy);
+        // Node environment reaches the spawn spec, plus the per-node instance
+        // id: a node reads its OTLP endpoint from the environment, not from a
+        // flag, so dropping it here would silently disable export on every
+        // child.
+        let mut expected_env = node_env.clone();
+        expected_env.insert("OTEL_SERVICE_INSTANCE_ID".to_owned(), "node0".to_owned());
+        assert!(node0.env == expected_env);
         assert!(node0.label == "node0");
         assert!(arg_value(&node0.args, "--ranges") == Some("0,1000000,2000000,3000000"));
         assert!(arg_value(&node0.args, "--host-ranges") == Some("r0,r3"));
@@ -1664,6 +1737,7 @@ mod tests {
         };
         let tls = test_tls();
         let registry_policy = RegistryPolicy::default();
+        let node_env = BTreeMap::new();
         let context = SpecContext {
             topology: &topology,
             mode: ModeSpec::Hlc {
@@ -1675,6 +1749,7 @@ mod tests {
             tls: &tls,
             cpu_allocation: None,
             registry_policy: &registry_policy,
+            node_env: &node_env,
         };
         let node0 = node_spec(0, &context);
         assert!(arg_value(&node0.args, "--checkpoint-store") == Some("local"));
@@ -1855,6 +1930,7 @@ mod tests {
             work_dir: work_dir.path().to_path_buf(),
             binaries,
             registry_policy: RegistryPolicy::default(),
+            node_env: BTreeMap::new(),
         };
         let mut cluster = Cluster::launch(options).await.expect("launch cluster");
         assert!(cluster.node_count() == 2);

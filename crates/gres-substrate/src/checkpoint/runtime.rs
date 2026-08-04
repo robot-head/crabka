@@ -14,6 +14,7 @@ use super::{
 };
 use crate::{
     error::SubstrateError,
+    recovery::{WAL_APPLY_RESTORE_TAIL, WalTraceLinks, wal_apply_span},
     replay::{
         ReplayItem, ReplayOutcome, replay_committed_frames_from,
         replay_committed_frames_from_filtered, replay_committed_frames_from_table_transfer,
@@ -229,6 +230,22 @@ pub struct RestoreTail {
     pub committed_frames: Vec<ReplayItem>,
     /// Highest committed WAL offset included in the tail replay barrier.
     pub barrier_offset: i64,
+}
+
+/// Build the `gres.wal_apply` span covering one checkpoint tail replay.
+///
+/// These spans carry no links. [`RestoreTail`] arrives already decoded into
+/// [`ReplayItem`]s — offset and frame bytes only — so whatever `traceparent`
+/// the producing commits stamped on their records was dropped before the tail
+/// reached here. What the span still answers is how long restoring a checkpoint
+/// tail took and how many frames it covered, which is the question a slow
+/// follower rebuild or split raises.
+fn restore_tail_apply_span(tail: &RestoreTail) -> tracing::Span {
+    wal_apply_span(
+        WAL_APPLY_RESTORE_TAIL,
+        tail.committed_frames.len(),
+        &WalTraceLinks::default(),
+    )
 }
 
 /// Stream a KV snapshot into checkpoint parts and write the manifest last.
@@ -707,13 +724,16 @@ pub async fn restore_latest_and_replay_tail(
             (0, 0)
         }
     });
-    let replay = replay_committed_frames_from(
-        kv,
-        tail.committed_frames,
-        tail.barrier_offset,
-        replay_start,
-        expected,
-    )?;
+    let apply = restore_tail_apply_span(&tail);
+    let replay = apply.in_scope(|| {
+        replay_committed_frames_from(
+            kv,
+            tail.committed_frames,
+            tail.barrier_offset,
+            replay_start,
+            expected,
+        )
+    })?;
     Ok(RestorePlan {
         restored_from,
         replay,
@@ -750,14 +770,17 @@ pub async fn restore_latest_filtered_and_replay_tail(
             (0, 0)
         }
     });
-    let replay = replay_committed_frames_from_filtered(
-        kv,
-        tail.committed_frames,
-        tail.barrier_offset,
-        replay_start,
-        expected,
-        &filter,
-    )?;
+    let apply = restore_tail_apply_span(&tail);
+    let replay = apply.in_scope(|| {
+        replay_committed_frames_from_filtered(
+            kv,
+            tail.committed_frames,
+            tail.barrier_offset,
+            replay_start,
+            expected,
+            &filter,
+        )
+    })?;
     Ok(RestorePlan {
         restored_from,
         replay,
@@ -799,14 +822,17 @@ pub async fn restore_latest_table_transfer_and_replay_tail(
         } else {
             (0, 0)
         };
-    let replay = replay_committed_frames_from_table_transfer(
-        kv,
-        tail.committed_frames,
-        tail.barrier_offset,
-        replay_start,
-        expected,
-        selector,
-    )?;
+    let apply = restore_tail_apply_span(&tail);
+    let replay = apply.in_scope(|| {
+        replay_committed_frames_from_table_transfer(
+            kv,
+            tail.committed_frames,
+            tail.barrier_offset,
+            replay_start,
+            expected,
+            selector,
+        )
+    })?;
     Ok((restored, replay))
 }
 
@@ -859,14 +885,17 @@ pub async fn restore_table_transfer_from_manifest_and_replay_tail(
         selector,
     )
     .await?;
-    let replay = replay_committed_frames_from_table_transfer(
-        kv,
-        tail.committed_frames,
-        tail.barrier_offset,
-        restored.restored_from.covered_offset.saturating_add(1),
-        restored.restored_from.journal_seq,
-        selector,
-    )?;
+    let apply = restore_tail_apply_span(&tail);
+    let replay = apply.in_scope(|| {
+        replay_committed_frames_from_table_transfer(
+            kv,
+            tail.committed_frames,
+            tail.barrier_offset,
+            restored.restored_from.covered_offset.saturating_add(1),
+            restored.restored_from.journal_seq,
+            selector,
+        )
+    })?;
     Ok((restored, replay))
 }
 
@@ -913,14 +942,17 @@ pub async fn restore_filtered_from_manifest_and_replay_tail(
         Some(filter.clone()),
     )
     .await?;
-    let replay = replay_committed_frames_from_filtered(
-        kv,
-        tail.committed_frames,
-        tail.barrier_offset,
-        restored.covered_offset.saturating_add(1),
-        restored.journal_seq,
-        &filter,
-    )?;
+    let apply = restore_tail_apply_span(&tail);
+    let replay = apply.in_scope(|| {
+        replay_committed_frames_from_filtered(
+            kv,
+            tail.committed_frames,
+            tail.barrier_offset,
+            restored.covered_offset.saturating_add(1),
+            restored.journal_seq,
+            &filter,
+        )
+    })?;
     Ok(RestorePlan {
         restored_from: Some(restored),
         replay,

@@ -35,6 +35,7 @@ use crabka_pgwire::{
 };
 use crabka_units::{ByteSize, convert::ByteSizeExt as _};
 use tokio::sync::{OwnedRwLockReadGuard, mpsc, watch};
+use tracing::Instrument as _;
 
 use crate::{
     error::ExecError,
@@ -2040,6 +2041,40 @@ fn with_guc_runtime<T>(
     })
 }
 
+/// Fold a statement's outcome onto its span: `ERROR` plus the SQLSTATE on
+/// failure, the row counts on success.
+///
+/// Only `ERROR` is ever recorded — a successful statement leaves the span
+/// `Unset`, as the OpenTelemetry specification asks. `span.is_none()` is the
+/// cheap early out that keeps this free when the target is disabled; the
+/// `ExecError` clone below only happens on a traced failure.
+fn record_statement_status(span: &tracing::Span, result: &Result<QueryResult, ExecError>) {
+    if span.is_none() {
+        return;
+    }
+    match result {
+        Ok(result) => record_statement_rows(span, result),
+        Err(error) => {
+            let error = error.clone().into_pg();
+            crate::telemetry::record_error(span, &error.code, &error.message);
+        }
+    }
+}
+
+fn record_statement_rows(span: &tracing::Span, result: &QueryResult) {
+    use crate::telemetry::command_tag_row_count;
+
+    match result {
+        QueryResult::Rows { rows, tag, .. } => {
+            crate::telemetry::record_rows(span, Some(rows.len()), command_tag_row_count(tag));
+        }
+        QueryResult::Command { tag } => {
+            crate::telemetry::record_rows(span, None, command_tag_row_count(tag));
+        }
+        QueryResult::Empty => {}
+    }
+}
+
 /// The command tag PostgreSQL names in `cannot execute <tag> in a read-only
 /// transaction`. Only the statements a read-only block can refuse need one, and
 /// [`statement_has_effects`] decides which those are.
@@ -3328,7 +3363,15 @@ impl SqlSession {
         let (request_tx, request_rx) = mpsc::channel(1);
         let worker_catalog = Arc::clone(&catalog);
         let (worker_id, _cancel, finished) = self.register_worker();
+        // The blocking pool has no ambient span, so everything the worker does
+        // would be orphaned. Capture the statement's span here and re-enter it
+        // inside, outermost, so the thread-local re-installation below nests
+        // within it.
+        let parent = tracing::Span::current();
         let worker = tokio::task::spawn_blocking(move || {
+            let _span_guard = parent.enter();
+            let _worker_span =
+                crate::telemetry::blocking_worker_span("plpgsql_expression").entered();
             let _finished = finished;
             crate::routine::with_scalar_runtime(&worker_catalog, Some(request_tx), || {
                 let scope = crate::scope::Scope::empty();
@@ -4879,11 +4922,18 @@ impl SqlSession {
     /// parse fails. `PostgreSQL` aborts the block on a syntax error exactly as
     /// it does on any other error, so the parse cannot sit outside that rule.
     fn parse_for_session(&mut self, sql: &str) -> Result<Vec<Statement>, PgError> {
+        let span = crate::telemetry::parse_span(sql.len());
+        let _entered = span.enter();
         match crabka_pgparser::parse(sql) {
-            Ok(statements) => Ok(statements),
+            Ok(statements) => {
+                crate::telemetry::record_parse_statements(&span, statements.len());
+                Ok(statements)
+            }
             Err(error) => {
+                let error = ExecError::from(error).into_pg();
+                crate::telemetry::record_error(&span, &error.code, &error.message);
                 self.mark_transaction_failed();
-                Err(ExecError::from(error).into_pg())
+                Err(error)
             }
         }
     }
@@ -4964,7 +5014,143 @@ impl SqlSession {
         )))
     }
 
+    /// Run one parsed statement, under a `db.statement` span.
+    ///
+    /// The verbatim SQL is only ever available on the simple-query protocol,
+    /// where the whole query string arrives with the statements it parsed to;
+    /// the extended protocol's `Execute` carries none, and pgwire records the
+    /// text on its own statement span instead.
     pub(crate) async fn run_one(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
+        self.run_one_with_source(stmt, None).await
+    }
+
+    pub(crate) async fn run_one_with_source(
+        &mut self,
+        stmt: &Statement,
+        sql: Option<&str>,
+    ) -> Result<QueryResult, ExecError> {
+        // The summary allocates and the relation resolution reads the catalog,
+        // so neither may run when the target is off.
+        let span = if tracing::enabled!(target: crate::telemetry::STATEMENT_TARGET, tracing::Level::DEBUG)
+        {
+            let span = self.build_statement_span(stmt, sql);
+            self.apply_guc_trace_context(&span, sql);
+            span
+        } else {
+            tracing::Span::none()
+        };
+        let result = Box::pin(self.run_one_inner(stmt))
+            .instrument(span.clone())
+            .await;
+        // `run_one_inner`'s guard clauses — a statement in an aborted block, a
+        // write in a READ ONLY block, VACUUM inside one — return before
+        // `finish_statement` folds the status, so catch them here. On every
+        // other path this repeats what `finish_statement` already recorded with
+        // the same values, which is idempotent.
+        record_statement_status(&span, &result);
+        result
+    }
+
+    /// Assemble the `db.statement` span's attributes from the parsed statement
+    /// and, when the statement names a relation the catalog knows, its resolved
+    /// schema and table id.
+    fn build_statement_span(&self, stmt: &Statement, sql: Option<&str>) -> tracing::Span {
+        let operation = crate::telemetry::statement_operation(stmt);
+        let relation = crate::telemetry::statement_relation(stmt);
+        let resolved = relation.and_then(|relation| self.resolve_traced_relation(relation));
+        let collection = resolved
+            .as_ref()
+            .map(|(name, _)| name.name.as_str())
+            .or_else(|| relation.map(|relation| relation.name.as_str()));
+        let summary = crate::telemetry::query_summary(operation, collection);
+        crate::telemetry::statement_span(&crate::telemetry::StatementFields {
+            summary: &summary,
+            operation,
+            collection,
+            namespace: resolved
+                .as_ref()
+                .map(|(name, _)| name.schema.as_str())
+                .or_else(|| relation.and_then(|relation| relation.schema.as_deref())),
+            table_id: resolved.as_ref().and_then(|(_, table_id)| *table_id),
+            implicit_txn: matches!(self.state, TxnState::Idle),
+            sql: sql.filter(|_| crate::telemetry::sql_text_enabled()),
+        })
+    }
+
+    /// Resolve a statement's relation to its catalog name and table id, for
+    /// `db.namespace` / `pg.table_id`.
+    ///
+    /// Purely observational: a name that does not resolve, or names something
+    /// that is not a table, yields whatever part is known and never an error.
+    fn resolve_traced_relation(
+        &self,
+        relation: &crabka_pgparser::ast::RelationRef,
+    ) -> Option<(crabka_pgcatalog::RelationName, Option<u32>)> {
+        let name = crate::relname::resolve_relation(
+            self.catalog_kv.as_ref(),
+            &self.resolution_scope(),
+            relation,
+            crate::relname::SchemaDisposition::Reference,
+        )
+        .ok()?;
+        let table_id = crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &name)
+            .ok()
+            .map(|table| table.id);
+        Some((name, table_id))
+    }
+
+    /// Join the trace a client named in the `crabka.traceparent` GUC.
+    ///
+    /// The secondary ingress channel, for drivers that cannot append a
+    /// sqlcommenter to the statement. Precedence is **statement sqlcommenter >
+    /// GUC > none**, and both halves of that are enforced here:
+    ///
+    /// - A statement carrying its own sqlcommenter skips the GUC outright.
+    ///   pgwire has already parented this statement into the comment's trace,
+    ///   and a stale session GUC must not pull it back out. Detecting that
+    ///   needs no signal from pgwire — the SQL text is right here, and
+    ///   `extract_sqlcommenter` answers from it directly.
+    /// - A GUC naming the trace the session is already in is a no-op, which
+    ///   covers the case where both channels agree.
+    ///
+    /// `sql` is `None` on the extended protocol, where `Execute` carries no
+    /// statement text; there the GUC is the only per-execution channel and
+    /// correctly applies.
+    ///
+    /// A malformed value is silently ignored — a bad trace header must never
+    /// fail the query it rode in on.
+    fn apply_guc_trace_context(&self, span: &tracing::Span, sql: Option<&str>) {
+        let Ok(traceparent) = self.guc.effective(crate::telemetry::TRACEPARENT_GUC) else {
+            return;
+        };
+        if traceparent.is_empty() {
+            return;
+        }
+        // Only reached when the GUC is actually set, so the common path never
+        // pays even the substring search this is built around.
+        if sql.is_some_and(|sql| crabka_trace_context::extract_sqlcommenter(sql).is_some()) {
+            return;
+        }
+        let tracestate = self.guc.effective(crate::telemetry::TRACESTATE_GUC).ok();
+        let Ok(carrier) = crabka_trace_context::TraceCarrier::from_w3c(
+            &traceparent,
+            tracestate.as_deref().filter(|state| !state.is_empty()),
+        ) else {
+            return;
+        };
+        let Some(remote) = carrier.span_context() else {
+            return;
+        };
+        let already_joined = crabka_trace_context::TraceCarrier::capture_current()
+            .span_context()
+            .is_some_and(|current| current.trace_id() == remote.trace_id());
+        if already_joined {
+            return;
+        }
+        carrier.apply_to(span);
+    }
+
+    async fn run_one_inner(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
         if !self.login_event_fired {
             self.login_event_fired = true;
             if let Err(error) = self
@@ -5181,6 +5367,29 @@ impl SqlSession {
         self.finish_statement(stmt, result).await
     }
 
+    /// Stamp the statement span with the transaction identity the statement
+    /// ended up running under. Both xids are assigned lazily — at the first
+    /// write, and at the first sharded write — so neither is known when the
+    /// span opens.
+    ///
+    /// An autocommit write is the one case this cannot reach: its implicit
+    /// transaction is committed and torn down inside `run_write`, before the
+    /// statement folds its outcome here. That xid is on the `pg.write` span
+    /// instead, which is still open while it is known.
+    fn record_statement_transaction(&self) {
+        let span = tracing::Span::current();
+        if span.is_none() {
+            return;
+        }
+        let xid = match &self.state {
+            TxnState::InTransaction(ctx) | TxnState::Prepared(ctx) | TxnState::Failed(ctx) => {
+                ctx.xid
+            }
+            TxnState::Idle => self.implicit_xid,
+        };
+        crate::telemetry::record_transaction(&span, xid, self.global_xid);
+    }
+
     /// The bookkeeping every statement shares: abort-on-error, the
     /// transaction-activity mark, and the autocommit notification flush.
     async fn finish_statement(
@@ -5192,6 +5401,8 @@ impl SqlSession {
         // block stays Failed (carrying its ctx, so the xid and any row locks it
         // holds stay held) until COMMIT/ROLLBACK releases them. Autocommit errors
         // leave us Idle (the statement was its own transaction).
+        record_statement_status(&tracing::Span::current(), &result);
+        self.record_statement_transaction();
         if result.is_err() {
             self.mark_transaction_failed();
         } else if establishes_transaction_activity(stmt)
@@ -5762,19 +5973,29 @@ impl SqlSession {
     async fn allocate_statement_read_timestamp(
         &self,
     ) -> Result<crate::timestamp_txn::ReadTimestamp, ExecError> {
-        let horizon = self.timestamp_horizon.current()?;
-        let granted = self
-            .timestamp_oracle
-            .allocate_read_timestamp()
-            .await
-            .map_err(|error| ExecError::Unsupported(error.to_string()))?;
-        if granted.get() > horizon {
-            return Ok(granted);
+        let span = crate::telemetry::timestamp_read_span();
+        async {
+            let span = tracing::Span::current();
+            let horizon = self.timestamp_horizon.current()?;
+            let granted = self
+                .timestamp_oracle
+                .allocate_read_timestamp()
+                .await
+                .map_err(|error| ExecError::Unsupported(error.to_string()))?;
+            if granted.get() > horizon {
+                crate::telemetry::record_timestamp_read(&span, granted.get(), false);
+                return Ok(granted);
+            }
+            self.local_sequence.observe(horizon);
+            let granted = self
+                .local_sequence
+                .allocate_read_timestamp()
+                .map_err(|error| ExecError::Unsupported(error.to_string()))?;
+            crate::telemetry::record_timestamp_read(&span, granted.get(), true);
+            Ok(granted)
         }
-        self.local_sequence.observe(horizon);
-        self.local_sequence
-            .allocate_read_timestamp()
-            .map_err(|error| ExecError::Unsupported(error.to_string()))
+        .instrument(span)
+        .await
     }
 
     async fn run_select(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
@@ -5799,6 +6020,13 @@ impl SqlSession {
     }
 
     async fn run_select_inner(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
+        let span = crate::telemetry::select_span(false);
+        Box::pin(self.run_select_traced(stmt))
+            .instrument(span)
+            .await
+    }
+
+    async fn run_select_traced(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
         let (snapshot, own, gsnap) = self.read_context().await?;
         let read_ts = match &self.state {
             TxnState::InTransaction(context) if context.repeatable_read => {
@@ -5819,6 +6047,13 @@ impl SqlSession {
         let _ts_read_pin = self.ts_gc.pin_read(self.kv.as_ref(), read_ts)?;
         let ctx = self.eval_ctx();
         let in_transaction = matches!(self.state, TxnState::InTransaction(_));
+        crate::telemetry::record_select_snapshot(
+            &tracing::Span::current(),
+            read_ts.get(),
+            snapshot.xmin,
+            snapshot.xmax,
+            matches!(&self.state, TxnState::InTransaction(ctx) if ctx.repeatable_read),
+        );
         let own_xid = match &self.state {
             TxnState::InTransaction(ctx) => ctx.xid,
             _ => None,
@@ -5841,7 +6076,13 @@ impl SqlSession {
         let stmt = stmt.clone();
         let (requests, request_rx) = mpsc::channel(1);
         let (worker_id, cancel, finished) = self.register_worker();
+        // Re-enter the `pg.select` span on the pool thread — see the note at
+        // the plpgsql expression worker. The executor's own spans (scans, row
+        // locks) hang off this one.
+        let parent = tracing::Span::current();
         let worker = tokio::task::spawn_blocking(move || {
+            let _span_guard = parent.enter();
+            let _worker_span = crate::telemetry::blocking_worker_span("read").entered();
             let _finished = finished;
             let statement_scanner = if let Some(own_start_ts) = own_start_ts {
                 crate::scanner::TimestampedRangeScanner::with_own_transaction(
@@ -6087,6 +6328,15 @@ impl SqlSession {
     /// before establishing a fresh snapshot (autocommit + RC); RR was gated at
     /// BEGIN. The global snapshot is `NO_GLOBAL_SNAPSHOT()` on a non-GTM engine.
     async fn read_context(&mut self) -> Result<(Snapshot, Option<u64>, Snapshot), ExecError> {
+        let span = crate::telemetry::read_context_span();
+        let context = self.read_context_inner().instrument(span.clone()).await;
+        if let Ok((snapshot, _, _)) = &context {
+            crate::telemetry::record_read_context(&span, snapshot.xmin, snapshot.xmax);
+        }
+        context
+    }
+
+    async fn read_context_inner(&mut self) -> Result<(Snapshot, Option<u64>, Snapshot), ExecError> {
         enum Plan {
             Auto,
             RcRefresh,
@@ -6873,7 +7123,13 @@ impl SqlSession {
         let lock_wait_cap = self.lock_wait_cap;
         let (request_tx, request_rx) = mpsc::channel(1);
         let (worker_id, mut cancel, finished) = self.register_worker();
+        // Re-enter the statement's span on the pool thread; the current-thread
+        // runtime built below inherits it, so the locking read's awaits stay in
+        // the trace.
+        let parent = tracing::Span::current();
         let worker = tokio::task::spawn_blocking(move || {
+            let _span_guard = parent.enter();
+            let _worker_span = crate::telemetry::blocking_worker_span("locking_read").entered();
             let _finished = finished;
             let LockingActorContext {
                 global_snapshot,
@@ -6942,7 +7198,12 @@ impl SqlSession {
         let prepared = self.prepared_statement_rows();
         let (request_tx, request_rx) = mpsc::channel(1);
         let (worker_id, mut cancel, finished) = self.register_worker();
+        // Re-enter the `pg.write` span on the pool thread — see the note at the
+        // locking-read worker.
+        let parent = tracing::Span::current();
         let worker = tokio::task::spawn_blocking(move || {
+            let _span_guard = parent.enter();
+            let _worker_span = crate::telemetry::blocking_worker_span("write").entered();
             let _finished = finished;
             let WriteActorContext {
                 global_snapshot,
@@ -7091,10 +7352,37 @@ impl SqlSession {
     }
 
     async fn run_write(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
+        let span = crate::telemetry::write_span(matches!(self.state, TxnState::Idle));
+        let result = Box::pin(self.run_write_traced(stmt))
+            .instrument(span.clone())
+            .await;
+        if let Ok(result) = &result {
+            record_statement_rows(&span, result);
+        }
+        result
+    }
+
+    /// The xid a write ran under, whichever kind of transaction owned it.
+    /// Assigned lazily at the first write, so it is only known once the write
+    /// has run — and, for an autocommit write, only until its implicit
+    /// transaction is torn down.
+    fn record_write_xid(&self) {
+        let xid = match &self.state {
+            TxnState::InTransaction(ctx) | TxnState::Prepared(ctx) | TxnState::Failed(ctx) => {
+                ctx.xid
+            }
+            TxnState::Idle => self.implicit_xid,
+        };
+        crate::telemetry::record_transaction(&tracing::Span::current(), xid, None);
+    }
+
+    async fn run_write_traced(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
         let owns_transaction =
             matches!(self.state, TxnState::Idle) && !self.statement_targets_sharded_table(stmt)?;
         if !owns_transaction {
-            return self.run_write_inner(stmt).await;
+            let result = self.run_write_inner(stmt).await;
+            self.record_write_xid();
+            return result;
         }
         self.begin_implicit_transaction(None).await?;
         let result = Box::pin(self.run_write_inner(stmt)).await;
@@ -7105,6 +7393,7 @@ impl SqlSession {
                 Err(error)
             }
         };
+        self.record_write_xid();
         self.implicit_transaction = false;
         self.implicit_xid = None;
         result
@@ -7544,7 +7833,13 @@ impl SqlSession {
         let prepared = self.prepared_statement_rows();
         let (request_tx, request_rx) = mpsc::channel(1);
         let (worker_id, _cancel, finished) = self.register_worker();
+        // Re-enter the `pg.write` span on the pool thread — see the note at the
+        // locking-read worker.
+        let parent = tracing::Span::current();
         let worker = tokio::task::spawn_blocking(move || {
+            let _span_guard = parent.enter();
+            let _worker_span =
+                crate::telemetry::blocking_worker_span("sharded_timestamp_write").entered();
             let _finished = finished;
             with_guc_runtime(guc_values, guc_settings, prepared, || {
                 crate::trigger::with_after_trigger_queue(|| {
@@ -9777,9 +10072,13 @@ impl SqlSession {
         self.parse("", sql, &[]).await.map(|d| d.fields)
     }
 
+    /// `sql` is the whole query string the statement was parsed from, which the
+    /// statement span needs both for `db.query.text` and to decide sqlcommenter
+    /// precedence over the `crabka.traceparent` GUC.
     async fn stream_eligible_select<S: crabka_pgwire::engine::ResultSink>(
         &mut self,
         stmt: &Statement,
+        sql: &str,
         result_index: usize,
         page_rows: usize,
         sink: &mut S,
@@ -9843,7 +10142,14 @@ impl SqlSession {
             || select.filter.as_ref().is_some_and(requires_materialization)
             || select.limit.as_ref().is_some_and(requires_materialization)
             || select.offset.as_ref().is_some_and(requires_materialization)
-            || crate::agg::is_aggregate_query(&select)
+            // `is_grouping_query`, not `agg::is_aggregate_query`: it also covers
+            // a grouping-set clause carrying no aggregate and a bare
+            // `GROUPING()` call. `GROUPING()` is not a function this cursor can
+            // resolve — `PostgreSQL` answers 42803 naming the missing GROUP BY,
+            // and only the materializing path knows that. Evaluating it here
+            // row-by-row reports 42883 "function grouping(...) does not exist"
+            // instead, which is the SQLSTATE change the comment above forbids.
+            || crate::grouping::is_grouping_query(&select)
             // A set-returning function in the select list turns one source row
             // into many, which this one-row-in-one-row-out cursor cannot do.
             || crate::srf::projection_contains_srf(&select.projection)
@@ -9865,6 +10171,15 @@ impl SqlSession {
             Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => return None,
             Err(error) => return Some(Err(error.into())),
         };
+        // A partitioned parent stores no rows of its own — they live in its
+        // leaves. This cursor scans exactly one relation, so serving `SELECT *
+        // FROM parent` here silently returns nothing instead of the partitions'
+        // rows. Only `run_select` expands a parent to its leaves.
+        match crate::partition::is_partitioned(self.catalog_kv.as_ref(), &name) {
+            Ok(false) => {}
+            Ok(true) => return None,
+            Err(error) => return Some(Err(error)),
+        }
         if crate::plan_dist::plan_scan(&table, select.filter.as_ref(), &select.projection)
             .text_search
             .is_some()
@@ -9872,154 +10187,175 @@ impl SqlSession {
             return None;
         }
 
-        Some(
-            async {
-                self.reject_prepared_participant()?;
-                if matches!(self.state, TxnState::Failed(_)) {
+        // The streaming cursor bypasses `run_one`, so it opens its own
+        // `db.statement` span. `pg.select` is created while that span is
+        // entered, which is what makes it a child: parentage is fixed at
+        // creation, not at the point the future is instrumented.
+        let statement_span = if tracing::enabled!(target: crate::telemetry::STATEMENT_TARGET, tracing::Level::DEBUG)
+        {
+            let span = self.build_statement_span(stmt, Some(sql));
+            self.apply_guc_trace_context(&span, Some(sql));
+            span
+        } else {
+            tracing::Span::none()
+        };
+        let select_span = {
+            let _entered = statement_span.enter();
+            crate::telemetry::select_span(true)
+        };
+        let result = async {
+            self.reject_prepared_participant()?;
+            if matches!(self.state, TxnState::Failed(_)) {
+                return Err(ExecError::InFailedTransaction);
+            }
+            let (snapshot, own, global_snapshot) = self.read_context().await?;
+            let read_ts = match &self.state {
+                TxnState::InTransaction(context) if context.repeatable_read => {
+                    context.timestamp_read.ok_or_else(|| {
+                        ExecError::Unsupported("repeatable-read timestamp is missing".into())
+                    })?
+                }
+                TxnState::InTransaction(_) | TxnState::Idle => {
+                    self.allocate_statement_read_timestamp().await?
+                }
+                TxnState::Prepared(_) | TxnState::Failed(_) => {
                     return Err(ExecError::InFailedTransaction);
                 }
-                let (snapshot, own, global_snapshot) = self.read_context().await?;
-                let read_ts = match &self.state {
-                    TxnState::InTransaction(context) if context.repeatable_read => {
-                        context.timestamp_read.ok_or_else(|| {
-                            ExecError::Unsupported("repeatable-read timestamp is missing".into())
-                        })?
-                    }
-                    TxnState::InTransaction(_) | TxnState::Idle => {
-                        self.allocate_statement_read_timestamp().await?
-                    }
-                    TxnState::Prepared(_) | TxnState::Failed(_) => {
-                        return Err(ExecError::InFailedTransaction);
-                    }
-                };
-                // Statement-duration timestamp-domain pin — see `run_select`.
-                let _ts_read_pin = self.ts_gc.pin_read(self.kv.as_ref(), read_ts)?;
-                let scanner = crate::scanner::TimestampedRangeScanner::new(
-                    Arc::clone(&self.range_scanner),
-                    read_ts,
-                );
-                let qualifier = alias.as_deref().unwrap_or(&table.name.name);
-                let scope = crate::scope::Scope::single(&table, qualifier);
-                let (fields, expressions, _) =
-                    crate::exec::resolve_projection(&select.projection, &scope)?;
-                let mut plan =
-                    crate::plan_dist::plan_scan(&table, select.filter.as_ref(), &select.projection);
-                plan.projection = crate::ProjectionPushdown::All;
-                plan.partial_aggregate = None;
-                plan.top_k = None;
-                let mut cursor = crate::scanner::RangeScanner::scan_cursor(
-                    &scanner,
-                    crate::scanner::ScanRequest {
-                        local: self.kv.as_ref(),
-                        global: self.catalog_kv.as_ref(),
-                        global_snapshot: &global_snapshot,
-                        snapshot: &snapshot,
-                        own_xid: own,
-                        read_ts: None,
-                        own_start_ts: None,
-                        table: &table,
-                        interval: crate::scanner::RowInterval::ALL,
-                        predicate: plan.predicate,
-                        projection: plan.projection,
-                        partial_aggregate: None,
-                        top_k: None,
-                    },
-                )?;
-                let ctx = self.eval_ctx();
-                // LIMIT/OFFSET are arbitrary expressions; the streaming cursor
-                // needs them as counts, so they are evaluated once up front just
-                // as the materializing path does.
-                let mut offset = usize::try_from(
-                    crate::exec::eval_row_count(
-                        select.offset.as_ref(),
-                        crate::exec::RowCountClause::Offset,
-                        &ctx,
-                    )?
-                    .unwrap_or(0),
-                )
-                .unwrap_or(usize::MAX);
-                let mut remaining = crate::exec::eval_row_count(
-                    select.limit.as_ref(),
-                    crate::exec::RowCountClause::Limit,
+            };
+            // Statement-duration timestamp-domain pin — see `run_select`.
+            let _ts_read_pin = self.ts_gc.pin_read(self.kv.as_ref(), read_ts)?;
+            crate::telemetry::record_select_snapshot(
+                &tracing::Span::current(),
+                read_ts.get(),
+                snapshot.xmin,
+                snapshot.xmax,
+                matches!(&self.state, TxnState::InTransaction(ctx) if ctx.repeatable_read),
+            );
+            let scanner = crate::scanner::TimestampedRangeScanner::new(
+                Arc::clone(&self.range_scanner),
+                read_ts,
+            );
+            let qualifier = alias.as_deref().unwrap_or(&table.name.name);
+            let scope = crate::scope::Scope::single(&table, qualifier);
+            let (fields, expressions, _) =
+                crate::exec::resolve_projection(&select.projection, &scope)?;
+            let mut plan =
+                crate::plan_dist::plan_scan(&table, select.filter.as_ref(), &select.projection);
+            plan.projection = crate::ProjectionPushdown::All;
+            plan.partial_aggregate = None;
+            plan.top_k = None;
+            let mut cursor = crate::scanner::RangeScanner::scan_cursor(
+                &scanner,
+                crate::scanner::ScanRequest {
+                    local: self.kv.as_ref(),
+                    global: self.catalog_kv.as_ref(),
+                    global_snapshot: &global_snapshot,
+                    snapshot: &snapshot,
+                    own_xid: own,
+                    read_ts: None,
+                    own_start_ts: None,
+                    table: &table,
+                    interval: crate::scanner::RowInterval::ALL,
+                    predicate: plan.predicate,
+                    projection: plan.projection,
+                    partial_aggregate: None,
+                    top_k: None,
+                },
+            )?;
+            let ctx = self.eval_ctx();
+            // LIMIT/OFFSET are arbitrary expressions; the streaming cursor
+            // needs them as counts, so they are evaluated once up front just
+            // as the materializing path does.
+            let mut offset = usize::try_from(
+                crate::exec::eval_row_count(
+                    select.offset.as_ref(),
+                    crate::exec::RowCountClause::Offset,
                     &ctx,
                 )?
-                .map(|limit| usize::try_from(limit).unwrap_or(usize::MAX));
-                let mut fields = Some(fields);
-                let mut emitted = 0usize;
+                .unwrap_or(0),
+            )
+            .unwrap_or(usize::MAX);
+            let mut remaining = crate::exec::eval_row_count(
+                select.limit.as_ref(),
+                crate::exec::RowCountClause::Limit,
+                &ctx,
+            )?
+            .map(|limit| usize::try_from(limit).unwrap_or(usize::MAX));
+            let mut fields = Some(fields);
+            let mut emitted = 0usize;
 
-                loop {
-                    let page = cursor.next_page(page_rows).await?;
-                    let mut source_rows = Vec::with_capacity(page.rows.len());
-                    for scanned in page.rows {
-                        if !crate::exec::row_matches(
-                            select.filter.as_ref(),
-                            &scope,
-                            &scanned.row,
-                            &ctx,
-                        )? {
-                            continue;
-                        }
-                        if offset > 0 {
-                            offset -= 1;
-                            continue;
-                        }
-                        if remaining == Some(0) {
-                            break;
-                        }
-                        source_rows.push(scanned.row);
-                        if let Some(remaining) = &mut remaining {
-                            *remaining -= 1;
-                        }
+            loop {
+                let page = cursor.next_page(page_rows).await?;
+                let mut source_rows = Vec::with_capacity(page.rows.len());
+                for scanned in page.rows {
+                    if !crate::exec::row_matches(
+                        select.filter.as_ref(),
+                        &scope,
+                        &scanned.row,
+                        &ctx,
+                    )? {
+                        continue;
                     }
-                    let projected =
-                        crate::exec::project_rows(&expressions, &scope, &source_rows, &ctx)?;
-                    let encoded = match crate::exec::rows_result(
-                        Vec::new(),
-                        &projected,
-                        ctx.output_style(),
-                    ) {
+                    if offset > 0 {
+                        offset -= 1;
+                        continue;
+                    }
+                    if remaining == Some(0) {
+                        break;
+                    }
+                    source_rows.push(scanned.row);
+                    if let Some(remaining) = &mut remaining {
+                        *remaining -= 1;
+                    }
+                }
+                let projected =
+                    crate::exec::project_rows(&expressions, &scope, &source_rows, &ctx)?;
+                let encoded =
+                    match crate::exec::rows_result(Vec::new(), &projected, ctx.output_style()) {
                         QueryResult::Rows { rows, .. } => rows,
                         _ => unreachable!("rows_result always returns rows"),
                     };
-                    emitted = emitted.saturating_add(encoded.len());
-                    let stopped = remaining == Some(0);
-                    let is_last = page.is_last || stopped;
-                    let mut chunks = into_bounded_row_pages(
-                        encoded,
-                        page_rows,
-                        self.result_page_max.bytes_usize(),
-                    )
-                    .peekable();
-                    if chunks.peek().is_none() && is_last {
-                        sink.send(crabka_pgwire::engine::ResultPage::Rows {
-                            result_index,
-                            fields: fields.take(),
-                            rows: Vec::new(),
-                            tag: Some(format!("SELECT {emitted}")),
-                        })
-                        .await
-                        .map_err(ExecError::Remote)?;
-                    }
-                    while let Some(rows) = chunks.next() {
-                        let rows = rows.map_err(ExecError::Remote)?;
-                        let final_chunk = is_last && chunks.peek().is_none();
-                        sink.send(crabka_pgwire::engine::ResultPage::Rows {
-                            result_index,
-                            fields: fields.take(),
-                            rows,
-                            tag: final_chunk.then(|| format!("SELECT {emitted}")),
-                        })
-                        .await
-                        .map_err(ExecError::Remote)?;
-                    }
-                    if is_last {
-                        break;
-                    }
+                emitted = emitted.saturating_add(encoded.len());
+                let stopped = remaining == Some(0);
+                let is_last = page.is_last || stopped;
+                let mut chunks =
+                    into_bounded_row_pages(encoded, page_rows, self.result_page_max.bytes_usize())
+                        .peekable();
+                if chunks.peek().is_none() && is_last {
+                    sink.send(crabka_pgwire::engine::ResultPage::Rows {
+                        result_index,
+                        fields: fields.take(),
+                        rows: Vec::new(),
+                        tag: Some(format!("SELECT {emitted}")),
+                    })
+                    .await
+                    .map_err(ExecError::Remote)?;
                 }
-                Ok(())
+                while let Some(rows) = chunks.next() {
+                    let rows = rows.map_err(ExecError::Remote)?;
+                    let final_chunk = is_last && chunks.peek().is_none();
+                    sink.send(crabka_pgwire::engine::ResultPage::Rows {
+                        result_index,
+                        fields: fields.take(),
+                        rows,
+                        tag: final_chunk.then(|| format!("SELECT {emitted}")),
+                    })
+                    .await
+                    .map_err(ExecError::Remote)?;
+                }
+                if is_last {
+                    break;
+                }
             }
-            .await,
-        )
+            Ok(())
+        }
+        .instrument(select_span)
+        .await;
+        if let Err(error) = &result {
+            let error = error.clone().into_pg();
+            crate::telemetry::record_error(&statement_span, &error.code, &error.message);
+        }
+        Some(result)
     }
 
     #[cfg(test)]
@@ -10079,7 +10415,11 @@ impl Session for SqlSession {
         }
         let mut results = Vec::with_capacity(statements.len());
         for stmt in statements {
-            results.push(self.run_one(&stmt).await.map_err(ExecError::into_pg)?);
+            results.push(
+                self.run_one_with_source(&stmt, Some(sql))
+                    .await
+                    .map_err(ExecError::into_pg)?,
+            );
         }
         Ok(results)
     }
@@ -10106,7 +10446,7 @@ impl Session for SqlSession {
         }
         for (result_index, stmt) in statements.iter().enumerate() {
             if let Some(result) = self
-                .stream_eligible_select(stmt, result_index, page_rows, sink)
+                .stream_eligible_select(stmt, sql, result_index, page_rows, sink)
                 .await
             {
                 // The streaming fast path bypasses `run_one`, so run its
@@ -10117,7 +10457,11 @@ impl Session for SqlSession {
                     .map_err(ExecError::into_pg)?;
                 continue;
             }
-            match self.run_one(stmt).await.map_err(ExecError::into_pg)? {
+            match self
+                .run_one_with_source(stmt, Some(sql))
+                .await
+                .map_err(ExecError::into_pg)?
+            {
                 QueryResult::Rows { fields, rows, tag } => {
                     let mut fields = Some(fields);
                     if rows.is_empty() {

@@ -1506,22 +1506,22 @@ spec:
                       sampleRatio:
                         description: |-
                           Optional sampling ratio in `[0.0, 1.0]`. Rendered as
-                          `CRABKA_OTLP_SAMPLE_RATIO`. Defaults to the broker's `1.0`
-                          (sample every trace).
+                          `CRABKA_OTLP_SAMPLE_RATIO`. Unset leaves the binary's own default
+                          of `1.0` (sample every trace).
                         format: double
                         nullable: true
                         type: number
                       serviceName:
                         description: |-
                           Optional `service.name` resource attribute. Rendered as
-                          `OTEL_SERVICE_NAME`. Defaults to the broker's
-                          `"crabka-broker"`.
+                          `OTEL_SERVICE_NAME`. Unset leaves the binary's own name —
+                          `"crabka-broker"` for `Kafka`, `"crabka-gres"` for `Gres`.
                         nullable: true
                         type: string
                       timeout:
                         description: |-
                           Optional export timeout. Rendered as `CRABKA_OTLP_TIMEOUT`.
-                          Defaults to the broker's `10s`.
+                          Unset leaves the binary's own default of `10s`.
                         nullable: true
                         type: string
                     required:

@@ -23,11 +23,13 @@ use crabka_units::{
     convert::{ByteSizeExt as _, TimeExt as _},
     fmt::Human as _,
 };
+use tracing::Instrument as _;
 
 use crate::{
     RangeId,
     barrier::Range0Barrier,
     registry::{RangeRegistry, RegistryError},
+    telemetry,
     transport::{
         FramedTcpClient, InspectDurableRecordsReq, InspectDurableRecordsResp, JoinRangeReq,
         JoinRangeResp, JoinRangeRow, RangeRequest, RangeResponse, RangeService, ResolveTxnResp,
@@ -1272,7 +1274,58 @@ struct RangeFrameSink<'a> {
     terminal_error_sent: bool,
 }
 
+/// The `pg.operation` for one owner-session operation: its
+/// [`WireSessionOperation`] variant name.
+///
+/// A closed set of `&'static str`, so the attribute stays low-cardinality and
+/// costs nothing to derive when the span is disabled.
+const fn session_operation_name(operation: &WireSessionOperation) -> &'static str {
+    match operation {
+        WireSessionOperation::SimpleQuery { .. } => "SimpleQuery",
+        WireSessionOperation::Parse { .. } => "Parse",
+        WireSessionOperation::Bind { .. } => "Bind",
+        WireSessionOperation::DescribeStatement { .. } => "DescribeStatement",
+        WireSessionOperation::DescribePortal { .. } => "DescribePortal",
+        WireSessionOperation::Execute { .. } => "Execute",
+        WireSessionOperation::PrepareGlobal { .. } => "PrepareGlobal",
+        WireSessionOperation::CommitGlobal { .. } => "CommitGlobal",
+        WireSessionOperation::AbortGlobal { .. } => "AbortGlobal",
+        WireSessionOperation::SetTimestampOwner { .. } => "SetTimestampOwner",
+        WireSessionOperation::CloseStatement { .. } => "CloseStatement",
+        WireSessionOperation::ClosePortal { .. } => "ClosePortal",
+        WireSessionOperation::Sync => "Sync",
+    }
+}
+
+/// Run one owner-side extended-protocol operation under its own span.
+///
+/// This is the only place the forwarded extended protocol becomes visible: a
+/// `Bind` or `Execute` carries no SQL, so without this span the owner's share of
+/// a prepared-statement round trip is an unattributed gap between the gateway's
+/// `gres.range_rpc` and the executor's work.
 async fn handle_session_operation(
+    session: &mut crabka_pgexec::SqlSession,
+    operation: WireSessionOperation,
+) -> Result<WireSessionResult, PgError> {
+    let span = tracing::debug_span!(
+        target: telemetry::ROUTE_TARGET,
+        "gres.session_operation",
+        otel.status_code = tracing::field::Empty,
+        otel.status_description = tracing::field::Empty,
+        error.type = tracing::field::Empty,
+        db.response.status_code = tracing::field::Empty,
+        pg.operation = session_operation_name(&operation),
+    );
+    let outcome = session_operation(session, operation)
+        .instrument(span.clone())
+        .await;
+    if let Err(error) = &outcome {
+        telemetry::record_error(&span, &error.code, &error.message);
+    }
+    outcome
+}
+
+async fn session_operation(
     session: &mut crabka_pgexec::SqlSession,
     operation: WireSessionOperation,
 ) -> Result<WireSessionResult, PgError> {
@@ -3153,11 +3206,27 @@ impl RegistryRangeScanner {
 }
 
 impl crabka_pgexec::RangeScanner for RegistryRangeScanner {
+    /// # Trace context across the bridge
+    ///
+    /// The executor calls this from a blocking worker, and it answers by
+    /// spawning a scoped `std::thread` running a fresh current-thread runtime.
+    /// Two context losses stack there: the scoped thread does not inherit the
+    /// caller's span, and any span created inside would be a trace root.
+    ///
+    /// So the caller's span is captured **outside** `thread::scope` — `Span` is
+    /// `Clone + Send`, and `tracing-opentelemetry` keys the `OTel` context off
+    /// the registry by span id rather than off a thread-local, so the clone
+    /// reconstitutes full context on the other thread. The payload is then
+    /// re-entered with [`tracing::Instrument`], **not** with an `enter()` guard:
+    /// `Instrumented` re-enters on every poll, so the `client.call(…)` awaits
+    /// deep inside see it as current. A guard held across `block_on` happens to
+    /// work for a single task and breaks the moment anything spawns.
     fn scan(
         &self,
         request: crabka_pgexec::ScanRequest<'_>,
     ) -> Result<Vec<crabka_pgexec::ScannedRow>, crabka_pgexec::ExecError> {
         let scanner = self.clone();
+        let span = tracing::Span::current();
         std::thread::scope(|scope| {
             scope
                 .spawn(|| {
@@ -3165,18 +3234,22 @@ impl crabka_pgexec::RangeScanner for RegistryRangeScanner {
                         .enable_all()
                         .build()
                         .expect("range scanner runtime builds")
-                        .block_on(scanner.scan_async(request))
+                        .block_on(scanner.scan_async(request).instrument(span))
                 })
                 .join()
                 .expect("range scanner thread does not panic")
         })
     }
 
+    /// Bridges the same way [`RegistryRangeScanner::scan`] does; see there for
+    /// why the span is captured outside the scope and re-entered with
+    /// `Instrument`.
     fn join(
         &self,
         request: crabka_pgexec::JoinRangeRequest,
     ) -> Result<crabka_pgexec::JoinRangeResult, crabka_pgexec::ExecError> {
         let scanner = self.clone();
+        let span = tracing::Span::current();
         std::thread::scope(|scope| {
             scope
                 .spawn(|| {
@@ -3184,7 +3257,7 @@ impl crabka_pgexec::RangeScanner for RegistryRangeScanner {
                         .enable_all()
                         .build()
                         .expect("range scanner runtime builds")
-                        .block_on(scanner.join_async(request))
+                        .block_on(scanner.join_async(request).instrument(span))
                 })
                 .join()
                 .expect("range scanner thread does not panic")
@@ -3209,6 +3282,7 @@ impl crabka_pgexec::RangeScanner for RegistryRangeScanner {
         Ok(Box::new(RegistryRangeCursor {
             scanner: self,
             request,
+            span: tracing::Span::current(),
             done: false,
             owners: None,
             tokens: BTreeMap::new(),
@@ -3221,6 +3295,14 @@ impl crabka_pgexec::RangeScanner for RegistryRangeScanner {
 struct RegistryRangeCursor<'a> {
     scanner: &'a RegistryRangeScanner,
     request: crabka_pgexec::ScanRequest<'a>,
+    /// The span current when the cursor was opened.
+    ///
+    /// Pages are pulled later, and the executor drives them from a blocking
+    /// worker on a runtime of its own, where nothing of the opening context is
+    /// current. Holding the handle here and re-entering it per page is what
+    /// keeps every owner RPC the cursor makes inside the statement's trace
+    /// rather than orphaned at the root.
+    span: tracing::Span,
     done: bool,
     /// Range membership is statement-stable. Endpoint refresh may move an
     /// owner, but must never add/remove owners halfway through a snapshot.
@@ -3233,6 +3315,16 @@ struct RegistryRangeCursor<'a> {
 #[async_trait]
 impl crabka_pgexec::RangeCursor for RegistryRangeCursor<'_> {
     async fn next_page(
+        &mut self,
+        max_rows: usize,
+    ) -> Result<crabka_pgexec::ScanPage, crabka_pgexec::ExecError> {
+        let span = self.span.clone();
+        self.next_page_traced(max_rows).instrument(span).await
+    }
+}
+
+impl RegistryRangeCursor<'_> {
+    async fn next_page_traced(
         &mut self,
         max_rows: usize,
     ) -> Result<crabka_pgexec::ScanPage, crabka_pgexec::ExecError> {
@@ -4740,10 +4832,15 @@ mod tests {
         let mut stream = tokio::net::TcpStream::connect(address)
             .await
             .expect("connect range service");
-        let request = serde_json::to_vec(&RangeRequest::Sql {
-            range_id: RangeId::new(1),
-            sql: "SELECT value FROM live_frames".into(),
-        })
+        // Hand-framed, so the envelope the transport wraps every request in has
+        // to be spelled out here: an untraced caller sends the request under a
+        // `request` key and no trace context.
+        let request = serde_json::to_vec(&serde_json::json!({
+            "request": RangeRequest::Sql {
+                range_id: RangeId::new(1),
+                sql: "SELECT value FROM live_frames".into(),
+            },
+        }))
         .expect("serialize request");
         stream
             .write_u32(u32::try_from(request.len()).expect("request length fits"))

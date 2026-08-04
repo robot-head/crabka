@@ -308,6 +308,8 @@ fn test_args(listen: String, data_dir: Option<std::path::PathBuf>) -> crabka_gre
         checkpoint_delete_records_timeout: None,
         checkpoint_poll_interval: None,
         idle_suspend_poll_interval: None,
+        gres_trace_ingress: crabka_gres::TraceIngressMode::default(),
+        otlp_sample_ratio: None,
     }
 }
 

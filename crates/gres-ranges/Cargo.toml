@@ -29,6 +29,10 @@ crabka-pgmvcc = { version = "0.3.9", path = "../pgmvcc" }
 crabka-pgparser = { version = "0.3.9", path = "../pgparser" }
 crabka-pgtypes = { version = "0.3.9", path = "../pgtypes" }
 crabka-pgwire = { version = "0.3.9", path = "../pgwire" }
+# W3C trace-context propagation across the range RPC hop. Deliberately *not*
+# `crabka-telemetry`, which pulls in axum, tonic and the OTLP exporter that a
+# transport crate has no business linking.
+crabka-trace-context = { version = "0.3.9", path = "../trace-context" }
 crabka-units = { workspace = true }
 derive_more = { workspace = true, features = ["display", "from", "into", "from_str"] }
 serde = { workspace = true, features = ["derive"] }
@@ -45,7 +49,14 @@ tracing = { workspace = true }
 assert2 = { workspace = true }
 crabka-broker = { path = "../broker" }
 crabka-client-admin = { path = "../client-admin" }
+# Tracing assertions run against exported `SpanData`, not live `Span` handles:
+# `tracing-opentelemetry` resolves a span's parent and trace id at close, so a
+# live handle reports the wrong tree.
+opentelemetry = { workspace = true, features = ["trace"] }
+opentelemetry_sdk = { workspace = true, features = ["trace", "testing"] }
 proptest = { workspace = true }
 stateright = { workspace = true }
 tempfile = { workspace = true }
 tokio-postgres = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+tracing-subscriber = { workspace = true }

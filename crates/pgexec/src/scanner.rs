@@ -5,6 +5,7 @@ use std::{cmp::Ordering, ops::RangeBounds};
 use crabka_pgcatalog::Table;
 use crabka_pgmvcc::visibility::Snapshot;
 use crabka_units::convert::ByteSizeExt as _;
+use tracing::Instrument as _;
 
 use crate::ExecError;
 
@@ -349,6 +350,20 @@ pub enum JoinExecutionStrategy {
     BroadcastRight,
     CoPartitioned,
     Gather,
+}
+
+impl JoinExecutionStrategy {
+    /// The strategy's name as a span attribute — one of four fixed strings, so
+    /// `pg.join_strategy` stays a discriminator an operator can group by.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BroadcastLeft => "broadcast_left",
+            Self::BroadcastRight => "broadcast_right",
+            Self::CoPartitioned => "co_partitioned",
+            Self::Gather => "gather",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -935,33 +950,45 @@ pub fn collect_cursor_bounded(
 ) -> Result<Vec<ScannedRow>, ExecError> {
     let max_bytes = crabka_units::convert::ByteSizeExt::bytes_usize(budget);
     let cancel = crate::session::query_cancel_runtime();
+    // The scoped thread starts with no ambient span, so the statement's is
+    // carried across by hand — otherwise every scan span the cursor opens is a
+    // root, in its own trace. The guard covers the synchronous prologue (which
+    // opens the cursor, and may scan) and `Instrument` covers the future: an
+    // `Instrumented` future re-enters on every poll, so what the cursor awaits
+    // sees the span as current, which an `enter()` guard held across
+    // `block_on` would only manage for as long as nothing spawns.
+    let span = tracing::Span::current();
     std::thread::scope(|scope| {
         scope
             .spawn(move || {
                 crate::session::with_query_cancel_runtime(cancel, || {
+                    let _guard = span.enter();
                     let mut cursor = scanner.scan_cursor(request)?;
                     let runtime = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()
                         .map_err(|error| ExecError::Unsupported(error.to_string()))?;
-                    runtime.block_on(async move {
-                        let mut rows = Vec::new();
-                        let mut used = 0usize;
-                        loop {
-                            let page = cursor.next_page(1024).await?;
-                            for row in page.rows {
-                                let bytes = scanned_row_bytes(&row);
-                                if used.saturating_add(bytes) > max_bytes {
-                                    return Err(memory_budget_exceeded());
+                    runtime.block_on(
+                        async move {
+                            let mut rows = Vec::new();
+                            let mut used = 0usize;
+                            loop {
+                                let page = cursor.next_page(1024).await?;
+                                for row in page.rows {
+                                    let bytes = scanned_row_bytes(&row);
+                                    if used.saturating_add(bytes) > max_bytes {
+                                        return Err(memory_budget_exceeded());
+                                    }
+                                    used += bytes;
+                                    rows.push(row);
                                 }
-                                used += bytes;
-                                rows.push(row);
-                            }
-                            if page.is_last {
-                                return Ok(rows);
+                                if page.is_last {
+                                    return Ok(rows);
+                                }
                             }
                         }
-                    })
+                        .instrument(span.clone()),
+                    )
                 })
             })
             .join()
@@ -1005,33 +1032,40 @@ pub(crate) fn collect_partial_aggregates_bounded(
         ));
     }
     let cancel = crate::session::query_cancel_runtime();
+    // Carried across the scoped thread for the reasons given in
+    // [`collect_cursor_bounded`].
+    let span = tracing::Span::current();
     std::thread::scope(|scope| {
         scope
             .spawn(move || {
                 crate::session::with_query_cancel_runtime(cancel, || {
+                    let _guard = span.enter();
                     let mut cursor = scanner.scan_cursor(request)?;
                     let runtime = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()
                         .map_err(|error| ExecError::Unsupported(error.to_string()))?;
-                    runtime.block_on(async move {
-                        let mut states = vec![Vec::new(); specs.len()];
-                        loop {
-                            let page = cursor.next_page(1024).await?;
-                            let is_last = page.is_last;
-                            let rows = page.rows.into_vec();
-                            if scanned_rows_bytes(rows.iter()) > max_bytes {
-                                return Err(memory_budget_exceeded());
-                            }
-                            fold_page_into_states(rows, specs, &mut states)?;
-                            if scanned_rows_bytes(states.iter().flatten()) > max_bytes {
-                                return Err(memory_budget_exceeded());
-                            }
-                            if is_last {
-                                return Ok(states);
+                    runtime.block_on(
+                        async move {
+                            let mut states = vec![Vec::new(); specs.len()];
+                            loop {
+                                let page = cursor.next_page(1024).await?;
+                                let is_last = page.is_last;
+                                let rows = page.rows.into_vec();
+                                if scanned_rows_bytes(rows.iter()) > max_bytes {
+                                    return Err(memory_budget_exceeded());
+                                }
+                                fold_page_into_states(rows, specs, &mut states)?;
+                                if scanned_rows_bytes(states.iter().flatten()) > max_bytes {
+                                    return Err(memory_budget_exceeded());
+                                }
+                                if is_last {
+                                    return Ok(states);
+                                }
                             }
                         }
-                    })
+                        .instrument(span.clone()),
+                    )
                 })
             })
             .join()
@@ -1211,6 +1245,57 @@ impl RangeScanner for TimestampedRangeScanner {
     }
 }
 
+/// Build the span covering one `scan()` call or one cursor page.
+///
+/// Deliberately one span per call and never one per row: a table scan returns
+/// as many rows as the table holds, and a span each would bury the trace it is
+/// supposed to explain. The counts [`record_scan_rows`] folds back in are what
+/// carry the per-row detail.
+///
+/// TRACE, because a statement can open a great many of these — one per cursor
+/// page — so an operator opts into scan-level detail rather than paying for it
+/// on the `DEBUG` default.
+fn scan_span(request: &ScanRequest<'_>, interval: RowInterval) -> tracing::Span {
+    let span = tracing::trace_span!(
+        target: crate::telemetry::EXEC_TARGET,
+        "pg.scan",
+        otel.kind = "internal",
+        pg.table_id = crate::telemetry::integer(request.table.id),
+        db.collection.name = request.table.name.name.as_str(),
+        pg.sharded = request.table.sharded,
+        pg.rowid.start = tracing::field::Empty,
+        pg.rowid.end = tracing::field::Empty,
+        pg.read_ts = tracing::field::Empty,
+        pg.rows_scanned = tracing::field::Empty,
+        pg.rows_visible = tracing::field::Empty,
+        pg.pushdown.predicate = !matches!(request.predicate, PredicatePushdown::FullScan),
+        pg.pushdown.projection = !matches!(request.projection, ProjectionPushdown::All),
+    );
+    // An open bound is left unrecorded rather than reported as 0 or u64::MAX,
+    // both of which are real rowids a bounded scan could name.
+    if let Some(start) = interval.start {
+        span.record("pg.rowid.start", crate::telemetry::integer(start));
+    }
+    if let Some(end) = interval.end {
+        span.record("pg.rowid.end", crate::telemetry::integer(end));
+    }
+    if let Some(read_ts) = request.read_ts {
+        span.record("pg.read_ts", crate::telemetry::integer(read_ts.get()));
+    }
+    span
+}
+
+/// Fold a scan's row counts onto its span.
+///
+/// `scanned` is what the MVCC interval scan returned; `visible` is what the
+/// caller receives once predicate, projection and aggregate pushdown have run.
+/// The ratio between them is the pushdown's selectivity, which is the reason
+/// both are recorded rather than just the second.
+fn record_scan_rows(span: &tracing::Span, scanned: usize, visible: usize) {
+    span.record("pg.rows_scanned", crate::telemetry::integer(scanned));
+    span.record("pg.rows_visible", crate::telemetry::integer(visible));
+}
+
 /// Scanner used by default: reads only the local MVCC store.
 #[derive(Debug, Default)]
 pub struct LocalRangeScanner;
@@ -1243,6 +1328,8 @@ impl RangeCursor for LocalRangeCursor<'_> {
             start: Some(self.next_rowid),
             end: Some(page_end),
         };
+        let span = scan_span(&self.request, interval);
+        let _guard = span.enter();
         let rows = if self.request.table.sharded {
             let read_ts = self.request.read_ts.ok_or_else(|| {
                 ExecError::Unsupported(
@@ -1268,6 +1355,7 @@ impl RangeCursor for LocalRangeCursor<'_> {
                 interval,
             )?
         };
+        let scanned = rows.len();
         let rows = apply_executable_scan_pushdown(
             rows,
             &self.request.predicate,
@@ -1275,6 +1363,7 @@ impl RangeCursor for LocalRangeCursor<'_> {
             None,
             None,
         )?;
+        record_scan_rows(&span, scanned, rows.len());
         self.next_rowid = page_end;
         self.done = page_end >= requested_end || page_end == u64::MAX;
         Ok(ScanPage {
@@ -1286,6 +1375,8 @@ impl RangeCursor for LocalRangeCursor<'_> {
 
 impl RangeScanner for LocalRangeScanner {
     fn scan(&self, request: ScanRequest<'_>) -> Result<Vec<ScannedRow>, ExecError> {
+        let span = scan_span(&request, request.interval);
+        let _guard = span.enter();
         if request.table.sharded {
             let read_ts = request.read_ts.ok_or_else(|| {
                 ExecError::Unsupported(
@@ -1300,13 +1391,16 @@ impl RangeScanner for LocalRangeScanner {
                 request.own_start_ts,
                 request.interval,
             )?;
-            return apply_executable_scan_pushdown(
+            let scanned = rows.len();
+            let rows = apply_executable_scan_pushdown(
                 rows,
                 &request.predicate,
                 &request.projection,
                 request.partial_aggregate.as_ref(),
                 request.top_k.as_ref(),
-            );
+            )?;
+            record_scan_rows(&span, scanned, rows.len());
+            return Ok(rows);
         }
         let rows = crate::exec::scan_live_interval(
             request.local,
@@ -1317,13 +1411,16 @@ impl RangeScanner for LocalRangeScanner {
             request.table,
             request.interval,
         )?;
-        apply_executable_scan_pushdown(
+        let scanned = rows.len();
+        let rows = apply_executable_scan_pushdown(
             rows,
             &request.predicate,
             &request.projection,
             request.partial_aggregate.as_ref(),
             request.top_k.as_ref(),
-        )
+        )?;
+        record_scan_rows(&span, scanned, rows.len());
+        Ok(rows)
     }
 
     fn scan_cursor<'a>(

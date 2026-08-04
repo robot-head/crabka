@@ -450,3 +450,85 @@ async fn grouped_streaming_aggregate_orders_groups_with_nulls_last() {
         ]
     );
 }
+
+/// `GROUPING()` outside a grouped query must keep `PostgreSQL`'s 42803, naming
+/// the missing GROUP BY, on the streaming path as well as the materializing one.
+///
+/// The streaming cursor resolves projection expressions row-by-row and has no
+/// notion of `GROUPING()`, so if it accepts the shape at all it reports 42883
+/// "function grouping(...) does not exist" — a different error for the same SQL
+/// depending only on which path served it. Its eligibility gate therefore has
+/// to decline on `grouping::is_grouping_query`, not just on
+/// `agg::is_aggregate_query`: `GROUPING()` is not an aggregate.
+///
+/// This regressed the differential-conformance parity gate the moment
+/// `RuntimeSession` began forwarding `simple_query_into`, which is what made
+/// the streaming path reachable in the first place.
+#[tokio::test]
+async fn bare_grouping_call_keeps_its_sqlstate_on_the_streaming_path() {
+    use crabka_pgwire::engine::CollectingResultSink;
+
+    let engine = SqlEngine::new();
+    let mut setup = engine.connect();
+    exec(&mut setup, "CREATE TABLE q3gs (a int4, b int4)").await;
+    exec(&mut setup, "INSERT INTO q3gs VALUES (1, 2)").await;
+
+    // Both entry points must agree, and both must agree with PostgreSQL.
+    let mut session = engine.connect();
+    let buffered = session.simple_query("SELECT grouping(a) FROM q3gs").await;
+    let error = buffered.expect_err("bare GROUPING() is an error");
+    assert!(error.code == "42803", "buffered path: {error:?}");
+
+    let mut sink = CollectingResultSink::default();
+    let streamed = session
+        .simple_query_into("SELECT grouping(a) FROM q3gs", 16, &mut sink)
+        .await;
+    let error = streamed.expect_err("bare GROUPING() is an error");
+    assert!(error.code == "42803", "streaming path: {error:?}");
+}
+
+/// `SELECT * FROM parent` on a partitioned table must return its partitions'
+/// rows on the streaming path, exactly as on the materializing one.
+///
+/// A partitioned parent stores nothing itself, and the streaming cursor scans a
+/// single relation — so if it accepts the shape it returns an empty result for
+/// a table that plainly has rows. That is silent row loss, not an error, which
+/// makes it the worst failure mode available to a `SELECT`.
+///
+/// Mirrors `alter_table.sql` in the `pg_regress` corpus, whose `select * from
+/// bar1` regressed the differential parity gate the moment `RuntimeSession`
+/// began forwarding `simple_query_into` and made this path reachable.
+#[tokio::test]
+async fn selecting_a_partitioned_parent_streams_its_partitions_rows() {
+    use crabka_pgwire::engine::CollectingResultSink;
+
+    let engine = SqlEngine::new();
+    let mut setup = engine.connect();
+    for ddl in [
+        "CREATE TABLE bar1 (a integer, b integer not null default 1) PARTITION BY RANGE (a)",
+        "CREATE TABLE bar2 (a integer, b integer not null default 1)",
+        "ALTER TABLE bar1 ATTACH PARTITION bar2 DEFAULT",
+    ] {
+        exec(&mut setup, ddl).await;
+    }
+    exec(&mut setup, "INSERT INTO bar1 VALUES (1, 1)").await;
+
+    let mut session = engine.connect();
+    let buffered = query_rows(&mut session, "SELECT * FROM bar1").await;
+    assert!(buffered == vec![vec![Some("1".to_owned()), Some("1".to_owned())]]);
+
+    let mut sink = CollectingResultSink::default();
+    session
+        .simple_query_into("SELECT * FROM bar1", 16, &mut sink)
+        .await
+        .expect("streamed select over a partitioned parent");
+    let pages = sink.finish().expect("valid result pages");
+    let streamed: usize = pages
+        .into_iter()
+        .map(|page| match page {
+            QueryResult::Rows { rows, .. } => rows.len(),
+            _ => 0,
+        })
+        .sum();
+    assert!(streamed == 1, "streaming path lost the partition's row");
+}

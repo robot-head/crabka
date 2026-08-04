@@ -14,6 +14,8 @@ use crabka_pgparser::ast::{
 };
 use crabka_pgtypes::{ColumnType, Datum};
 use crabka_pgwire::engine::{Cell, FieldDescription, QueryResult};
+use crabka_units::convert::ByteSizeExt as _;
+use tracing::Instrument as _;
 use zerocopy::{FromBytes, byteorder::big_endian::U64};
 
 use crate::{
@@ -2032,10 +2034,118 @@ pub(crate) async fn execute_write(
     write_ctx: &WriteContext<'_>,
     stmt: &Statement,
 ) -> Result<(QueryResult, Vec<crabka_pgkv::WriteOp>), ExecError> {
+    let span = execute_write_span(write_ctx, stmt);
+    let triggers_before = crate::trigger::fired_count();
     let mut writes = StatementWrites::default();
-    let (outcome, ops) =
-        execute_write_with_ctes(write_ctx, write_ctx.ctes, stmt, &mut writes).await?;
+    let written = execute_write_with_ctes(write_ctx, write_ctx.ctes, stmt, &mut writes)
+        .instrument(span.clone())
+        .await;
+    let (outcome, ops) = match written {
+        Ok(written) => written,
+        Err(error) => {
+            let rendered = error.clone().into_pg();
+            crate::telemetry::record_error(&span, &rendered.code, &rendered.message);
+            return Err(error);
+        }
+    };
+    record_write_outcome(
+        &span,
+        &outcome,
+        &ops,
+        crate::trigger::fired_count().saturating_sub(triggers_before),
+    );
     Ok((outcome.into_result(write_ctx.eval_ctx), ops))
+}
+
+/// Build the span covering one data-modifying statement's execution.
+///
+/// Guarded rather than built unconditionally: resolving the target relation
+/// costs a name resolution and a catalog read, and a span macro's field
+/// expressions evaluate whether or not the callsite is enabled.
+fn execute_write_span(write_ctx: &WriteContext<'_>, stmt: &Statement) -> tracing::Span {
+    if !tracing::enabled!(target: crate::telemetry::EXEC_TARGET, tracing::Level::DEBUG) {
+        return tracing::Span::none();
+    }
+    let span = tracing::debug_span!(
+        target: crate::telemetry::EXEC_TARGET,
+        "pg.execute_write",
+        otel.kind = "internal",
+        otel.status_code = tracing::field::Empty,
+        otel.status_description = tracing::field::Empty,
+        db.response.status_code = tracing::field::Empty,
+        "error.type" = tracing::field::Empty,
+        db.collection.name = tracing::field::Empty,
+        pg.table_id = tracing::field::Empty,
+        pg.rows_affected = tracing::field::Empty,
+        pg.write_ops = tracing::field::Empty,
+        pg.index_ops = tracing::field::Empty,
+        pg.fk_checks = tracing::field::Empty,
+        pg.triggers_fired = tracing::field::Empty,
+        pg.returning = tracing::field::Empty,
+    );
+    if let Some(relation) = crate::telemetry::statement_relation(stmt) {
+        span.record("db.collection.name", relation.name.as_str());
+        // A statement whose target does not resolve — a `CREATE TABLE AS`, a
+        // name that is about to fail — records the name it wrote and no id,
+        // rather than failing the span build.
+        if let Ok(resolved) = resolve_relation(
+            write_ctx.catalog_kv,
+            write_ctx.fctx.resolution,
+            relation,
+            SchemaDisposition::Reference,
+        ) && let Ok(table) = crabka_pgcatalog::get_table(write_ctx.catalog_kv, &resolved)
+        {
+            span.record("pg.table_id", crate::telemetry::integer(table.id));
+        }
+    }
+    span
+}
+
+/// Fold a write's outcome onto its span.
+///
+/// `pg.fk_checks` is deliberately absent here: the referential drain records it
+/// itself, onto whichever span encloses it, because only the drain knows how
+/// many checks a cascade grew the batch to.
+fn record_write_outcome(
+    span: &tracing::Span,
+    outcome: &WriteOutcome,
+    ops: &[crabka_pgkv::WriteOp],
+    triggers_fired: u64,
+) {
+    if span.is_disabled() {
+        return;
+    }
+    if let Some(rows) = crate::telemetry::command_tag_row_count(&outcome.tag) {
+        span.record("pg.rows_affected", crate::telemetry::integer(rows));
+    }
+    span.record("pg.write_ops", crate::telemetry::integer(ops.len()));
+    span.record("pg.index_ops", crate::telemetry::integer(index_ops(ops)));
+    span.record(
+        "pg.triggers_fired",
+        crate::telemetry::integer(triggers_fired),
+    );
+    span.record("pg.returning", outcome.returning.is_some());
+}
+
+/// How many of a write's ops maintain a secondary index rather than the heap.
+///
+/// The split an operator wants when a write is slower than its row count
+/// explains: index maintenance is per index per row, so it is what a wide
+/// index set costs.
+fn index_ops(ops: &[crabka_pgkv::WriteOp]) -> usize {
+    ops.iter()
+        .filter(|op| {
+            let key = match op {
+                crabka_pgkv::WriteOp::Put { key, .. }
+                | crabka_pgkv::WriteOp::ConditionalPut { key, .. }
+                | crabka_pgkv::WriteOp::Delete { key } => key,
+            };
+            matches!(
+                crabka_pgkv::key::classify_key(key),
+                crabka_pgkv::key::KeyClass::SecondaryIndex { .. }
+            )
+        })
+        .count()
 }
 
 /// The write state every part of one statement shares: the `WITH` list's
@@ -9433,6 +9543,10 @@ fn try_distributed_inner_equi_join(
         crate::plan_dist::JoinStrategy::CoPartitioned => JoinExecutionStrategy::Gather,
         crate::plan_dist::JoinStrategy::Gather => JoinExecutionStrategy::Gather,
     };
+    // Folded onto the enclosing read span rather than carried on one of this
+    // join's own: the strategy is a property of how the statement ran, and a
+    // span that declares no such field ignores this.
+    tracing::Span::current().record("pg.join_strategy", strategy.as_str());
     let join_snapshot = |source: &crabka_pgmvcc::visibility::Snapshot| JoinSnapshot {
         xmin: source.xmin,
         xmax: source.xmax,
@@ -12536,16 +12650,37 @@ pub(crate) fn execute_read(
     read_ctx: &crate::subquery::SubCtx<'_>,
     stmt: &Statement,
 ) -> Result<QueryResult, ExecError> {
+    let span = exec_read_span(read_ctx);
+    let _guard = span.enter();
     crate::session::check_query_canceled()?;
     let Statement::Query(q) = stmt else {
         return Err(ExecError::Unsupported("not a query statement".into()));
     };
     let rel = crate::query::query_to_relation(read_ctx, q)?;
     crate::session::check_query_canceled()?;
-    Ok(crate::query::relation_to_rows_result(
-        rel,
-        read_ctx.eval_ctx,
-    ))
+    let result = crate::query::relation_to_rows_result(rel, read_ctx.eval_ctx);
+    if let QueryResult::Rows { rows, .. } = &result {
+        span.record("pg.rows_out", crate::telemetry::integer(rows.len()));
+    }
+    Ok(result)
+}
+
+/// Build the span covering a read statement's execution inside the executor.
+///
+/// The scans, joins and locks the read performs attach to this, so it is the
+/// level at which "the query itself was slow" separates from "getting a read
+/// timestamp was slow". `pg.join_strategy` stays empty unless the planner
+/// actually chose a distributed join — see [`try_distributed_inner_equi_join`].
+fn exec_read_span(read_ctx: &crate::subquery::SubCtx<'_>) -> tracing::Span {
+    tracing::debug_span!(
+        target: crate::telemetry::EXEC_TARGET,
+        "gres.exec_read",
+        otel.kind = "internal",
+        pg.rows_out = tracing::field::Empty,
+        pg.blocking_query_memory_bytes =
+            crate::telemetry::integer(read_ctx.blocking_query_memory.bytes_usize()),
+        pg.join_strategy = tracing::field::Empty,
+    )
 }
 
 /// Run a locking SELECT's body without taking any locks — the case where its
