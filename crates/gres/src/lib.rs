@@ -24,6 +24,7 @@ use crabka_pgwire::{
         PortalDescription, PreparedDescription, QueryResult, Session, TxStatus,
     },
     session::{AuthMode, SessionConfig},
+    telemetry::{DEFAULT_SAMPLE_RATIO, IngressTracePolicy},
 };
 use crabka_security::{
     ClientAuthMode, ListenerProtocol, SaslMechanism, TlsConfig, scram::PgScramVerifier,
@@ -42,6 +43,7 @@ use tokio_util::sync::CancellationToken;
 mod live_range_control;
 mod range0_follower;
 mod split_activation;
+pub mod telemetry;
 use split_activation::{PendingLiveTopology, PreparedLiveTopology, StagedLiveRangeSuccessor};
 
 trait SubstrateKv: SnapshotKv + RestoreKv {}
@@ -629,6 +631,102 @@ pub struct ServeArgs {
         value_parser = crabka_units::parse::positive_time
     )]
     pub idle_suspend_poll_interval: Option<Time>,
+
+    /// How much of a client-supplied W3C trace context a session honours.
+    ///
+    /// A client fully controls the `traceparent` it appends to its SQL, and the
+    /// OTLP pipeline samples with `ParentBased(TraceIdRatioBased(ratio))`: a
+    /// *sampled* remote parent makes `ParentBased` return `RecordAndSample`
+    /// unconditionally, so a client that stamps `-01` on every statement forces
+    /// 100% export of every gres span its queries touch, on every range owner.
+    /// This is the knob that decides whether it may.
+    ///
+    /// - `off` — ignore ingress context entirely; gres traces are always its own.
+    /// - `link` — record the client's context as an `OpenTelemetry` link rather
+    ///   than as a parent, and head-sample independently. Correlation without
+    ///   ceding the sampling decision.
+    /// - `resample` (default) — accept the context as the parent, but recompute
+    ///   the sampled flag locally from the incoming trace-id at the pipeline's
+    ///   own head-sampling ratio (`CRABKA_OTLP_SAMPLE_RATIO`, adopted through
+    ///   [`ServeArgs::adopt_otlp_sample_ratio`] so the two cannot drift).
+    ///   Recompute, not clear: `ParentBased` returns `Drop` for a *non-sampled*
+    ///   parent — it does not fall through to the root sampler — so clearing the
+    ///   bit would drop exactly the statements a client took the trouble to
+    ///   instrument. Because `TraceIdRatioBased` is a pure function of the
+    ///   trace-id, a client and gres at the same ratio agree by construction and
+    ///   a trace stays whole across the boundary.
+    /// - `trust` — honour the client's sampled flag verbatim. Trusted clients
+    ///   only: it hands the export volume of the whole cluster to whoever can
+    ///   open a `PostgreSQL` connection.
+    #[arg(
+        long = "gres-trace-ingress",
+        env = "CRABKA_GRES_TRACE_INGRESS",
+        value_enum,
+        default_value_t = TraceIngressMode::Resample
+    )]
+    pub gres_trace_ingress: TraceIngressMode,
+
+    /// Head-sampling ratio the OTLP pipeline was built with, adopted from the
+    /// resolved [`OtlpConfig`](telemetry::OtlpConfig) rather than parsed here.
+    ///
+    /// Not a command-line argument: the pipeline is built in `main` (inside the
+    /// tokio runtime, so the exporter captures the runtime handle) and hands the
+    /// ratio back through [`ServeArgs::adopt_otlp_sample_ratio`]. `None` means
+    /// OTLP is disabled, and [`ServeArgs::ingress_trace_policy`] then falls back
+    /// to [`DEFAULT_SAMPLE_RATIO`].
+    #[arg(skip)]
+    pub otlp_sample_ratio: Option<f64>,
+}
+
+/// Trust placed in a client-supplied W3C trace context, selected by
+/// `--gres-trace-ingress`.
+///
+/// The mode mirrors [`IngressTracePolicy`] without the `resample` ratio, which
+/// is not a command-line input at all — it belongs to the OTLP pipeline;
+/// [`ServeArgs::ingress_trace_policy`] reattaches it.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TraceIngressMode {
+    /// Ignore the client's context entirely.
+    Off,
+    /// Record the client's context as a link, and head-sample independently.
+    Link,
+    /// Adopt the client's context as the parent, recomputing the sampled flag at
+    /// the pipeline's ratio.
+    #[default]
+    Resample,
+    /// Honour the client's sampled flag verbatim.
+    Trust,
+}
+
+impl ServeArgs {
+    /// Adopt the head-sampling ratio of the resolved OTLP pipeline, so that
+    /// `--gres-trace-ingress resample` recomputes the sampled flag with exactly
+    /// the ratio the exporter samples at.
+    ///
+    /// `None` — OTLP disabled — leaves the ratio unset; see
+    /// [`Self::ingress_trace_policy`] for what that resolves to.
+    pub fn adopt_otlp_sample_ratio(&mut self, otlp: Option<&telemetry::OtlpConfig>) {
+        self.otlp_sample_ratio = otlp.map(|config| config.sample_ratio);
+    }
+
+    /// Resolve the pgwire ingress trust policy from the selected mode and the
+    /// adopted pipeline ratio.
+    ///
+    /// With OTLP disabled no span is exported at all, so the ratio only decides
+    /// a recorded flag; it falls back to [`DEFAULT_SAMPLE_RATIO`], which is also
+    /// what the pipeline itself uses when no ratio is configured — enabling OTLP
+    /// with default settings therefore does not change ingress behaviour.
+    #[must_use]
+    pub fn ingress_trace_policy(&self) -> IngressTracePolicy {
+        match self.gres_trace_ingress {
+            TraceIngressMode::Off => IngressTracePolicy::Off,
+            TraceIngressMode::Link => IngressTracePolicy::Link,
+            TraceIngressMode::Resample => {
+                IngressTracePolicy::resample(self.otlp_sample_ratio.unwrap_or(DEFAULT_SAMPLE_RATIO))
+            }
+            TraceIngressMode::Trust => IngressTracePolicy::Trust,
+        }
+    }
 }
 
 /// Optional CLI overrides for distributed range runtime policy.
@@ -2652,6 +2750,20 @@ impl Engine for RuntimeEngine {
 }
 
 impl Session for RuntimeSession {
+    async fn startup(&mut self) -> Result<(), crabka_pgwire::error::PgError> {
+        match self {
+            Self::Single(session) => session.startup().await,
+            Self::Multi(session) => session.startup().await,
+        }
+    }
+
+    async fn terminate(&mut self) {
+        match self {
+            Self::Single(session) => session.terminate().await,
+            Self::Multi(session) => session.terminate().await,
+        }
+    }
+
     async fn simple_query(
         &mut self,
         sql: &str,
@@ -2659,6 +2771,22 @@ impl Session for RuntimeSession {
         match self {
             Self::Single(session) => session.simple_query(sql).await,
             Self::Multi(session) => session.simple_query(sql).await,
+        }
+    }
+
+    /// Forwarding this is what keeps the inner sessions' streaming fast paths
+    /// alive: the trait default materializes the whole result through
+    /// [`Session::simple_query`] before it pages, so a runtime that inherited it
+    /// would buffer every simple-protocol result no matter how large.
+    async fn simple_query_into<S: crabka_pgwire::engine::ResultSink>(
+        &mut self,
+        sql: &str,
+        page_rows: usize,
+        sink: &mut S,
+    ) -> Result<(), crabka_pgwire::error::PgError> {
+        match self {
+            Self::Single(session) => session.simple_query_into(sql, page_rows, sink).await,
+            Self::Multi(session) => session.simple_query_into(sql, page_rows, sink).await,
         }
     }
 
@@ -2777,8 +2905,20 @@ impl Session for RuntimeSession {
 
     fn take_notifications(&mut self) -> Option<tokio::sync::mpsc::Receiver<Notification>> {
         match self {
-            Self::Single(session) => session.take_notifications(),
-            Self::Multi(session) => session.take_notifications(),
+            Self::Single(session) => Session::take_notifications(session.as_mut()),
+            Self::Multi(session) => Session::take_notifications(session.as_mut()),
+        }
+    }
+
+    /// Resolved through [`Session`] explicitly: [`crabka_pgexec::SqlSession`]
+    /// also has an inherent `take_notices`, which would otherwise win method
+    /// lookup and could drift from the trait contract the wire layer calls.
+    fn take_notices(
+        &mut self,
+    ) -> Option<tokio::sync::mpsc::Receiver<crabka_pgwire::error::PgError>> {
+        match self {
+            Self::Single(session) => Session::take_notices(session.as_mut()),
+            Self::Multi(session) => Session::take_notices(session.as_mut()),
         }
     }
 
@@ -2786,6 +2926,16 @@ impl Session for RuntimeSession {
         match self {
             Self::Single(session) => session.mark_statement_failed(),
             Self::Multi(session) => session.mark_statement_failed(),
+        }
+    }
+
+    /// The default only marks the statement failed; the single-engine session
+    /// also has to stop and join its detached scan workers before the wire layer
+    /// reports `ReadyForQuery`.
+    async fn cancel_current_query(&mut self) {
+        match self {
+            Self::Single(session) => session.cancel_current_query().await,
+            Self::Multi(session) => session.cancel_current_query().await,
         }
     }
 
@@ -8540,6 +8690,9 @@ pub fn build_session_config_from_tenant(
     }?;
     config.max_message_len =
         whole_bytes_usize("pgwire maximum message size", args.pgwire_max_message_size)?;
+    // Set here rather than in each `..SessionConfig::trust()` arm above: the
+    // policy is orthogonal to authentication, and every arm needs it.
+    config.ingress_trace = args.ingress_trace_policy();
     Ok(config)
 }
 
@@ -9786,6 +9939,8 @@ mod tests {
             checkpoint_delete_records_timeout: None,
             checkpoint_poll_interval: None,
             idle_suspend_poll_interval: None,
+            gres_trace_ingress: TraceIngressMode::default(),
+            otlp_sample_ratio: None,
         }
     }
 
@@ -10079,6 +10234,132 @@ mod tests {
                 "{option}"
             );
         }
+    }
+
+    /// Every mode must survive the trip from the command line to the pgwire
+    /// session config: the policy is the only thing standing between a client's
+    /// `-01` and 100% export of the cluster's spans.
+    #[test]
+    fn trace_ingress_modes_reach_session_config() {
+        let cases: [(&str, TraceIngressMode, IngressTracePolicy); 4] = [
+            ("off", TraceIngressMode::Off, IngressTracePolicy::Off),
+            ("link", TraceIngressMode::Link, IngressTracePolicy::Link),
+            (
+                "resample",
+                TraceIngressMode::Resample,
+                IngressTracePolicy::resample(DEFAULT_SAMPLE_RATIO),
+            ),
+            ("trust", TraceIngressMode::Trust, IngressTracePolicy::Trust),
+        ];
+
+        for (value, mode, policy) in cases {
+            let args = Cli::try_parse_from(["crabka-gres", "--gres-trace-ingress", value])
+                .unwrap_or_else(|error| panic!("--gres-trace-ingress {value}: {error}"))
+                .serve;
+            assert!(args.gres_trace_ingress == mode, "{value}");
+
+            let config = build_session_config(&args).expect("config");
+            assert!(config.ingress_trace == policy, "{value}");
+        }
+    }
+
+    #[test]
+    fn trace_ingress_defaults_to_resample_and_rejects_unknown_modes() {
+        let command = <Cli as clap::CommandFactory>::command();
+        let argument = command
+            .get_arguments()
+            .find(|argument| argument.get_id().as_str() == "gres_trace_ingress")
+            .expect("trace ingress argument");
+        assert!(argument.get_env() == Some(std::ffi::OsStr::new("CRABKA_GRES_TRACE_INGRESS")));
+
+        let default = Cli::try_parse_from(["crabka-gres"])
+            .expect("defaults")
+            .serve;
+        assert!(default.gres_trace_ingress == TraceIngressMode::Resample);
+
+        for value in ["", "on", "resampled", "0.5", "Off "] {
+            assert!(
+                Cli::try_parse_from(["crabka-gres", "--gres-trace-ingress", value]).is_err(),
+                "{value}"
+            );
+        }
+    }
+
+    /// `resample` recomputes a client's sampled bit, and only agrees with that
+    /// client when it uses the ratio the exporter samples at — a hardcoded 1.0
+    /// would make every `resample` deployment behave as `trust`.
+    #[test]
+    fn resample_adopts_the_pipeline_sample_ratio() {
+        let mut args = serve_args(None, Vec::new());
+        let otlp = telemetry::OtlpConfig::from_env(
+            |key| match key {
+                "CRABKA_OTLP_ENDPOINT" => Some("http://collector:4317".to_owned()),
+                "CRABKA_OTLP_SAMPLE_RATIO" => Some("0.25".to_owned()),
+                _ => None,
+            },
+            "gres-1",
+            "0.0.0",
+            "crabka-gres",
+        )
+        .expect("valid OTLP configuration")
+        .expect("OTLP enabled by endpoint");
+
+        args.adopt_otlp_sample_ratio(Some(&otlp));
+
+        let config = build_session_config(&args).expect("config");
+        assert!(config.ingress_trace == IngressTracePolicy::resample(0.25));
+    }
+
+    /// With OTLP disabled nothing is exported, so the ratio only decides a
+    /// recorded flag: it falls back to the pipeline's own default, which keeps
+    /// ingress behaviour unchanged when OTLP is later switched on.
+    #[test]
+    fn disabled_otlp_leaves_resample_at_the_default_ratio() {
+        let mut args = serve_args(None, Vec::new());
+        let otlp = telemetry::OtlpConfig::from_env(|_| None, "gres-1", "0.0.0", "crabka-gres")
+            .expect("valid OTLP configuration");
+        assert!(otlp.is_none());
+
+        args.adopt_otlp_sample_ratio(otlp.as_ref());
+
+        let config = build_session_config(&args).expect("config");
+        assert!(config.ingress_trace == IngressTracePolicy::resample(DEFAULT_SAMPLE_RATIO));
+    }
+
+    /// The adopted ratio belongs to `resample` alone; the other three modes make
+    /// no sampling decision of their own.
+    #[test]
+    fn sample_ratio_does_not_disturb_the_other_modes() {
+        let cases: [(TraceIngressMode, IngressTracePolicy); 3] = [
+            (TraceIngressMode::Off, IngressTracePolicy::Off),
+            (TraceIngressMode::Link, IngressTracePolicy::Link),
+            (TraceIngressMode::Trust, IngressTracePolicy::Trust),
+        ];
+
+        for (mode, policy) in cases {
+            let mut args = serve_args(None, Vec::new());
+            args.gres_trace_ingress = mode;
+            args.otlp_sample_ratio = Some(0.25);
+
+            assert!(args.ingress_trace_policy() == policy, "{mode:?}");
+        }
+    }
+
+    /// SCRAM builds its session config down a different arm; the policy must
+    /// reach it too.
+    #[test]
+    fn trace_ingress_reaches_the_scram_session_config() {
+        let mut args = serve_args(Some("scram"), vec!["alice=secret".to_owned()]);
+        args.gres_trace_ingress = TraceIngressMode::Off;
+
+        let standalone = build_session_config(&args).expect("config");
+        assert!(standalone.ingress_trace == IngressTracePolicy::Off);
+
+        let mut tenant_args = serve_args(None, Vec::new());
+        tenant_args.gres_trace_ingress = TraceIngressMode::Link;
+        let tenant =
+            build_session_config_from_tenant(&tenant_args, Some(&tenant_record())).expect("config");
+        assert!(tenant.ingress_trace == IngressTracePolicy::Link);
     }
 
     #[test]
@@ -13059,6 +13340,143 @@ mod tests {
         );
         // The receiver is handed over once: the wire loop owns it from then on.
         assert!(session.take_notifications().is_none());
+    }
+
+    /// Rows of one `Rows` page, decoded from their text format.
+    fn page_ids(page: &crabka_pgwire::engine::ResultPage) -> Vec<i32> {
+        let crabka_pgwire::engine::ResultPage::Rows { rows, .. } = page else {
+            panic!("a SELECT pages as rows");
+        };
+        rows.iter()
+            .map(|row| {
+                let cell = row[0].as_ref().expect("id is not null");
+                std::str::from_utf8(&cell.text)
+                    .expect("int4 text encoding is utf-8")
+                    .parse()
+                    .expect("int4 text encoding parses")
+            })
+            .collect()
+    }
+
+    /// `simple_query_into` must reach the engine, not the buffering default on
+    /// [`Session`].
+    ///
+    /// The two are told apart by where the page boundaries fall. The default
+    /// materializes the whole result through
+    /// [`Session::simple_query`](crabka_pgwire::engine::Session::simple_query)
+    /// and only then splits it, so it can only ever produce uniform `page_rows`
+    /// chunks — every page but the last exactly `page_rows` rows, the last
+    /// non-empty, the tag on it. The engine paces its pages off the scan cursor
+    /// instead, so boundaries land where the scan reaches them and the tag
+    /// arrives on a trailing empty page once the cursor reports exhaustion.
+    /// Comparing the observed page sizes against the chunked shape is therefore
+    /// exactly the "streamed, not buffered" question: restore the default and
+    /// the two become equal by construction.
+    #[tokio::test]
+    async fn runtime_session_streams_simple_query_pages_from_the_engine_cursor() {
+        use assert2::assert;
+
+        const TABLE_ROWS: i32 = 20;
+        const PAGE_ROWS: usize = 4;
+
+        let mut session = RuntimeEngine::Single(Box::new(SqlEngine::new())).connect();
+        session
+            .simple_query("CREATE TABLE stream_pages (id int4)")
+            .await
+            .expect("create");
+        let values = (1..=TABLE_ROWS)
+            .map(|id| format!("({id})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        session
+            .simple_query(&format!("INSERT INTO stream_pages VALUES {values}"))
+            .await
+            .expect("seed");
+
+        let mut sink = crabka_pgwire::engine::CollectingResultSink::default();
+        session
+            .simple_query_into("SELECT id FROM stream_pages", PAGE_ROWS, &mut sink)
+            .await
+            .expect("stream the select into the sink");
+
+        let pages = sink.pages();
+        let ids = pages.iter().flat_map(page_ids).collect::<Vec<_>>();
+        assert!(ids == (1..=TABLE_ROWS).collect::<Vec<_>>());
+
+        let row_counts = pages
+            .iter()
+            .map(|page| page_ids(page).len())
+            .collect::<Vec<_>>();
+        let buffered_row_counts = ids.chunks(PAGE_ROWS).map(<[i32]>::len).collect::<Vec<_>>();
+        assert!(row_counts != buffered_row_counts);
+        // Every row still arrives exactly once, in scan order.
+        assert!(row_counts.iter().sum::<usize>() == ids.len());
+        // A cursor-paced page can be short; a chunked one cannot. Seeing one
+        // ahead of the last page is the scan boundary showing through.
+        assert!(
+            row_counts[..row_counts.len() - 1]
+                .iter()
+                .any(|count| *count < PAGE_ROWS)
+        );
+
+        // Field descriptions ride the first page, the command tag the last.
+        let framing = pages
+            .iter()
+            .map(|page| match page {
+                crabka_pgwire::engine::ResultPage::Rows { fields, tag, .. } => {
+                    (fields.is_some(), tag.clone())
+                }
+                _ => panic!("a SELECT pages as rows"),
+            })
+            .collect::<Vec<_>>();
+        let expected_framing = (0..framing.len())
+            .map(|index| {
+                (
+                    index == 0,
+                    (index + 1 == framing.len()).then(|| format!("SELECT {TABLE_ROWS}")),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(framing == expected_framing);
+    }
+
+    /// The gateway arm forwards too.
+    ///
+    /// This one cannot separate streamed from buffered the way its sibling
+    /// does: the gateway only streams for a range it does not host, and an
+    /// in-process tenant hosts every range, so both paths page the same
+    /// materialized result. What it does pin is that routing a `Query` through
+    /// the second arm still answers with every row, once, in order.
+    #[tokio::test]
+    async fn runtime_session_forwards_simple_query_into_on_the_gateway_arm() {
+        use assert2::assert;
+
+        let config = crabka_gres_ranges::MultiRangeTenantConfig::from_boundaries(
+            crabka_gres_ranges::TenantName::parse("runtime_stream").expect("tenant"),
+            "0,100,200",
+        )
+        .expect("config");
+        let (multi, _handles) = crabka_gres_ranges::MultiRangeTenant::start(config).expect("multi");
+        let mut session = RuntimeEngine::Multi(Box::new(multi)).connect();
+        session
+            .simple_query("CREATE TABLE gateway_pages (id int4)")
+            .await
+            .expect("create");
+        session
+            .simple_query("INSERT INTO gateway_pages VALUES (1), (2), (3)")
+            .await
+            .expect("seed");
+
+        let mut sink = crabka_pgwire::engine::CollectingResultSink::default();
+        session
+            .simple_query_into("SELECT id FROM gateway_pages", 2, &mut sink)
+            .await
+            .expect("stream the select into the sink");
+
+        let pages = sink.pages();
+        let ids = pages.iter().flat_map(page_ids).collect::<Vec<_>>();
+        assert!(ids == vec![1, 2, 3]);
+        assert!(pages.len() == 2);
     }
 
     #[tokio::test]

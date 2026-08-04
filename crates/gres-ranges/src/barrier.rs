@@ -7,8 +7,20 @@ use crabka_pgexec::{ExecError, Linearizer};
 use crabka_units::secs;
 use crabka_units::{Time, convert::TimeExt as _, fmt::Human as _};
 use tokio::sync::{Mutex, Notify, watch};
+use tracing::{Instrument as _, Span, field::Empty};
 
-use crate::range0_tail::{Range0Tail, Range0TailError};
+use crate::{
+    range0_tail::{Range0Tail, Range0TailError},
+    telemetry::{ROUTE_TARGET, integer, record_error},
+};
+
+/// `pg.barrier.mode` for [`Range0Barrier::wait_for_fresh_end`] — the
+/// write-side wait that refuses to adopt any sample already in flight.
+const BARRIER_MODE_FRESH_END: &str = "fresh_end";
+
+/// `pg.barrier.mode` for the read-side [`Linearizer`] gate, which coalesces
+/// concurrent callers onto one generation's sample.
+const BARRIER_MODE_READ: &str = "read";
 
 /// Samples a conservative committed range-0 end after a read-barrier call begins.
 #[async_trait::async_trait]
@@ -90,10 +102,24 @@ impl Range0Barrier {
     /// apply the sampled end within the barrier timeout, and propagates
     /// sampling and tail failures.
     pub async fn wait_for_fresh_end(&self) -> Result<(), BarrierError> {
+        let span = barrier_span(BARRIER_MODE_FRESH_END, self.tail.applied_offset());
+        let result = self.fresh_end_wait().instrument(span.clone()).await;
+        if let Err(error) = &result {
+            record_error(&span, barrier_error_type(error), &error.to_string());
+        }
+        result
+    }
+
+    /// The body of [`Range0Barrier::wait_for_fresh_end`], running inside its
+    /// span so both the sample and the catch-up wait are inside the measured
+    /// interval.
+    async fn fresh_end_wait(&self) -> Result<(), BarrierError> {
         if let Some(poke) = &self.refresh_poke {
             poke.notify_one();
         }
         let end = self.sampler.sample_end_after_call_begins().await?;
+        // Exactly one sample: this path never adopts an in-flight one.
+        record_barrier_target(&Span::current(), end, 1);
         tokio::time::timeout(self.timeout.to_std(), self.tail.wait_until_applied(end))
             .await
             .map_err(|_elapsed| BarrierError::CatchUpTimeout(self.timeout))??;
@@ -101,7 +127,12 @@ impl Range0Barrier {
     }
 
     /// Return an end offset from a sample whose broker fetch started after
-    /// this call began — the [`Range0EndSampler`] contract.
+    /// this call began — the [`Range0EndSampler`] contract — together with the
+    /// number of sample generations this caller had to observe to get one.
+    ///
+    /// That count is `pg.barrier.polls`: `1` when the caller started its own
+    /// sample, more when it arrived during someone else's and had to wait that
+    /// one out before its generation could start.
     ///
     /// A sample already in flight at arrival may have read the log end before
     /// a write this caller must observe (a commit decision acknowledged just
@@ -110,9 +141,11 @@ impl Range0Barrier {
     /// OUT: arrivals during a fetch form the next generation's batch and share
     /// one fresh fetch — the same conveyor coalescing as a single in-flight
     /// slot, one generation later.
-    async fn sample_target_offset(&self) -> Result<i64, BarrierError> {
+    async fn sample_target_offset(&self) -> Result<(i64, u64), BarrierError> {
         let mut stale_generation: Option<u64> = None;
+        let mut polls = 0_u64;
         loop {
+            polls = polls.saturating_add(1);
             let (mut receiver, adopted) = {
                 let mut guard = self.samples.lock().await;
                 // A completed sample whose fetch task has not yet cleared the
@@ -145,7 +178,9 @@ impl Range0Barrier {
                         receiver.changed().await.map_err(|_| BarrierError::Closed)?;
                     }
                     SampleState::Ready(result) if adopted => {
-                        return result.map_err(BarrierError::Sample);
+                        return result
+                            .map(|offset| (offset, polls))
+                            .map_err(BarrierError::Sample);
                     }
                     SampleState::Ready(_) => break,
                 }
@@ -190,14 +225,84 @@ impl Range0Barrier {
 #[async_trait::async_trait]
 impl Linearizer for Range0Barrier {
     async fn ensure_readable(&self) -> Result<(), ExecError> {
-        let target_offset = self.sample_target_offset().await?;
+        let span = barrier_span(BARRIER_MODE_READ, self.tail.applied_offset());
+        let result = self.read_gate_wait().instrument(span.clone()).await;
+        if let Err(error) = &result {
+            record_error(&span, barrier_error_type(error), &error.to_string());
+        }
+        result.map_err(ExecError::from)
+    }
+}
+
+impl Range0Barrier {
+    /// The body of the [`Linearizer`] gate, running inside its
+    /// [`barrier_span`].
+    ///
+    /// Returns [`BarrierError`] rather than [`ExecError`] so the span can name
+    /// *which* failure occurred: every variant collapses to
+    /// [`ExecError::Unavailable`] at the boundary, which is the right thing for
+    /// the client and useless for an operator.
+    async fn read_gate_wait(&self) -> Result<(), BarrierError> {
+        let (target_offset, polls) = self.sample_target_offset().await?;
+        record_barrier_target(&Span::current(), target_offset, polls);
         tokio::time::timeout(
             self.timeout.to_std(),
             self.tail.wait_until_applied(target_offset),
         )
         .await
-        .map_err(|_| ExecError::Unavailable)??;
+        .map_err(|_elapsed| BarrierError::CatchUpTimeout(self.timeout))??;
         Ok(())
+    }
+}
+
+/// Build the `range.barrier` span covering one wait on the range-0 read
+/// barrier.
+///
+/// This is the second of the two unbounded blocking waits on a gres read path
+/// (the first is `tso.grant`): a catalog or global-clog read cannot serve until
+/// the local range-0 tail has applied an offset sampled after the read began,
+/// and the wait is bounded only by the configured catch-up timeout.
+///
+/// `pg.barrier.applied_offset` is the tail's position when the barrier opened;
+/// with `pg.barrier.target_offset` it is exactly the catch-up distance the read
+/// paid for, which is what separates "range 0 is behind" from "the broker
+/// sample was slow".
+#[must_use]
+fn barrier_span(mode: &'static str, applied_offset: i64) -> Span {
+    tracing::debug_span!(
+        target: ROUTE_TARGET,
+        "range.barrier",
+        otel.kind = "client",
+        otel.status_code = Empty,
+        otel.status_description = Empty,
+        error.type = Empty,
+        pg.range_id = integer(crate::ids::RangeId::COORDINATOR.as_u32()),
+        pg.barrier.mode = mode,
+        pg.barrier.applied_offset = integer(applied_offset),
+        pg.barrier.target_offset = Empty,
+        pg.barrier.polls = Empty,
+    )
+}
+
+/// Record the sampled end this barrier is waiting for, and how many sample
+/// generations the caller observed before it got one it was allowed to adopt.
+fn record_barrier_target(span: &Span, target_offset: i64, polls: u64) {
+    if span.is_disabled() {
+        return;
+    }
+    span.record("pg.barrier.target_offset", integer(target_offset));
+    span.record("pg.barrier.polls", integer(polls));
+}
+
+/// The low-cardinality `error.type` for a failed barrier wait. `catch_up_timeout`
+/// is the one that means range 0 is not keeping up; the rest mean the sample or
+/// the local tail failed.
+const fn barrier_error_type(error: &BarrierError) -> &'static str {
+    match error {
+        BarrierError::Sample(_) => "sample",
+        BarrierError::Closed => "closed",
+        BarrierError::Tail(_) => "tail",
+        BarrierError::CatchUpTimeout(_) => "catch_up_timeout",
     }
 }
 

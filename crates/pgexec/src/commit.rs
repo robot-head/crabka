@@ -23,7 +23,29 @@ pub struct LocalCommitter {
 #[async_trait::async_trait]
 impl Committer for LocalCommitter {
     async fn commit(&self, ops: Vec<WriteOp>) -> Result<(), ExecError> {
-        self.kv.write_batch(&ops)?;
+        // Named `pg.commit`, the same as the substrate committer's span, so one
+        // Grafana query answers "how long did the durable write take" in either
+        // engine mode. The two never nest: a `LocalCommitter` writes the KV
+        // directly and delegates to no other committer, so exactly one of them
+        // is on any commit path.
+        let span = tracing::debug_span!(
+            target: crate::telemetry::EXEC_TARGET,
+            "pg.commit",
+            otel.kind = "internal",
+            otel.status_code = tracing::field::Empty,
+            otel.status_description = tracing::field::Empty,
+            db.response.status_code = tracing::field::Empty,
+            "error.type" = tracing::field::Empty,
+            pg.commit.ops = crate::telemetry::integer(ops.len()),
+            pg.commit.mode = "local",
+        );
+        let _guard = span.enter();
+        if let Err(error) = self.kv.write_batch(&ops) {
+            let error = ExecError::from(error);
+            let rendered = error.clone().into_pg();
+            crate::telemetry::record_error(&span, &rendered.code, &rendered.message);
+            return Err(error);
+        }
         Ok(())
     }
 }

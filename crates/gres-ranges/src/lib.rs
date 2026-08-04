@@ -16,6 +16,7 @@ pub mod registry;
 pub mod split;
 pub mod split_hooks;
 pub mod swappable_kv;
+pub mod telemetry;
 pub mod tenant;
 pub mod transfer;
 pub mod transport;

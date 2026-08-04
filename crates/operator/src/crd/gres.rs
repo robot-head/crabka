@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
 use crate::controller::common::millis_u64;
+use crate::crd::kafka::Tracing;
 
 const DEFAULT_LIFECYCLE_REQUEUE: Time = crabka_units::secs(5);
 
@@ -131,6 +132,25 @@ pub struct GresSpec {
     /// not performed by the operator yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub balancer: Option<GresBalancerSpec>,
+
+    /// Distributed-tracing wiring for this fleet's tenant compute pods.
+    ///
+    /// When set, the `GresTenant` reconciler renders the `CRABKA_OTLP_*` /
+    /// `OTEL_SERVICE_NAME` env contract on every compute container and
+    /// `crabka-gres` installs the OTLP exporter at startup. When absent no
+    /// OTLP env var is emitted at all, which is what leaves tracing off: an
+    /// empty endpoint would still switch the exporter on and then fail to
+    /// reach a collector.
+    ///
+    /// The schema is the one `Kafka.spec.tracing` uses, so the two fleets have
+    /// one shape, one validation path, and the field names an operator already
+    /// knows.
+    ///
+    /// Deliberately fleet-scoped rather than per-`GresTenant`: the collector
+    /// endpoint, protocol and export timeout are cluster infrastructure, and a
+    /// tenant-writable copy would make telemetry routing a tenant decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracing: Option<Tracing>,
 }
 
 /// Wake activator deployment and runtime policy.
@@ -1863,6 +1883,16 @@ mod tests {
                     operations: vec![GresBalancerOperationKind::Move],
                 }),
             }),
+            tracing: Some(Tracing {
+                kind: crate::crd::kafka::TracingType::Otlp,
+                otlp: Some(crate::crd::kafka::OtlpTracing {
+                    endpoint: "http://otel:4317".into(),
+                    protocol: Some(crate::crd::kafka::OtlpProtocol::HttpProtobuf),
+                    sample_ratio: Some(0.25),
+                    service_name: Some("gres-analytics".into()),
+                    timeout: Some(crabka_units::secs(7)),
+                }),
+            }),
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert!(json.contains("\"kafkaCluster\":\"demo\""), "got: {json}");
@@ -1878,8 +1908,44 @@ mod tests {
             json.contains("\"disabledGoals\":[\"load_skew\"]"),
             "got: {json}"
         );
+        assert!(
+            json.contains(
+                "\"tracing\":{\"type\":\"Otlp\",\"otlp\":{\"endpoint\":\"http://otel:4317\",\"protocol\":\"http_protobuf\",\"sampleRatio\":0.25,\"serviceName\":\"gres-analytics\",\"timeout\":\"7s\"}}"
+            ),
+            "got: {json}"
+        );
         let back: GresSpec = serde_json::from_str(&json).unwrap();
         assert!(back == spec);
+    }
+
+    /// `Gres.spec.tracing` reuses `Kafka`'s [`Tracing`] rather than declaring a
+    /// parallel set of types, so the two CRDs must present the same field
+    /// shape, the same enum values and the same required set. Only the
+    /// top-level `description` may differ — each field documents its own fleet.
+    #[test]
+    fn tracing_schema_is_shared_with_the_kafka_crd() {
+        let gres = serde_json::to_value(Gres::crd()).expect("serialize Gres CRD");
+        let kafka = serde_json::to_value(crate::crd::Kafka::crd()).expect("serialize Kafka CRD");
+        let tracing = |crd: &serde_json::Value| {
+            let mut schema = crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]
+                ["spec"]["properties"]["tracing"]
+                .clone();
+            schema
+                .as_object_mut()
+                .expect("tracing schema is an object")
+                .remove("description");
+            schema
+        };
+        let gres_tracing = tracing(&gres);
+        assert!(gres_tracing["type"] == "object", "got: {gres_tracing}");
+        assert!(
+            gres_tracing["properties"]["otlp"]["properties"]["endpoint"]["type"] == "string",
+            "got: {gres_tracing}"
+        );
+        assert!(
+            gres_tracing == tracing(&kafka),
+            "Gres and Kafka must render one shared tracing schema; got: {gres_tracing}"
+        );
     }
 
     #[test]

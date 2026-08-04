@@ -1,0 +1,31 @@
+[package]
+name = "crabka-trace-context"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "W3C Trace Context propagation helpers shared by Crabka's wire-protocol crates"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-trace-context"
+readme = "README.md"
+keywords = ["tracing", "opentelemetry", "w3c", "sqlcommenter", "crabka"]
+categories = ["development-tools::debugging"]
+
+[lints]
+workspace = true
+
+[dependencies]
+opentelemetry = { workspace = true, features = ["trace"] }
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+
+[dev-dependencies]
+assert2 = { workspace = true }
+crabka-pgparser = { version = "0.3.9", path = "../pgparser" }
+opentelemetry_sdk = { workspace = true, features = ["trace", "testing"] }
+serde_json = { workspace = true }
+tracing-subscriber = { workspace = true }

@@ -1,6 +1,6 @@
 //! Barrier-based recovery primitives.
 
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use crabka_client_admin::AdminClient;
 use crabka_client_core::{
@@ -20,6 +20,7 @@ use crabka_protocol::{
     },
     primitives::uuid::Uuid as WireUuid,
 };
+use crabka_trace_context::TraceCarrier;
 use crabka_units::{
     ByteSize, Time,
     convert::{ByteSizeExt as _, TimeExt as _},
@@ -28,6 +29,7 @@ use crabka_units::{
 };
 use refined_type::rule::GreaterUsize;
 use tokio::sync::Mutex;
+use tracing::Span;
 
 use crate::{
     checkpoint::{CheckpointStore, CheckpointWalPruner, restore_latest_at_or_before},
@@ -35,6 +37,7 @@ use crate::{
     follower::{CommittedEndConnection, CommittedEndDialer, LiveCommittedEndSampler},
     frame::{BARRIER_SEQ, WalFrame},
     replay::{ReplayItem, ReplayOutcome, replay_committed_frames, replay_committed_frames_from},
+    telemetry::{WAL_TARGET, integer},
     topic::{
         WalAdminPolicy, ensure_wal_topic_name_with_policy, transactional_id_for_range,
         wal_topic_for_generation,
@@ -845,16 +848,16 @@ async fn recover_store_after_barrier_with_seed(
     replay_seed: Option<(i64, u64)>,
 ) -> Result<ReplayOutcome, SubstrateError> {
     if let Some((replay_start, expected)) = replay_seed {
-        return replay_committed_frames_from(
-            kv,
-            reader.committed_from(replay_start).await?,
-            barrier.offset,
-            replay_start,
-            expected,
-        );
+        let traced = reader.committed_from_traced(replay_start).await?;
+        let apply = wal_apply_span(WAL_APPLY_RECOVERY, traced.items.len(), &traced.links);
+        return apply.in_scope(|| {
+            replay_committed_frames_from(kv, traced.items, barrier.offset, replay_start, expected)
+        });
     }
     let Some(checkpoints) = checkpoints else {
-        return replay_committed_frames(kv, reader.committed_from_start().await?, barrier.offset);
+        let traced = reader.committed_from_start_traced().await?;
+        let apply = wal_apply_span(WAL_APPLY_RECOVERY, traced.items.len(), &traced.links);
+        return apply.in_scope(|| replay_committed_frames(kv, traced.items, barrier.offset));
     };
     let restore_kv = restore_kv.ok_or_else(|| {
         SubstrateError::Unavailable("checkpoint restore requires a restore-capable KV store".into())
@@ -886,13 +889,11 @@ async fn recover_store_after_barrier_with_seed(
             (0, 0)
         }
     });
-    replay_committed_frames_from(
-        kv,
-        reader.committed_from(replay_start).await?,
-        barrier.offset,
-        replay_start,
-        expected,
-    )
+    let traced = reader.committed_from_traced(replay_start).await?;
+    let apply = wal_apply_span(WAL_APPLY_RECOVERY, traced.items.len(), &traced.links);
+    apply.in_scope(|| {
+        replay_committed_frames_from(kv, traced.items, barrier.offset, replay_start, expected)
+    })
 }
 
 #[cfg(test)]
@@ -1115,12 +1116,20 @@ async fn open_wal_connection(
 #[async_trait::async_trait]
 impl CommittedWalReader for KafkaCommittedWalReader {
     async fn committed_from(&self, start_offset: i64) -> Result<Vec<ReplayItem>, SubstrateError> {
+        Ok(self.committed_from_traced(start_offset).await?.items)
+    }
+
+    async fn committed_from_traced(
+        &self,
+        start_offset: i64,
+    ) -> Result<TracedWalRecords, SubstrateError> {
         let conn = self.open_connection().await?;
+        let mut links = WalTraceLinks::collecting();
         let mut items = Vec::new();
         let mut next_offset = start_offset;
         let mut empty_fetch_retries = None;
         loop {
-            let fetched = self.fetch_partition(&conn, next_offset).await?;
+            let fetched = self.fetch_partition(&conn, next_offset, &mut links).await?;
             match empty_fetch_decision(
                 empty_fetch_retries,
                 next_offset,
@@ -1161,7 +1170,7 @@ impl CommittedWalReader for KafkaCommittedWalReader {
                 let offset = record.offset;
                 items.push(record);
                 if offset >= self.barrier_offset {
-                    return Ok(items);
+                    return Ok(TracedWalRecords { items, links });
                 }
             }
         }
@@ -1211,10 +1220,17 @@ pub(crate) struct FetchedWalPartition {
 }
 
 impl KafkaCommittedWalReader {
+    /// Fetch one page and decode it, offering each applied record's headers to
+    /// `links`.
+    ///
+    /// The headers are only in hand here: [`ReplayItem`] carries the frame
+    /// bytes and its offset and nothing else, so a trace context that is not
+    /// collected at this point is gone by the time anything applies the frame.
     async fn fetch_partition(
         &self,
         conn: &Connection,
         fetch_offset: i64,
+        links: &mut WalTraceLinks,
     ) -> Result<FetchedWalPartition, SubstrateError> {
         let result = fetch_partition_with_isolation_progress(
             conn,
@@ -1233,22 +1249,31 @@ impl KafkaCommittedWalReader {
                 self.topic
             ))
         })?;
+        let mut records = Vec::with_capacity(result.records.len());
+        for record in result.records {
+            // A valueless record carries no frame to apply, so it contributes
+            // no link either.
+            let Some(bytes) = record.value else {
+                continue;
+            };
+            links.record(record.headers.iter().map(|header| {
+                (
+                    header.key.as_str(),
+                    header.value.as_deref().unwrap_or_default(),
+                )
+            }));
+            records.push(ReplayItem {
+                offset: record.offset,
+                bytes: bytes.to_vec(),
+            });
+        }
         Ok(FetchedWalPartition {
             log_start_offset: 0,
             high_watermark: self.barrier_offset.saturating_add(1),
             last_stable_offset: self.barrier_offset.saturating_add(1),
             decoded_batches: usize::from(result.next_offset.is_some()),
             next_offset: result.next_offset.unwrap_or(fetch_offset),
-            records: result
-                .records
-                .into_iter()
-                .filter_map(|record| {
-                    record.value.map(|bytes| ReplayItem {
-                        offset: record.offset,
-                        bytes: bytes.to_vec(),
-                    })
-                })
-                .collect(),
+            records,
         })
     }
 
@@ -1449,6 +1474,157 @@ pub trait RecoveryFencer: Send + Sync {
     async fn fence_with_barrier(&self) -> Result<RecoveryBarrier, SubstrateError>;
 }
 
+/// Upper bound on the distinct producer traces one `gres.wal_apply` span links
+/// to.
+///
+/// A replay batch can mix records from thousands of commits, and every link is
+/// exported with the span. Eight is enough to see *which* writers a slow apply
+/// is replaying without letting one span's payload grow with the batch.
+pub const MAX_WAL_APPLY_LINKS: usize = 8;
+
+/// `pg.wal.source` for the replay a recovering writer runs after fencing.
+pub const WAL_APPLY_RECOVERY: &str = "recovery";
+
+/// `pg.wal.source` for the catch-up replay a read-only range-0 follower runs
+/// when it boots.
+pub const WAL_APPLY_FOLLOWER_BOOTSTRAP: &str = "follower_bootstrap";
+
+/// `pg.wal.source` for the WAL tail replayed on top of a restored checkpoint.
+pub const WAL_APPLY_RESTORE_TAIL: &str = "restore_tail";
+
+/// Byte range of the trace-id inside a W3C `traceparent`
+/// (`00-<32 hex trace id>-<16 hex span id>-<2 hex flags>`).
+///
+/// Only ever applied to a string [`TraceCarrier`] itself re-rendered from a
+/// parsed span context, so the slice is always present and always canonical
+/// lower-case hex — which is what makes it usable as a set key.
+const TRACEPARENT_TRACE_ID: std::ops::Range<usize> = 3..35;
+
+/// The distinct producer traces carried by one batch of committed WAL records.
+///
+/// # Why links and not parents
+///
+/// A `gres.wal_apply` span is **linked** to the commits it applies, never
+/// parented under them, and that is a deliberate constraint rather than an
+/// approximation to be tightened later. Three independent reasons:
+///
+/// - A recovery replay may run hours after the commit it is replaying. Making
+///   it a child would stretch the commit's trace across the whole WAL retention
+///   period, so the trace's duration would measure retention, not latency.
+/// - One commit fans out to every follower, every checkpoint service, and every
+///   future replay. The child set of a single commit span is unbounded in a way
+///   no trace backend renders usefully.
+/// - The sampler is `ParentBased(TraceIdRatioBased)`, which returns
+///   `RecordAndSample` unconditionally for a *sampled* remote parent. Parenting
+///   would therefore force export of every apply of every sampled write,
+///   forever, on the hottest loop in the system.
+///
+/// A link says "this apply was caused by that commit" without any of those
+/// consequences.
+#[derive(Debug, Clone, Default)]
+pub struct WalTraceLinks {
+    /// Whether the WAL target is enabled. When it is not, [`WalTraceLinks::record`]
+    /// returns before parsing anything: a recovery that exports no spans must
+    /// not pay a `traceparent` parse per record.
+    armed: bool,
+    carriers: Vec<TraceCarrier>,
+    trace_ids: BTreeSet<String>,
+}
+
+impl WalTraceLinks {
+    /// Build a collector that gathers links only when the WAL span target is
+    /// enabled.
+    #[must_use]
+    pub fn collecting() -> Self {
+        Self {
+            armed: tracing::enabled!(target: WAL_TARGET, tracing::Level::DEBUG),
+            ..Self::default()
+        }
+    }
+
+    /// Offer one record's headers to the collector.
+    ///
+    /// Keeps at most one carrier per trace-id and at most
+    /// [`MAX_WAL_APPLY_LINKS`] of them: a batch is overwhelmingly one commit
+    /// per trace, so deduplicating by trace rather than by record is what keeps
+    /// a thousand-record replay to a handful of links.
+    pub fn record<'a, I, V>(&mut self, headers: I)
+    where
+        I: IntoIterator<Item = (&'a str, V)>,
+        V: AsRef<[u8]>,
+    {
+        if !self.armed || self.carriers.len() >= MAX_WAL_APPLY_LINKS {
+            return;
+        }
+        let carrier = TraceCarrier::from_headers(headers);
+        let Some(trace_id) = carrier
+            .traceparent
+            .as_deref()
+            .and_then(|traceparent| traceparent.get(TRACEPARENT_TRACE_ID))
+        else {
+            return;
+        };
+        if !self.trace_ids.insert(trace_id.to_owned()) {
+            return;
+        }
+        self.carriers.push(carrier);
+    }
+
+    /// How many distinct producer traces were collected.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.carriers.len()
+    }
+
+    /// Whether no producer trace was collected — the normal case for an
+    /// untraced write, and for a reader that does not decode record headers.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.carriers.is_empty()
+    }
+
+    /// Attach every collected context to `span` as an OpenTelemetry link.
+    fn attach_to(&self, span: &Span) {
+        for carrier in &self.carriers {
+            carrier.link_into(span);
+        }
+    }
+}
+
+/// Committed WAL records together with the producer traces their record
+/// headers named.
+#[derive(Debug, Default)]
+pub struct TracedWalRecords {
+    /// The records, in offset order — exactly what
+    /// [`CommittedWalReader::committed_from`] returns.
+    pub items: Vec<ReplayItem>,
+    /// Producer trace contexts for the `gres.wal_apply` span to link to.
+    pub links: WalTraceLinks,
+}
+
+/// Build the `gres.wal_apply` span covering one batch of committed WAL records
+/// applied to a local read model.
+///
+/// One span per *batch*, never per record: a replay applies thousands of frames
+/// and a span each would be dropped by the exporter long before it reached a
+/// backend. `pg.wal.source` says which consumer is applying, which is the field
+/// that separates a slow recovery from a slow follower from a slow checkpoint
+/// restore when all three are running against one tenant.
+#[must_use]
+pub fn wal_apply_span(source: &'static str, records: usize, links: &WalTraceLinks) -> Span {
+    let span = tracing::debug_span!(
+        target: WAL_TARGET,
+        "gres.wal_apply",
+        otel.kind = "consumer",
+        messaging.system = "kafka",
+        pg.wal.source = source,
+        pg.wal.records = integer(records),
+        pg.wal.links = integer(links.len()),
+    );
+    links.attach_to(&span);
+    span
+}
+
 /// `READ_COMMITTED` replay seam. Implementations must not model `ListOffsets` as a
 /// stable end; recovery terminates on the barrier offset returned by fencing.
 #[async_trait::async_trait]
@@ -1459,6 +1635,31 @@ pub trait CommittedWalReader: Send + Sync {
     /// Return committed WAL records from the beginning of the topic.
     async fn committed_from_start(&self) -> Result<Vec<ReplayItem>, SubstrateError> {
         self.committed_from(0).await
+    }
+
+    /// Return committed WAL records together with the producer traces their
+    /// headers named, for a caller that will open a `gres.wal_apply` span.
+    ///
+    /// Separate from [`CommittedWalReader::committed_from`] because trace
+    /// context lives in Kafka record headers and [`ReplayItem`] deliberately
+    /// carries none: it is a decode-and-apply value, and threading telemetry
+    /// through it would put a trace field on every one of its construction
+    /// sites. A reader that reads no headers — an in-memory log, a test double
+    /// — inherits the default and reports no links, which is exactly true of it.
+    async fn committed_from_traced(
+        &self,
+        start_offset: i64,
+    ) -> Result<TracedWalRecords, SubstrateError> {
+        Ok(TracedWalRecords {
+            items: self.committed_from(start_offset).await?,
+            links: WalTraceLinks::default(),
+        })
+    }
+
+    /// [`CommittedWalReader::committed_from_traced`] from the beginning of the
+    /// topic.
+    async fn committed_from_start_traced(&self) -> Result<TracedWalRecords, SubstrateError> {
+        self.committed_from_traced(0).await
     }
 
     /// Return the earliest retained WAL offset when known.

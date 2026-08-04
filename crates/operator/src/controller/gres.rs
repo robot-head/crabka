@@ -1252,6 +1252,7 @@ mod tests {
                 compute: None,
                 defaults: None,
                 balancer: None,
+                tracing: None,
             },
         );
         obj.metadata.namespace = Some("ns".into());

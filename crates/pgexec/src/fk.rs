@@ -91,6 +91,7 @@ use crabka_pgkv::{Kv, WriteOp};
 use crabka_pgmvcc::visibility::Snapshot;
 use crabka_pgparser::ast::{ConstraintAttributes, ForeignKeyRef};
 use crabka_pgtypes::{ColumnType, Datum};
+use tracing::Instrument as _;
 
 use crate::{
     clock::EvalCtx,
@@ -1551,48 +1552,103 @@ where
     L: FkKeyLocks + Sync,
     C: FkCascade + Send,
 {
-    let mut catalog = DrainCatalog::new(ctx.catalog_kv);
-    let mut ops = Vec::new();
-    // Referential actions append, so this is a fixpoint loop, not a walk over a
-    // fixed list. It terminates on the data — each action's ops are folded into
-    // what is read here, so a row already dealt with no longer matches the key
-    // being chased — and the engine's write bookkeeping bounds it regardless, by
-    // allowing one constraint's action one write per row.
-    while let Some(check) = entries.pop_front() {
-        let check = match deferred.as_deref_mut() {
-            Some(store) => {
-                let Some(check) = store.defer(check) else {
-                    continue;
-                };
-                check
-            }
-            None => check,
-        };
-        match check {
-            PendingCheck::Child { fk, rowid, key } => {
-                run_child_check(ctx, locks, &mut catalog, &fk, rowid, key).await?;
-            }
-            PendingCheck::Parent {
-                fk, key, new_key, ..
-            } => {
-                let follow_on = run_parent_check(
-                    ctx,
-                    locks,
-                    cascade,
-                    &mut catalog,
-                    &ParentCheck {
-                        fk: &fk,
-                        key: &key,
-                        new_key: new_key.as_deref(),
-                    },
-                    &mut ops,
-                )
-                .await?;
-                entries.extend(follow_on);
+    // A statement with no referential work drains nothing, and gets no span:
+    // the overwhelming majority of writes touch no foreign key, and a
+    // zero-duration span on every one of them is pure noise.
+    if entries.is_empty() {
+        return Ok(Vec::new());
+    }
+    // The enclosing write span, captured before this one opens so the count can
+    // be folded back onto it. A statement runs exactly one of these drains.
+    let statement = tracing::Span::current();
+    let span = drain_span(entries.len());
+    let drained = async {
+        let mut catalog = DrainCatalog::new(ctx.catalog_kv);
+        let mut ops = Vec::new();
+        let mut performed = 0usize;
+        // Referential actions append, so this is a fixpoint loop, not a walk over a
+        // fixed list. It terminates on the data — each action's ops are folded into
+        // what is read here, so a row already dealt with no longer matches the key
+        // being chased — and the engine's write bookkeeping bounds it regardless, by
+        // allowing one constraint's action one write per row.
+        while let Some(check) = entries.pop_front() {
+            let check = match deferred.as_deref_mut() {
+                Some(store) => {
+                    let Some(check) = store.defer(check) else {
+                        continue;
+                    };
+                    check
+                }
+                None => check,
+            };
+            performed += 1;
+            match check {
+                PendingCheck::Child { fk, rowid, key } => {
+                    run_child_check(ctx, locks, &mut catalog, &fk, rowid, key).await?;
+                }
+                PendingCheck::Parent {
+                    fk, key, new_key, ..
+                } => {
+                    let follow_on = run_parent_check(
+                        ctx,
+                        locks,
+                        cascade,
+                        &mut catalog,
+                        &ParentCheck {
+                            fk: &fk,
+                            key: &key,
+                            new_key: new_key.as_deref(),
+                        },
+                        &mut ops,
+                    )
+                    .await?;
+                    entries.extend(follow_on);
+                }
             }
         }
+        Ok::<_, ExecError>((ops, performed))
     }
-    Ok(ops)
+    .instrument(span.clone())
+    .await;
+
+    match drained {
+        Ok((ops, performed)) => {
+            span.record("pg.fk_checks", crate::telemetry::integer(performed));
+            span.record("pg.fk_action_ops", crate::telemetry::integer(ops.len()));
+            statement.record("pg.fk_checks", crate::telemetry::integer(performed));
+            Ok(ops)
+        }
+        Err(error) => {
+            let rendered = error.clone().into_pg();
+            crate::telemetry::record_error(&span, &rendered.code, &rendered.message);
+            Err(error)
+        }
+    }
+}
+
+/// Build the span covering one statement's referential-check drain.
+///
+/// One span for the whole drain, never one per check: a `DELETE` of a widely
+/// referenced key queues a check per referencing row, and the useful signal is
+/// how long the batch took and how large it grew — both of which are fields
+/// here.
+///
+/// `queued` is the batch the statement handed over; `pg.fk_checks` is what the
+/// drain actually ran, which is larger whenever a referential action cascaded
+/// into further checks and smaller whenever a check was deferred to `COMMIT`.
+fn drain_span(queued: usize) -> tracing::Span {
+    tracing::debug_span!(
+        target: crate::telemetry::EXEC_TARGET,
+        "pg.fk.drain",
+        otel.kind = "internal",
+        otel.status_code = tracing::field::Empty,
+        otel.status_description = tracing::field::Empty,
+        db.response.status_code = tracing::field::Empty,
+        "error.type" = tracing::field::Empty,
+        pg.fk_queued = crate::telemetry::integer(queued),
+        pg.fk_checks = tracing::field::Empty,
+        pg.fk_action_ops = tracing::field::Empty,
+    )
 }
 
 /// Check that one referencing row's key exists in the parent.

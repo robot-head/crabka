@@ -25,6 +25,7 @@ use crabka_pgwire::{
 };
 use crabka_units::convert::TimeExt as _;
 use tokio::sync::{Mutex, RwLock};
+use tracing::Instrument as _;
 
 use crate::{
     CheckpointManifest, HashShardSpec, MapEpoch, RangeId, RangeKey, RangeMap, RangeScanSegment,
@@ -38,7 +39,7 @@ use crate::{
         RemoteRangeSession, canonicalize_timestamp_operations,
     },
     registry::RangeRegistry,
-    run_split,
+    run_split, telemetry,
     transport::FramedTcpClient,
     tso::{
         BatchedTsoClient, EpochHeartbeat, GrantLease, MemoryTsoHorizon, TsoError,
@@ -3217,6 +3218,24 @@ pub enum StatementKind {
     Local,
 }
 
+impl StatementKind {
+    /// Value written to the `pg.statement_kind` span attribute. Lower-case and
+    /// fixed, so a rename of the variant cannot silently change what an
+    /// operator's saved trace query matches on.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Begin => "begin",
+            Self::Commit => "commit",
+            Self::Rollback => "rollback",
+            Self::Ddl => "ddl",
+            Self::Dml => "dml",
+            Self::Query => "query",
+            Self::Local => "local",
+        }
+    }
+}
+
 pub struct GatewaySession {
     inner: Arc<TenantInner>,
     sessions: BTreeMap<RangeId, crabka_pgexec::SqlSession>,
@@ -3255,6 +3274,31 @@ struct GatewayPortal {
     gateway_execution: Option<ExecuteOutcome>,
 }
 
+/// Which commit protocol a gateway session is currently running under.
+///
+/// **There are two, and a transaction uses one or the other — never both.**
+/// Confusing them reads like a missing-2PC bug, so:
+///
+/// - [`Self::Open`] — plain per-range tables. Each write enlists its range via
+///   `touch_write_range`, which flips `escalated` the moment a *second*
+///   distinct range joins. `commit_transaction` then settles through the
+///   **global-xid** protocol: `commit_global_transaction`, one `prepare_on_range`
+///   per participant, then the decision. Traced as `pg.commit_global` +
+///   `pg.prepare`.
+/// - [`Self::Timestamp`] — hash-sharded tables, where one statement's rows
+///   already straddle ranges. `execute_timestamp_scatter` runs the
+///   Percolator-style protocol instead. Traced as `pg.timestamp_scatter` /
+///   `pg.prewrite` / `pg.resolve`.
+///
+/// So a `BEGIN; INSERT t_a; INSERT t_b; COMMIT` across two ranges emits
+/// `pg.commit_global`, **not** `pg.timestamp_scatter`. That is correct, and is
+/// pinned by `cross_range_transaction_commits_through_global_two_phase_commit`
+/// in `tests/gateway_tracing.rs`.
+///
+/// The atomicity invariant is enforced rather than assumed: a multi-participant
+/// [`Self::Open`] that somehow reached commit *without* `escalated` set is
+/// rejected with `XX000` in `commit_transaction` instead of committing
+/// participant-by-participant. There is no path that silently half-applies.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum GatewayTransaction {
     Idle,
@@ -3376,11 +3420,23 @@ impl Session for GatewaySession {
                     inner: sink,
                     offset: result_index,
                     completed: 0,
+                    rows: 0,
+                    pages: 0,
                 };
-                forward
+                // The streaming path bypasses `execute_one`, so it builds its
+                // own `db.statement` span; without it the fast path would be
+                // the one shape of query missing from every trace.
+                let span = self.statement_span(statement, true);
+                let streamed = forward
                     .forward_query_into(route.range_id, statement.to_owned(), &mut offset)
+                    .instrument(span.clone())
                     .await
-                    .map_err(ForwardError::into_pg)?;
+                    .map_err(ForwardError::into_pg);
+                // Counters, not per-page spans: a 100k-row result would emit a
+                // span per page, all of which the exporter drops.
+                telemetry::record_rows(&span, u64::try_from(offset.rows).ok(), Some(offset.pages));
+                record_pg_result(&span, &streamed);
+                streamed?;
                 result_index = result_index.saturating_add(offset.completed);
                 continue;
             }
@@ -3486,6 +3542,11 @@ struct OffsetResultSink<'a, S> {
     inner: &'a mut S,
     offset: usize,
     completed: usize,
+    /// Rows forwarded, accumulated so the enclosing statement span can record
+    /// `db.response.returned_rows` once instead of emitting a span per page.
+    rows: usize,
+    /// Pages forwarded, for `pg.result_pages`.
+    pages: usize,
 }
 
 #[async_trait::async_trait]
@@ -3493,6 +3554,10 @@ impl<S: crabka_pgwire::engine::ResultSink> crabka_pgwire::engine::ResultSink
     for OffsetResultSink<'_, S>
 {
     async fn send(&mut self, mut page: crabka_pgwire::engine::ResultPage) -> Result<(), PgError> {
+        self.pages = self.pages.saturating_add(1);
+        if let crabka_pgwire::engine::ResultPage::Rows { rows, .. } = &page {
+            self.rows = self.rows.saturating_add(rows.len());
+        }
         let (index, terminal) = match &mut page {
             crabka_pgwire::engine::ResultPage::Rows {
                 result_index, tag, ..
@@ -3508,6 +3573,57 @@ impl<S: crabka_pgwire::engine::ResultSink> crabka_pgwire::engine::ResultSink
         }
         self.inner.send(page).await
     }
+}
+
+/// The `pg.decision` attribute for a resolve round.
+const fn timestamp_decision_label(decision: crabka_pgexec::TimestampTxnDecision) -> &'static str {
+    match decision {
+        crabka_pgexec::TimestampTxnDecision::Pending => "pending",
+        crabka_pgexec::TimestampTxnDecision::Aborted => "aborted",
+        crabka_pgexec::TimestampTxnDecision::Committed(_) => "committed",
+        crabka_pgexec::TimestampTxnDecision::Deleted(_) => "deleted",
+    }
+}
+
+/// Fold a failed result onto `span`. Success is deliberately not recorded:
+/// `otel.status_code` stays unset, which is what `Unset` means in `OTel`.
+fn record_pg_result<T>(span: &tracing::Span, result: &Result<T, PgError>) {
+    if let Err(error) = result {
+        telemetry::record_error(span, &error.code, &error.message);
+    }
+}
+
+/// Rows a statement sent back to the client, for `db.response.returned_rows`.
+/// `None` when the statement returned no result set at all, which is different
+/// from a result set that happened to be empty.
+fn returned_rows(results: &[QueryResult]) -> Option<u64> {
+    let mut total: Option<u64> = None;
+    for result in results {
+        if let QueryResult::Rows { rows, .. } = result {
+            let rows = u64::try_from(rows.len()).unwrap_or(u64::MAX);
+            total = Some(total.unwrap_or_default().saturating_add(rows));
+        }
+    }
+    total
+}
+
+/// Rows a statement reported *changing*, for `pg.rows_affected`: the count
+/// `PostgreSQL` puts at the end of a command tag (`INSERT 0 1`, `UPDATE 3`).
+///
+/// Tags without a count (`BEGIN`, `SET`) contribute nothing, and a statement
+/// that produced only those leaves the attribute unset rather than claiming
+/// zero. Row-returning results are deliberately excluded — the rows a `SELECT`
+/// returned are `db.response.returned_rows`, a different question.
+fn rows_affected(results: &[QueryResult]) -> Option<u64> {
+    let mut total: Option<u64> = None;
+    for result in results {
+        if let QueryResult::Command { tag } = result
+            && let Some(rows) = tag.rsplit(' ').next().and_then(|c| c.parse::<u64>().ok())
+        {
+            total = Some(total.unwrap_or_default().saturating_add(rows));
+        }
+    }
+    total
 }
 
 async fn send_gateway_result<S: crabka_pgwire::engine::ResultSink>(
@@ -3644,19 +3760,27 @@ impl GatewaySession {
         range_id: RangeId,
         global_xid: u64,
     ) -> Result<u64, PgError> {
-        if let Some(session) = self.sessions.get_mut(&range_id) {
-            session
-                .prepare_global_participant(global_xid)
-                .await
-                .map_err(ExecError::into_pg)
-        } else {
-            self.ensure_remote_session(range_id).await?;
-            self.remote_sessions
-                .get_mut(&range_id)
-                .expect("remote session inserted")
-                .prepare_global(global_xid)
-                .await
+        let span =
+            telemetry::prepare_span(range_id, global_xid, self.sessions.contains_key(&range_id));
+        let result = async {
+            if let Some(session) = self.sessions.get_mut(&range_id) {
+                session
+                    .prepare_global_participant(global_xid)
+                    .await
+                    .map_err(ExecError::into_pg)
+            } else {
+                self.ensure_remote_session(range_id).await?;
+                self.remote_sessions
+                    .get_mut(&range_id)
+                    .expect("remote session inserted")
+                    .prepare_global(global_xid)
+                    .await
+            }
         }
+        .instrument(span.clone())
+        .await;
+        record_pg_result(&span, &result);
+        result
     }
 
     async fn release_on_range(
@@ -4116,7 +4240,68 @@ impl GatewaySession {
         Ok(())
     }
 
+    /// Run one statement under the gateway's `db.statement` span — the
+    /// gateway-side analogue of the range-local statement span, and the span an
+    /// operator reads first when a query is slow.
     async fn execute_one_inner(&mut self, statement: &str) -> Result<Vec<QueryResult>, PgError> {
+        let span = self.statement_span(statement, false);
+        let result = self
+            .execute_one_statement(statement)
+            .instrument(span.clone())
+            .await;
+        match &result {
+            Ok(results) => {
+                telemetry::record_rows(&span, returned_rows(results), None);
+                telemetry::record_statement_outcome(
+                    &span,
+                    rows_affected(results),
+                    self.transaction_global_xid(),
+                );
+            }
+            Err(error) => telemetry::record_error(&span, &error.code, &error.message),
+        }
+        result
+    }
+
+    /// Build the `db.statement` span for `statement`.
+    ///
+    /// Behind an `enabled!` guard because the field expressions are not free:
+    /// naming the collection lower-cases the statement and re-scans it for a
+    /// table reference. That work must not be paid by a gateway that exports
+    /// nothing.
+    fn statement_span(&self, statement: &str, fast_path: bool) -> tracing::Span {
+        if !tracing::enabled!(target: telemetry::ROUTE_TARGET, tracing::Level::DEBUG) {
+            return tracing::Span::none();
+        }
+        let normalized = statement.trim_start().to_ascii_lowercase();
+        let table_ref = table_refs_in_statement(&normalized).into_iter().next();
+        let table_id = table_ref
+            .as_ref()
+            .map(|table_ref| table_ref.table_id.as_u64());
+        let kind = route_statement_kind(&normalized);
+        telemetry::statement_span(
+            self.inner.tenant.as_str(),
+            statement,
+            kind.label(),
+            table_ref.as_ref().map(|table_ref| table_ref.name.as_str()),
+            table_id,
+            fast_path,
+        )
+    }
+
+    /// The global transaction id this session is currently running under, for
+    /// `pg.txn.global_xid`. `None` outside a distributed transaction.
+    fn transaction_global_xid(&self) -> Option<u64> {
+        match &self.transaction {
+            GatewayTransaction::Timestamp { identity, .. } => Some(identity.global_xid),
+            _ => None,
+        }
+    }
+
+    async fn execute_one_statement(
+        &mut self,
+        statement: &str,
+    ) -> Result<Vec<QueryResult>, PgError> {
         self.current_serving()?;
         self.reject_statement_in_failed_transaction(statement)?;
         let route = self.route_statement(statement)?;
@@ -4314,11 +4499,42 @@ impl GatewaySession {
         Ok(rollback_command_response())
     }
 
+    /// Drive the global-xid 2PC commit — the gateway's other distributed-commit
+    /// protocol, distinct from the timestamp scatter above.
+    ///
+    /// The outcome falls straight out of the error the body already builds:
+    /// [`GlobalCommitError::recovery`] is `Some` exactly when the decision may
+    /// be durable but unreleased, which is what `indeterminate` means.
     async fn commit_global_transaction(
         &mut self,
         touched: Vec<RangeId>,
     ) -> Result<(), GlobalCommitError> {
+        let span = telemetry::commit_global_span(self.inner.tenant.as_str(), &touched);
+        let result = self
+            .commit_global_transaction_inner(touched)
+            .instrument(span.clone())
+            .await;
+        match &result {
+            Ok(()) => telemetry::record_outcome(&span, telemetry::ScatterOutcome::Committed),
+            Err(error) => {
+                let outcome = if error.recovery.is_some() {
+                    telemetry::ScatterOutcome::Indeterminate
+                } else {
+                    telemetry::ScatterOutcome::Aborted
+                };
+                telemetry::record_outcome(&span, outcome);
+                telemetry::record_error(&span, &error.error.code, &error.error.message);
+            }
+        }
+        result
+    }
+
+    async fn commit_global_transaction_inner(
+        &mut self,
+        touched: Vec<RangeId>,
+    ) -> Result<(), GlobalCommitError> {
         let global_xid = self.begin_global_transaction(&touched).await?;
+        telemetry::record_global_xid(&tracing::Span::current(), global_xid);
         let mut prepared = Vec::with_capacity(touched.len());
 
         for range_id in touched.iter().copied() {
@@ -4656,9 +4872,23 @@ impl GatewaySession {
     }
 
     async fn execute_ddl(&mut self, statement: &str) -> Result<Vec<QueryResult>, PgError> {
+        let span = telemetry::ddl_span(self.inner.tenant.as_str());
+        let result = self
+            .execute_ddl_inner(statement)
+            .instrument(span.clone())
+            .await;
+        record_pg_result(&span, &result);
+        result
+    }
+
+    async fn execute_ddl_inner(&mut self, statement: &str) -> Result<Vec<QueryResult>, PgError> {
         let _schema_gate = self.inner.schema_gate.clone().lock_owned().await;
         // DDL always executes on the range-0 catalog owner: locally when this
         // node hosts r0, otherwise forwarded to the owner over the range RPC.
+        telemetry::record_local(
+            &tracing::Span::current(),
+            self.sessions.contains_key(&RangeId::COORDINATOR),
+        );
         let results = if self.sessions.contains_key(&RangeId::COORDINATOR) {
             self.session_for(RangeId::COORDINATOR)?
                 .simple_query(statement)
@@ -4780,6 +5010,25 @@ impl GatewaySession {
         kind: StatementKind,
         range_id: RangeId,
     ) -> Result<Vec<QueryResult>, PgError> {
+        let span = telemetry::routed_statement_span(
+            range_id,
+            kind.label(),
+            self.sessions.contains_key(&range_id),
+        );
+        let result = self
+            .execute_routed_statement_inner(statement, kind, range_id)
+            .instrument(span.clone())
+            .await;
+        record_pg_result(&span, &result);
+        result
+    }
+
+    async fn execute_routed_statement_inner(
+        &mut self,
+        statement: &str,
+        kind: StatementKind,
+        range_id: RangeId,
+    ) -> Result<Vec<QueryResult>, PgError> {
         if !self.sessions.contains_key(&range_id) {
             return self
                 .execute_remote_statement(statement, kind, range_id)
@@ -4805,6 +5054,21 @@ impl GatewaySession {
     }
 
     async fn execute_remote_statement(
+        &mut self,
+        statement: &str,
+        kind: StatementKind,
+        range_id: RangeId,
+    ) -> Result<Vec<QueryResult>, PgError> {
+        let span = telemetry::remote_statement_span(range_id, kind.label());
+        let result = self
+            .execute_remote_statement_inner(statement, kind, range_id)
+            .instrument(span.clone())
+            .await;
+        record_pg_result(&span, &result);
+        result
+    }
+
+    async fn execute_remote_statement_inner(
         &mut self,
         statement: &str,
         kind: StatementKind,
@@ -4850,15 +5114,47 @@ impl GatewaySession {
         result
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "the timestamp scatter 2PC protocol must keep its durable ordering visible"
-    )]
+    /// Run one timestamp-scatter (Percolator-style) 2PC round under the
+    /// `pg.timestamp_scatter` span.
+    ///
+    /// The fields worth having — participants, primary, start and commit
+    /// timestamps — are only known part-way through the round, so the body
+    /// records them as it learns them. `pg.outcome` is threaded back out
+    /// through `outcome` instead of being recorded inline: the body has a dozen
+    /// `?` exits, and a round that ends indeterminate without saying so on its
+    /// span is the one failure this feature must not ship with. Threading it
+    /// makes every exit path, including the propagating ones, record something.
     async fn execute_timestamp_scatter(
         &mut self,
         statement: &str,
         ranges: Vec<RangeId>,
     ) -> Result<QueryResult, PgError> {
+        let span = telemetry::scatter_span(self.inner.tenant.as_str());
+        // Nothing is durable until a prewrite lands, so "no durable effect" is
+        // the correct starting claim; the body strengthens it as it goes.
+        let mut outcome = telemetry::ScatterOutcome::Aborted;
+        let result = self
+            .execute_timestamp_scatter_inner(statement, ranges, &mut outcome)
+            .instrument(span.clone())
+            .await;
+        telemetry::record_outcome(&span, outcome);
+        if let Err(error) = &result {
+            telemetry::record_error(&span, &error.code, &error.message);
+        }
+        result
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the timestamp scatter 2PC protocol must keep its durable ordering visible"
+    )]
+    async fn execute_timestamp_scatter_inner(
+        &mut self,
+        statement: &str,
+        ranges: Vec<RangeId>,
+        outcome: &mut telemetry::ScatterOutcome,
+    ) -> Result<QueryResult, PgError> {
+        let span = tracing::Span::current();
         let explicit_timestamp = matches!(self.transaction, GatewayTransaction::Open { ref touched, .. } if touched.is_empty())
             || matches!(self.transaction, GatewayTransaction::Timestamp { .. });
         if !matches!(self.transaction, GatewayTransaction::Idle) && !explicit_timestamp {
@@ -4889,10 +5185,12 @@ impl GatewaySession {
         } else {
             None
         };
+        telemetry::record_scatter_mode(&span, autocommit, bypass_engine.is_some());
         let mut plan = planner
             .plan_timestamp_write_sql(statement)
             .map_err(ExecError::into_pg)?;
         if plan.writes.is_empty() {
+            *outcome = telemetry::ScatterOutcome::NoWrites;
             return Ok(plan.result);
         }
         if plan
@@ -4961,9 +5259,23 @@ impl GatewaySession {
                 "timestamp scatter plan does not match routed ranges",
             ));
         }
+        telemetry::record_scatter_identity(
+            &span,
+            write_lease.start_ts.get(),
+            write_lease.start_ts.get(),
+        );
+        telemetry::record_scatter_plan(
+            &span,
+            &writes_by_range.keys().copied().collect::<Vec<_>>(),
+            writes_by_range.values().map(Vec::len).sum(),
+            // The routing table id, not the catalog's: it is what `pg.route`
+            // and the range map both key off, so the two spans agree.
+            routing_table_id(&table.name).as_u64(),
+        );
         if autocommit {
             let primary_range =
                 timestamp_primary_range(&writes_by_range).expect("one primary range");
+            telemetry::record_primary_range(&span, primary_range);
             let start_ts = write_lease.start_ts;
             let identity = crabka_pgexec::TimestampTxnIdentity {
                 start_ts,
@@ -4982,6 +5294,9 @@ impl GatewaySession {
                         .await?;
                 }
             }
+            // Every prewrite is durable and no decision exists yet: from here
+            // until the primary resolves, a failure leaves locks behind.
+            *outcome = telemetry::ScatterOutcome::Indeterminate;
             if self.take_commit_fault_for_testing(
                 GatewayCommitFault::AfterTimestampPrewriteBeforeDecision,
             ) {
@@ -5000,6 +5315,7 @@ impl GatewaySession {
                     .await
                     .map_err(ExecError::into_pg)?
             };
+            telemetry::record_commit_ts(&span, commit_ts.get());
             self.timestamp_resolve(
                 primary_range,
                 identity,
@@ -5007,6 +5323,10 @@ impl GatewaySession {
                 writes_by_range.get(&primary_range).expect("primary writes"),
             )
             .await?;
+            // Percolator decides at the primary: once its resolve is durable
+            // the transaction is committed, even if a secondary resolve below
+            // fails and the statement returns an error.
+            *outcome = telemetry::ScatterOutcome::Committed;
             let committed_table_ids = writes_by_range
                 .values()
                 .flatten()
@@ -5057,6 +5377,13 @@ impl GatewaySession {
             identity
         };
         let primary_range = RangeId::new(identity.primary_range);
+        telemetry::record_primary_range(&span, primary_range);
+        telemetry::record_scatter_identity(&span, identity.start_ts.get(), identity.global_xid);
+        if existing {
+            // Earlier statements in this transaction already prewrote, so
+            // durable-and-unresolved is the truth before this one starts.
+            *outcome = telemetry::ScatterOutcome::Indeterminate;
+        }
         let mut statement_participants = Vec::with_capacity(writes_by_range.len());
         for (range_id, writes) in &writes_by_range {
             if existing && *range_id != primary_range {
@@ -5082,12 +5409,16 @@ impl GatewaySession {
                 // the prewrite failure with its own error.
                 let participants = self.timestamp_participants_with(&statement_participants);
                 if !participants.is_empty() {
+                    // A failing abort leaves `outcome` at `Indeterminate`: the
+                    // locks it could not resolve are still out there.
                     self.abort_timestamp_scatter(identity, &participants)
                         .await
                         .map_err(ExecError::into_pg)?;
                 }
+                *outcome = telemetry::ScatterOutcome::Aborted;
                 return Err(error);
             }
+            *outcome = telemetry::ScatterOutcome::Indeterminate;
             statement_participants.push((*range_id, writes.clone()));
             if *range_id != primary_range {
                 if !existing {
@@ -5105,6 +5436,9 @@ impl GatewaySession {
             for (range_id, writes) in statement_participants {
                 participants.entry(range_id).or_default().extend(writes);
             }
+            // Prewrites are durable; the decision waits for the explicit
+            // COMMIT, which runs its own resolve round.
+            *outcome = telemetry::ScatterOutcome::Prepared;
             return Ok(plan.result);
         }
         unreachable!("autocommit timestamp writes return through the primary-range fast path")
@@ -5208,23 +5542,30 @@ impl GatewaySession {
         participants: &[RangeId],
         writes: &[crabka_pgexec::TimestampWrite],
     ) -> Result<(), PgError> {
+        let span = self.prewrite_span(range_id, telemetry::ROLE_PRIMARY, identity, writes.len());
         let participants = participants
             .iter()
             .map(|range| range.as_u32())
             .collect::<Vec<_>>();
-        if let Ok(participant) = self.timestamp_participant(range_id) {
-            return participant
-                .prewrite_as_primary(identity, &participants, writes)
+        let result = async {
+            if let Ok(participant) = self.timestamp_participant(range_id) {
+                return participant
+                    .prewrite_as_primary(identity, &participants, writes)
+                    .await
+                    .map_err(ExecError::into_pg);
+            }
+            self.remote_sessions
+                .get(&range_id)
+                .ok_or_else(|| {
+                    PgError::error("08003", "remote timestamp participant session is missing")
+                })?
+                .timestamp_prewrite_as_primary(identity, &participants, writes)
                 .await
-                .map_err(ExecError::into_pg);
         }
-        self.remote_sessions
-            .get(&range_id)
-            .ok_or_else(|| {
-                PgError::error("08003", "remote timestamp participant session is missing")
-            })?
-            .timestamp_prewrite_as_primary(identity, &participants, writes)
-            .await
+        .instrument(span.clone())
+        .await;
+        record_pg_result(&span, &result);
+        result
     }
 
     async fn timestamp_prewrite_as_secondary(
@@ -5233,19 +5574,26 @@ impl GatewaySession {
         identity: crabka_pgexec::TimestampTxnIdentity,
         writes: &[crabka_pgexec::TimestampWrite],
     ) -> Result<(), PgError> {
-        if let Ok(participant) = self.timestamp_participant(range_id) {
-            return participant
-                .prewrite_as_secondary(identity, writes)
+        let span = self.prewrite_span(range_id, telemetry::ROLE_SECONDARY, identity, writes.len());
+        let result = async {
+            if let Ok(participant) = self.timestamp_participant(range_id) {
+                return participant
+                    .prewrite_as_secondary(identity, writes)
+                    .await
+                    .map_err(ExecError::into_pg);
+            }
+            self.remote_sessions
+                .get(&range_id)
+                .ok_or_else(|| {
+                    PgError::error("08003", "remote timestamp participant session is missing")
+                })?
+                .timestamp_prewrite_as_secondary(identity, writes)
                 .await
-                .map_err(ExecError::into_pg);
         }
-        self.remote_sessions
-            .get(&range_id)
-            .ok_or_else(|| {
-                PgError::error("08003", "remote timestamp participant session is missing")
-            })?
-            .timestamp_prewrite_as_secondary(identity, writes)
-            .await
+        .instrument(span.clone())
+        .await;
+        record_pg_result(&span, &result);
+        result
     }
 
     async fn timestamp_prewrite_on_primary(
@@ -5254,17 +5602,49 @@ impl GatewaySession {
         identity: crabka_pgexec::TimestampTxnIdentity,
         writes: &[crabka_pgexec::TimestampWrite],
     ) -> Result<(), PgError> {
-        if let Ok(participant) = self.timestamp_participant(range_id) {
-            return participant
-                .prewrite_on_primary(identity, writes)
+        let span = self.prewrite_span(range_id, telemetry::ROLE_PRIMARY, identity, writes.len());
+        let result = async {
+            if let Ok(participant) = self.timestamp_participant(range_id) {
+                return participant
+                    .prewrite_on_primary(identity, writes)
+                    .await
+                    .map_err(ExecError::into_pg);
+            }
+            self.remote_sessions
+                .get(&range_id)
+                .ok_or_else(|| {
+                    PgError::error("08003", "remote timestamp primary session is missing")
+                })?
+                .timestamp_prewrite_on_primary(identity, writes)
                 .await
-                .map_err(ExecError::into_pg);
         }
-        self.remote_sessions
-            .get(&range_id)
-            .ok_or_else(|| PgError::error("08003", "remote timestamp primary session is missing"))?
-            .timestamp_prewrite_on_primary(identity, writes)
-            .await
+        .instrument(span.clone())
+        .await;
+        record_pg_result(&span, &result);
+        result
+    }
+
+    /// Build a `pg.prewrite` span, resolving `pg.local` only when the span is
+    /// live: deciding it costs a serving-snapshot load and an engine lookup,
+    /// which a gateway that exports nothing should not pay per participant.
+    fn prewrite_span(
+        &self,
+        range_id: RangeId,
+        role: &'static str,
+        identity: crabka_pgexec::TimestampTxnIdentity,
+        writes: usize,
+    ) -> tracing::Span {
+        let span = telemetry::prewrite_span(
+            range_id,
+            role,
+            identity.start_ts.get(),
+            identity.global_xid,
+            writes,
+        );
+        if !span.is_disabled() {
+            telemetry::record_local(&span, self.timestamp_participant(range_id).is_ok());
+        }
+        span
     }
 
     async fn add_primary_participant(
@@ -5334,6 +5714,37 @@ impl GatewaySession {
     }
 
     async fn timestamp_resolve(
+        &self,
+        range_id: RangeId,
+        identity: crabka_pgexec::TimestampTxnIdentity,
+        decision: crabka_pgexec::TimestampTxnDecision,
+        writes: &[crabka_pgexec::TimestampWrite],
+    ) -> Result<(), PgError> {
+        let role = if identity.primary_range == range_id.as_u32() {
+            telemetry::ROLE_PRIMARY
+        } else {
+            telemetry::ROLE_SECONDARY
+        };
+        let span = telemetry::resolve_span(
+            range_id,
+            role,
+            identity.start_ts.get(),
+            identity.global_xid,
+            timestamp_decision_label(decision),
+            writes.len(),
+        );
+        if !span.is_disabled() {
+            telemetry::record_local(&span, self.timestamp_participant(range_id).is_ok());
+        }
+        let result = self
+            .timestamp_resolve_inner(range_id, identity, decision, writes)
+            .instrument(span.clone())
+            .await;
+        record_pg_result(&span, &result);
+        result
+    }
+
+    async fn timestamp_resolve_inner(
         &self,
         range_id: RangeId,
         identity: crabka_pgexec::TimestampTxnIdentity,
@@ -5418,7 +5829,56 @@ impl GatewaySession {
             .await
     }
 
+    /// Resolve every participant of a timestamp transaction as aborted.
+    ///
+    /// Carries its own `pg.abort_scatter` span rather than recording onto the
+    /// scatter span, because an abort also runs from `ROLLBACK` and from the
+    /// failed-statement cleanup, by which time the scatter span is long closed.
+    /// An abort that stops half-way is exactly the state that needs a span of
+    /// its own saying `pg.outcome = "indeterminate"`.
     async fn abort_timestamp_scatter(
+        &self,
+        identity: crabka_pgexec::TimestampTxnIdentity,
+        participants: &[(RangeId, Vec<crabka_pgexec::TimestampWrite>)],
+    ) -> Result<(), ExecError> {
+        let span = telemetry::abort_scatter_span(
+            RangeId::new(identity.primary_range),
+            identity.start_ts.get(),
+            identity.global_xid,
+            participants.len(),
+        );
+        if !span.is_disabled() {
+            telemetry::record_abort_participants(
+                &span,
+                &participants
+                    .iter()
+                    .map(|(range_id, _)| *range_id)
+                    .collect::<Vec<_>>(),
+            );
+        }
+        let result = self
+            .abort_timestamp_scatter_inner(identity, participants)
+            .instrument(span.clone())
+            .await;
+        match &result {
+            Ok(()) => telemetry::record_outcome(&span, telemetry::ScatterOutcome::Aborted),
+            Err(error) => {
+                // Some participants may already have resolved and some not, so
+                // the round's true state is unknown until recovery runs.
+                telemetry::record_outcome(&span, telemetry::ScatterOutcome::Indeterminate);
+                // Every failure below is an `ExecError::Unsupported`, which is
+                // exactly what `ExecError::into_pg` renders as `0A000`.
+                telemetry::record_error(
+                    &span,
+                    sqlstate::FEATURE_NOT_SUPPORTED,
+                    &format!("{error:?}"),
+                );
+            }
+        }
+        result
+    }
+
+    async fn abort_timestamp_scatter_inner(
         &self,
         identity: crabka_pgexec::TimestampTxnIdentity,
         participants: &[(RangeId, Vec<crabka_pgexec::TimestampWrite>)],
@@ -5569,7 +6029,30 @@ impl GatewaySession {
         })
     }
 
+    /// Route a statement, recording the decision on a `pg.route` span.
+    ///
+    /// `TRACE`, not `DEBUG`: routing runs on every statement — including the
+    /// `SET`s and `BEGIN`s that never leave the coordinator — and it is a
+    /// string scan, so it is the one span here cheap enough to be noise at the
+    /// default level.
     fn route_statement(&self, sql: &str) -> Result<StatementRoute, PgError> {
+        let span = telemetry::route_span(self.inner.tenant.as_str());
+        let _guard = span.enter();
+        let route = self.route_statement_inner(sql);
+        match &route {
+            Ok(route) => telemetry::record_route(
+                &span,
+                route.kind.label(),
+                route.range_id,
+                route.table_id.map(TableId::as_u64),
+                route.scatter_ranges.as_ref().map(Vec::len),
+            ),
+            Err(error) => telemetry::record_error(&span, &error.code, &error.message),
+        }
+        route
+    }
+
+    fn route_statement_inner(&self, sql: &str) -> Result<StatementRoute, PgError> {
         let serving = self.current_serving()?;
         let catalog = planner_engine(&serving)?;
         let mut route = route_statement(&serving.range_map, catalog, sql)?;
@@ -6157,61 +6640,28 @@ fn route_statement(
     sql: &str,
 ) -> Result<StatementRoute, PgError> {
     let normalized = sql.trim_start().to_ascii_lowercase();
-    if normalized.is_empty() {
+    let kind = route_statement_kind(&normalized);
+    if matches!(
+        kind,
+        StatementKind::Begin
+            | StatementKind::Commit
+            | StatementKind::Rollback
+            | StatementKind::Local
+    ) {
         return Ok(StatementRoute {
-            kind: StatementKind::Local,
+            kind,
             range_id: RangeId::COORDINATOR,
             table_id: None,
             scatter_ranges: None,
         });
     }
-    if starts_with_any(&normalized, &["begin", "start transaction"]) {
+    if kind == StatementKind::Ddl {
         return Ok(StatementRoute {
-            kind: StatementKind::Begin,
-            range_id: RangeId::COORDINATOR,
-            table_id: None,
-            scatter_ranges: None,
-        });
-    }
-    if statement_is_commit(sql) {
-        return Ok(StatementRoute {
-            kind: StatementKind::Commit,
-            range_id: RangeId::COORDINATOR,
-            table_id: None,
-            scatter_ranges: None,
-        });
-    }
-    if statement_is_abort_cleanup(sql) {
-        return Ok(StatementRoute {
-            kind: StatementKind::Rollback,
-            range_id: RangeId::COORDINATOR,
-            table_id: None,
-            scatter_ranges: None,
-        });
-    }
-    if starts_with_any(&normalized, &["create", "alter", "drop", "truncate"]) {
-        return Ok(StatementRoute {
-            kind: StatementKind::Ddl,
+            kind,
             range_id: RouteIntent::DataDefinition
                 .route(range_map)
                 .map_err(|error| map_error_to_pg(&error))?
                 .range_id,
-            table_id: None,
-            scatter_ranges: None,
-        });
-    }
-
-    let kind = if starts_with_any(&normalized, &["insert", "update", "delete"]) {
-        StatementKind::Dml
-    } else if normalized.starts_with("select") {
-        StatementKind::Query
-    } else {
-        StatementKind::Local
-    };
-    if kind == StatementKind::Local {
-        return Ok(StatementRoute {
-            kind,
-            range_id: RangeId::COORDINATOR,
             table_id: None,
             scatter_ranges: None,
         });
@@ -6228,6 +6678,37 @@ fn route_statement(
         table_id: Some(table_id),
         scatter_ranges: route.scatter_ranges,
     })
+}
+
+/// Classify a statement from its leading keywords alone.
+///
+/// This is the catalog-free half of [`route_statement`]'s decision: the part
+/// that needs no range map, no planner and no allocation beyond the caller's
+/// already-lower-cased `normalized`. Statement spans use it to label a
+/// statement without paying for a full route.
+fn route_statement_kind(normalized: &str) -> StatementKind {
+    if normalized.is_empty() {
+        return StatementKind::Local;
+    }
+    if starts_with_any(normalized, &["begin", "start transaction"]) {
+        return StatementKind::Begin;
+    }
+    if statement_is_commit(normalized) {
+        return StatementKind::Commit;
+    }
+    if statement_is_abort_cleanup(normalized) {
+        return StatementKind::Rollback;
+    }
+    if starts_with_any(normalized, &["create", "alter", "drop", "truncate"]) {
+        return StatementKind::Ddl;
+    }
+    if starts_with_any(normalized, &["insert", "update", "delete"]) {
+        return StatementKind::Dml;
+    }
+    if normalized.starts_with("select") {
+        return StatementKind::Query;
+    }
+    StatementKind::Local
 }
 
 struct RouteTarget {

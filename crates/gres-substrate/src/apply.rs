@@ -12,6 +12,8 @@ use std::collections::{HashMap, HashSet};
 use crabka_pgkv::{Kv, KvError, WriteOp, is_notify_op, key};
 use crabka_pgmvcc::clog;
 
+use crate::telemetry;
+
 /// Apply one journaled batch to `kv` with max-merge counters and write-once
 /// clog, folding duplicates within the batch.
 ///
@@ -23,6 +25,11 @@ use crabka_pgmvcc::clog;
 ///
 /// Returns an error when the requested operation cannot be completed.
 pub fn apply_frame(kv: &dyn Kv, ops: &[WriteOp]) -> Result<(), KvError> {
+    // A manual span rather than `#[instrument]`: the attribute macro only
+    // accepts a literal `target`, which would fork the target name from
+    // `telemetry::WAL_TARGET`.
+    let span = telemetry::apply_span(ops.len());
+    let _entered = span.enter();
     let mut counters: HashMap<Vec<u8>, u64> = HashMap::new();
     let mut decided: HashSet<Vec<u8>> = HashSet::new();
     let mut adjusted = Vec::with_capacity(ops.len());

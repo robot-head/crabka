@@ -36,13 +36,13 @@ crabka-client-core = { version = "0.3.9", path = "../client-core" }
 crabka-client-producer = { version = "0.3.9", path = "../client-producer" }
 crabka-protocol = { version = "0.3.9", path = "../protocol", default-features = false }
 crabka-security = { path = "../security" }
+crabka-telemetry = { version = "0.3.8", path = "../telemetry" }
 crabka-units = { workspace = true }
 bytes = { workspace = true }
 clap = { workspace = true, features = ["env"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 rustls = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
@@ -67,3 +67,4 @@ crabka-security = { path = "../security" }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
 tokio-postgres = { workspace = true }
+tracing-subscriber = { workspace = true }

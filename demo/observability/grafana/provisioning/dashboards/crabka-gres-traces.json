@@ -1,0 +1,68 @@
+{
+  "uid": "crabka-gres-traces",
+  "title": "Crabka — Gres Query Traces",
+  "description": "Distributed traces from crabka-gres, the PostgreSQL-compatible SQL engine. Every panel filters on span attributes rather than span names: the statement span sets otel.name, so it is exported under the query summary (\"SELECT demo_orders\"), never under a literal name like db.statement.",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "id": 1, "type": "table", "title": "Recent query traces",
+      "description": "One row per trace. Click a trace id to open the waterfall: gres.session → gres.statement → the engine's statement span → pg.select / pg.write → pg.timestamp.read, gres.wal_append, gres.exec_read; a write also has pg.commit.",
+      "datasource": { "type": "tempo", "uid": "crabka-tempo" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 0 },
+      "targets": [ { "refId": "A", "queryType": "traceql", "query": "{ resource.service.name = \"gres\" }", "limit": 20, "tableType": "traces" } ]
+    },
+    {
+      "id": 2, "type": "table", "title": "Statement spans",
+      "description": "Matched on db.system.name, NOT on a span name. The statement span records otel.name = its query summary, so it exports as \"SELECT demo_orders\" and a query for a span named db.statement returns nothing.",
+      "datasource": { "type": "tempo", "uid": "crabka-tempo" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 0 },
+      "targets": [ { "refId": "A", "queryType": "traceql", "query": "{ resource.service.name = \"gres\" && span.db.system.name = \"postgresql\" }", "limit": 20, "tableType": "spans" } ]
+    },
+    {
+      "id": 3, "type": "table", "title": "Slow statements (> 50 ms)",
+      "description": "The starting point for \"which step was slow\" — open one and read the child durations.",
+      "datasource": { "type": "tempo", "uid": "crabka-tempo" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 9 },
+      "targets": [ { "refId": "A", "queryType": "traceql", "query": "{ resource.service.name = \"gres\" && span.db.system.name = \"postgresql\" && duration > 50ms }", "limit": 20, "tableType": "spans" } ]
+    },
+    {
+      "id": 4, "type": "table", "title": "Failed statements",
+      "description": "Statement spans whose status is ERROR. error.type and db.response.status_code both carry the five-character SQLSTATE; otel.status_description carries the message.",
+      "datasource": { "type": "tempo", "uid": "crabka-tempo" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 9 },
+      "targets": [ { "refId": "A", "queryType": "traceql", "query": "{ resource.service.name = \"gres\" && span.db.system.name = \"postgresql\" && status = error }", "limit": 20, "tableType": "spans" } ]
+    },
+    {
+      "id": 5, "type": "table", "title": "Executor reads",
+      "description": "gres.exec_read is the executor body under pg.select / pg.write. Widen crabka_pgexec::exec to =trace via CRABKA_OTLP_FILTER to also get the pg.blocking_worker and pg.scan spans underneath it.",
+      "datasource": { "type": "tempo", "uid": "crabka-tempo" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 9 },
+      "targets": [ { "refId": "A", "queryType": "traceql", "query": "{ resource.service.name = \"gres\" && name = \"gres.exec_read\" }", "limit": 20, "tableType": "spans" } ]
+    },
+    {
+      "id": 6, "type": "table", "title": "Commits",
+      "description": "pg.commit carries pg.gate_wait_ms — time spent waiting for the group-commit gate, the single most useful commit-latency field.",
+      "datasource": { "type": "tempo", "uid": "crabka-tempo" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 17 },
+      "targets": [ { "refId": "A", "queryType": "traceql", "query": "{ resource.service.name = \"gres\" && name = \"pg.commit\" }", "limit": 20, "tableType": "spans" } ]
+    },
+    {
+      "id": 7, "type": "table", "title": "WAL appends",
+      "description": "gres.wal_append is the durable write into the broker, with pg.wal.frames / bytes / first_offset / last_offset. It also injects a traceparent Kafka header, so a WAL apply on a follower or a later replay links back to this trace rather than parenting under it.",
+      "datasource": { "type": "tempo", "uid": "crabka-tempo" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 17 },
+      "targets": [ { "refId": "A", "queryType": "traceql", "query": "{ resource.service.name = \"gres\" && name = \"gres.wal_append\" }", "limit": 20, "tableType": "spans" } ]
+    },
+    {
+      "id": 8, "type": "text", "title": "Reading these traces",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 25 },
+      "options": {
+        "mode": "markdown",
+        "content": "**Filter on attributes, not span names.** `gres.statement` and `db.statement` set `otel.name` to the query summary, so they are exported as `SELECT demo_orders`. Use `span.db.system.name = \"postgresql\"` to select statement spans.\n\n**Fixed span names** you can match directly: `gres.session`, `gres.parse`, `pg.select`, `pg.write`, `pg.commit`, `pg.scan`, `pg.blocking_worker`, `gres.exec_read`, `pg.route`, `pg.timestamp_scatter`, `pg.prewrite`, `pg.resolve`, `gres.wal_append`, `gres.wal_apply`, `kv.apply`, `wal.chunk`, `tso.grant`, `range.barrier`, and — on a multi-range cluster only — `gres.range_rpc` / `gres.range_serve`.\n\n**Join your own trace.** Append a sqlcommenter comment to any query and gres adopts it as the parent:\n\n```sql\nSELECT count(*) FROM demo_orders /*traceparent='00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01'*/\n```\n\nOTel-instrumented Postgres drivers emit that automatically. The `gres-workload` container tags one statement per pass with a fresh random traceparent, so this dashboard always has an example.\n\n**More detail on demand.** The default `CRABKA_OTLP_FILTER` enables the session, statement, executor, routing and WAL tiers at `DEBUG`. Set `CRABKA_OTLP_FILTER=info,crabka_pgexec::exec=trace` (plus the other tiers you want) on the `gres` service for per-scan and contended-row-lock spans.\n\n**Verbatim SQL is off.** `db.query.text` appears only when `CRABKA_OTLP_SQL_TEXT=true`; it exports literals, so it is the one setting here that can leak secrets or personal data. `db.query.summary`, `db.operation.name` and `db.collection.name` are always present."
+      }
+    }
+  ]
+}

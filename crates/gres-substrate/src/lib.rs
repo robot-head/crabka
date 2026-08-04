@@ -21,6 +21,7 @@ pub mod recovery;
 pub mod replay;
 pub mod split_runtime;
 pub mod stats;
+pub mod telemetry;
 pub mod topic;
 pub mod transfer;
 pub mod writer;
@@ -69,6 +70,7 @@ pub use self::{
     },
     split_runtime::{InMemorySplitStateStore, RawKvSplitRuntime},
     stats::{InMemoryRangeStatsProvider, RangeStats, RangeStatsProvider, RangeStatsSnapshot},
+    telemetry::WAL_TARGET,
     topic::{
         DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT, DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT,
         DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT, DEFAULT_WAL_TOPIC_REPLICATION_FACTOR, TopicAdmin,

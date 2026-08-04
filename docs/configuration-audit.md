@@ -6669,3 +6669,57 @@ policy literals remain.
 The full workspace all-target test suite, generated-CRD parity, workspace
 all-target Clippy with warnings denied, nightly formatting, and diff hygiene
 all pass. The repository-wide hardcoded operational-value audit is complete.
+
+## Gres Distributed-Tracing Configuration
+
+`crabka-gres` now installs the shared OTLP pipeline and reads the same
+environment contract as the broker: `CRABKA_OTLP_ENABLED`,
+`CRABKA_OTLP_ENDPOINT`, `CRABKA_OTLP_PROTOCOL`, `CRABKA_OTLP_SAMPLE_RATIO`,
+`CRABKA_OTLP_TIMEOUT`, `CRABKA_OTLP_HEARTBEAT_INTERVAL` and
+`CRABKA_OTLP_FILTER`, with the standard `OTEL_*` fallbacks and the
+`OTEL_SDK_DISABLED` kill switch.
+
+`Gres.spec.tracing` exposes that contract as deployment policy. It reuses the
+`Kafka.spec.tracing` types instead of declaring a parallel set, so both fleets
+share one schema, one shape check, and one set of camelCase names: `type`,
+`otlp.endpoint`, `otlp.protocol`, `otlp.sampleRatio`, `otlp.serviceName` and
+the string-valued `otlp.timeout`. The `GresTenant` reconciler renders the
+populated fields onto every tenant compute container, adding
+`OTEL_SERVICE_NAME` only when `otlp.serviceName` is set; unset leaves the
+binary's own `crabka-gres` service name in place. As on `Kafka`, the export
+filter and heartbeat interval stay environment-only — they are debugging
+controls, not fleet policy.
+
+The field is fleet-scoped and has no `GresTenant` counterpart. Collector
+endpoint, protocol and export timeout are cluster infrastructure, so a
+tenant-writable copy would make telemetry routing a tenant decision. Sampling
+stays fleet-scoped for the same reason it is cluster-scoped on `Kafka`: the
+sampler is parent-based, so a client that supplies a sampled traceparent
+already forces capture of the statement it cares about without any CRD change.
+
+An absent `spec.tracing` emits no OTLP variable at all. That is the off state
+rather than a rendering shortcut: the config reader treats any set endpoint —
+including an empty one — as export enabled, so emitting the pair
+unconditionally would start an exporter that could never reach a collector.
+
+`CRABKA_OTLP_SQL_TEXT`, which attaches verbatim SQL to statement spans, is
+deliberately absent from the CRD. It is the one tracing setting that can export
+secrets and personal data, so it remains an environment-only opt-in for a
+targeted investigation rather than a field that can be turned on fleet-wide.
+
+One tracing value is deployment policy rather than an invariant: the **ingress
+trust policy**. `crabka_pgwire::telemetry::IngressTracePolicy` decides what a
+client-supplied `traceparent` is worth — ignore it, record it as a link, accept
+it as a parent with the sampled flag recomputed locally, or honour the client's
+flag verbatim. A fleet serving untrusted SQL clients wants `Link` (the client
+cannot then influence export volume at all); one serving only first-party
+services may want `Trust`. It is exposed on `ServeArgs` as
+`--gres-trace-ingress` / `CRABKA_GRES_TRACE_INGRESS`, defaulting to `resample`,
+and plumbed to `SessionConfig` in `build_session_config_from_tenant`. The
+`Resample` ratio is not a CLI input: it is adopted from the resolved
+`OtlpConfig` (`CRABKA_OTLP_SAMPLE_RATIO`) via
+`ServeArgs::adopt_otlp_sample_ratio`, so the ingress and export samplers agree
+by construction and cannot drift. Left environment- and flag-level
+rather than a CRD field for the same reason the export filter is: it is a
+security posture an operator tunes per environment, and the CRD already exposes
+the sampling ratio that bounds the blast radius.

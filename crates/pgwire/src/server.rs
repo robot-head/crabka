@@ -17,6 +17,7 @@ use tokio::{
 };
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument as _;
 
 use crate::{
     engine::Engine,
@@ -25,6 +26,7 @@ use crate::{
         frontend::{self, SSL_REQUEST_CODE, StartupPacket},
     },
     session::{self, SessionConfig},
+    telemetry,
 };
 
 /// How many low bits of a backend id the per-session counter occupies. The
@@ -481,6 +483,11 @@ pub async fn serve_conn<E: Engine>(
 
 /// Serve a single connection while updating a shared activity tracker.
 ///
+/// This is the funnel every accepted connection passes through — the accept
+/// loop's `tokio::spawn` and a front-end router serving a leader-local
+/// connection alike — so it is where the connection's `gres.session` span is
+/// raised and instrumented over the whole connection future.
+///
 /// # Errors
 ///
 /// Returns an I/O or protocol-handshake error while serving the connection.
@@ -492,7 +499,16 @@ pub async fn serve_conn_with_activity<E: Engine>(
     tls: Option<TlsAcceptor>,
     activity: Arc<ActivityTracker>,
 ) -> std::io::Result<()> {
-    handle_conn(stream, engine, config, registry, tls, activity).await
+    // `peer_addr` is a `getpeername` syscall and a disabled callsite still
+    // evaluates its arguments, so the whole construction sits behind the check.
+    let span = if tracing::enabled!(target: telemetry::SESSION_TARGET, tracing::Level::DEBUG) {
+        telemetry::session_span(stream.peer_addr().ok())
+    } else {
+        tracing::Span::none()
+    };
+    handle_conn(stream, engine, config, registry, tls, activity)
+        .instrument(span)
+        .await
 }
 
 async fn handle_conn<E: Engine>(
@@ -537,6 +553,7 @@ async fn handle_conn<E: Engine>(
             Some(acceptor) => {
                 stream.write_all(b"S").await?;
                 let tls_stream = acceptor.accept(stream).await?;
+                telemetry::record_session_tls(&tracing::Span::current(), true);
                 return startup_loop(tls_stream, buf, engine, config, registry, activity).await;
             }
             None => {
@@ -546,6 +563,7 @@ async fn handle_conn<E: Engine>(
         }
     }
 
+    telemetry::record_session_tls(&tracing::Span::current(), false);
     startup_loop(stream, buf, engine, config, registry, activity).await
 }
 

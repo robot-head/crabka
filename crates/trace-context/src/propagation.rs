@@ -1,8 +1,9 @@
 //! W3C Trace Context propagation over Kafka record headers.
 //!
-//! [`crate::init`] installs a global `TraceContextPropagator`, so a producer can
-//! serialise the current span's `traceparent`/`tracestate` into record headers
-//! (via [`current_trace_headers`]) and a consumer can rebuild that context (via
+//! The service's telemetry initialisation (`crabka_telemetry::init`) installs a
+//! global `TraceContextPropagator`, so a producer can serialise the current
+//! span's `traceparent`/`tracestate` into record headers (via
+//! [`current_trace_headers`]) and a consumer can rebuild that context (via
 //! [`extract_context`] / [`set_remote_parent`]) to make its own span a child of
 //! the producer's — stitching one distributed trace across services through the
 //! Kafka WAL / topics.
@@ -55,7 +56,7 @@ impl Extractor for MapExtractor<'_> {
 /// ```no_run
 /// let span = tracing::info_span!("produce_order");
 /// let _g = span.enter();
-/// let carriers = crabka_telemetry::propagation::current_trace_headers();
+/// let carriers = crabka_trace_context::current_trace_headers();
 /// // convert each (key, value) into your producer's Header and attach it
 /// ```
 #[must_use]

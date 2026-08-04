@@ -109,6 +109,7 @@ fn gres() -> Gres {
                 registry_layout: GresBalancerRegistryLayout::default(),
                 plan_snapshot: None,
             }),
+            tracing: None,
         },
     );
     obj.metadata.namespace = Some("ns".into());

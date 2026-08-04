@@ -9,3 +9,4 @@ pub mod scram;
 pub mod server;
 pub mod session;
 pub mod stub;
+pub mod telemetry;

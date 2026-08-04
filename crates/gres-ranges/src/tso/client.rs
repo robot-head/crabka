@@ -6,10 +6,14 @@ use std::{
 };
 
 use tokio::sync::oneshot;
+use tracing::{Instrument as _, Span, field::Empty};
 
-use crate::tso::{
-    oracle::{GrantLease, TsoError, TsoTimestamp, parse_count},
-    stats::TsoClientStats,
+use crate::{
+    telemetry::{ROUTE_TARGET, integer, record_error},
+    tso::{
+        oracle::{GrantLease, TsoError, TsoTimestamp, parse_count},
+        stats::TsoClientStats,
+    },
 };
 
 /// RPC seam implemented by local test doubles and range transport adapters.
@@ -72,10 +76,21 @@ where
     }
 
     /// Grant `count` contiguous timestamps, batched with concurrent callers.
+    ///
+    /// Traced as [`grant_span`]: this is one of the two points where a
+    /// statement can block for an unbounded time on another node.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
     pub async fn grant(&self, count: NonZeroU64) -> Result<GrantLease, TsoError> {
+        let span = grant_span(count);
+        self.grant_batched(count).instrument(span).await
+    }
+
+    /// The body of [`BatchedTsoClient::grant`], running inside its span so the
+    /// wait for the conveyor's reply is what the span measures.
+    async fn grant_batched(&self, count: NonZeroU64) -> Result<GrantLease, TsoError> {
+        let span = Span::current();
         let (sender, receiver) = oneshot::channel();
         let should_spawn = {
             let mut queue = lock_queue(&self.queue);
@@ -85,14 +100,21 @@ where
             // clear to set starts a flusher.
             !std::mem::replace(&mut queue.flusher_running, true)
         };
+        // A caller that did not have to start the flusher found one already
+        // running, so its request rides an existing conveyor batch.
+        if !span.is_disabled() {
+            span.record("pg.tso.batched", !should_spawn);
+        }
 
         if should_spawn {
             self.spawn_flush();
         }
 
-        receiver
+        let granted = receiver
             .await
-            .map_err(|_| TsoError::Rpc("batched timestamp request was canceled".to_owned()))?
+            .map_err(|_| TsoError::Rpc("batched timestamp request was canceled".to_owned()))?;
+        record_grant(&span, granted.as_ref());
+        granted
     }
 
     // Conveyor flusher: each iteration drains everything queued so far and
@@ -196,6 +218,70 @@ impl Drop for FlusherResetGuard {
         // Dropping the senders outside the lock wakes the stranded callers
         // with the canceled-request error.
         drop(stranded);
+    }
+}
+
+/// Build the `tso.grant` span covering one caller's wait for timestamps.
+///
+/// `otel.kind = "client"`: the grant that actually reaches the oracle is a
+/// range-0 RPC whenever the engine is not running solo, so this is one of the
+/// few places a statement blocks on another node with nothing else to show for
+/// it.
+///
+/// `pg.tso.batched` is the field worth reading. The client runs a conveyor —
+/// at most one upstream RPC in flight, everything arriving behind it coalescing
+/// into the next one — so a caller either *starts* a batch (and waits one
+/// upstream round trip) or *joins* one (and waits for the in-flight round trip
+/// plus its own). A run of `tso.grant` spans that are all unbatched says the
+/// oracle is answering faster than requests arrive; a run that is all batched
+/// says the opposite, and the span duration is then queueing, not oracle
+/// latency.
+///
+/// Kept as an explicit builder rather than `#[instrument]` so the target can be
+/// the [`ROUTE_TARGET`] constant rather than a duplicated literal, and so the
+/// outcome fields can be declared [`Empty`] and filled in later.
+fn grant_span(count: NonZeroU64) -> Span {
+    tracing::debug_span!(
+        target: ROUTE_TARGET,
+        "tso.grant",
+        otel.kind = "client",
+        otel.status_code = Empty,
+        otel.status_description = Empty,
+        error.type = Empty,
+        pg.tso.count = integer(count.get()),
+        pg.tso.batched = Empty,
+        pg.tso.first = Empty,
+        pg.tso.last = Empty,
+    )
+}
+
+/// Record the fate of one grant on its [`grant_span`].
+fn record_grant(span: &Span, granted: Result<&GrantLease, &TsoError>) {
+    if span.is_disabled() {
+        return;
+    }
+    match granted {
+        Ok(lease) => {
+            span.record("pg.tso.first", integer(lease.first_ts.get()));
+            if let Ok(last_ts) = lease.last_ts() {
+                span.record("pg.tso.last", integer(last_ts.get()));
+            }
+        }
+        Err(error) => record_error(span, tso_error_type(error), &error.to_string()),
+    }
+}
+
+/// The low-cardinality `error.type` for a failed grant. Deliberately the
+/// variant, not the message: a fenced epoch and a dead connection are different
+/// operational problems, while `TsoError::Rpc`'s payload is unbounded text.
+const fn tso_error_type(error: &TsoError) -> &'static str {
+    match error {
+        TsoError::EmptyGrant => "empty_grant",
+        TsoError::TimestampOverflow => "timestamp_overflow",
+        TsoError::FencedEpoch { .. } => "fenced_epoch",
+        TsoError::Kv(_) => "kv",
+        TsoError::CorruptHorizon(_) => "corrupt_horizon",
+        TsoError::Rpc(_) => "rpc",
     }
 }
 

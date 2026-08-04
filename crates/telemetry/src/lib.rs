@@ -38,8 +38,13 @@
 #![forbid(unsafe_code)]
 
 pub mod profiling;
-pub mod propagation;
 
+/// W3C Trace Context propagation helpers.
+///
+/// These live in the standalone, publishable `crabka-trace-context` crate so
+/// the wire-protocol crates can propagate a trace without linking the OTLP
+/// exporter, the admin HTTP server, or the profiler that this crate pulls in.
+pub use crabka_trace_context as propagation;
 use crabka_units::prelude::{Time, TimeExt, secs};
 use opentelemetry::{
     Context, KeyValue,

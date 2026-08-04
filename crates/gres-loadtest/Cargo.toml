@@ -59,4 +59,9 @@ rustix = { workspace = true, features = ["param"] }
 
 [dev-dependencies]
 assert2 = { workspace = true }
+async-trait = { workspace = true }
+# The cross-process tracing test stands up a real OTLP/gRPC collector in the
+# test binary and points the spawned nodes' exporters at it.
+opentelemetry-proto = { workspace = true, features = ["logs"] }
 tokio = { workspace = true, features = ["test-util"] }
+tonic = { workspace = true }
