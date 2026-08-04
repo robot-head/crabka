@@ -418,3 +418,71 @@ async fn large_equi_self_join_answers_without_scanning_every_pair() {
 
     assert2::assert!(rows[0].get::<_, i64>(0) == 10_000);
 }
+
+/// A single-relation `WHERE` conjunct is pre-applied to a *null-preserved* join
+/// side so the join walks fewer rows. It must never be pushed to the nullable
+/// side: dropping those rows early would suppress the NULL-padded row the outer
+/// join owes, and `IS NULL` predicates would then admit rows `PostgreSQL` does
+/// not. Every expectation below was taken from `PostgreSQL` 18.4.
+#[tokio::test]
+async fn a_where_conjunct_pushes_only_into_a_preserved_join_side() {
+    let client = connect(spawn().await).await;
+    seed(&client).await;
+
+    // (query, expected `name|dname` rows in order)
+    let cases: &[(&str, &[&str])] = &[
+        // Preserved side: `emp` may be filtered before the join.
+        (
+            "SELECT emp.name, dept.dname FROM emp LEFT JOIN dept ON emp.dept_id = dept.id \
+             WHERE emp.id < 3 ORDER BY emp.id",
+            &["ann|eng", "bob|sales"],
+        ),
+        // Nullable side: filtering `dept` early would still be observationally
+        // equal here, but the predicate must be applied after padding.
+        (
+            "SELECT emp.name, dept.dname FROM emp LEFT JOIN dept ON emp.dept_id = dept.id \
+             WHERE dept.id < 20 ORDER BY emp.id",
+            &["ann|eng"],
+        ),
+        // The case that catches an unsound push: `cy` has a NULL dept_id, so it
+        // is NULL-padded and kept. Pushing `IS NULL` onto `dept` would drop
+        // every dept row and pad `ann` and `bob` too.
+        (
+            "SELECT emp.name, dept.dname FROM emp LEFT JOIN dept ON emp.dept_id = dept.id \
+             WHERE dept.id IS NULL ORDER BY emp.id",
+            &["cy|"],
+        ),
+        // RIGHT JOIN preserves the right side; `emp` is the nullable one.
+        (
+            "SELECT emp.name, dept.dname FROM emp RIGHT JOIN dept ON emp.dept_id = dept.id \
+             WHERE dept.id < 30 ORDER BY dept.id",
+            &["ann|eng", "bob|sales"],
+        ),
+        (
+            "SELECT emp.name, dept.dname FROM emp RIGHT JOIN dept ON emp.dept_id = dept.id \
+             WHERE emp.id IS NULL ORDER BY dept.id",
+            &["|ops"],
+        ),
+        // FULL JOIN preserves both, so nothing may be pushed.
+        (
+            "SELECT emp.name, dept.dname FROM emp FULL JOIN dept ON emp.dept_id = dept.id \
+             WHERE emp.id IS NULL ORDER BY dept.id",
+            &["|ops"],
+        ),
+    ];
+
+    for (sql, expected) in cases {
+        let rows = client.query(*sql, &[]).await.expect(sql);
+        let got: Vec<String> = rows
+            .iter()
+            .map(|r| {
+                format!(
+                    "{}|{}",
+                    r.get::<_, Option<String>>(0).unwrap_or_default(),
+                    r.get::<_, Option<String>>(1).unwrap_or_default()
+                )
+            })
+            .collect();
+        assert2::assert!(got == *expected, "{sql}");
+    }
+}

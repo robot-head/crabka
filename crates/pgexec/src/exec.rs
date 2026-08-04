@@ -8953,7 +8953,7 @@ fn build_from(
     let first = iter
         .next()
         .ok_or_else(|| ExecError::Unsupported("build_from on empty FROM".into()))?;
-    let mut acc = build_table_expr(read_ctx, first, bounds, scan_plan)?;
+    let mut acc = build_table_expr(read_ctx, first, bounds, scan_plan, filter)?;
     for te in iter {
         // A comma-FROM (multiple tables) is a cross join — no single-table
         // pushdown applies, so subsequent items always scan in full.
@@ -8984,13 +8984,9 @@ fn append_from_item(
 ) -> Result<Relation, ExecError> {
     if !is_lateral_item(te, &acc.scope) {
         let mut acc = acc;
-        let mut next = build_table_expr(read_ctx, te, None, None)?;
-        if matches!(
-            kind,
-            crabka_pgparser::ast::JoinKind::Inner | crabka_pgparser::ast::JoinKind::Cross
-        ) && let Some(filter) = filter
-        {
-            push_local_where(&mut acc, &mut next, filter, read_ctx.eval_ctx)?;
+        let mut next = build_table_expr(read_ctx, te, None, None, None)?;
+        if let Some(filter) = filter {
+            push_local_where(&mut acc, &mut next, kind, filter, read_ctx.eval_ctx)?;
         }
         let pushed_constraint = filter
             .filter(|filter| {
@@ -9019,16 +9015,35 @@ fn append_from_item(
 /// Apply immutable top-level WHERE conjuncts that bind to exactly one join side
 /// before materializing an inner/cross product. The complete WHERE is evaluated
 /// again after FROM, so this optimization cannot weaken filtering.
+/// Apply the single-relation conjuncts of a `WHERE` to one side *before* the
+/// join, so the join walks the rows that can still survive it.
+///
+/// This only ever pre-applies a filter the caller runs again over the joined
+/// relation, so it can never keep a row the full `WHERE` would drop. What it
+/// must not do is drop a row the `WHERE` would have kept, and that is what the
+/// join kind decides: a predicate on a *null-preserved* side is safe, because
+/// such a row carries its own columns unchanged into the output whether it
+/// matched or was NULL-padded, so it fails the predicate either way. A
+/// predicate on the *nullable* side is not — dropping those rows early would
+/// suppress the NULL-padded row the outer join owes for an unmatched partner.
 fn push_local_where(
     left: &mut Relation,
     right: &mut Relation,
+    kind: crabka_pgparser::ast::JoinKind,
     filter: &Expr,
     ctx: &crate::clock::EvalCtx,
 ) -> Result<(), ExecError> {
+    use crabka_pgparser::ast::JoinKind;
+    let (push_left, push_right) = match kind {
+        JoinKind::Inner | JoinKind::Cross => (true, true),
+        JoinKind::Left => (true, false),
+        JoinKind::Right => (false, true),
+        JoinKind::Full => return Ok(()),
+    };
     let mut conjuncts = Vec::new();
     collect_conjuncts(filter, &mut conjuncts);
     for conjunct in conjuncts {
-        if !immutable_row_predicate(conjunct) {
+        if !immutable_row_predicate(conjunct) || !leakproof_predicate(conjunct) {
             continue;
         }
         let left_only = expr_references_scope(conjunct, &left.scope)
@@ -9036,12 +9051,44 @@ fn push_local_where(
         let right_only = expr_references_scope(conjunct, &right.scope)
             && crate::eval::check_predicate_resolves(conjunct, &right.scope).is_ok();
         match (left_only, right_only) {
-            (true, false) => filter_relation(left, conjunct, ctx)?,
-            (false, true) => filter_relation(right, conjunct, ctx)?,
+            (true, false) if push_left => filter_relation(left, conjunct, ctx)?,
+            (false, true) if push_right => filter_relation(right, conjunct, ctx)?,
             _ => {}
         }
     }
     Ok(())
+}
+
+/// Whether a predicate may be evaluated *before* the rows a security policy
+/// would hide — `PostgreSQL`'s `proleakproof`.
+///
+/// Row-level security makes the difference observable: the upstream
+/// `rowsecurity` test defines an `f_leak(text)` that `RAISE NOTICE`s whatever it
+/// is handed, and asserts it never sees a row the policy filters out. Pushing a
+/// call to it under the policy would print exactly those titles. Casts and
+/// division can leak through their error messages the same way, so only
+/// columns, literals and the total operators are allowed across.
+fn leakproof_predicate(expr: &Expr) -> bool {
+    let mut leakproof = true;
+    crate::grouping::visit_expr(expr, &mut |node| {
+        leakproof &= !matches!(
+            node,
+            Expr::Func(_)
+                | Expr::Cast { .. }
+                | Expr::ScalarSubquery(_)
+                | Expr::Exists(_)
+                | Expr::InSubquery { .. }
+                | Expr::Quantified { .. }
+                | Expr::ArraySubquery(_)
+        ) && !matches!(
+            node,
+            Expr::Binary {
+                op: crabka_pgparser::ast::BinaryOp::Div | crabka_pgparser::ast::BinaryOp::Mod,
+                ..
+            }
+        );
+    });
+    leakproof
 }
 
 fn immutable_row_predicate(expr: &Expr) -> bool {
@@ -9130,7 +9177,7 @@ fn lateral_join(
             )));
         }
         // Nothing was correlated, so the item is an ordinary relation.
-        let right = build_table_expr(read_ctx, &specialized, None, None)?;
+        let right = build_table_expr(read_ctx, &specialized, None, None, None)?;
         return join_relations(
             acc,
             right,
@@ -9170,7 +9217,7 @@ fn lateral_join(
                 &cached.index,
             )?
         } else {
-            let right = build_table_expr(read_ctx, &specialized, None, None)?;
+            let right = build_table_expr(read_ctx, &specialized, None, None, None)?;
             let right_bytes = right
                 .rows
                 .iter()
@@ -9266,7 +9313,7 @@ fn lateral_join(
         None => {
             let nulls = vec![Datum::Null; acc.scope.width()];
             let (specialized, _) = binder.bind(te, &acc.scope, &nulls);
-            let right = build_table_expr(read_ctx, &specialized, None, None)?;
+            let right = build_table_expr(read_ctx, &specialized, None, None, None)?;
             join_relations(
                 Relation {
                     scope: acc.scope.clone(),
@@ -11074,6 +11121,7 @@ fn partitioned_scan(
             },
             None,
             None,
+            None,
         )?;
         rows.extend(relation.rows.into_iter().map(|row| {
             ordinals
@@ -11113,6 +11161,7 @@ fn inherited_scan(
                 columns: None,
                 sample: None,
             },
+            None,
             None,
             None,
         )?;
@@ -11174,6 +11223,10 @@ fn build_table_expr(
     // base table. Applied verbatim to the foreign scan; `None` ⇒ full scan.
     bounds: Option<&ScanBounds>,
     scan_plan: Option<&crate::plan_dist::DistributedScanPlan>,
+    // The statement's `WHERE`, so a join can pre-apply its single-relation
+    // conjuncts to a null-preserved side. Only ever an optimization: the caller
+    // applies the same predicate again to the relation this returns.
+    filter: Option<&Expr>,
 ) -> Result<Relation, ExecError> {
     let catalog_kv = read_ctx.catalog_kv;
     let resolution = read_ctx.fctx.resolution;
@@ -11211,6 +11264,7 @@ fn build_table_expr(
                     },
                     bounds,
                     scan_plan,
+                    None,
                 )?;
                 let qualifier = alias.clone().unwrap_or_else(|| name.to_string());
                 return crate::values::requalify_derived(base, &qualifier, &Some(names.clone()));
@@ -11227,6 +11281,7 @@ fn build_table_expr(
                     },
                     bounds,
                     scan_plan,
+                    None,
                 )?;
                 return apply_tablesample(base, sample, ctx);
             }
@@ -11389,10 +11444,24 @@ fn build_table_expr(
             }
             // A join is never a single foreign table: each side scans in full and
             // the join predicate / residual WHERE filters locally.
-            let l = build_table_expr(read_ctx, left, None, None)?;
+            //
+            // The `WHERE` only descends into the left side while every join it
+            // passes through preserves that side. Under a `RIGHT`/`FULL` join
+            // the left is nullable, and dropping its rows early would turn a
+            // matched row into a NULL-padded one — which a predicate like
+            // `a.x IS NULL` would then wrongly admit.
+            let nested_filter = match kind {
+                crabka_pgparser::ast::JoinKind::Inner
+                | crabka_pgparser::ast::JoinKind::Cross
+                | crabka_pgparser::ast::JoinKind::Left => filter,
+                crabka_pgparser::ast::JoinKind::Right | crabka_pgparser::ast::JoinKind::Full => {
+                    None
+                }
+            };
+            let l = build_table_expr(read_ctx, left, None, None, nested_filter)?;
             // A lateral right side sees the left side's columns, so it is rebuilt
             // per left row instead of materialized once.
-            append_from_item(read_ctx, l, right, *kind, constraint, None)
+            append_from_item(read_ctx, l, right, *kind, constraint, filter)
         }
         TableExpr::Derived {
             subquery,
@@ -11993,8 +12062,8 @@ fn try_execute_local_join_count(
         return Ok(None);
     }
 
-    let left = build_table_expr(read_ctx, left, None, None)?;
-    let right = build_table_expr(read_ctx, right, None, None)?;
+    let left = build_table_expr(read_ctx, left, None, None, None)?;
+    let right = build_table_expr(read_ctx, right, None, None, None)?;
     let count = count_join_rows(
         &left,
         &right,
@@ -20772,6 +20841,31 @@ fn comment_ops(
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+
+    /// A predicate only crosses below a security policy when it cannot leak the
+    /// rows the policy hides. The upstream `rowsecurity` test proves the point
+    /// with an `f_leak(text)` that `RAISE NOTICE`s its argument: pushed under
+    /// the policy, it prints the titles of rows the user may not read.
+    #[test]
+    fn only_a_leakproof_predicate_may_cross_a_security_policy() {
+        // (predicate, may it be pushed below the policy?)
+        let cases: &[(&str, bool)] = &[
+            ("a.unique2 < 10", true),
+            ("a.x = 3 AND a.y > 1", true),
+            ("a.x IS NULL", true),
+            ("a.x + 1 = a.y", true),
+            // A function call can observe — and re-emit — what it is handed.
+            ("f_leak(a.title)", false),
+            ("a.x < 10 AND f_leak(a.title)", false),
+            // A cast and a division leak through their error messages instead.
+            ("a.text_col::int = 1", false),
+            ("a.x / a.y = 1", false),
+        ];
+        for (sql, expected) in cases {
+            let expr = crabka_pgparser::parser::parse_expr_for_test(sql).expect("parse");
+            assert2::assert!(super::leakproof_predicate(&expr) == *expected, "{sql}");
+        }
+    }
 
     use crabka_pgcatalog::RelationName;
     use crabka_pgparser::ast::{QueryBody, SelectStmt, SetExpr, Statement};

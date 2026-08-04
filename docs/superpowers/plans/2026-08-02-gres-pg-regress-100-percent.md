@@ -6,13 +6,13 @@
 test files, not the adopted corpus's statement matches. The checked-in monotone
 floor remains `6/231`; this review is still non-monotone against that floor and
 does not ratchet it. Serial completes all 231 files with zero infrastructure
-failures, leaving 203 semantic failures across 173731 canonical changed lines
+failures, leaving 203 semantic failures across 173654 canonical changed lines
 and 4659 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
 postflight probe succeeds, and the infrastructure report is empty.
 
 The measurement immediately before this wave was `22/231` at 176686 changed
 lines / 4606 hunks, from the same runner and the same pinned corpus. The
-waves below are therefore `+6` exact files and `-2270` changed lines with
+waves below are therefore `+6` exact files and `-2347` changed lines with
 **zero newly failing files**: `int4`, `int2`, `roleattributes`, `lseg`, `line` and `circle` become exact,
 and 4 files gain a combined 22 lines.
 
@@ -338,6 +338,27 @@ and their certified artifact describe current conformance.
       comparison and fail one error later, printing a caret line each -- the
       same "unblocked statements fail longer" effect that made the `box` type
       measure `+132` on its own in wave 15. It reverses when `polygon` lands.
+- [x] Push a `WHERE`'s single-relation conjuncts below a join. `push_local_where`
+      existed but ran only for `Inner`/`Cross`, and the statement's `WHERE` was
+      never threaded into `build_table_expr` -- so explicit `JOIN ... ON` syntax
+      never reached it at all, only comma-`FROM` did. Now the filter descends
+      while every join it passes preserves that side (never under `RIGHT`/`FULL`,
+      where dropping rows early would turn a matched row into a NULL-padded one
+      that `a.x IS NULL` would wrongly admit).
+      At the certified 20 MiB budget the two-way `tenk1` join with a `WHERE` goes
+      from a budget error to 10 rows in 0.2s, and bug #8591 to `(0 rows)` in
+      0.3s. `psql` -28, `join` -22, `memoize` -12, `type_sanity` -10,
+      `incremental_sort` -7, `create_table_like` -6; net -77.
+      **The first certification of this caught a security bug in it.** Pushing
+      the user's `WHERE` under a row-level-security policy let
+      `WHERE f_leak(title)` see rows the policy hides, and `f_leak` `RAISE
+      NOTICE`s what it is handed: `rowsecurity` +50, every line a leaked title.
+      `leakproof_predicate` now enforces PostgreSQL's `proleakproof` rule --
+      no function calls, casts, or division across the barrier. The
+      pre-existing `Inner`/`Cross` path had the same hole and is now covered
+      too. Unit tests did not catch this; the upstream suite did.
+      `alter_table` +8 is a statement that used to error and now returns rows
+      whose `attinhcount` is 0 where PostgreSQL says 1 -- a separate catalog gap.
 - [ ] Ratchet or repair the committed serial baseline. The gate in
       `crates/gres-conformance/pg-regress-baseline.json` was seeded once, in
       `179158c39`, and has never been ratcheted; `baseline.py update` correctly
