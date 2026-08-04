@@ -229,6 +229,13 @@ and their certified artifact describe current conformance.
       `"…" is out of range for type double precision`, matching the existing
       `float4` handling; overflow previously surfaced as the bare arithmetic
       `integer out of range` and underflow silently returned zero.
+- [x] Accept the `TABLE t` query form as a derived table (`FROM (TABLE t) AS s`).
+      `set_primary` already parsed `TABLE t` as a query body; only
+      `table_factor`'s post-parenthesis check omitted it.
+- [ ] Make `int2` exact. The `(TABLE …)` half is done; the rest is
+      `int2vector`, which mirrors the existing `OidVector` across roughly 25
+      registration sites (`ColumnType`/`Datum` variants, OID 22, element type,
+      text input, wire encoding, `pg_type` row).
 - [ ] Match remaining exact wire-visible diagnostics.
 - [ ] Attach `22008 date/time field value out of range` and `malformed array
       literal` source positions. Neither message names its type, so the
@@ -241,6 +248,19 @@ and their certified artifact describe current conformance.
       (`'2024-02-30'::date`, `'25:00:00'::time`) — it is PostgreSQL's distinct
       `DTERR_MD_FIELD_OVERFLOW`, so the datetime parser must separate that case
       before the hint can be added. 30 occurrences in the expected files.
+- [ ] Implement PostgreSQL's quoted `"char"` type (OID 18, one byte). It owns
+      the whole 36-line `char` residual, which is otherwise exact. Semantics
+      measured against the oracle: input takes the first byte, decoding a
+      `\nnn` octal escape (`'\101'` is `A`); output renders byte 0 as the empty
+      string and a non-printable byte as `\nnn` (`'\377'` round-trips as the
+      4-character text `\377`); `int4` converts both ways (`65` ↔ `A`);
+      `pg_typeof` prints it quoted.
+      **Blocker:** `crabka_pgparser::lexer` strips the quotes from a quoted
+      identifier and emits the same `Token::Ident` an unquoted one produces, so
+      `"char"` and `char` are indistinguishable and cannot resolve to different
+      types. This needs quoted-identifier provenance on the token (and on type
+      names in the AST) before the type itself is worth adding — a
+      cross-cutting parser change, not a type-registration change.
 - [ ] Give `oid` its own type identity. `crabka_pgtypes::datum` resolves `oid`
       to `ColumnType::Int4`, so every `oid` input failure reports `invalid input
       syntax for type integer`; the upstream `oid` file expects `... for type
@@ -300,6 +320,21 @@ For each item, first add one focused test at the shared layer that fails before 
 - [x] Include schema-qualified user types and their generated multirange/dependent types in schema dependency discovery and cleanup. `DROP SCHEMA ... RESTRICT` rejects a nonempty type-only schema; `CASCADE` and the shared temp cleanup remove roots and transitive dependents in dependents-first order, including primary and multirange registry identities. The schema lifecycle integration target passes 10 / 10 and pgcatalog schema tests pass 9 / 9.
 - [x] Within one active catalog, publish the process type registry only from the durable catalog delta after TYPE/DOMAIN create, alter, drop, `DROP SCHEMA CASCADE`, `DISCARD TEMP`, session teardown, or stale-temp reclamation commits and event triggers accept it. Successful nested event-trigger DDL re-reads the final durable type set before publication; a rejected hook publishes the current-to-restored rollback delta. Event-trigger rejection, partial multi-drop builder failure, commit/read failure, and savepoint rollback leave parser-visible names aligned with catalog state; one registry write lock applies removals and replacements atomically, including multirange mappings.
 - [ ] Scope the process user-type registry by a stable catalog identity and replace each catalog namespace atomically during hydration. Independent `SqlEngine` catalogs currently allocate the same local user-type OIDs and can overwrite one another's global name/OID mappings; single-catalog atomic publication does not provide multi-catalog isolation.
+- [ ] **A dangling user-type reference makes `pg_class` and `pg_attribute`
+      unreadable outright.** Reproduced from a snapshot of the 91 tests
+      preceding `sanity_check`: every scan of either catalog returns
+      `catalog storage error: corrupt row encoding: column type oid 300119 is
+      not a registered type`, while `pg_type` and `pg_namespace` still read
+      normally and 300119 is absent from `pg_type`. So an earlier `DROP TYPE` /
+      `DROP SCHEMA … CASCADE` removed a type while a relation kept a column
+      typed by it, and one such row now fails *all* relation introspection —
+      not merely the query that touches it. This is the observable cause of the
+      `sanity_check` residual and it will break every `\d`-style catalog query
+      after the same point. PostgreSQL cannot reach this state because
+      `DROP TYPE` is refused (`2BP01`) while a column still uses the type, and
+      `CASCADE` drops that column; the closure item below is what makes that
+      true here. Fix the closure rather than making row decoding tolerate an
+      unregistered OID, which would hide real corruption.
 - [ ] Extend schema/type dependency closure beyond user types to every non-type dependent: table columns and defaults, routines, views, indexes, and their catalog dependency rows. In particular, `DROP TYPE`/`DROP SCHEMA ... CASCADE` can remove a user-type record while leaving a table outside the dropped schema with a column that references the tombstoned OID. A type-to-type cascade is not yet full PostgreSQL object dependency closure.
 - [ ] Make stored SQL/expression reparsers (views, SQL/PL/pgSQL bodies, and domain/check expressions) use the session or captured type search path; today an unqualified non-`public` user type can fail to resolve or rebind after creation.
 - [x] Retain usable hash-compatible keys in mixed-key equijoins and recheck the full join predicate for every candidate.
