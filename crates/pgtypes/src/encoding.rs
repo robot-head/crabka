@@ -70,6 +70,15 @@ pub fn encode_text_in(d: &Datum, style: OutputStyle<'_>) -> Vec<u8> {
             encode_float8_text(point.y, style.extra_float_digits)
         )
         .into_bytes(),
+        // `box_out` writes the high corner first and uses no outer brackets.
+        Datum::Box(value) => format!(
+            "({},{}),({},{})",
+            encode_float8_text(value.high.x, style.extra_float_digits),
+            encode_float8_text(value.high.y, style.extra_float_digits),
+            encode_float8_text(value.low.x, style.extra_float_digits),
+            encode_float8_text(value.low.y, style.extra_float_digits)
+        )
+        .into_bytes(),
         // `circle_out` always writes the angle-bracket form.
         Datum::Circle(circle) => format!(
             "<({},{}),{}>",
@@ -384,6 +393,14 @@ pub fn encode_binary(d: &Datum) -> Vec<u8> {
             let mut out = Vec::with_capacity(16);
             out.extend_from_slice(&point.x.to_be_bytes());
             out.extend_from_slice(&point.y.to_be_bytes());
+            out
+        }
+        // `box_send`: high x, high y, low x, low y.
+        Datum::Box(value) => {
+            let mut out = Vec::with_capacity(32);
+            for coordinate in [value.high.x, value.high.y, value.low.x, value.low.y] {
+                out.extend_from_slice(&coordinate.to_be_bytes());
+            }
             out
         }
         // `circle_send`: centre x, centre y, radius.
