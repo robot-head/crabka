@@ -1350,7 +1350,10 @@ fn invoke_catalog_trigger(
             operation: operation_name(event).into(),
             event: None,
             tag: None,
-            relation_oid: trigger.table_id,
+            relation_oid: u32::try_from(crate::catalog_rel::trigger_relation_oid(
+                trigger.table_id,
+            )?)
+            .unwrap_or_default(),
             table_schema: table.name.schema.clone(),
             table_name: table.name.name.clone(),
             arguments: trigger.arguments.clone(),
@@ -1483,7 +1486,8 @@ fn queue_catalog_trigger(
         operation: operation_name(event).into(),
         event: None,
         tag: None,
-        relation_oid: trigger.table_id,
+        relation_oid: u32::try_from(crate::catalog_rel::trigger_relation_oid(trigger.table_id)?)
+            .unwrap_or_default(),
         table_schema: table.name.schema.clone(),
         table_name: table.name.name.clone(),
         arguments: trigger.arguments.clone(),

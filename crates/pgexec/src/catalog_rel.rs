@@ -545,6 +545,18 @@ pub(crate) fn index_relation_oid(index_id: u32) -> Result<i32, ExecError> {
         .ok_or_else(|| ExecError::Unsupported("index oid leaves its band".into()))
 }
 
+/// The `pg_class` oid of a trigger's relation. `Trigger::table_id` is
+/// polymorphic: a table's catalog id, or — when the trigger is `INSTEAD OF` on
+/// a view — that view's `pg_class` oid already. A catalog id is always inside
+/// the band width, and every relation oid band starts well above it, so the
+/// magnitude tells the two apart.
+pub(crate) fn trigger_relation_oid(table_id: u32) -> Result<i32, ExecError> {
+    if table_id < u32::try_from(OID_BAND_WIDTH).unwrap_or(u32::MAX) {
+        return table_relation_oid(table_id);
+    }
+    i32::try_from(table_id).map_err(|_| ExecError::Unsupported("oid exceeds int4 range".into()))
+}
+
 /// The `pg_class` oid of a table: its catalog id inside the table band.
 ///
 /// # Errors
@@ -781,7 +793,7 @@ fn pg_trigger_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             }
             Ok(vec![
                 int(i32::try_from(trigger.oid).unwrap_or(0)),
-                int(table_relation_oid(trigger.table_id)?),
+                int(trigger_relation_oid(trigger.table_id)?),
                 int(i32::try_from(trigger.parent_oid).unwrap_or(0)),
                 text(&trigger.name),
                 int(i32::try_from(trigger.function_oid).unwrap_or(0)),
@@ -789,7 +801,7 @@ fn pg_trigger_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 text(&trigger.enabled.catalog_code().to_string()),
                 Datum::Bool(trigger.is_internal),
                 match trigger.referenced_table_id {
-                    Some(referenced) => int(table_relation_oid(referenced)?),
+                    Some(referenced) => int(trigger_relation_oid(referenced)?),
                     None => int(0),
                 },
                 int(0),
@@ -829,7 +841,7 @@ fn pg_depend_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             int(oid),
             int(0),
             int(relation_class),
-            int(table_relation_oid(trigger.table_id)?),
+            int(trigger_relation_oid(trigger.table_id)?),
             int(0),
             text("a"),
         ]);
