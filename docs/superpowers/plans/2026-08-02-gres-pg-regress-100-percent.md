@@ -236,6 +236,18 @@ and their certified artifact describe current conformance.
       `int2vector`, which mirrors the existing `OidVector` across roughly 25
       registration sites (`ColumnType`/`Datum` variants, OID 22, element type,
       text input, wire encoding, `pg_type` row).
+- [x] Implement `ALTER ROLE` and persist role attributes. `CREATE ROLE`
+      previously swallowed its attribute list with a bare `bump()`, so
+      `SUPERUSER`/`CREATEDB`/… were parsed and discarded, and `ALTER ROLE` did
+      not parse at all while `pg_authid`/`pg_roles` hardcoded every attribute.
+      A shared option list now serves `CREATE ROLE`/`CREATE USER` and
+      `ALTER ROLE`, carrying `Option<bool>` so only written options apply and
+      the rest keep their stored value; the seven booleans persist as a one-byte
+      bitset on the role record and both catalogs project them. Verified
+      byte-identical to the oracle on a clean cluster. `ALTER USER` stays the
+      `ALTER USER MAPPING` spelling; `PASSWORD`, `VALID UNTIL`,
+      `CONNECTION LIMIT` and role-level GUCs remain unmodelled, and the
+      attributes do not yet gate authorization.
 - [ ] Match remaining exact wire-visible diagnostics.
 - [ ] Attach `22008 date/time field value out of range` and `malformed array
       literal` source positions. Neither message names its type, so the

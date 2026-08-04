@@ -3205,9 +3205,14 @@ impl Parser {
                 Token::Keyword(Keyword::Index) => emitted(I::AlterIndex, self.alter_index()),
                 Token::Keyword(Keyword::Schema) => emitted(I::AlterSchema, self.alter_schema()),
                 Token::Keyword(Keyword::Server) => emitted(I::AlterServer, self.alter_server()),
-                Token::Keyword(Keyword::User) => {
+                // `ALTER USER MAPPING …` and `ALTER USER name …` share a
+                // prefix; only the former is followed by MAPPING.
+                Token::Keyword(Keyword::User)
+                    if matches!(self.peek3(), Token::Keyword(Keyword::Mapping)) =>
+                {
                     emitted(I::AlterUserMapping, self.alter_user_mapping())
                 }
+                Token::Keyword(Keyword::User) => emitted(I::AlterRole, self.alter_role()),
                 Token::Ident(s) if s == "database" => {
                     emitted(I::AlterDatabase, self.alter_database_refusal())
                 }
@@ -3663,11 +3668,13 @@ impl Parser {
     }
 
     /// `ALTER ROLE name [WITH] option …` — the attribute form. Only the options
-    /// written are applied; the rest keep their stored value. `ALTER USER`
-    /// stays routed to `ALTER USER MAPPING`, which owns that spelling here.
+    /// written are applied; the rest keep their stored value. `ALTER USER name`
+    /// is the same statement; only `ALTER USER MAPPING` takes the other path.
     fn alter_role(&mut self) -> Result<crate::ast::Statement, ParseError> {
         self.expect_ident_eq("alter")?;
-        self.expect_ident_eq("role")?;
+        if !self.eat_keyword(Keyword::User) {
+            self.expect_ident_eq("role")?;
+        }
         let name = self.expect_object_name()?;
         let mut options = crate::ast::RoleOptions::default();
         let mut saw_option = false;
@@ -12205,6 +12212,8 @@ mod tests {
             ("ALTER ROLE r WITH BYPASSRLS", "bypassrls"),
             ("ALTER ROLE r WITH NOREPLICATION", "replication"),
             ("ALTER ROLE r WITH CREATEROLE", "createrole"),
+            // `ALTER USER name` is the same statement as `ALTER ROLE name`.
+            ("ALTER USER r WITH LOGIN", "login"),
         ] {
             let Statement::AlterRole { options, .. } = one(sql) else {
                 panic!("{sql}")
