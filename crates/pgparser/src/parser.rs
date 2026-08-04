@@ -10035,47 +10035,71 @@ impl Parser {
     /// A left-associative chain of joins over table factors. `JOIN` binds tighter
     /// than the top-level comma (handled by `parse_from`).
     fn join_tree(&mut self) -> Result<crate::ast::TableExpr, ParseError> {
-        use crate::ast::{JoinConstraint, JoinKind, TableExpr};
         let mut left = self.table_factor()?;
-        loop {
-            let (kind, natural) = if self.eat_keyword(Keyword::Natural) {
-                (self.join_kind()?, true)
-            } else if self.peek_is_join_start() {
-                (self.join_kind()?, false)
-            } else {
-                break;
-            };
-            let right = self.table_factor()?;
-            let constraint = if natural || kind == JoinKind::Cross {
-                if natural {
-                    JoinConstraint::Natural
-                } else {
-                    JoinConstraint::None
-                }
-            } else if self.eat_keyword(Keyword::On) {
-                JoinConstraint::On(self.expr(0)?)
-            } else if self.eat_keyword(Keyword::Using) {
-                self.expect(&Token::LParen)?;
-                let mut cols = vec![self.expect_ident()?];
-                while self.eat_comma() {
-                    cols.push(self.expect_ident()?);
-                }
-                self.expect(&Token::RParen)?;
-                JoinConstraint::Using(cols)
-            } else {
-                return Err(ParseError::new(
-                    "expected ON or USING after JOIN",
-                    self.peek_pos(),
-                ));
-            };
-            left = TableExpr::Join {
-                left: Box::new(left),
-                right: Box::new(right),
-                kind,
-                constraint,
-            };
+        while self.peek_starts_join() {
+            left = self.join_onto(left)?;
         }
         Ok(left)
+    }
+
+    fn peek_starts_join(&self) -> bool {
+        matches!(self.peek(), Token::Keyword(Keyword::Natural)) || self.peek_is_join_start()
+    }
+
+    /// Parse one join with `left` as its left operand.
+    ///
+    /// The right operand may itself be a join: SQL's `joined_table` is a
+    /// `table_ref`, so `A LEFT JOIN B FULL JOIN C ON x ON y` groups as
+    /// `A LEFT JOIN (B FULL JOIN C ON x) ON y` — the inner join claims the first
+    /// qualifier and the outer one takes the next. A join that takes no
+    /// qualifier (`CROSS`, `NATURAL`) ends there and stays left-associative.
+    fn join_onto(
+        &mut self,
+        left: crate::ast::TableExpr,
+    ) -> Result<crate::ast::TableExpr, ParseError> {
+        use crate::ast::{JoinConstraint, JoinKind, TableExpr};
+        let (kind, natural) = if self.eat_keyword(Keyword::Natural) {
+            (self.join_kind()?, true)
+        } else {
+            (self.join_kind()?, false)
+        };
+        let mut right = self.table_factor()?;
+        let takes_qualifier = !natural && kind != JoinKind::Cross;
+        if takes_qualifier {
+            while !matches!(self.peek(), Token::Keyword(Keyword::On | Keyword::Using))
+                && self.peek_starts_join()
+            {
+                right = self.join_onto(right)?;
+            }
+        }
+        let constraint = if natural || kind == JoinKind::Cross {
+            if natural {
+                JoinConstraint::Natural
+            } else {
+                JoinConstraint::None
+            }
+        } else if self.eat_keyword(Keyword::On) {
+            JoinConstraint::On(self.expr(0)?)
+        } else if self.eat_keyword(Keyword::Using) {
+            self.expect(&Token::LParen)?;
+            let mut cols = vec![self.expect_ident()?];
+            while self.eat_comma() {
+                cols.push(self.expect_ident()?);
+            }
+            self.expect(&Token::RParen)?;
+            JoinConstraint::Using(cols)
+        } else {
+            return Err(ParseError::new(
+                "expected ON or USING after JOIN",
+                self.peek_pos(),
+            ));
+        };
+        Ok(TableExpr::Join {
+            left: Box::new(left),
+            right: Box::new(right),
+            kind,
+            constraint,
+        })
     }
 
     /// True if the next token begins a join clause (after an optional NATURAL).
@@ -12117,6 +12141,69 @@ mod tests {
         IndexPlacement, IsolationLevel, SelectItem, ShardingSpec, Statement, TableConstraint,
         TableConstraintKind, UnaryOp,
     };
+
+    /// SQL's `joined_table` is itself a `table_ref`, so a join's right operand
+    /// may be another join whose qualifier has not been written yet:
+    /// `A LEFT JOIN B FULL JOIN C ON x ON y` means
+    /// `A LEFT JOIN (B FULL JOIN C ON x) ON y`. The inner join claims the first
+    /// `ON`. A join that takes no qualifier stays left-associative.
+    #[test]
+    fn a_join_right_operand_may_be_another_join() {
+        use crate::ast::TableExpr;
+
+        // The shape of a FROM item, as `kind(left, right)` with leaf names.
+        fn shape(te: &TableExpr) -> String {
+            match te {
+                TableExpr::Table { name, .. } => name.name.clone(),
+                TableExpr::Join {
+                    left, right, kind, ..
+                } => format!("{:?}({}, {})", kind, shape(left), shape(right)),
+                other => format!("{other:?}"),
+            }
+        }
+        fn from_shape(sql: &str) -> String {
+            let Statement::Query(query) = one(sql) else {
+                panic!("not a query: {sql}")
+            };
+            let crate::ast::SetExpr::Query(crate::ast::QueryBody::Select(select)) = query.body
+            else {
+                panic!("not a plain SELECT: {sql}")
+            };
+            shape(&select.from[0])
+        }
+
+        // (SQL, expected grouping)
+        let cases: &[(&str, &str)] = &[
+            // The deferred qualifier binds the inner join first.
+            (
+                "SELECT * FROM a LEFT JOIN b FULL JOIN c ON b.x = c.x ON a.x = b.x",
+                "Left(a, Full(b, c))",
+            ),
+            // Which is exactly what the parenthesized spelling produces.
+            (
+                "SELECT * FROM a LEFT JOIN (b FULL JOIN c ON b.x = c.x) ON a.x = b.x",
+                "Left(a, Full(b, c))",
+            ),
+            // An ordinary chain is still left-associative.
+            (
+                "SELECT * FROM a JOIN b ON a.x = b.x JOIN c ON b.x = c.x",
+                "Inner(Inner(a, b), c)",
+            ),
+            // CROSS takes no qualifier, so it cannot absorb the following join.
+            (
+                "SELECT * FROM a CROSS JOIN b JOIN c ON b.x = c.x",
+                "Inner(Cross(a, b), c)",
+            ),
+            // Three deferred qualifiers nest right-to-left.
+            (
+                "SELECT * FROM a LEFT JOIN b LEFT JOIN c LEFT JOIN d ON c.x = d.x ON b.x = c.x ON a.x = b.x",
+                "Left(a, Left(b, Left(c, d)))",
+            ),
+        ];
+        for (sql, expected) in cases {
+            assert2::assert!(from_shape(sql) == *expected, "{sql}");
+        }
+    }
 
     /// The [`RelationRef`](crate::ast::RelationRef) a name is expected to parse
     /// to, written the way the SQL spells it. The split here is a test-writing

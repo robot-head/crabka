@@ -6,13 +6,13 @@
 test files, not the adopted corpus's statement matches. The checked-in monotone
 floor remains `6/231`; this review is still non-monotone against that floor and
 does not ratchet it. Serial completes all 231 files with zero infrastructure
-failures, leaving 203 semantic failures across 173654 canonical changed lines
+failures, leaving 203 semantic failures across 173703 canonical changed lines
 and 4659 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
 postflight probe succeeds, and the infrastructure report is empty.
 
 The measurement immediately before this wave was `22/231` at 176686 changed
 lines / 4606 hunks, from the same runner and the same pinned corpus. The
-waves below are therefore `+6` exact files and `-2347` changed lines with
+waves below are therefore `+6` exact files and `-2298` changed lines with
 **zero newly failing files**: `int4`, `int2`, `roleattributes`, `lseg`, `line` and `circle` become exact,
 and 4 files gain a combined 22 lines.
 
@@ -359,6 +359,26 @@ and their certified artifact describe current conformance.
       too. Unit tests did not catch this; the upstream suite did.
       `alter_table` +8 is a statement that used to error and now returns rows
       whose `attinhcount` is 0 where PostgreSQL says 1 -- a separate catalog gap.
+- [x] Let a join's right operand be another join. SQL's `joined_table` is a
+      `table_ref`, so `A LEFT JOIN B FULL JOIN C ON x ON y` groups as
+      `A LEFT JOIN (B FULL JOIN C ON x) ON y`; the parser was strictly
+      left-associative and demanded `ON` right after the factor. `join`'s
+      `expected ON or USING after JOIN` count falls 24 -> 5, and the unblocked
+      statements return byte-exact PostgreSQL results.
+      **The line count still rose `+49`**, and the change was kept anyway: every
+      new line is `EXPLAIN` plan text replacing a one-line parse error, and
+      `explain.rs` is a purely syntactic renderer that prints a generic
+      `Nested Loop` tree for any join, so its output cannot match until that is
+      rewritten. Correctness improved while the metric worsened; recorded rather
+      than reverted, unlike the wave-15 `box` type which bought no correctness.
+      The 5 residual failures are all `(<join>) alias` -- aliasing a
+      parenthesized join, a separate parser gap.
+- [ ] Make `EXPLAIN` reflect the executed plan. It is currently a syntactic walk
+      of the AST: every join prints `Nested Loop`, `ON` conditions are not shown
+      at all, and no index or hash strategy appears -- even though the executor
+      does build hash indexes. This misled this program's own root-cause
+      analysis twice, and it caps how far `join`, `memoize`, `incremental_sort`
+      and the other plan-printing files can converge.
 - [ ] Ratchet or repair the committed serial baseline. The gate in
       `crates/gres-conformance/pg-regress-baseline.json` was seeded once, in
       `179158c39`, and has never been ratcheted; `baseline.py update` correctly
