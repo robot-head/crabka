@@ -182,8 +182,25 @@ mod tests {
 
     #[test]
     fn status_messages_are_clamped_on_a_char_boundary() {
-        // Each `é` is two bytes, so the 512-byte budget lands mid-character.
-        let message = "é".repeat(400);
+        // The leading ASCII byte shifts every two-byte `é` onto an odd offset,
+        // so the budget lands *inside* a character and the helper has to step
+        // back. Without it — `"é".repeat(n)` alone — the budget is already a
+        // boundary and the step-back loop never runs, which is how it went
+        // untested despite a test that appeared to cover exactly this.
+        let message = format!("a{}", "é".repeat(MAX_STATUS_MESSAGE_BYTES));
+        let truncated = truncate_on_char_boundary(&message);
+
+        check!(truncated.len() == MAX_STATUS_MESSAGE_BYTES - 1);
+        check!(message.is_char_boundary(truncated.len()));
+        check!(truncated.starts_with('a'));
+        check!(truncated[1..].chars().all(|c| c == 'é'));
+    }
+
+    #[test]
+    fn a_budget_already_on_a_boundary_keeps_the_whole_budget() {
+        // The complement: two-byte characters with no offset put a boundary
+        // exactly on the budget, so nothing is stepped back.
+        let message = "é".repeat(MAX_STATUS_MESSAGE_BYTES);
         let truncated = truncate_on_char_boundary(&message);
 
         check!(truncated.len() == MAX_STATUS_MESSAGE_BYTES);
