@@ -2,20 +2,36 @@
 
 **Goal:** Make the unmodified PostgreSQL 18.4 core regression schedule pass against Gres, replacing the partial adopted-corpus percentage with a literal upstream `pg_regress` result.
 
-**Current state:** The authoritative result is `22/231` whole
-upstream test files, not the adopted corpus's `9323/14272` statement matches
-(65.3%). The checked-in monotone floor remains `6/231`; this non-monotone
-review does not ratchet it. Serial and parallel each complete all 231 files
-with zero infrastructure failures, leaving 209 semantic failures. Serial has
-176685 canonical changed lines across 4606 hunks; parallel has 177530 across
-4608. Exact tests in both modes are `test_setup`, `boolean`, `varchar`, `md5`,
-`comments`, `mvcc`, `euc_kr`, `create_function_c`, `infinite_recurse`,
+**Current state:** The authoritative serial result is `23/231` whole upstream
+test files, not the adopted corpus's statement matches. The checked-in monotone
+floor remains `6/231`; this review is still non-monotone against that floor and
+does not ratchet it. Serial completes all 231 files with zero infrastructure
+failures, leaving 208 semantic failures across 175704 canonical changed lines
+and 4583 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
+postflight probe succeeds, and the infrastructure report is empty.
+
+The measurement immediately before this wave was `22/231` at 176686 changed
+lines / 4606 hunks, from the same runner and the same pinned corpus. The
+type-input and diagnostics wave below is therefore `+1` exact file and `-982`
+changed lines with **zero newly failing files**: 36 files improve, `int4`
+becomes exact, and 4 gain a combined 22 lines.
+
+Those 4 — `timestamptz` +12, `horology` +6, `alter_table` +2, `timestamp` +2 —
+are all one benign category: a caret correctly attached to an error Gres should
+not be raising at all. `insert into child values (12, 13, 'testing')` and
+`'Jan 01 00:00:00 1000 LMT'::timestamptz` both *succeed* in PostgreSQL under the
+schedule's settings, so Gres's pre-existing wrong error now carries two more
+correct lines. Fixing the underlying rejection removes the error and its caret
+together; no over-attachment remains. (Beware isolated re-checks of the `LMT`
+cases: they depend on the run's `TimeZone`, and a bare `psql` session reproduces
+neither PostgreSQL's success nor its error.)
+
+`int4` joins the 22 previously exact files (`test_setup`, `boolean`, `varchar`,
+`md5`, `comments`, `mvcc`, `euc_kr`, `create_function_c`, `infinite_recurse`,
 `delete`, `security_label`, `async`, `dbsize`, `collate.icu.utf8`,
 `psql_crosstab`, `collate.linux.utf8`, `collate.windows.win1252`,
-`vacuum_parallel`, `portals_p2`, `bitmapops`, `numa`, and `compression_pglz`.
-Both PostgreSQL self-check modes pass 231/231, both Gres postflight probes
-succeed, and both infrastructure reports are empty. Certified artifact:
-`target/pg-regress-runs/20260803T231638Z-rebased-final-gres`.
+`vacuum_parallel`, `portals_p2`, `bitmapops`, `numa`, `compression_pglz`).
+Parallel mode has not been re-measured since this wave.
 
 The branch now includes PL/pgSQL, triggers, foreign keys, real schema
 namespaces, and full-text-search surfaces. Their serial owner diffs are
@@ -160,9 +176,99 @@ and their certified artifact describe current conformance.
 - [x] Apply scalar-to-`varchar(n)`/`char(n)` assignment coercion through the shared cast path and preserve the target typmod in truncation and `pg_input_error_info` diagnostics. The untouched `varchar` file is exact in `target/pg-regress-runs/20260803T222100Z-focused-varchar-current`.
 - [x] Expose PostgreSQL 18.4's 31 pinned catalog OID indexes consistently through `pg_class`, `pg_attribute`, and `pg_index`, including uniqueness/immediacy and index-key invariants. The untouched `sanity_check` file is exact in `target/pg-regress-runs/20260803T222000Z-focused-sanity-current`; the authoritative full schedule still leaves an order-sensitive 5-line / 1-hunk catalog-query residual, so focused success is not file-level certification.
 - [x] Box recursively re-entered SELECT/function futures in PL/pgSQL and cap parser recursion below the default 2 MiB thread-stack limit while retaining the explicit twenty-level acceptance floor. Focused PL/pgSQL, parser, and recursion-guard suites pass without a process abort.
+- [x] Implement PostgreSQL's real integer input grammar for `int2`/`int4`/`int8`:
+      the `0x`/`0o`/`0b` base prefixes and `_` digit separators it has accepted
+      since 16, with each separator required to precede a digit of that base so
+      `1__0`, `100_`, `_100`, and `0x__1` stay 22P02 while `1_0` and `0x_10` are
+      values. The magnitude accumulates negatively so `-0x8000000000000000`
+      reaches `i64::MIN`. A well-formed but too-wide value is now 22003
+      `value "…" is out of range for type <t>` for all three widths — `int4` and
+      `int8` previously fell back to the bare arithmetic message — and integer
+      arithmetic overflow names its own width (`smallint`/`integer`/`bigint`)
+      rather than always saying `integer`.
+- [x] Attach PostgreSQL's source position to type-input failures generally,
+      replacing the `bool`-only attacher. A rejected value is positioned when
+      exactly one string literal in the statement carries it *and* any type the
+      source states next to that literal is the type that rejected it, so
+      `int2 '34.5'`, `'34.5'::int2`, `CAST('zz' AS int4)`, and a `VALUES` item
+      coerced to its column all get a caret, while a value coerced through an
+      intermediate type (`'  tru e '::text::boolean`) or computed rather than
+      written (`('12'||'x')::int4`) correctly gets none — the latter two are
+      raised at execution time, where PostgreSQL has no parse location either.
+      Covers 22P02, 22003, and 22007, each of which names its type in the
+      message; a repeated literal stays undecorated rather than guessed. Every
+      case was checked byte-for-byte against a PostgreSQL 18.4 oracle, including
+      a sweep over `date`, `uuid`, `numeric`, `interval`, `time`, `timestamp`,
+      arrays, and floats confirming Gres never positions an error PostgreSQL
+      leaves bare.
+- [x] Position type-input failures raised by the datetime family (SQLSTATE
+      22007), and exclude *function arguments* from positioning entirely. A
+      literal passed to a function reaches it as an already-typed value and the
+      function raises its own error at execution time —
+      `to_timestamp('97/Feb/16', 'YYMonDD')` is `invalid value "/Feb/16" for
+      "Mon"` with no position — so the attacher walks back to the parenthesis
+      opening the literal's enclosing argument list and declines when it follows
+      an identifier. A `VALUES` row is not a call: its parenthesis follows the
+      `VALUES` keyword, and PostgreSQL does position each item's coercion to its
+      target column. A cast written on an argument still binds tighter than the
+      call, so `length(upper('zz'::interval::text))` keeps its caret — and the
+      `CAST('x' AS type)` spelling is recognised only when the literal sits
+      directly inside `CAST(`, because otherwise the *column alias* in
+      `SELECT bool 'test' AS error` reads as a target type named `error` and
+      suppresses a caret PostgreSQL does emit.
+      The complete schedule is what exposed both halves, and neither showed up
+      in targeted oracle probes: attaching to arguments cost `horology` 54
+      lines, `timestamptz` 12 and `timestamp` 2, and the alias misreading cost
+      the whole `boolean` file its exactness (20 lines). Treat "was this literal
+      coerced directly?" as a question only the full corpus can answer.
+- [x] Accept PostgreSQL's optional `TABLE` object-type keyword in
+      `GRANT`/`REVOKE`, so a bare relation name after `ON` names a table. 334
+      statements across 34 upstream files use that spelling, which was
+      previously a syntax error. `SCHEMA` still requires its keyword.
+- [x] Report `float8` text input overflow *and* underflow as 22003
+      `"…" is out of range for type double precision`, matching the existing
+      `float4` handling; overflow previously surfaced as the bare arithmetic
+      `integer out of range` and underflow silently returned zero.
 - [ ] Match remaining exact wire-visible diagnostics.
+- [ ] Attach `22008 date/time field value out of range` and `malformed array
+      literal` source positions. Neither message names its type, so the
+      "literal was coerced directly to the type that rejected it" evidence the
+      22P02/22003/22007 attacher relies on is unavailable; these need a
+      separate rule that instead rejects a literal opening a cast *chain*.
+- [ ] Emit `HINT: Perhaps you need a different "DateStyle" setting.` Measured
+      against the oracle, PostgreSQL attaches it only to *month/day* field
+      overflow (`'2024-13-01'::date`), not to other datetime range errors
+      (`'2024-02-30'::date`, `'25:00:00'::time`) — it is PostgreSQL's distinct
+      `DTERR_MD_FIELD_OVERFLOW`, so the datetime parser must separate that case
+      before the hint can be added. 30 occurrences in the expected files.
+- [ ] Give `oid` its own type identity. `crabka_pgtypes::datum` resolves `oid`
+      to `ColumnType::Int4`, so every `oid` input failure reports `invalid input
+      syntax for type integer`; the upstream `oid` file expects `... for type
+      oid`, which is roughly half that file's residual. Its source positions are
+      already correct.
+- [ ] Finish source-aware `bpchar` coercion. PostgreSQL treats a `bpchar`'s
+      trailing blanks as insignificant on *every* conversion out of the type —
+      `c::text`, `c::varchar`, `length(c)`, `lower(c)`/`upper(c)`, and `||` all
+      strip them — so the fix belongs at the shared bpchar-to-text coercion, not
+      at the explicit cast alone. Owns the padded-output residuals in
+      `select_having`, `select_implicit`, and `char`.
 - [ ] Eliminate nondeterministic unordered results rather than weakening comparisons.
 - [x] Treat every crash, I/O loss, or timeout as a harness failure, never as an SQL mismatch or a match on two dead connections.
+- [ ] Bound the postflight probe by a query timeout, not just a connect
+      timeout. `probe_gres` passes `PGCONNECT_TIMEOUT=5`, which limits only the
+      TCP/startup phase; when a schedule run is killed at
+      `GRES_PG_REGRESS_TIMEOUT` and leaves the server wedged, the probe's
+      `SELECT 1` blocks forever and the wrapper hangs instead of writing
+      `postflight-failed` and returning. Observed directly: a run killed at
+      exit-status 124 after 193/231 left `psql --command='SELECT 1'` blocked for
+      over two hours against a server whose log showed no panic and no I/O
+      error. Add `-v STATEMENT_TIMEOUT` / a `timeout` wrapper so a wedged server
+      is reported as the infrastructure failure it is.
+- [ ] Investigate why a `SIGTERM` of `pg_regress` mid-schedule can leave the
+      server unable to answer a new `SELECT 1`. This was observed under heavy
+      concurrent CPU load and after the volume had repeatedly hit 100%, so it is
+      not yet isolated from those, but a client disconnect must never wedge the
+      server.
 - [x] Reject positional parameter numbers outside PostgreSQL's signed-32-bit lexer range before allocating parameter-shape vectors; the upstream `numerology` case now returns `42601` rather than consuming unbounded CPU and memory.
 - [x] Keep regress-scale lateral derived joins bounded by caching only conservative, nonvolatile specializations (including the semantic no-op `OFFSET 0`) and reusing their equijoin indexes under the blocking-query memory limit.
 - [x] Index a top-level OR join only when every disjunct has a safe hash-comparable equality key. Union and deduplicate candidate right-row positions in original order, then recheck the full ON predicate; all four join kinds match an independent nested loop with NULLs, duplicates, overlap, and unmatched rows, while an unsafe branch declines the entire optimization.
