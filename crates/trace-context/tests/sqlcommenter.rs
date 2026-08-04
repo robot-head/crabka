@@ -35,8 +35,23 @@ fn extract_sqlcommenter_reads_only_genuine_comment_regions() {
         "SELECT 1 /*traceparent='00-nothex-b7ad6b7169203331-01'*/ /*traceparent='{TRACEPARENT}'*/"
     );
     let prefixed_key = format!("SELECT 1 /*db_traceparent='{TRACEPARENT}'*/");
+    // Operators and parameters the scanner must step over one byte at a time.
+    // Each is a single character that *begins* a construct the scanner also
+    // handles, so a guard that stops discriminating swallows the rest of the
+    // statement and the real comment behind it is never reached.
+    let subtraction = format!("SELECT a - b FROM t /*traceparent='{TRACEPARENT}'*/");
+    let division = format!("SELECT a / b FROM t /*traceparent='{TRACEPARENT}'*/");
+    let positional_param = format!("SELECT * FROM t WHERE id = $1 /*traceparent='{TRACEPARENT}'*/");
+    // The comment sits *after* the dollar-quoted body, so the skip has to land
+    // exactly past the closing delimiter — too short re-reads the body, too far
+    // steps over the comment.
+    let after_dollar_body = format!("SELECT $body$hi$body$ /*traceparent='{TRACEPARENT}'*/");
+    // The tag is only reachable if nesting is honoured: without it the first
+    // `*/` closes the comment and `traceparent=` is left sitting in bare SQL.
+    let after_nested_close =
+        format!("SELECT 1 /* outer /* inner */ traceparent='{TRACEPARENT}' */");
 
-    let cases: [(&str, &str, Option<SqlCommenterTrace<'_>>); 16] = [
+    let cases: [(&str, &str, Option<SqlCommenterTrace<'_>>); 21] = [
         (
             "trailing block comment",
             &trailing,
@@ -76,6 +91,31 @@ fn extract_sqlcommenter_reads_only_genuine_comment_regions() {
         (
             "a later comment is used when the first is malformed",
             &second_comment_wins,
+            Some(found(TRACEPARENT, None)),
+        ),
+        (
+            "subtraction before the comment",
+            &subtraction,
+            Some(found(TRACEPARENT, None)),
+        ),
+        (
+            "division before the comment",
+            &division,
+            Some(found(TRACEPARENT, None)),
+        ),
+        (
+            "positional parameter before the comment",
+            &positional_param,
+            Some(found(TRACEPARENT, None)),
+        ),
+        (
+            "after a dollar-quoted body",
+            &after_dollar_body,
+            Some(found(TRACEPARENT, None)),
+        ),
+        (
+            "after a nested comment closes",
+            &after_nested_close,
             Some(found(TRACEPARENT, None)),
         ),
         // The traps: none of these is a comment, or none is a traceparent.
