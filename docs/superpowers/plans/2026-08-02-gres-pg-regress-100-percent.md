@@ -354,7 +354,15 @@ For each item, first add one focused test at the shared layer that fails before 
 - [ ] Implement aggregate `ORDER BY`, ordered-set aggregates, record-returning function column definitions, and recursive CTE `SEARCH`/`CYCLE`.
 - [ ] Burn down the measured residuals in the PL/pgSQL, trigger, foreign-key, schema, and full-text-search owner files.
 - [ ] Complete expression/partial indexes next, then stored views over general queries, sequence lifecycle, array-slice assignment, and partitioned-table update semantics.
-- [ ] Implement real ANALYZE target parsing and durable TableId-keyed `reltuples` statistics. Preserve PostgreSQL's nontransactional row-count updates, target preflight, inheritance/partition counting, and stale-after-DML behavior. Keep `relhassubclass` separate: it is a persisted, potentially stale hint with different rollback semantics, not a projection of the current child graph.
+- [ ] Implement real ANALYZE target parsing and durable TableId-keyed `reltuples` statistics.
+      This owns the whole 4-line `maintain_every` residual, which is otherwise
+      exact: `pg_class` currently hardcodes `reltuples` to `Float4(-1.0)` and
+      `relhassubclass` to `false` (`crates/pgexec/src/exec.rs`), so the test's
+      `0 | t` then `0 | f` both read `-1 | f`. Note the trap: projecting
+      `relhassubclass` from the live child graph would reproduce both expected
+      lines, because the test only samples it after an `ANALYZE` — but that is
+      the test-only shortcut this plan forbids, since PostgreSQL clears the hint
+      *in `ANALYZE`* rather than at `DROP`. Implement the persisted hint. Preserve PostgreSQL's nontransactional row-count updates, target preflight, inheritance/partition counting, and stale-after-DML behavior. Keep `relhassubclass` separate: it is a persisted, potentially stale hint with different rollback semantics, not a projection of the current child graph.
 - [ ] Finish source-aware `bpchar` to text coercion, input-independent scalar-HAVING scan elision, and clause-aware error positions. The measured `select_having` and `select_implicit` residuals otherwise already match.
 - [ ] Implement full `name` type identity plus executable unique/partial expression indexes and hash-index entries/options before claiming `hash_index`; catalog-only expression metadata is insufficient.
 - [ ] Implement schema element transformation/execution atomically, `CURRENT_ROLE` authorization resolution, ColId relation components, and DROP CASCADE notices before claiming `create_schema` exactness.
