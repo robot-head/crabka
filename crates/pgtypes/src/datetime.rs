@@ -998,7 +998,9 @@ pub fn parse_time(s: &str) -> Result<Time, TypeError> {
 
 /// [`parse_time`] with the session's `DateStyle` field order and zone.
 pub fn parse_time_in(s: &str, order: DateOrder, tz: &TimeZone) -> Result<Time, TypeError> {
-    let type_name = "time without time zone";
+    // `time_in` names the type `time` in its errors, not the canonical
+    // `time without time zone` that `pg_typeof` and `format_type` report.
+    let type_name = "time";
     let micros = match decode(s.trim(), order).map_err(|e| decode_error(e, type_name, s))? {
         Decoded::Special(special) => match special {
             // `allballs` decodes as a plain clock reading, so the only reserved
@@ -1314,7 +1316,8 @@ pub fn parse_timestamp(s: &str) -> Result<DateTime, TypeError> {
 
 /// [`parse_timestamp`] with the session's `DateStyle` field order and zone.
 pub fn parse_timestamp_in(s: &str, order: DateOrder, tz: &TimeZone) -> Result<DateTime, TypeError> {
-    let type_name = "timestamp without time zone";
+    // `timestamp_in` names the type `timestamp`, as `time_in` names `time`.
+    let type_name = "timestamp";
     match decode(s.trim(), order).map_err(|e| decode_error(e, type_name, s))? {
         Decoded::Special(special) => special_to_datetime(special, tz),
         Decoded::Parts(parts) => {
