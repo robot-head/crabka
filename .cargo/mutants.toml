@@ -510,4 +510,27 @@ exclude_re = [
     # `< -> <=` exclusion above. The non-equivalent `< -> ==` / `< -> >`
     # mutations on the same line are still generated and caught.
     "broker/src/partition_writer\\.rs.*replace < with <= in run$",
+    # Non-terminating mutants in the sqlcommenter scanner. `index *= 1` never
+    # advances the cursor, and `end = start * key.len()` is 0 when `start` is 0,
+    # so the search restarts at the same offset forever. Neither answers wrongly
+    # — both hang — so the run is recorded as a timeout rather than a kill: the
+    # same detected-but-unreportable shape as the `BatchedTsoClient` flusher
+    # entries above. No assertion can be written for a state the correct scanner
+    # cannot reach; forward progress is structural, since `key.len() >= 1` makes
+    # `end > start >= from` on every iteration. The scanner's decisions — which
+    # regions count as comments, where a value ends, whether a quote is escaped —
+    # are mutation-tested and all caught.
+    "trace-context/src/sqlcommenter\\.rs.*replace \\+= with \\*= in scan_comments",
+    "trace-context/src/sqlcommenter\\.rs.*replace \\+ with \\* in find_field",
+    # NB: `delete field partition from struct ProducerRecord` in
+    # `gres-substrate/src/writer.rs` is also an equivalent mutant — the WAL topic
+    # is created with exactly one partition (`WAL_TOPIC_PARTITIONS`), so an
+    # explicit `partition: Some(0)` and the partitioner's choice under `None`
+    # resolve to the same partition. It is deliberately NOT listed here: as the
+    # `crates/broker/src/bin/**` note above records, name-regex exclusions do not
+    # reliably match struct-field-deletion mutants, and the alternatives — a file
+    # glob, or `#[mutants::skip]` on `append_group` — would drop the trace-header
+    # injection and the generation `key` (which fences a superseded writer, and
+    # IS caught) along with it. Left generated rather than silently no-op
+    # excluded.
 ]
