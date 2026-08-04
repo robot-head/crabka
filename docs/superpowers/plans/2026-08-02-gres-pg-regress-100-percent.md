@@ -6,13 +6,13 @@
 test files, not the adopted corpus's statement matches. The checked-in monotone
 floor remains `6/231`; this review is still non-monotone against that floor and
 does not ratchet it. Serial completes all 231 files with zero infrastructure
-failures, leaving 206 semantic failures across 175613 canonical changed lines
-and 4567 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
+failures, leaving 206 semantic failures across 175597 canonical changed lines
+and 4564 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
 postflight probe succeeds, and the infrastructure report is empty.
 
 The measurement immediately before this wave was `22/231` at 176686 changed
 lines / 4606 hunks, from the same runner and the same pinned corpus. The
-waves below are therefore `+3` exact files and `-1073` changed lines with
+waves below are therefore `+3` exact files and `-1089` changed lines with
 **zero newly failing files**: `int4`, `int2` and `roleattributes` become exact,
 and 4 files gain a combined 22 lines.
 
