@@ -77,7 +77,7 @@ fn tracestate_with_members(count: usize) -> String {
 
 #[test]
 fn from_w3c_accepts_only_well_formed_version_00_traceparents() {
-    let cases: [(&str, &str, Option<TraceContextError>); 11] = [
+    let cases: [(&str, &str, Option<TraceContextError>); 13] = [
         ("canonical", REMOTE, None),
         (
             "unsampled flags are still valid",
@@ -105,9 +105,25 @@ fn from_w3c_accepts_only_well_formed_version_00_traceparents() {
             Some(TraceContextError::Length(56)),
         ),
         ("empty", "", Some(TraceContextError::Length(0))),
+        // W3C mandates lower-case hex in all three fields, and each needs its
+        // own case: the permissive parsers underneath disagree about which
+        // ones they would otherwise wave through. `TraceId`/`SpanId::from_hex`
+        // accept upper case, and `u8::from_str_radix(_, 16)` accepts `0A`, so
+        // dropping any one of these guards silently admits a non-conforming
+        // traceparent rather than failing later.
         (
-            "upper-case hex",
+            "upper-case hex trace id",
             "00-0AF7651916CD43DD8448EB211C80319C-b7ad6b7169203331-01",
+            Some(TraceContextError::Malformed),
+        ),
+        (
+            "upper-case hex span id",
+            "00-0af7651916cd43dd8448eb211c80319c-B7AD6B7169203331-01",
+            Some(TraceContextError::Malformed),
+        ),
+        (
+            "upper-case hex flags",
+            "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-0A",
             Some(TraceContextError::Malformed),
         ),
         (
