@@ -474,6 +474,28 @@ and their certified artifact describe current conformance.
       (`exec.rs`), because `RETURNING` resolves against the leaf's order;
       gating that refusal on `returning.is_some()` looks correct but is a DML
       change with its own test surface.
+- [ ] **An intermittent hang wedges a session mid-schedule.** It has cost three
+      certification runs, at two different schedule positions, and is not tied
+      to any one change: a re-run of the *same commit* completed 231/231 after
+      one of them.
+      Signature, captured from `/proc` and `ss` while wedged: the gres process
+      has two threads, the tokio worker parked in `ep_poll` and the main thread
+      in `futex_do_wait`, so the runtime is IDLE -- yet a client socket sits
+      `ESTAB` with a request that never gets a reply, alongside a stale
+      `CLOSE-WAIT` gres never reaped. That is a lost wakeup or a task dropped
+      without responding, not a deadlock and not a slow query.
+      Observed at test 92 (group containing `subselect`) and twice at test 193
+      (group containing `truncate`). The last one wedged on a plain
+      `SELECT * FROM truncate_a` after `BEGIN; TRUNCATE; ROLLBACK;`, in a file
+      containing no CTAS at all, which ruled out the change under test.
+      Note `ptrace_scope` blocks `gdb -p` on this machine, so a backtrace needs
+      either root or a build that dumps its own state on a signal. Worth adding
+      that hook: three runs is ~2 hours, and the next occurrence is the cheapest
+      time to catch it.
+      Beware the diagnostic trap: pg_regress prints a parallel group's `ok`
+      lines only when the WHOLE group finishes, and the `subselect` group takes
+      6.3 minutes normally. A stall detector under ~10 minutes reports healthy
+      runs as hung -- that mistake cost one killed run here.
 - [ ] Ratchet or repair the committed serial baseline. The gate in
       `crates/gres-conformance/pg-regress-baseline.json` was seeded once, in
       `179158c39`, and has never been ratcheted; `baseline.py update` correctly
