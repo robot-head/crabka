@@ -6,13 +6,13 @@
 test files, not the adopted corpus's statement matches. The checked-in monotone
 floor remains `6/231`; this review is still non-monotone against that floor and
 does not ratchet it. Serial completes all 231 files with zero infrastructure
-failures, leaving 203 semantic failures across 171797 canonical changed lines
-and 4714 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
+failures, leaving 203 semantic failures across 171387 canonical changed lines
+and 4713 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
 postflight probe succeeds, and the infrastructure report is empty.
 
 The measurement immediately before this wave was `22/231` at 176686 changed
 lines / 4606 hunks, from the same runner and the same pinned corpus. The
-waves below are therefore `+6` exact files and `-4204` changed lines with
+waves below are therefore `+6` exact files and `-4614` changed lines with
 **zero newly failing files**: `int4`, `int2`, `roleattributes`, `lseg`, `line` and `circle` become exact,
 and 4 files gain a combined 22 lines.
 
@@ -430,6 +430,31 @@ and their certified artifact describe current conformance.
 - [ ] Make `ALTER TABLE` recurse to inheritance children. 42 occurrences of
       `child table is missing column` across nine files trace to it, and it
       blocks `inherit` and `alter_table` far more than anything RLS touched.
+- [x] **Table privileges and owner-rights views**, the pair the row-security
+      work deferred. Certified in three runs: `-100` for enforcement, `-91` for
+      views, `-219` for letting one `GRANT` name several relations. `privileges`
+      1911 -> 1774, `stats_ext` -106, `updatable_views` -60, `rowsecurity`
+      2752 -> 2661.
+      The halves had to land together for a reason the plan only half stated.
+      Safety was the known one: owner rights over an unenforced `GRANT` make any
+      view a universal bypass. Measurement was the other -- enforcement alone
+      made `rowsecurity` and `select_views` *worse* (+136, +56), because
+      upstream grants the caller the view and never the tables under it, so
+      every such access was wrongly denied until owner rights arrived.
+      Enforcement also exposed a live leak in the row-security work: the
+      aggregate, top-K and join-count pushdowns proved a relation free of
+      policies and then read it without a privilege check. `UnrestrictedTable`
+      now carries a `ReadPermit`, so the proof means both freedoms and one
+      signature closed five sites.
+      `GRANT` taking a single relation was reported out of scope during the
+      parser work and was harmless then. Once privileges were enforced it cost
+      20 spurious denials on `z1` alone, because an unparsed `GRANT` stores
+      nothing. Out-of-scope calls are worth revisiting when the thing that made
+      them harmless changes.
+- [ ] Close the remaining `rowsecurity` privilege gap: 34 `permission denied`
+      lines against PostgreSQL's 45, so the engine now *under*-denies. Schema,
+      function and column-level privileges are unenforced, and `relacl` /
+      `nspacl` / `attacl` still project NULL although grants exist.
 - [ ] Ratchet or repair the committed serial baseline. The gate in
       `crates/gres-conformance/pg-regress-baseline.json` was seeded once, in
       `179158c39`, and has never been ratcheted; `baseline.py update` correctly
