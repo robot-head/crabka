@@ -16,14 +16,14 @@ tools/check-pg-compat-matrix.sh
 The implemented rows reflect the current parser/executor surface. The
 authoritative PostgreSQL 18.4 core-schedule score is 28 / 231 exact in serial
 under the runner's explicit 20 MiB blocking-query memory policy, leaving 203
-failures across 171387 changed lines and 4713 hunks. Both PostgreSQL
+failures across 171336 changed lines and 4718 hunks. Both PostgreSQL
 self-checks pass 231 / 231, Gres completes all 231 files with a successful
 postflight probe and an empty infrastructure report. Parallel mode has not been
 re-measured since the type-input wave; its last certified figure was 22 / 231 at
 177530 changed lines / 4608 hunks.
 
 These waves add `int4`, `int2`, `roleattributes`, `lseg`, `line` and `circle`
-to the exact set (`+6` files, `-4614` changed lines) with zero newly failing files, by
+to the exact set (`+6` files, `-4665` changed lines) with zero newly failing files, by
 implementing PostgreSQL's real integer input grammar — `0x`/`0o`/`0b` bases and
 `_` separators — its exact out-of-range messages for every integer and float
 width, general source positions for type-input errors, the optional `TABLE`

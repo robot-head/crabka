@@ -6,13 +6,13 @@
 test files, not the adopted corpus's statement matches. The checked-in monotone
 floor remains `6/231`; this review is still non-monotone against that floor and
 does not ratchet it. Serial completes all 231 files with zero infrastructure
-failures, leaving 203 semantic failures across 171387 canonical changed lines
-and 4713 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
+failures, leaving 203 semantic failures across 171336 canonical changed lines
+and 4718 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
 postflight probe succeeds, and the infrastructure report is empty.
 
 The measurement immediately before this wave was `22/231` at 176686 changed
 lines / 4606 hunks, from the same runner and the same pinned corpus. The
-waves below are therefore `+6` exact files and `-4614` changed lines with
+waves below are therefore `+6` exact files and `-4665` changed lines with
 **zero newly failing files**: `int4`, `int2`, `roleattributes`, `lseg`, `line` and `circle` become exact,
 and 4 files gain a combined 22 lines.
 
@@ -455,6 +455,25 @@ and their certified artifact describe current conformance.
       lines against PostgreSQL's 45, so the engine now *under*-denies. Schema,
       function and column-level privileges are unenforced, and `relacl` /
       `nspacl` / `attacl` still project NULL although grants exist.
+- [x] **`ALTER TABLE` column changes recurse to descendants.** Certified `-51`
+      (`alter_table` -15, `select_parallel` -10, `returning` -8, `inherit` -6,
+      `select_views` -6), nothing worsened. `child table is missing column`
+      falls 42 -> 29.
+      The walk is one BFS over the partition and inheritance links together
+      with a single visited set, not the two existing `descendants` helpers: a
+      tree may mix link kinds, so either walk alone stops at the first link of
+      the other, and a diamond's foot must be altered exactly once.
+      The 29 that remain are a different root and should not be chased as this
+      one: they are cascades from unsupported partial indexes, where a column
+      cannot be dropped because an index depends on it and the later `ATTACH`
+      then finds the partition short a column.
+- [ ] Two pre-existing gaps found while tracing the above, both in DML rather
+      than DDL. `TRUNCATE` on an inheritance parent does not recurse at all --
+      the children keep their rows. And a partition declaring its columns in a
+      different order than its parent is refused outright in `DELETE`/`TRUNCATE`
+      (`exec.rs`), because `RETURNING` resolves against the leaf's order;
+      gating that refusal on `returning.is_some()` looks correct but is a DML
+      change with its own test surface.
 - [ ] Ratchet or repair the committed serial baseline. The gate in
       `crates/gres-conformance/pg-regress-baseline.json` was seeded once, in
       `179158c39`, and has never been ratcheted; `baseline.py update` correctly
