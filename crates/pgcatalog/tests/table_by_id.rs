@@ -47,6 +47,8 @@ fn ordinary_table(id: TableId, name: &RelationName) -> Table {
         name: name.clone(),
         columns: columns(),
         sharded: false,
+        row_security: false,
+        force_row_security: false,
         sharding: None,
         foreign: None,
         checks: Vec::new(),

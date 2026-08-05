@@ -4360,6 +4360,8 @@ mod tests {
             name: crabka_pgcatalog::RelationName::public("t11"),
             columns: vec![Column::new("id", ColumnType::Int4)],
             sharded: true,
+            row_security: false,
+            force_row_security: false,
             sharding: None,
             foreign: None,
             checks: Vec::new(),

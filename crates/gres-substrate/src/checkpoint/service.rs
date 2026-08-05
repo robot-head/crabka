@@ -1246,6 +1246,8 @@ mod tests {
                 crabka_pgtypes::ColumnType::Int4,
             )],
             sharded: true,
+            row_security: false,
+            force_row_security: false,
             sharding: Some(crabka_pgcatalog::ShardingStrategy::Hash(
                 crabka_pgcatalog::HashSharding {
                     columns: vec!["id".into()],

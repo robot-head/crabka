@@ -66,7 +66,11 @@ fn a_schema_record_round_trips_its_owner() {
         ),
         (
             "sharded_owner",
-            TableOptions { sharded: true },
+            TableOptions {
+                sharded: true,
+                row_security: false,
+                force_row_security: false,
+            },
             None,
             Vec::new(),
         ),
@@ -114,6 +118,8 @@ fn a_created_table_reads_back_owned_by_the_role_it_was_created_under() {
                 owner: "regress_owner".into(),
                 columns: columns(),
                 sharded: false,
+                row_security: false,
+                force_row_security: false,
                 sharding: None,
                 foreign: None,
                 checks: checks(),
@@ -144,6 +150,8 @@ fn replacing_a_schema_record_writes_the_owner_it_is_given() {
                     owner: owner.into(),
                     columns: widened,
                     sharded: false,
+                    row_security: false,
+                    force_row_security: false,
                     sharding: None,
                     foreign: None,
                     checks: checks(),
@@ -182,7 +190,11 @@ fn a_foreign_table_reads_back_owned_by_the_role_it_was_created_under() {
 fn a_record_carrying_an_unknown_option_bit_is_refused() {
     let encode = |options| serialize_schema(7, &columns(), options, BOOTSTRAP_ROLE, None, &[]);
     let clear = encode(TableOptions::default());
-    let set = encode(TableOptions { sharded: true });
+    let set = encode(TableOptions {
+        sharded: true,
+        row_security: false,
+        force_row_security: false,
+    });
     // The only byte the one known option changes is the option-flag byte, so
     // the difference locates it without the test knowing the layout.
     let flags = clear

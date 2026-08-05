@@ -5,6 +5,7 @@
 
 #![doc(html_root_url = "https://docs.rs/crabka-pgcatalog/0.3.9")]
 
+pub mod policy;
 pub mod routine;
 pub mod serde;
 pub mod trigger;
@@ -182,10 +183,24 @@ pub struct ForeignTableMeta {
 }
 
 /// Ordinary-table creation options stored in the catalog schema record.
+///
+/// Every flag here is a single bit of the schema record's table-option byte, so
+/// they travel together: a reader that recovers one has recovered all of them
+/// or has refused the record outright.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TableOptions {
     /// True when writes use global visibility and routing may span ranges.
     pub sharded: bool,
+    /// `pg_class.relrowsecurity`: `ALTER TABLE … ENABLE ROW LEVEL SECURITY`.
+    /// While it is set, a read of the relation is filtered by the policies in
+    /// [`crate::policy`] — including when the relation has none, which hides
+    /// every row rather than showing every row.
+    pub row_security: bool,
+    /// `pg_class.relforcerowsecurity`: `ALTER TABLE … FORCE ROW LEVEL
+    /// SECURITY`, which stops the relation's owner from bypassing its own
+    /// policies. Meaningless on its own — it only has an effect while
+    /// [`Self::row_security`] is set.
+    pub force_row_security: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -534,6 +549,16 @@ pub struct Table {
     pub columns: Vec<Column>,
     /// True when the table uses global-visibility semantics and may span ranges.
     pub sharded: bool,
+    /// `pg_class.relrowsecurity` — see [`TableOptions::row_security`].
+    ///
+    /// It is a field on `Table`, not a side catalog keyed by relation, for one
+    /// reason: every read path already holds a `Table`, so it holds this too.
+    /// There is no lookup to forget and no window in which a relation has been
+    /// fetched but its row-security state has not.
+    pub row_security: bool,
+    /// `pg_class.relforcerowsecurity` — see
+    /// [`TableOptions::force_row_security`].
+    pub force_row_security: bool,
     /// Optional physical sharding strategy for range routing.
     pub sharding: Option<ShardingStrategy>,
     /// Present when the table is a foreign table; `None` for ordinary tables.
@@ -589,6 +614,13 @@ pub enum CatalogError {
     /// constraint the relation does not have (42704).
     #[error("constraint \"{0}\" does not exist")]
     UndefinedConstraint(String),
+    /// A row-security policy name is per-relation, exactly like a constraint
+    /// name, so `PostgreSQL` reports the relation alongside the name.
+    #[error("policy \"{name}\" for table \"{relation}\" already exists")]
+    DuplicatePolicy { name: String, relation: String },
+    /// `ALTER POLICY`/`DROP POLICY` named a policy the relation does not carry.
+    #[error("policy \"{name}\" for table \"{relation}\" does not exist")]
+    UndefinedPolicy { name: String, relation: String },
     #[error("sequence \"{0}\" already exists")]
     DuplicateSequence(String),
     #[error("sequence \"{0}\" does not exist")]
@@ -654,7 +686,8 @@ impl CatalogError {
             CatalogError::UndefinedColumn(_) => "42703",
             CatalogError::UndefinedIndex(_)
             | CatalogError::UndefinedObject(_)
-            | CatalogError::UndefinedConstraint(_) => "42704",
+            | CatalogError::UndefinedConstraint(_)
+            | CatalogError::UndefinedPolicy { .. } => "42704",
             CatalogError::DependentObjectsStillExist(_)
             | CatalogError::TablespaceNotEmpty(_)
             | CatalogError::OperatorFamilyNotEmpty(_)
@@ -664,7 +697,9 @@ impl CatalogError {
             CatalogError::NotOrdinaryTable(_)
             | CatalogError::StoredViewDependency(_)
             | CatalogError::InvalidSharding(_) => "0A000",
-            CatalogError::DuplicateObject(_) | CatalogError::DuplicateConstraint { .. } => "42710",
+            CatalogError::DuplicateObject(_)
+            | CatalogError::DuplicateConstraint { .. }
+            | CatalogError::DuplicatePolicy { .. } => "42710",
             CatalogError::DuplicateSchema(_) => "42P06",
             CatalogError::ReservedSchemaName(_) => "42939",
             CatalogError::UndefinedSchema(_) => "3F000",
@@ -2000,14 +2035,15 @@ pub fn drop_schema_ops(
 ///
 /// Immutable IDs key the rows and the local secondary-index entries, so their
 /// physical keys do not move. Index *metadata* and table privileges carry the
-/// table name, and the same batch rewrites them. Index names do not change.
-///
-/// Foreign keys are id-keyed on both sides, so the batch rewrites only the
-/// denormalized display names in their payloads. It does this on the table's
-/// own constraints and on every constraint that references the table. Stored
-/// views retain SQL text rather than dependency identities. Any stored view
-/// therefore blocks a rename, until that representation can be rewritten
-/// safely.
+/// table name and are rewritten in the same batch. Index names are preserved.
+/// Foreign keys are id-keyed on both sides, so only the denormalized display
+/// names in their payloads are rewritten — on the table's own constraints and
+/// on every constraint that references it. Row-security policies need no
+/// rewriting at all: they are keyed and stored by table id only, so a rename
+/// cannot strand one under the old name and leave the relation unprotected.
+/// Stored views retain SQL text rather
+/// than dependency identities; until that representation can be rewritten
+/// safely, any stored view blocks a rename.
 ///
 /// # Errors
 ///
@@ -2320,6 +2356,47 @@ pub fn replace_table_schema_ops(
     }])
 }
 
+/// Build the write batch that sets a relation's row-security flags, preserving
+/// every other part of its schema record.
+///
+/// The two flags are set together because they are read together: `FORCE ROW
+/// LEVEL SECURITY` alone means nothing, and a caller that could move one
+/// without the other could leave a relation forced-but-not-enabled, which reads
+/// as "unprotected".
+///
+/// Nothing in the SQL surface reaches this yet — `ALTER TABLE … ENABLE ROW
+/// LEVEL SECURITY` is still a parse error, and enforcement is a later slice.
+///
+/// # Errors
+///
+/// Returns undefined-table or storage/corruption errors from the catalog KV seam.
+pub fn set_row_security_ops(
+    kv: &dyn Kv,
+    name: &RelationName,
+    row_security: bool,
+    force_row_security: bool,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    let bytes = kv
+        .get(&catalog_key(name))?
+        .ok_or_else(|| CatalogError::UndefinedTable(name.to_string()))?;
+    let (id, columns, options, owner, foreign, checks) = deserialize_schema(&bytes)?;
+    Ok(vec![WriteOp::Put {
+        key: catalog_key(name),
+        value: serialize_schema(
+            id,
+            &columns,
+            TableOptions {
+                row_security,
+                force_row_security,
+                ..options
+            },
+            &owner,
+            foreign.as_ref(),
+            &checks,
+        ),
+    }])
+}
+
 /// Build the write batch that drops a view without persisting it.
 ///
 /// # Errors
@@ -2483,6 +2560,8 @@ fn table_from_schema_bytes(
         owner,
         columns,
         sharded: options.sharded,
+        row_security: options.row_security,
+        force_row_security: options.force_row_security,
         sharding,
         foreign,
         checks,
@@ -2564,6 +2643,8 @@ pub fn complete_table_conversion_ops(
         owner,
         columns,
         sharded: options.sharded,
+        row_security: options.row_security,
+        force_row_security: options.force_row_security,
         sharding: get_table_sharding(kv, name)?,
         foreign: None,
         checks,
@@ -2578,7 +2659,13 @@ pub fn complete_table_conversion_ops(
         value: serialize_schema(
             id,
             &table.columns,
-            TableOptions { sharded: true },
+            // Only the sharding flag changes: rewriting the whole option set
+            // here would silently clear the relation's row-security flags,
+            // which is a total policy bypass rather than a lost preference.
+            TableOptions {
+                sharded: true,
+                ..options
+            },
             &table.owner,
             None,
             &table.checks,
@@ -3785,6 +3872,10 @@ pub fn drop_table_ops(kv: &dyn Kv, name: &RelationName) -> Result<Vec<WriteOp>, 
         ops.push(drop_relation_tablespace_op(&index.qualified_name()));
     }
     ops.extend(drop_table_foreign_key_ops(kv, table.id)?);
+    // Row-security policies are keyed by table id, and a table id can be handed
+    // out again, so leaving them behind would attach one relation's policies to
+    // an unrelated later one.
+    ops.extend(policy::drop_policies_for_table_ops(kv, table.id)?);
     Ok(ops)
 }
 
@@ -5277,8 +5368,16 @@ mod tests {
     fn replacing_a_table_schema_preserves_its_identity() {
         use assert2::assert;
         let kv = MemKv::default();
-        create_table_with_options(&kv, &rel("t"), cols(), TableOptions { sharded: true })
-            .expect("create");
+        create_table_with_options(
+            &kv,
+            &rel("t"),
+            cols(),
+            TableOptions {
+                sharded: true,
+                ..TableOptions::default()
+            },
+        )
+        .expect("create");
         let before = get_table(&kv, &rel("t")).expect("table");
 
         let mut columns = before.columns.clone();
@@ -5661,7 +5760,10 @@ mod tests {
             &kv,
             &rel("sharded_t"),
             cols(),
-            TableOptions { sharded: true },
+            TableOptions {
+                sharded: true,
+                ..TableOptions::default()
+            },
         )
         .expect("create sharded table");
         let table = get_table(&kv, &rel("sharded_t")).expect("lookup sharded table");
@@ -5673,8 +5775,16 @@ mod tests {
     #[test]
     fn table_hash_sharding_metadata_roundtrips() {
         let kv = MemKv::new();
-        create_table_with_options(&kv, &rel("hash_t"), cols(), TableOptions { sharded: true })
-            .expect("create hash table");
+        create_table_with_options(
+            &kv,
+            &rel("hash_t"),
+            cols(),
+            TableOptions {
+                sharded: true,
+                ..TableOptions::default()
+            },
+        )
+        .expect("create hash table");
         let sharding = ShardingStrategy::Hash(HashSharding {
             columns: vec!["id".into()],
             buckets: 16,
@@ -5725,7 +5835,10 @@ mod tests {
                 &kv,
                 &rel("t"),
                 cols(),
-                TableOptions { sharded: true },
+                TableOptions {
+                    sharded: true,
+                    ..TableOptions::default()
+                },
                 Some(&hash_sharding(columns)),
                 Vec::new(),
                 TableCreation::bootstrap(),
@@ -5738,7 +5851,10 @@ mod tests {
                 &kv,
                 &rel("existing"),
                 cols(),
-                TableOptions { sharded: true },
+                TableOptions {
+                    sharded: true,
+                    ..TableOptions::default()
+                },
             )
             .expect("create table");
             let attached =
@@ -5763,7 +5879,10 @@ mod tests {
             &kv,
             &rel("hash_t"),
             cols(),
-            TableOptions { sharded: true },
+            TableOptions {
+                sharded: true,
+                ..TableOptions::default()
+            },
             Some(&sharding),
             Vec::new(),
             TableCreation::bootstrap(),

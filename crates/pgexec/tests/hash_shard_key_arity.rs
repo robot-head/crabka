@@ -59,7 +59,11 @@ fn engine_with_catalog_sharding(
         kv.as_ref(),
         &RelationName::public("t"),
         columns,
-        TableOptions { sharded: true },
+        TableOptions {
+            sharded: true,
+            row_security: false,
+            force_row_security: false,
+        },
         Some(sharding),
         Vec::new(),
         crabka_pgcatalog::TableCreation::bootstrap(),
@@ -198,7 +202,11 @@ fn the_catalog_api_refuses_a_multi_column_hash_shard_key() {
         &kv,
         &RelationName::public("existing"),
         columns.clone(),
-        TableOptions { sharded: true },
+        TableOptions {
+            sharded: true,
+            row_security: false,
+            force_row_security: false,
+        },
     )
     .expect("create the table the sharding is attached to");
 
@@ -207,7 +215,11 @@ fn the_catalog_api_refuses_a_multi_column_hash_shard_key() {
             &kv,
             &RelationName::public("t"),
             columns,
-            TableOptions { sharded: true },
+            TableOptions {
+                sharded: true,
+                row_security: false,
+                force_row_security: false,
+            },
             Some(&hash_sharding(&["a", "b"])),
             Vec::new(),
             crabka_pgcatalog::TableCreation::bootstrap(),

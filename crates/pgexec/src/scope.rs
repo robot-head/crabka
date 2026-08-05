@@ -156,6 +156,8 @@ mod tests {
             name: RelationName::public(name),
             columns: cols.iter().map(|(n, t)| Column::new(*n, *t)).collect(),
             sharded: false,
+            row_security: false,
+            force_row_security: false,
             sharding: None,
             foreign: None,
             checks: Vec::new(),

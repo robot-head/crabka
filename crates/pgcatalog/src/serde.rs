@@ -1,7 +1,8 @@
 //! Versioned (de)serialization of a table schema — the value stored under
 //! `crabka_pgkv::key::catalog_key(name)`. Format: version byte, `table_id`
 //! (u32 BE), column count (u32 BE), then per column: u32 name length, name bytes,
-//! type tag; table option flags (u8); the owning role (u32 length + name bytes);
+//! type tag; table option flags (u8: sharded, row security, forced row
+//! security); the owning role (u32 length + name bytes);
 //! followed by a `foreign` flag byte: `0` = ordinary table (no further payload),
 //! `1` = foreign table (server name len u32, server name bytes, option count
 //! u32, then per option: key len u32, key bytes, value len u32, value bytes).
@@ -39,9 +40,16 @@ pub type DecodedSchema = (
 /// are written with this version byte; a flag byte after the column list
 /// distinguishes ordinary (`0`) from foreign (`1`), and a `CHECK` constraint
 /// list closes the record.
-pub const SCHEMA_VERSION: u8 = 8;
+pub const SCHEMA_VERSION: u8 = 9;
 
 const TABLE_OPTION_SHARDED: u8 = 0b0000_0001;
+const TABLE_OPTION_ROW_SECURITY: u8 = 0b0000_0010;
+const TABLE_OPTION_FORCE_ROW_SECURITY: u8 = 0b0000_0100;
+/// Every bit [`read_table_options`] knows how to decode. A bit outside this
+/// mask is a record from a build this one does not understand, and the reader
+/// refuses it rather than guessing — see the comment on `read_table_options`.
+const TABLE_OPTION_KNOWN: u8 =
+    TABLE_OPTION_SHARDED | TABLE_OPTION_ROW_SECURITY | TABLE_OPTION_FORCE_ROW_SECURITY;
 const SHARDING_VERSION: u8 = 1;
 const SHARDING_NONE: u8 = 0;
 const SHARDING_HASH: u8 = 1;
@@ -879,21 +887,36 @@ fn read_checks(cur: &mut &[u8]) -> Result<Vec<CheckConstraint>, KvError> {
 }
 
 fn table_option_flags(options: TableOptions) -> u8 {
+    let mut flags = 0;
     if options.sharded {
-        TABLE_OPTION_SHARDED
-    } else {
-        0
+        flags |= TABLE_OPTION_SHARDED;
     }
+    if options.row_security {
+        flags |= TABLE_OPTION_ROW_SECURITY;
+    }
+    if options.force_row_security {
+        flags |= TABLE_OPTION_FORCE_ROW_SECURITY;
+    }
+    flags
 }
 
+/// Decode the table-option byte, refusing any bit this build does not know.
+///
+/// The strictness is a security property, not tidiness. Row security lives in
+/// this byte, and a tolerant reader — one that masked unknown bits away — would
+/// decode a record written with a later flag layout as a table with row
+/// security *off*, which is a silent, total policy bypass. Refusing the record
+/// fails the read instead.
 fn read_table_options(flags: u8) -> Result<TableOptions, KvError> {
-    if flags & !TABLE_OPTION_SHARDED != 0 {
+    if flags & !TABLE_OPTION_KNOWN != 0 {
         return Err(KvError::CorruptRow(format!(
             "unknown table option flags {flags:#04x}"
         )));
     }
     Ok(TableOptions {
         sharded: flags & TABLE_OPTION_SHARDED != 0,
+        row_security: flags & TABLE_OPTION_ROW_SECURITY != 0,
+        force_row_security: flags & TABLE_OPTION_FORCE_ROW_SECURITY != 0,
     })
 }
 
@@ -2458,7 +2481,10 @@ mod tests {
         let bytes = serialize_schema(
             1,
             &columns,
-            TableOptions { sharded: true },
+            TableOptions {
+                sharded: true,
+                ..TableOptions::default()
+            },
             "postgres",
             None,
             &[],
@@ -2760,7 +2786,10 @@ mod tests {
         // locates the flags without restating the layout here.
         let option_flag_offset = bytes
             .iter()
-            .zip(encode(TableOptions { sharded: true }))
+            .zip(encode(TableOptions {
+                sharded: true,
+                ..TableOptions::default()
+            }))
             .position(|(clear, set)| *clear != set)
             .expect("a set option changes the record");
         bytes[option_flag_offset] = 0b1000_0000;

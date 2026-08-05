@@ -3056,6 +3056,8 @@ mod tests {
             name: RelationName::public("c"),
             columns: columns(&[("a", ColumnType::Int4)]),
             sharded: false,
+            row_security: false,
+            force_row_security: false,
             sharding: None,
             foreign: None,
             checks: Vec::new(),

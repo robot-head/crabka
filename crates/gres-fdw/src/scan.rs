@@ -185,6 +185,8 @@ mod tests {
                 Column::new("value", ColumnType::Bytea),
             ],
             sharded: false,
+            row_security: false,
+            force_row_security: false,
             sharding: None,
             foreign: Some(ForeignTableMeta {
                 server: "s".into(),
