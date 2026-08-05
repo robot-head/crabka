@@ -582,6 +582,9 @@ pub enum Statement {
     /// `CREATE TABLE … AS <query>` and its `SELECT … INTO <table>` spelling.
     CreateTableAs {
         name: RelationRef,
+        /// `CREATE TEMP TABLE … AS`, which creates the result in the session's
+        /// temporary namespace exactly as the column-list spelling does.
+        temporary: bool,
         if_not_exists: bool,
         /// An explicit output column list, which renames the query's columns.
         columns: Option<Vec<String>>,

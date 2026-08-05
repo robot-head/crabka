@@ -299,3 +299,31 @@ async fn an_index_belongs_to_the_owner_of_the_table_it_indexes() {
             == "indexer"
     );
 }
+
+/// `CREATE TEMP TABLE … AS` and `SELECT … INTO TEMP` create the result in the
+/// session's temporary namespace, exactly as the column-list spelling does.
+/// Both used to be a syntax error or a silently permanent relation.
+#[tokio::test]
+async fn a_temporary_target_is_temporary_in_every_spelling() {
+    let cases = [
+        ("CREATE TEMP TABLE t1 AS SELECT 1 AS id", "t1", true),
+        ("CREATE TEMPORARY TABLE t2 AS SELECT 1 AS id", "t2", true),
+        ("SELECT 1 AS id INTO TEMP t3", "t3", true),
+        ("CREATE TABLE t4 AS SELECT 1 AS id", "t4", false),
+        ("SELECT 1 AS id INTO t5", "t5", false),
+    ];
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    for (sql, relation, temporary) in cases {
+        run(&mut session, sql).await;
+        let schema = scalar(
+            &mut session,
+            &format!("SELECT schemaname FROM pg_tables WHERE tablename = '{relation}'"),
+        )
+        .await;
+        assert!(
+            schema.starts_with("pg_temp") == temporary,
+            "{sql} -> {schema}"
+        );
+    }
+}

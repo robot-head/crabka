@@ -7264,6 +7264,7 @@ impl SqlSession {
     async fn run_create_table_as(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
         let Statement::CreateTableAs {
             name,
+            temporary,
             if_not_exists,
             columns,
             query,
@@ -7285,7 +7286,14 @@ impl SqlSession {
             self.catalog_kv.as_ref(),
             &self.resolution_scope(),
             name,
-            crate::relname::SchemaDisposition::Creation,
+            // A `TEMP` target lands in the session's temporary namespace, not
+            // the first search-path entry — the same disposition the
+            // column-list spelling of `CREATE TEMP TABLE` resolves under.
+            if *temporary {
+                crate::relname::SchemaDisposition::TemporaryCreation
+            } else {
+                crate::relname::SchemaDisposition::Creation
+            },
         )?;
         let target = crabka_pgparser::ast::RelationRef::qualified(&name.schema, &name.name);
         if *if_not_exists && crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), name).is_ok() {
@@ -7340,7 +7348,7 @@ impl SqlSession {
             sharded: false,
             sharding: None,
             if_not_exists: *if_not_exists,
-            temporary: false,
+            temporary: *temporary,
             like: Vec::new(),
             inherits: Vec::new(),
             on_commit: None,

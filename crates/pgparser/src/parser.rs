@@ -127,6 +127,8 @@ pub(crate) struct Parser {
     /// here and [`Parser::query_statement`] turns the finished query into a
     /// [`crate::ast::Statement::CreateTableAs`].
     select_into: Option<crate::ast::RelationRef>,
+    /// Whether the pending `SELECT … INTO` target was `TEMP`/`TEMPORARY`.
+    select_into_temporary: bool,
     /// One frame per `SELECT` currently being parsed, innermost last: the window
     /// calls met so far in that SELECT. A subquery pushes its own frame, so a
     /// window call always lands on the SELECT that owns it.
@@ -234,6 +236,7 @@ impl Parser {
             type_schemas: None,
             depth: Rc::new(Cell::new(0)),
             select_into: None,
+            select_into_temporary: false,
             window_calls: Vec::new(),
             window_spec_depth: 0,
             unnamed_subqueries: 0,
@@ -5861,6 +5864,12 @@ impl Parser {
     fn create_table_as(&mut self) -> Result<crate::ast::Statement, ParseError> {
         use crate::ast::Statement;
         self.expect(&Token::Keyword(Keyword::Create))?;
+        // The persistence modifiers sit between CREATE and TABLE in this
+        // spelling too; `GLOBAL`/`LOCAL` are noise words on a temp table.
+        self.eat_keyword(Keyword::Global);
+        self.eat_keyword(Keyword::Local);
+        let temporary = self.eat_ident_eq("temp") || self.eat_ident_eq("temporary");
+        let _unlogged = self.eat_ident_eq("unlogged");
         self.expect(&Token::Keyword(Keyword::Table))?;
         let if_not_exists = self.eat_if_not_exists();
         let name = self.relation_ref()?;
@@ -5884,6 +5893,7 @@ impl Parser {
         };
         Ok(Statement::CreateTableAs {
             name,
+            temporary,
             if_not_exists,
             columns,
             query: Box::new(query),
@@ -10049,6 +10059,7 @@ impl Parser {
         match self.select_into.take() {
             Some(name) => crate::ast::Statement::CreateTableAs {
                 name,
+                temporary: std::mem::take(&mut self.select_into_temporary),
                 if_not_exists: false,
                 columns: None,
                 query: Box::new(query),
@@ -10059,16 +10070,18 @@ impl Parser {
         }
     }
 
-    /// `SELECT … INTO <table>`: record the target so [`Parser::query_statement`]
-    /// can hand back a `CREATE TABLE … AS`. `TEMP`/`TEMPORARY`/`UNLOGGED` are
-    /// accepted and ignored: there is one storage class here.
+    /// `SELECT … INTO <table>` — record the target so [`Parser::query_statement`]
+    /// can hand back a `CREATE TABLE … AS`. `TEMP`/`TEMPORARY` names the
+    /// session's temporary namespace, exactly as it does on the `CREATE`
+    /// spelling; `UNLOGGED` is accepted and ignored, there being one storage
+    /// class here.
     fn opt_select_into(&mut self) -> Result<(), ParseError> {
         if !self.eat_keyword(Keyword::Into) {
             return Ok(());
         }
-        let _ = self.eat_ident_eq("temporary")
-            || self.eat_ident_eq("temp")
-            || self.eat_ident_eq("unlogged");
+        let temporary = self.eat_ident_eq("temporary") || self.eat_ident_eq("temp");
+        let _unlogged = !temporary && self.eat_ident_eq("unlogged");
+        self.select_into_temporary = temporary;
         let name = self.relation_ref()?;
         if self.select_into.replace(name).is_some() {
             return Err(ParseError::new_sqlstate(
