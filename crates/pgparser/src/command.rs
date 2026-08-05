@@ -53,6 +53,7 @@ command_identities!(
     (AlterTrigger, "ALTER TRIGGER"),
     (AlterType, "ALTER TYPE"),
     (AlterUserMapping, "ALTER USER MAPPING"),
+    (AlterView, "ALTER VIEW"),
     (Analyze, "ANALYZE"),
     (Begin, "BEGIN"),
     (Call, "CALL"),

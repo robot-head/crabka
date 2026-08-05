@@ -3233,6 +3233,7 @@ impl Parser {
                         statement,
                     })
                 }
+                Token::Keyword(Keyword::View) => emitted(I::AlterView, self.alter_view()),
                 Token::Keyword(Keyword::Index) => emitted(I::AlterIndex, self.alter_index()),
                 Token::Keyword(Keyword::Schema) => emitted(I::AlterSchema, self.alter_schema()),
                 Token::Keyword(Keyword::Server) => emitted(I::AlterServer, self.alter_server()),
@@ -7767,33 +7768,119 @@ impl Parser {
         if !self.eat_keyword(Keyword::With) {
             return Ok(options);
         }
-        self.expect(&Token::LParen)?;
-        loop {
-            let start = self.peek_pos();
-            let name = self.expect_ident()?.to_ascii_lowercase();
-            match name.as_str() {
-                "security_invoker" => options.security_invoker = self.reloption_bool()?,
-                "security_barrier" => options.security_barrier = self.reloption_bool()?,
-                "check_option" => {
-                    if *self.peek() == Token::Eq {
-                        self.bump();
-                        self.expect_ident()?;
-                    }
-                }
-                other => {
-                    return Err(ParseError::new_sqlstate(
-                        "22023",
-                        format!("unrecognized parameter \"{other}\""),
-                        start,
-                    ));
-                }
+        for (name, value) in self.view_option_settings()? {
+            match name {
+                crate::ast::ViewOptionName::SecurityInvoker => options.security_invoker = value,
+                crate::ast::ViewOptionName::SecurityBarrier => options.security_barrier = value,
+                crate::ast::ViewOptionName::CheckOption => {}
             }
+        }
+        Ok(options)
+    }
+
+    /// A parenthesized `(name [= value], …)` reloption list, as `CREATE VIEW …
+    /// WITH (…)` and `ALTER VIEW … SET (…)` both write it.
+    ///
+    /// Shared so the two spellings cannot drift: an option `CREATE VIEW`
+    /// refuses must not be one `ALTER VIEW` silently accepts.
+    fn view_option_settings(
+        &mut self,
+    ) -> Result<Vec<(crate::ast::ViewOptionName, bool)>, ParseError> {
+        self.expect(&Token::LParen)?;
+        let mut settings = Vec::new();
+        loop {
+            let name = self.view_option_name()?;
+            // `check_option` is an enum, not a boolean, so its value is taken
+            // and dropped rather than run through `parse_bool`.
+            let value = if name == crate::ast::ViewOptionName::CheckOption {
+                if *self.peek() == Token::Eq {
+                    self.bump();
+                    self.expect_ident()?;
+                }
+                false
+            } else {
+                self.reloption_bool()?
+            };
+            settings.push((name, value));
             if !self.eat_comma() {
                 break;
             }
         }
         self.expect(&Token::RParen)?;
-        Ok(options)
+        Ok(settings)
+    }
+
+    /// One reloption name, refusing anything a view does not have.
+    fn view_option_name(&mut self) -> Result<crate::ast::ViewOptionName, ParseError> {
+        use crate::ast::ViewOptionName;
+
+        let start = self.peek_pos();
+        let name = self.expect_ident()?.to_ascii_lowercase();
+        match name.as_str() {
+            "security_invoker" => Ok(ViewOptionName::SecurityInvoker),
+            "security_barrier" => Ok(ViewOptionName::SecurityBarrier),
+            "check_option" => Ok(ViewOptionName::CheckOption),
+            other => Err(ParseError::new_sqlstate(
+                "22023",
+                format!("unrecognized parameter \"{other}\""),
+                start,
+            )),
+        }
+    }
+
+    /// `ALTER VIEW [IF EXISTS] name { OWNER TO role | SET (…) | RESET (…) }`.
+    ///
+    /// The three `PostgreSQL` subcommands this engine can act on. `RENAME TO`,
+    /// `SET SCHEMA` and the `ALTER COLUMN … SET DEFAULT` family reach the
+    /// syntax error below rather than being consumed and ignored, so a
+    /// statement that would change a view's identity never looks like it
+    /// succeeded.
+    fn alter_view(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::AlterViewAction;
+
+        self.expect_ident_eq("alter")?;
+        self.expect(&Token::Keyword(Keyword::View))?;
+        let if_exists = self.eat_if_exists()?;
+        let name = self.relation_ref()?;
+        if self.eat_ident_eq("owner") {
+            self.expect_keyword_or_ident(Keyword::To, "to")?;
+            return Ok(crate::ast::Statement::AlterView {
+                name,
+                if_exists,
+                action: AlterViewAction::OwnerTo(self.expect_object_name()?),
+            });
+        }
+        if self.eat_keyword(Keyword::Set) {
+            return Ok(crate::ast::Statement::AlterView {
+                name,
+                if_exists,
+                action: AlterViewAction::SetOptions(self.view_option_settings()?),
+            });
+        }
+        if self.eat_ident_eq("reset") {
+            self.expect(&Token::LParen)?;
+            let mut names = Vec::new();
+            loop {
+                names.push(self.view_option_name()?);
+                if !self.eat_comma() {
+                    break;
+                }
+            }
+            self.expect(&Token::RParen)?;
+            return Ok(crate::ast::Statement::AlterView {
+                name,
+                if_exists,
+                action: AlterViewAction::ResetOptions(names),
+            });
+        }
+        Err(ParseError::new(
+            format!(
+                "unsupported ALTER VIEW subcommand, found {:?}; \
+                 expected OWNER TO, SET (…) or RESET (…)",
+                self.peek()
+            ),
+            self.peek_pos(),
+        ))
     }
 
     /// A boolean reloption's value. A bare name is `true`, which is how
@@ -12815,6 +12902,85 @@ mod tests {
                 crate::parse(sql).expect_err("refused").sqlstate() == "22023",
                 "case: {sql}"
             );
+        }
+    }
+
+    /// `ALTER VIEW`'s three subcommands, and the ones it declines to swallow.
+    #[test]
+    fn alter_view_subcommands() {
+        use assert2::assert;
+
+        use crate::ast::{AlterViewAction as Action, ViewOptionName as Name};
+        let cases = [
+            (
+                "ALTER VIEW v OWNER TO bob",
+                "v",
+                false,
+                Action::OwnerTo("bob".into()),
+            ),
+            (
+                "ALTER VIEW IF EXISTS s.v OWNER TO CURRENT_USER",
+                "v",
+                true,
+                Action::OwnerTo("current_user".into()),
+            ),
+            (
+                "ALTER VIEW v SET (security_invoker = true)",
+                "v",
+                false,
+                Action::SetOptions(vec![(Name::SecurityInvoker, true)]),
+            ),
+            (
+                // A bare name is `true`, and `check_option`'s enum value is
+                // taken and dropped, exactly as on `CREATE VIEW`.
+                "ALTER VIEW v SET (security_barrier, check_option = cascaded)",
+                "v",
+                false,
+                Action::SetOptions(vec![
+                    (Name::SecurityBarrier, true),
+                    (Name::CheckOption, false),
+                ]),
+            ),
+            (
+                "ALTER VIEW v RESET (security_invoker, security_barrier)",
+                "v",
+                false,
+                Action::ResetOptions(vec![Name::SecurityInvoker, Name::SecurityBarrier]),
+            ),
+        ];
+        for (sql, name, if_exists, want) in cases {
+            let Statement::AlterView {
+                name: parsed_name,
+                if_exists: parsed_if_exists,
+                action,
+            } = one(sql)
+            else {
+                panic!("expected ALTER VIEW from {sql}");
+            };
+            assert!(parsed_name.name == name, "case: {sql}");
+            assert!(parsed_if_exists == if_exists, "case: {sql}");
+            assert!(action == want, "case: {sql}");
+        }
+        // An unrecognized reloption is the same 22023 `CREATE VIEW` raises, so
+        // a misspelling cannot take effect in one spelling and not the other.
+        for sql in [
+            "ALTER VIEW v SET (securty_invoker = true)",
+            "ALTER VIEW v RESET (securty_invoker)",
+            "ALTER VIEW v SET (security_invoker = maybe)",
+        ] {
+            assert!(
+                crate::parse(sql).expect_err("refused").sqlstate() == "22023",
+                "case: {sql}"
+            );
+        }
+        // The subcommands this engine cannot act on are refused rather than
+        // consumed and ignored.
+        for sql in [
+            "ALTER VIEW v RENAME TO w",
+            "ALTER VIEW v SET SCHEMA other",
+            "ALTER VIEW v ALTER COLUMN a SET DEFAULT 1",
+        ] {
+            assert!(crate::parse(sql).is_err(), "case: {sql}");
         }
     }
 

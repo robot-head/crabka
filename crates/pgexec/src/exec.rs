@@ -1171,6 +1171,89 @@ pub(crate) fn execute_ddl(
                 vec![crabka_pgcatalog::set_relation_tablespace_op(name, oid)],
             ))
         }
+        Statement::AlterView {
+            name,
+            if_exists,
+            action,
+        } => {
+            use crabka_pgparser::ast::{AlterViewAction, ViewOptionName};
+
+            let name = &match resolve_relation(kv, resolution, name, SchemaDisposition::Utility) {
+                Ok(name) => name,
+                Err(error) if *if_exists && is_missing_schema(&error) => {
+                    return Ok((command("ALTER VIEW"), Vec::new()));
+                }
+                Err(error) => return Err(error),
+            };
+            let mut view = match crabka_pgcatalog::get_view(kv, name) {
+                Ok(view) => view,
+                Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) if *if_exists => {
+                    return Ok((command("ALTER VIEW"), Vec::new()));
+                }
+                // A relation of that name which is not a view is PostgreSQL's
+                // 42809, not a missing-relation report: `ALTER VIEW t` on a
+                // table must say so rather than claim `t` does not exist.
+                Err(crabka_pgcatalog::CatalogError::UndefinedTable(_))
+                    if crabka_pgcatalog::get_table(kv, name).is_ok() =>
+                {
+                    return Err(ExecError::WrongObjectType(format!(
+                        "\"{}\" is not a view",
+                        name.name
+                    )));
+                }
+                Err(error) => return Err(error.into()),
+            };
+            // Owner-only, like every other statement that redefines what a
+            // relation means. It matters more here than for a table: the
+            // owner is the identity the view's body reads under, so a role
+            // that could rewrite it could hand its own rights to anyone.
+            crate::privilege::require_ownership(
+                kv,
+                &view.name,
+                &view.owner,
+                crate::privilege::RelationKind::View,
+                fctx.effective_role(),
+            )?;
+            match action {
+                AlterViewAction::OwnerTo(role) => {
+                    view.owner = resolve_new_owner(kv, fctx, role)?;
+                }
+                // `SET` moves only the options written; `RESET` returns the
+                // ones written to their default, which for both booleans is
+                // false. `check_option` is dropped by both, as `CREATE VIEW`
+                // drops it.
+                AlterViewAction::SetOptions(settings) => {
+                    for (option, value) in settings {
+                        match option {
+                            ViewOptionName::SecurityInvoker => {
+                                view.options.security_invoker = *value;
+                            }
+                            ViewOptionName::SecurityBarrier => {
+                                view.options.security_barrier = *value;
+                            }
+                            ViewOptionName::CheckOption => {}
+                        }
+                    }
+                }
+                AlterViewAction::ResetOptions(names) => {
+                    for option in names {
+                        match option {
+                            ViewOptionName::SecurityInvoker => {
+                                view.options.security_invoker = false;
+                            }
+                            ViewOptionName::SecurityBarrier => {
+                                view.options.security_barrier = false;
+                            }
+                            ViewOptionName::CheckOption => {}
+                        }
+                    }
+                }
+            }
+            Ok((
+                command("ALTER VIEW"),
+                vec![crabka_pgcatalog::put_view_op(&view)],
+            ))
+        }
         Statement::CreateRole {
             name,
             can_login,
@@ -11848,11 +11931,11 @@ fn build_base_table(
     }
     match crabka_pgcatalog::get_view(catalog_kv, name) {
         Ok(view) => {
-            // A view carries its own ACL, checked before its body runs. The
-            // body itself still executes with INVOKER rights — every base
-            // relation it names is read under the session's own privileges and
-            // policies — so this is strictly an extra gate, never a way through
-            // one. Owner-rights views are a separate change for that reason.
+            // A view carries its own ACL, and it is checked *before* the
+            // identity switch below — under whatever role reached this view,
+            // which for a nested view is the outer view's owner. This check is
+            // what makes owner rights safe: the body may read relations the
+            // caller cannot, so the caller must have been granted the view.
             crate::privilege::require(
                 &read_ctx.privileges(),
                 &view.name,
@@ -11866,7 +11949,21 @@ fn build_base_table(
                     "stored view definition is not a query".into(),
                 ));
             };
-            let relation = crate::query::query_to_relation(read_ctx, query)?;
+            // The body then runs as the view's owner — for privileges and for
+            // which row-security policies apply, which move together because
+            // they are the same field. `security_invoker` keeps the caller's
+            // identity, which is the whole meaning of the option.
+            //
+            // `EvalCtx` is not touched, so `CURRENT_USER` inside the body
+            // still names the invoker, as it does in PostgreSQL: only the
+            // identity decisions are made under changes.
+            let body_role = if view.options.security_invoker {
+                read_ctx.security_role
+            } else {
+                view.owner.as_str()
+            };
+            let body_ctx = read_ctx.with_security_role(body_role);
+            let relation = crate::query::query_to_relation(&body_ctx, query)?;
             let qualifier = alias.as_deref().unwrap_or(&view.name.name);
             return requalify_view_relation(relation, &view, qualifier);
         }
@@ -19373,6 +19470,43 @@ fn alter_action_label(action: &crabka_pgparser::ast::AlterTableAction) -> &'stat
     }
 }
 
+/// The role an `OWNER TO` clause names, validated the way `PostgreSQL`
+/// validates one.
+///
+/// Shared by every relation kind that can be handed over, so a view and a table
+/// cannot disagree about who may receive one.
+///
+/// # Errors
+///
+/// Returns 42704 when the name is `PUBLIC` or belongs to no role, or
+/// storage/corruption errors from the catalog KV seam.
+fn resolve_new_owner(kv: &dyn Kv, fctx: ForeignCtx<'_>, role: &str) -> Result<String, ExecError> {
+    // `CURRENT_USER`/`USER` in an owner position name the session's role, the
+    // same spelling `ALTER TABLESPACE … OWNER TO` accepts.
+    let role = match role {
+        "current_user" | "user" => fctx.effective_role(),
+        named => named,
+    };
+    // `PUBLIC` is a pseudo-role with no `pg_authid` row, so PostgreSQL answers
+    // a handover to it the same way it answers a handover to a name nobody
+    // holds. Letting it through would leave a relation owned by something no
+    // ownership test can ever match.
+    //
+    // The bootstrap role is the opposite case. It has no stored record either,
+    // but it is the default owner of every relation, so refusing to name it
+    // would reject `OWNER TO CURRENT_USER` from an unauthenticated session —
+    // whose effective role is exactly that — while the relation it names is
+    // already owned by it.
+    let known =
+        role == crabka_pgcatalog::BOOTSTRAP_ROLE || crabka_pgcatalog::role_exists(kv, role)?;
+    if role == crabka_pgcatalog::PUBLIC_ROLE || !known {
+        return Err(ExecError::UndefinedObject(format!(
+            "role \"{role}\" does not exist"
+        )));
+    }
+    Ok(role.to_string())
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "one arm per PostgreSQL ALTER TABLE subcommand; splitting them hides the \
@@ -19865,32 +19999,9 @@ fn alter_table_action_ops(
         // is the same: the command succeeds and changes no queryable state.
         Action::SetStorageParameters(_) | Action::ResetStorageParameters(_) => Ok(()),
         Action::OwnerTo(role) => {
-            // `CURRENT_USER`/`USER` in an owner position name the session's
-            // role, the same spelling `ALTER TABLESPACE … OWNER TO` accepts.
-            let role = match role.as_str() {
-                "current_user" | "user" => fctx.effective_role(),
-                named => named,
-            };
-            // `PUBLIC` is a pseudo-role with no `pg_authid` row, so PostgreSQL
-            // answers a handover to it the same way it answers a handover to a
-            // name nobody holds. Letting it through would leave a relation
-            // owned by something no ownership test can ever match.
-            //
-            // The bootstrap role is the opposite case. It has no stored record
-            // either, but it is the default owner of every relation, so
-            // refusing to name it would reject `OWNER TO CURRENT_USER` from an
-            // unauthenticated session — whose effective role is exactly that —
-            // while the relation it names is already owned by it.
-            let known = role == crabka_pgcatalog::BOOTSTRAP_ROLE
-                || crabka_pgcatalog::role_exists(kv, role)?;
-            if role == crabka_pgcatalog::PUBLIC_ROLE || !known {
-                return Err(ExecError::UndefinedObject(format!(
-                    "role \"{role}\" does not exist"
-                )));
-            }
             // The schema record is rewritten once, after every action; folding
             // the new owner into the working table is what makes it durable.
-            state.table.owner = role.to_string();
+            state.table.owner = resolve_new_owner(kv, fctx, role)?;
             Ok(())
         }
         // The four row-security subcommands fold into the working relation the

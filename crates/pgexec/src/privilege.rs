@@ -218,6 +218,36 @@ pub(crate) fn require(
     })
 }
 
+/// Raise `PostgreSQL`'s `must be owner of <kind> <name>` unless `role` owns the
+/// relation.
+///
+/// Ownership, not a privilege: no `GRANT` confers it, and the only two ways
+/// past it are membership in the owning role and being the superuser. It sits
+/// here beside [`holds`] so the set of ways to pass an ownership test is as
+/// short and as visible as the set of ways to pass a privilege test.
+///
+/// # Errors
+///
+/// Returns 42501 when the role does not own the relation, or
+/// storage/corruption errors from the catalog KV seam.
+pub(crate) fn require_ownership(
+    kv: &dyn Kv,
+    relation: &RelationName,
+    owner: &str,
+    kind: RelationKind,
+    role: &str,
+) -> Result<(), ExecError> {
+    if crabka_pgcatalog::role_has_privs_of(kv, role, owner)?
+        || crate::rls::role_is_superuser(kv, role)?
+    {
+        return Ok(());
+    }
+    Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+        "42501",
+        format!("must be owner of {} {}", kind.noun(), relation.name),
+    )))
+}
+
 /// Proof that the session may read the rows of one stored relation.
 ///
 /// A token rather than a bare call, for the reason [`crate::rls::RawScan`] is a

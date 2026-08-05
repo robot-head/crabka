@@ -78,6 +78,28 @@ impl<'a> SubCtx<'a> {
         }
     }
 
+    /// The same read context, with privilege and row-security decisions made
+    /// as `role` instead.
+    ///
+    /// The one caller is the view-expansion site: a view without
+    /// `security_invoker` runs its body as the role that owns it. Nesting
+    /// shadows rather than stacks, because each expansion derives its context
+    /// from the one it was reached through — a view owned by A over a view
+    /// owned by B evaluates B's body as B, and B's own ACL is checked as A.
+    ///
+    /// `eval_ctx` is deliberately untouched: `CURRENT_USER` reads from there,
+    /// and `PostgreSQL` leaves it naming the invoking role inside a view body.
+    /// Only the identity decisions are made under moves.
+    pub(crate) fn with_security_role<'b>(&'b self, role: &'b str) -> SubCtx<'b>
+    where
+        'a: 'b,
+    {
+        SubCtx {
+            security_role: role,
+            ..*self
+        }
+    }
+
     /// The row-security decision context this read makes its decisions in.
     pub(crate) fn rls(&self) -> crate::rls::RlsCtx<'_> {
         crate::rls::RlsCtx::new(self.catalog_kv, self.security_role, self.fctx.row_security)

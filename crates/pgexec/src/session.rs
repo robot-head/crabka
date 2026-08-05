@@ -2133,6 +2133,7 @@ fn read_only_command_tag(stmt: &Statement) -> &'static str {
         Statement::CreateIndex { .. } => "CREATE INDEX",
         Statement::AlterIndexTablespace { .. } => "ALTER INDEX",
         Statement::CreateView { .. } => "CREATE VIEW",
+        Statement::AlterView { .. } => "ALTER VIEW",
         Statement::CreateSchema { .. } => "CREATE SCHEMA",
         Statement::CreateType { .. } => "CREATE TYPE",
         Statement::CreateDomain { .. } => "CREATE DOMAIN",
@@ -2218,6 +2219,7 @@ fn establishes_transaction_activity(stmt: &Statement) -> bool {
         | Statement::CreateTable { .. }
         | Statement::CreateIndex { .. }
         | Statement::AlterIndexTablespace { .. }
+        | Statement::AlterView { .. }
         | Statement::DropIndex { .. }
         | Statement::DropTable { .. }
         | Statement::AlterTable { .. }
@@ -6048,6 +6050,7 @@ impl SqlSession {
             Statement::CreateTable { .. }
             | Statement::CreateIndex { .. }
             | Statement::AlterIndexTablespace { .. }
+            | Statement::AlterView { .. }
             | Statement::DropIndex { .. }
             | Statement::DropTable { .. }
             | Statement::AlterTable { .. }

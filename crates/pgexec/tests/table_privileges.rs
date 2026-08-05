@@ -533,15 +533,16 @@ async fn a_tree_is_read_under_the_relation_that_was_named() {
     assert!(message == "permission denied for table child");
 }
 
-/// A view is checked on its own ACL, and its body still runs with the caller's
-/// rights.
+/// A view is checked on its own ACL, and that check is what the caller must
+/// pass — its body then runs with the *owner's* rights.
 ///
-/// Both grants are needed, and neither substitutes for the other. That pairing
-/// is what keeps a view from being a way around a base relation's grants — the
-/// day the view body runs as its owner instead, that bound is what changes, and
-/// it changes deliberately rather than by accident.
+/// The grant on the view is therefore both necessary and, when the view's owner
+/// can read what the body names, sufficient. A grant on the base relation is
+/// neither: it does not open the view, and it is not needed once the view is
+/// open. That is the whole ACL contract for a view in one table, and it is why
+/// the view's own check can never be skipped.
 #[tokio::test]
-async fn a_view_needs_grants_on_itself_and_on_what_it_reads() {
+async fn a_views_own_grant_is_what_the_caller_needs() {
     struct Case {
         name: &'static str,
         grants: &'static str,
@@ -554,14 +555,14 @@ async fn a_view_needs_grants_on_itself_and_on_what_it_reads() {
             readable: false,
         },
         Case {
-            name: "the view alone is not enough",
-            grants: "GRANT SELECT ON document_v TO bob",
+            name: "the base relation alone does not open the view",
+            grants: "GRANT SELECT ON document TO bob",
             readable: false,
         },
         Case {
-            name: "the base relation alone is not enough",
-            grants: "GRANT SELECT ON document TO bob",
-            readable: false,
+            name: "the view alone is enough",
+            grants: "GRANT SELECT ON document_v TO bob",
+            readable: true,
         },
         Case {
             name: "both together admit the read",
@@ -572,7 +573,8 @@ async fn a_view_needs_grants_on_itself_and_on_what_it_reads() {
     for case in cases {
         let (engine, _alice) = owned_engine().await;
         if !case.grants.is_empty() {
-            // The view was created by the bootstrap session, so it owns it.
+            // The view was created by the bootstrap session, so it owns it —
+            // and, being the superuser, may read `document` whoever owns it.
             let mut owner = engine.connect();
             run(&mut owner, case.grants).await;
         }

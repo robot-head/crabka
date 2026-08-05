@@ -288,6 +288,32 @@ pub struct ViewOptions {
     pub security_barrier: bool,
 }
 
+/// One reloption a view's `WITH (…)`/`SET (…)`/`RESET (…)` list may name.
+///
+/// Spelled as a closed set rather than a string so an `ALTER VIEW … SET (…)`
+/// cannot carry a parameter no writer knows about: an unrecognized name is
+/// refused where it is written, exactly as `CREATE VIEW`'s list refuses one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewOptionName {
+    SecurityInvoker,
+    SecurityBarrier,
+    /// Accepted and dropped, as it is on `CREATE VIEW`: nothing here enforces a
+    /// view's `WITH CHECK OPTION` yet.
+    CheckOption,
+}
+
+/// What one `ALTER VIEW` statement does. `PostgreSQL` allows a single
+/// subcommand per statement, so this is a field and not a list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterViewAction {
+    /// `OWNER TO role` — moves the identity the view's body runs under.
+    OwnerTo(String),
+    /// `SET (name = value, …)`; a bare name is `true`, as in `CREATE VIEW`.
+    SetOptions(Vec<(ViewOptionName, bool)>),
+    /// `RESET (name, …)` — each named option returns to its default, `false`.
+    ResetOptions(Vec<ViewOptionName>),
+}
+
 #[rustfmt::skip]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
@@ -395,6 +421,12 @@ pub enum Statement {
     AlterIndexTablespace {
         name: RelationRef,
         tablespace: String,
+    },
+    /// `ALTER VIEW [IF EXISTS] name <action>`.
+    AlterView {
+        name: RelationRef,
+        if_exists: bool,
+        action: AlterViewAction,
     },
     CreateView {
         name: RelationRef,

@@ -64,17 +64,13 @@ pub(crate) fn require_owner(
     table: &Table,
     fctx: ForeignCtx<'_>,
 ) -> Result<(), ExecError> {
-    let role = fctx.effective_role();
-    if crabka_pgcatalog::role_has_privs_of(kv, role, &table.owner)? {
-        return Ok(());
-    }
-    if crate::rls::role_is_superuser(kv, role)? {
-        return Ok(());
-    }
-    Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
-        "42501",
-        format!("must be owner of table {}", table.name.name),
-    )))
+    crate::privilege::require_ownership(
+        kv,
+        &table.name,
+        &table.owner,
+        crate::privilege::RelationKind::Table,
+        fctx.effective_role(),
+    )
 }
 
 const fn catalog_command(command: ast::PolicyCommand) -> PolicyCommand {

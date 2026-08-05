@@ -813,32 +813,41 @@ async fn a_sharded_relation_cannot_be_put_under_row_security() {
     }
 }
 
-/// **Invoker semantics for views.**
+/// **A view shows what its owner sees, through every read shape.**
 ///
-/// `PostgreSQL` filters a view body by the *view owner's* policies, which turns
-/// an owner-rights view over a relation under row security into a bypass unless
-/// the view's own `GRANT` is what stops the caller. Invoker semantics guarantee
-/// the bound that matters without depending on that: a view can never show a row
-/// the caller could not have read from the base relation itself.
+/// `PostgreSQL` filters a view body by the *view owner's* policies, and this
+/// engine now does too. The bound that keeps that from being a bypass is the
+/// view's own ACL, which is checked against the caller before the body runs
+/// (pinned in `owner_rights_views.rs`); what this test adds is that the
+/// substitution is total — a scan, an aggregate folded inside the scanner, and
+/// a `security_invoker` view over the same relation all agree about whose
+/// policies applied.
 #[tokio::test]
-async fn a_view_cannot_show_a_row_the_caller_could_not_read() {
+async fn a_view_shows_the_rows_its_owner_can_read() {
     let (engine, mut alice) = owned_engine().await;
-    // A view is a grantable object of its own and its body reads the base
-    // relation with invoker rights, so bob needs both grants; the test is about
-    // which rows come back, not about being refused.
     run(
         &mut alice,
         "CREATE VIEW all_documents AS SELECT id, holder, title FROM document;
+         CREATE VIEW own_documents WITH (security_invoker) AS
+             SELECT id, holder, title FROM document;
          GRANT SELECT ON all_documents TO bob;
+         GRANT SELECT ON own_documents TO bob;
          CREATE POLICY high ON document USING (id > 3);
          ALTER TABLE document ENABLE ROW LEVEL SECURITY",
     )
     .await;
     let mut bob = as_bob(&engine).await;
-    assert!(query(&mut bob, "SELECT id FROM all_documents ORDER BY id").await == rows(&["4", "5"]));
-    // Aggregating through the view is the same read, and so is a join onto it.
-    assert!(query(&mut bob, "SELECT count(*) FROM all_documents").await == rows(&["2"]));
-    // The owner, who bypasses the policy on the base relation, still sees all
-    // five — so the view itself is not what is filtering.
+    // Alice owns `document` and does not `FORCE`, so she bypasses the policy —
+    // and so, through her view, does bob.
+    assert!(
+        query(&mut bob, "SELECT id FROM all_documents ORDER BY id").await
+            == rows(&["1", "2", "3", "4", "5"])
+    );
+    // Aggregating through the view folds inside the scanner and must agree.
+    assert!(query(&mut bob, "SELECT count(*) FROM all_documents").await == rows(&["5"]));
     assert!(query(&mut alice, "SELECT count(*) FROM all_documents").await == rows(&["5"]));
+    // The `security_invoker` view over the same relation is filtered by bob's
+    // own policies, so it shows him what a direct read would.
+    assert!(query(&mut bob, "SELECT id FROM own_documents ORDER BY id").await == rows(&["4", "5"]));
+    assert!(query(&mut bob, "SELECT id FROM document ORDER BY id").await == rows(&["4", "5"]));
 }

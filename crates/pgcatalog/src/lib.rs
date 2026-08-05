@@ -583,17 +583,18 @@ pub struct View {
 
 /// The `CREATE VIEW … WITH (…)` reloptions this catalog keeps.
 ///
-/// Both are **recorded and not yet honoured**. Every view is evaluated with
-/// invoker semantics regardless of `security_invoker`: its own ACL is checked
-/// on [`View::owner`], and then its body reads each relation it names under the
-/// caller's own grants and policies. Owner-rights semantics are a deliberate
-/// separate step, because they change the bound that makes invoker semantics
-/// safe — *a view can never show you a row you could not have read yourself* —
-/// and that change should be reviewed on its own rather than folded into the
-/// work that made the ACL check possible. `security_barrier` is likewise inert:
-/// the planner does not reorder a view's own qualifiers below a user-supplied
-/// one, so there is nothing yet for the barrier to stop. Storing them now means
-/// the flags are already on disk when either arrives.
+/// [`Self::security_invoker`] is honoured. A view without it evaluates its body
+/// with [`View::owner`]'s rights — both the privilege checks and the
+/// row-security policies applied to whatever the body reads — and one with it
+/// keeps the caller's. What makes the owner-rights default safe is that the
+/// view's *own* ACL is still checked against the caller first: a view can reach
+/// relations the caller cannot, so the caller has to have been granted the
+/// view.
+///
+/// [`Self::security_barrier`] is recorded and inert, and it is inert for a
+/// structural reason rather than a pending one: a view body is materialized
+/// before the reader's own qualifier runs, so there is no reordering for a
+/// barrier to forbid.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ViewOptions {
     pub security_invoker: bool,

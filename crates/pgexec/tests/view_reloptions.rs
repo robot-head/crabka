@@ -1,11 +1,13 @@
-//! `CREATE VIEW … WITH (security_invoker | security_barrier)`.
+//! `CREATE VIEW … WITH (security_invoker | security_barrier)`: the clause as
+//! written, stored, and read back.
 //!
-//! The clause is parsed and recorded on the view; **nothing reads it back yet**.
-//! Row security evaluates every view with invoker semantics on purpose, so a
-//! `security_invoker` view and a plain one must still return the same rows to
-//! the same role — the tests below pin exactly that, because the day the option
-//! starts being honoured is the day an owner-rights view over a row-secured
-//! table becomes a bypass, and it must not happen by accident.
+//! `security_invoker` is now the switch between the two rights models, so the
+//! tests here pin the *storage* contract — every spelling of the list reaching
+//! the view record, `OR REPLACE` rewriting it, an unknown name refused — and
+//! one behavioral rule that belongs to the option rather than to owner rights:
+//! writing `security_invoker` is the only thing that changes whose policies
+//! filter a view. What owner rights themselves guarantee is pinned in
+//! `owner_rights_views.rs`.
 
 use std::sync::Arc;
 
@@ -168,15 +170,39 @@ async fn an_unknown_reloption_is_refused() {
     assert!(message.contains("invalid value for boolean option: \"maybe\""));
 }
 
-/// **The safety rule.** `security_invoker` is stored, not honoured: a view over
-/// a row-secured table shows the querying role exactly the rows that role could
-/// have selected directly, whether or not the option was written. Owner-rights
-/// views must never start working by accident: the day the option is honoured,
-/// a view whose owner bypasses the base relation's policies becomes a way
-/// around them for everyone the view is granted to.
+/// **The safety rule, restated for owner rights.** `security_invoker` now
+/// decides whose row-security policies filter a view's body, and the option is
+/// the *only* thing that decides it: a plain view and a `security_barrier` one
+/// behave identically, because a barrier is about evaluation order and not
+/// about identity. Writing the option must be what changes the answer — a view
+/// that silently switched rights model on some other spelling would be a
+/// bypass nobody wrote down.
+///
+/// The base relation is `FORCE`d so the owner does not simply skip its own
+/// policies, which would hide the difference behind a bypass instead of
+/// showing it.
 #[tokio::test]
-async fn security_invoker_does_not_change_what_a_view_shows() {
-    for option in ["", " WITH (security_invoker)", " WITH (security_barrier)"] {
+async fn only_security_invoker_changes_whose_policies_filter_a_view() {
+    struct Case {
+        option: &'static str,
+        /// The ids bob reads through the view.
+        expected: &'static [&'static str],
+    }
+    let cases = [
+        Case {
+            option: "",
+            expected: &["1"],
+        },
+        Case {
+            option: " WITH (security_barrier)",
+            expected: &["1"],
+        },
+        Case {
+            option: " WITH (security_invoker)",
+            expected: &["2"],
+        },
+    ];
+    for case in cases {
         let (engine, _kv) = fixture();
         let mut alice = engine.connect();
         run(
@@ -191,18 +217,23 @@ async fn security_invoker_does_not_change_what_a_view_shows() {
         run(&mut alice, "SET ROLE alice").await;
         run(
             &mut alice,
-            &format!("CREATE VIEW doc_v{option} AS SELECT id, holder FROM document"),
+            &format!(
+                "CREATE VIEW doc_v{} AS SELECT id, holder FROM document",
+                case.option
+            ),
         )
         .await;
-        // What is under test is which *rows* the view shows, so bob holds a
-        // grant on both the view and its base relation: without them the read
-        // would stop at a privilege denial and never reach the policy. A view
-        // needs its own grant, and its body still reads the base relation with
-        // invoker rights, so both are required.
+        // Bob holds a grant on the base relation too, so the `security_invoker`
+        // case reaches the policies instead of stopping at a denial. The two
+        // policies are told apart by their `TO` list, which is what makes
+        // *whose* policies apply observable — a qual reading `current_user`
+        // would not, because `current_user` names the invoker either way.
         run(
             &mut alice,
             "ALTER TABLE document ENABLE ROW LEVEL SECURITY;
-             CREATE POLICY own ON document USING (holder = current_user);
+             ALTER TABLE document FORCE ROW LEVEL SECURITY;
+             CREATE POLICY only_alice ON document TO alice USING (id = 1);
+             CREATE POLICY only_bob ON document TO bob USING (id = 2);
              GRANT SELECT ON document TO bob;
              GRANT SELECT ON doc_v TO bob;",
         )
@@ -210,14 +241,16 @@ async fn security_invoker_does_not_change_what_a_view_shows() {
 
         let mut bob = engine.connect();
         run(&mut bob, "SET ROLE bob").await;
-        // Bob's own policy row, through the view and around it, identically.
         assert!(
-            query(&mut bob, "SELECT id FROM doc_v ORDER BY id").await == rows(&["2"]),
-            "case: {option:?}"
+            query(&mut bob, "SELECT id FROM doc_v ORDER BY id").await == rows(case.expected),
+            "case: {:?}",
+            case.option
         );
+        // Around the view, bob only ever sees his own row.
         assert!(
             query(&mut bob, "SELECT id FROM document ORDER BY id").await == rows(&["2"]),
-            "case: {option:?}"
+            "case: {:?}",
+            case.option
         );
     }
 }

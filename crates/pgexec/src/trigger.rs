@@ -770,6 +770,7 @@ pub(crate) fn event_command_tag(stmt: &parsed::Statement) -> &'static str {
         Statement::AlterIndexTablespace { .. } => "ALTER INDEX",
         Statement::DropIndex { .. } => "DROP INDEX",
         Statement::CreateView { .. } => "CREATE VIEW",
+        Statement::AlterView { .. } => "ALTER VIEW",
         Statement::DropView { .. } => "DROP VIEW",
         Statement::CreateSchema { .. } => "CREATE SCHEMA",
         Statement::AlterSchema { .. } => "ALTER SCHEMA",
