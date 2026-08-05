@@ -595,7 +595,7 @@ async fn policy_ddl_lifecycle_and_ownership() {
                FROM pg_policies WHERE tablename = 'document'"
         )
         .await
-            == rows(&["high,ALL,PERMISSIVE,{bob},id > 4,NULL"])
+            == rows(&["high,ALL,PERMISSIVE,{bob},(id > 4),NULL"])
     );
 
     run(&mut alice, "ALTER TABLE document ENABLE ROW LEVEL SECURITY").await;
@@ -632,7 +632,7 @@ async fn the_catalog_projects_the_stored_policies_and_flags() {
             "SELECT polname, polcmd, polpermissive, polqual, polwithcheck FROM pg_policy"
         )
         .await
-            == rows(&["ins,a,f,NULL,id > 0"])
+            == rows(&["ins,a,f,NULL,(id > 0)"])
     );
     assert!(
         query(
@@ -659,6 +659,72 @@ async fn the_catalog_projects_the_stored_policies_and_flags() {
         .await
             == rows(&["f"])
     );
+}
+
+/// The catalog reports the *deparsed* qual, the way `PostgreSQL`'s rule printer
+/// renders one, and never the source text the author typed.
+///
+/// Each case is written deliberately unnormalized — cramped spacing, a
+/// qualifier `PostgreSQL` resolves away, an unparenthesized operator, an
+/// unqualified column inside a sub-select — so a projection that echoed the
+/// stored text back would answer the left column and not the right one.
+#[tokio::test]
+async fn the_catalog_deparses_a_policy_qual_rather_than_echoing_it() {
+    let (_engine, mut alice) = owned_engine().await;
+    run(
+        &mut alice,
+        "CREATE TABLE clearance (who text, lvl int4);
+         ALTER TABLE clearance OWNER TO alice",
+    )
+    .await;
+
+    let cases = [
+        ("cramped spacing", "id>4", "(id > 4)"),
+        (
+            "a qualifier the sole relation resolves away",
+            "document . id > 4",
+            "(id > 4)",
+        ),
+        (
+            "the session role, spelled as ruleutils spells it",
+            "holder = current_user",
+            "(holder = CURRENT_USER)",
+        ),
+        (
+            "nested operators, each one parenthesized",
+            "id > 1 AND holder <> 'bob'",
+            "((id > 1) AND (holder <> 'bob'::text))",
+        ),
+        (
+            "a sub-select, laid out and qualified by the printer",
+            "id <= (SELECT lvl FROM clearance WHERE who = current_user)",
+            "(id <= ( SELECT clearance.lvl\n   FROM clearance\n  WHERE (clearance.who = CURRENT_USER)))",
+        ),
+    ];
+
+    for (label, source, deparsed) in cases {
+        run(
+            &mut alice,
+            &format!("CREATE POLICY shape ON document USING ({source}) WITH CHECK ({source})"),
+        )
+        .await;
+        let expected = format!("{deparsed},{deparsed}");
+        assert!(
+            query(
+                &mut alice,
+                "SELECT qual, with_check FROM pg_policies WHERE tablename = 'document'"
+            )
+            .await
+                == rows(&[expected.as_str()]),
+            "{label}"
+        );
+        assert!(
+            query(&mut alice, "SELECT polqual, polwithcheck FROM pg_policy").await
+                == rows(&[expected.as_str()]),
+            "{label}"
+        );
+        run(&mut alice, "DROP POLICY shape ON document").await;
+    }
 }
 
 /// A policy applies to the command it names and to `ALL`, never to a command it

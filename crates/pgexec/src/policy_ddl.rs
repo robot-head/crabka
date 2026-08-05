@@ -14,11 +14,13 @@
 //!   silent total bypass. Refusing the DDL is what makes
 //!   [`crate::rls::CheckExemption::ShardedRelation`] sound.
 //!
-//! Quals are stored as the source text the user wrote, not as a re-rendered
-//! expression: `pg_policy.polqual` and `pg_get_expr` hand it straight back, and
-//! the enforcement path re-parses it per statement so a policy never carries a
-//! stale plan. The parser hands both forms over ([`ast::PolicyQual`]), so the
-//! text stored and the expression enforced cannot disagree.
+//! Quals are stored as the source text the user wrote, not as a serialized
+//! expression, so the catalog crate needs no parser; the enforcement path
+//! re-parses per statement, so a policy never carries a stale plan, and
+//! `pg_policy.polqual` re-parses and deparses, so what the catalog reports is
+//! PostgreSQL's normalized rendering rather than the text. The parser hands
+//! both forms over ([`ast::PolicyQual`]), so the text stored and the expression
+//! enforced cannot disagree.
 
 use crabka_pgcatalog::{
     RelationName, Table,

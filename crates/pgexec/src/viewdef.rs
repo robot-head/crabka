@@ -89,6 +89,28 @@ pub(crate) fn write_query(
     write_query_tail(out, query, ctx);
 }
 
+/// Deparse one stored expression, the way `pg_get_expr` renders a qual held in
+/// a catalog column.
+///
+/// PostgreSQL deparses such an expression with `PRETTYFLAG_INDENT` alone — the
+/// same flags `pg_get_viewdef(oid)` uses — so it is the un-pretty form here:
+/// every operator node fully parenthesized, any sub-select laid out on its own
+/// indented lines. `varprefix` starts *false* because the context is built from
+/// the single relation the expression belongs to, which is why a column
+/// reference is bare at the top level and qualified only once a sub-select puts
+/// it a level down.
+pub(crate) fn expression_text(expr: &Expr) -> String {
+    expr_text(
+        expr,
+        Ctx {
+            pretty: false,
+            qualify: false,
+            qualifier: None,
+            wrap: None,
+        },
+    )
+}
+
 fn write_query_tail(out: &mut String, query: &QueryExpr, ctx: Ctx<'_>) {
     if !query.order_by.is_empty() {
         let _ = write!(out, "\n  ORDER BY {}", order_list(&query.order_by, ctx));
@@ -606,7 +628,32 @@ fn unary_text(op: UnaryOp, expr: &Expr, ctx: Ctx<'_>) -> String {
     }
 }
 
+/// The keyword spellings PostgreSQL's deparser gives the SQL value functions.
+///
+/// Each is parsed here as a zero-argument function call, but PostgreSQL holds
+/// it as an `SQLValueFunction` node and `get_rule_expr` prints the keyword back
+/// in upper case with no parentheses — `CURRENT_USER`, never `current_user()`.
+/// The parenthesized spellings (`current_timestamp(0)`) carry arguments and are
+/// ordinary calls in both engines, so matching on an empty argument list is
+/// what separates the two.
+const SQL_VALUE_FUNCTIONS: [(&str, &str); 7] = [
+    ("current_date", "CURRENT_DATE"),
+    ("current_time", "CURRENT_TIME"),
+    ("current_timestamp", "CURRENT_TIMESTAMP"),
+    ("current_user", "CURRENT_USER"),
+    ("localtime", "LOCALTIME"),
+    ("localtimestamp", "LOCALTIMESTAMP"),
+    ("session_user", "SESSION_USER"),
+];
+
 fn func_text(call: &FuncCall, ctx: Ctx<'_>) -> String {
+    if matches!(&call.args, FuncArgs::Exprs(args) if args.is_empty())
+        && let Some((_, keyword)) = SQL_VALUE_FUNCTIONS
+            .iter()
+            .find(|(name, _)| *name == call.name)
+    {
+        return (*keyword).to_string();
+    }
     let args = match &call.args {
         FuncArgs::Star => "*".to_string(),
         FuncArgs::Exprs(exprs) => exprs
@@ -774,6 +821,15 @@ mod tests {
                 " SELECT b,\n    count(*) AS count\n   FROM t\n  GROUP BY b\n HAVING (count(*) > 1)\n  ORDER BY b\n LIMIT 5;",
                 " SELECT b,\n    count(*) AS count\n   FROM t\n  GROUP BY b\n HAVING count(*) > 1\n  ORDER BY b\n LIMIT 5;",
             ),
+            // A SQL value function is a keyword, not a call: PostgreSQL holds
+            // it as its own node kind and prints the keyword back in upper
+            // case, so `current_user()` is never what comes out.
+            (
+                "SELECT a FROM t WHERE b = current_user",
+                &["a"][..],
+                " SELECT a\n   FROM t\n  WHERE (b = CURRENT_USER);",
+                " SELECT a\n   FROM t\n  WHERE b = CURRENT_USER;",
+            ),
             (
                 "SELECT DISTINCT b FROM t WHERE a IN (1,2,3)",
                 &["b"][..],
@@ -814,6 +870,28 @@ mod tests {
             view_definition_text(&view, true)
                 == " SELECT t.a\n   FROM t\nUNION ALL\n SELECT u.a\n   FROM u;"
         );
+    }
+
+    /// The expression entry point `pg_get_expr` reaches for a qual stored in a
+    /// catalog column. Column references carry no prefix at the top level —
+    /// the deparse context is the one relation the expression belongs to — and
+    /// pick one up as soon as a sub-select puts them a level down.
+    #[test]
+    fn deparses_a_stored_expression_the_way_pg_get_expr_does() {
+        let cases = [
+            ("a>0", "(a > 0)"),
+            ("t.a > 0", "(a > 0)"),
+            ("a > 0 OR NOT b", "((a > 0) OR (NOT b))"),
+            ("a IN (1, 2)", "(a = ANY (ARRAY[1, 2]))"),
+            (
+                "a <= (SELECT c FROM u WHERE d = session_user)",
+                "(a <= ( SELECT u.c\n   FROM u\n  WHERE (u.d = SESSION_USER)))",
+            ),
+        ];
+        for (source, expected) in cases {
+            let expr = crabka_pgparser::parser::parse_expression(source).expect("parse");
+            assert!(super::expression_text(&expr) == expected, "{source}");
+        }
     }
 
     /// An unparseable stored definition still answers a usable statement.

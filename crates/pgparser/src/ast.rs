@@ -137,11 +137,11 @@ pub enum AlterTriggerAction {
 
 /// A row-security policy qual, kept both parsed and exactly as written.
 ///
-/// The catalog stores the source text, because `pg_policy.polqual` and
-/// `pg_get_expr` have to hand it back; the executor needs the parsed form to
-/// evaluate it. Capturing both here — the way [`CreateTrigger::when`] and
-/// [`CreateTrigger::when_source`] do — means the two can never disagree about
-/// what the user wrote.
+/// The catalog stores the source text, so it needs no parser of its own; the
+/// executor needs the parsed form to evaluate the qual, and `pg_policy.polqual`
+/// re-parses the text and deparses it. Capturing both here — the way
+/// [`CreateTrigger::when`] and [`CreateTrigger::when_source`] do — means the
+/// two can never disagree about what the user wrote.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PolicyQual {
     pub expr: Expr,

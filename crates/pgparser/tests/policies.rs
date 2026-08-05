@@ -2,7 +2,7 @@
 //! subcommands.
 //!
 //! A policy's quals are captured twice — parsed and as written — because the
-//! catalog stores the text (`pg_policy.polqual` hands it straight back) and the
+//! catalog stores the text, which is what keeps a parser out of it, and the
 //! executor evaluates the expression. The tests below pin both, since a
 //! production that kept only one of them would look right until somebody read
 //! `pg_policies`.

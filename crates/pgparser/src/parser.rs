@@ -7353,8 +7353,8 @@ impl Parser {
 
     /// A parenthesised policy qual, captured both parsed and as written.
     ///
-    /// The catalog stores the source text — `pg_policy.polqual` has to hand it
-    /// back — and the enforcement path evaluates the parsed form, so both come
+    /// The catalog stores the source text — that is what keeps a parser out of
+    /// it — and the enforcement path evaluates the parsed form, so both come
     /// out of one production rather than the text being re-derived later.
     fn policy_qual(&mut self) -> Result<crate::ast::PolicyQual, ParseError> {
         self.expect(&Token::LParen)?;

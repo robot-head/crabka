@@ -413,8 +413,12 @@ fn eval_catalog_reading(f: CatalogFunc, vals: &[Datum], ctx: &EvalCtx) -> Result
         IndexDef => index_def(kv, scope, &vals[0]),
         ConstraintDef => constraint_def(kv, &vals[0]),
         CatalogFunc::TriggerDef => trigger_def(kv, &vals[0]),
-        // crabka stores a default/`CHECK` predicate as source text, so
-        // "decompiling" it is the identity on the stored text.
+        // Every catalog column this reaches already holds the text that column
+        // is supposed to report — `polqual` deparsed by its projection, a
+        // default or `CHECK` predicate as stored — so "decompiling" is the
+        // identity here. A column that starts needing deparsing must do it in
+        // its own projection, not here: this call has only the value, and the
+        // relation argument it would need is nothing but an oid.
         ExprDef => Ok(vals[0].clone()),
         UserById => user_by_id(kv, &vals[0]),
         SerialSequence => serial_sequence(kv, scope, vals),

@@ -432,6 +432,47 @@ async fn a_policy_qual_that_probes_privileges_is_refused() {
     assert!(message.contains("has_table_privilege"));
 }
 
+/// A qual the catalog holds but the parser cannot read still projects a row.
+///
+/// `CREATE`/`ALTER POLICY` parse every qual before storing it, so this text
+/// cannot arrive through SQL — it is written straight into the catalog here,
+/// which is the only way to reach the branch. The point is what a catalog scan
+/// does when deparsing is impossible: answer the stored text, so one damaged
+/// policy costs its own normalization and not the whole of `pg_policy`.
+#[tokio::test]
+async fn an_undeparsable_stored_qual_still_projects_its_text() {
+    let fixture = fixture();
+    let mut owner = fixture.engine.connect();
+    run(&mut owner, FIXTURE_SQL).await;
+    let id = table_id(fixture.kv.as_ref(), "document");
+    store_policy(
+        fixture.kv.as_ref(),
+        &Policy {
+            using: Some("id > ???".into()),
+            ..deny_everything(id, "unreadable")
+        },
+    );
+    store_policy(
+        fixture.kv.as_ref(),
+        &Policy {
+            using: Some("id>3".into()),
+            ..deny_everything(id, "readable")
+        },
+    );
+
+    assert!(
+        query(
+            &mut owner,
+            "SELECT polname, polqual FROM pg_policy ORDER BY polname"
+        )
+        .await
+            == vec![
+                "readable,(id > 3)".to_string(),
+                "unreadable,id > ???".to_string()
+            ]
+    );
+}
+
 /// The SQL surface reaches the flag now, and reaches it through the statements
 /// `PostgreSQL` spells it with — the whole point of this slice.
 #[tokio::test]

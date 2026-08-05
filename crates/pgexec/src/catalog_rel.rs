@@ -2398,11 +2398,30 @@ fn pg_policy_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 text(&policy.command.catalog_code().to_string()),
                 Datum::Bool(policy.permissive),
                 Datum::Array(crabka_pgtypes::ArrayValue::new(ElemType::Int4, roles)),
-                policy.using.as_deref().map_or(Datum::Null, text),
-                policy.with_check.as_deref().map_or(Datum::Null, text),
+                policy_qual(policy.using.as_deref()),
+                policy_qual(policy.with_check.as_deref()),
             ])
         })
         .collect()
+}
+
+/// A stored policy qual as the catalog reports it: PostgreSQL's deparsed form,
+/// not the source text the author wrote.
+///
+/// The catalog keeps the text so `pgcatalog` needs no parser, so reporting the
+/// deparsed form means re-parsing here. That parse cannot fail on anything
+/// `CREATE`/`ALTER POLICY` stored — both validate the qual by parsing it
+/// (`crate::rls::validate_policy_qual`) before writing it — but a catalog scan
+/// is the wrong place to discover otherwise. Text that will not parse falls
+/// back to itself, so `pg_policy` answers a slightly unnormalized row rather
+/// than failing the whole scan and taking every unrelated policy down with it.
+fn policy_qual(source: Option<&str>) -> Datum {
+    source.map_or(Datum::Null, |source| {
+        crabka_pgparser::parser::parse_expression(source).map_or_else(
+            |_| text(source),
+            |expr| text(&crate::viewdef::expression_text(&expr)),
+        )
+    })
 }
 
 /// `pg_policies`, the readable view over `pg_policy`: relation and role names
@@ -2438,8 +2457,8 @@ fn pg_policies_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                     },
                 )),
                 text(policy.command.keyword()),
-                policy.using.as_deref().map_or(Datum::Null, text),
-                policy.with_check.as_deref().map_or(Datum::Null, text),
+                policy_qual(policy.using.as_deref()),
+                policy_qual(policy.with_check.as_deref()),
             ])
         })
         .collect()
