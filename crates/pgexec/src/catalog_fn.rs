@@ -1259,6 +1259,32 @@ fn cluster_size(object: &Datum) -> Datum {
 
 /// Resolve a `regclass`-shaped argument, an oid or a relation name, to its
 /// `pg_class` oid.
+/// Whether a relation is visible to this session — `pg_table_is_visible`.
+///
+/// The rule that matters here is the temporary one: another session's
+/// `pg_temp_N` namespace is never visible, which is how PostgreSQL keeps
+/// `\d` and the `information_schema` views from listing relations that belong
+/// to somebody else's backend. Everything else answers visible, because an
+/// unqualified name here already resolves through the search path.
+pub(crate) fn relation_is_visible(oid: i64, ctx: &EvalCtx) -> bool {
+    let (Some(kv), Ok(oid)) = (ctx.catalog(), i32::try_from(oid)) else {
+        return true;
+    };
+    let Some(schema) = relation_schema_for_oid(kv, oid) else {
+        return true;
+    };
+    !crabka_pgcatalog::is_temp_schema(&schema) || schema == ctx.resolution().temp_schema()
+}
+
+/// The schema a relation oid lives in, or `None` when no relation claims it.
+fn relation_schema_for_oid(kv: &dyn Kv, oid: i32) -> Option<String> {
+    crabka_pgcatalog::list_tables(kv)
+        .ok()?
+        .into_iter()
+        .find(|table| crate::catalog_rel::table_relation_oid(table.id) == Ok(oid))
+        .map(|table| table.name.schema)
+}
+
 fn resolve_relation_oid(
     kv: &dyn Kv,
     scope: &ResolutionScope,

@@ -327,3 +327,30 @@ async fn a_temporary_target_is_temporary_in_every_spelling() {
         );
     }
 }
+
+/// Another session's temporary relations are not visible: `pg_table_is_visible`
+/// is what keeps psql's `\d` and the `information_schema` views from listing
+/// relations that belong to somebody else's backend.
+#[tokio::test]
+async fn another_sessions_temporary_relations_are_not_visible() {
+    let engine = SqlEngine::new();
+    let mut owner = engine.connect();
+    run(&mut owner, "CREATE TEMP TABLE mine AS SELECT 1 AS id").await;
+    run(&mut owner, "CREATE TABLE shared (id int4)").await;
+
+    // Its own temporary relation is visible to the session that made it.
+    let own = query(
+        &mut owner,
+        "SELECT relname FROM pg_class WHERE pg_table_is_visible(oid) AND relname = 'mine'",
+    )
+    .await;
+    assert!(own.len() == 1);
+
+    let mut other = engine.connect();
+    let seen = query(
+        &mut other,
+        "SELECT relname FROM pg_class WHERE pg_table_is_visible(oid) AND relname IN ('mine', 'shared') ORDER BY relname",
+    )
+    .await;
+    assert!(seen == vec![vec![Some("shared".to_string())]]);
+}

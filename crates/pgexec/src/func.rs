@@ -1699,8 +1699,10 @@ fn eval_eager(
         }
         ScalarFunc::PgTableIsVisible => {
             require_arity(fc, vals.len() == 1)?;
-            let _oid = int_arg(&vals[0])?;
-            Ok(Datum::Bool(true))
+            let oid = int_arg(&vals[0])?;
+            Ok(Datum::Bool(crate::catalog_fn::relation_is_visible(
+                oid, ctx,
+            )))
         }
         // concat / coalesce / nullif / greatest / least are handled before here.
         _ => unreachable!("non-eager scalar function reached eval_eager"),
