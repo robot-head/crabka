@@ -495,6 +495,9 @@ pub enum Statement {
     AlterTable {
         table: RelationRef,
         if_exists: bool,
+        /// `ONLY name` — the column-shape subcommands stop at this relation
+        /// instead of reaching its partitions and inheritance children.
+        only: bool,
         actions: Vec<AlterTableAction>,
     },
     Insert {

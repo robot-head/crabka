@@ -836,9 +836,10 @@ pub(crate) fn execute_ddl(
         Statement::AlterTable {
             table,
             if_exists,
+            only,
             actions,
         } => match resolve_relation(kv, resolution, table, SchemaDisposition::Utility) {
-            Ok(name) => alter_table_ops(kv, &name, *if_exists, actions, fctx),
+            Ok(name) => alter_table_ops(kv, &name, *if_exists, *only, actions, fctx),
             // `ALTER TABLE IF EXISTS nope.t` skips rather than reporting the
             // schema, as PostgreSQL does.
             Err(error) if *if_exists && is_missing_schema(&error) => {
@@ -19151,6 +19152,20 @@ impl Kv for StagedKv<'_> {
 }
 
 impl AlterTableState {
+    fn new(table: Table) -> Self {
+        Self {
+            table,
+            rows: None,
+            ops: Vec::new(),
+            dropped_indexes: Vec::new(),
+            created_indexes: Vec::new(),
+            retyped_columns: Vec::new(),
+            created_foreign_keys: Vec::new(),
+            dropped_foreign_keys: Vec::new(),
+            foreign_key_ids: crabka_pgcatalog::ForeignKeyIds::default(),
+        }
+    }
+
     fn rows_mut(&mut self, kv: &dyn Kv) -> Result<&mut Vec<RowVersion>, ExecError> {
         if self.rows.is_none() {
             self.rows = Some(scan_all_row_versions(kv, &self.table)?);
@@ -19314,6 +19329,7 @@ fn alter_table_ops(
     kv: &dyn Kv,
     table_name: &crabka_pgcatalog::RelationName,
     if_exists: bool,
+    only: bool,
     actions: &[crabka_pgparser::ast::AlterTableAction],
     fctx: ForeignCtx<'_>,
 ) -> Result<(QueryResult, Vec<crabka_pgkv::WriteOp>), ExecError> {
@@ -19369,28 +19385,68 @@ fn alter_table_ops(
         Err(error) => return Err(error.into()),
     };
     validate_alter_constraint_columns(kv, resolution, &table, actions)?;
-    let mut state = AlterTableState {
-        table,
-        own_xid,
-        rows: None,
-        ops: Vec::new(),
-        dropped_indexes: Vec::new(),
-        created_indexes: Vec::new(),
-        retyped_columns: Vec::new(),
-        created_foreign_keys: Vec::new(),
-        dropped_foreign_keys: Vec::new(),
-        foreign_key_ids: crabka_pgcatalog::ForeignKeyIds::default(),
-    };
+    if only {
+        reject_only_that_would_skip_descendants(kv, &table, actions)?;
+    }
+    let columns_before: HashSet<String> = table
+        .columns
+        .iter()
+        .map(|column| column.name.clone())
+        .collect();
+    let mut state = AlterTableState::new(table);
     let mut ordered_actions = actions.iter().collect::<Vec<_>>();
     ordered_actions.sort_by_key(|action| alter_table_action_pass(action));
-    for action in ordered_actions {
+    for action in &ordered_actions {
         alter_table_action_ops(kv, &mut state, action, fctx)?;
     }
 
     // The schema record is written once, after every action has folded into the
     // working column/CHECK lists.
+    let mut ops = alter_table_state_ops(kv, table_name, &mut state)?;
+
+    // Every descendant repeats the column-shape subcommands against its own
+    // catalog record, so a partition or inheritance child can never fall out of
+    // step with the shape its parent presents. `ONLY` skipped this above, and
+    // the guard it went through refused the spellings PostgreSQL will not let
+    // stop here.
+    let recursed = if only {
+        Vec::new()
+    } else {
+        ordered_actions
+            .iter()
+            .copied()
+            .filter(|action| {
+                action_recurses_to_descendants(action)
+                    && !skipped_by_existence_check(action, &columns_before)
+            })
+            .collect::<Vec<_>>()
+    };
+    if !recursed.is_empty() {
+        for descendant in column_shape_descendants(kv, table_name)? {
+            ops.extend(alter_descendant_ops(
+                kv,
+                &descendant,
+                &state.table,
+                &recursed,
+                fctx,
+            )?);
+        }
+    }
+    Ok((command("ALTER TABLE"), ops))
+}
+
+/// The catalog and row writes one relation's finished [`AlterTableState`] owes.
+///
+/// Shared by the named relation and by every descendant the statement recursed
+/// into, so a child's schema record and rewritten rows are staged by exactly
+/// the same code that stages the parent's.
+fn alter_table_state_ops(
+    kv: &dyn Kv,
+    table_name: &crabka_pgcatalog::RelationName,
+    state: &mut AlterTableState,
+) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
     let mut ops = crabka_pgcatalog::replace_table_schema_ops(kv, table_name, &state.table)?;
-    if let Some(rows) = state.rows {
+    if let Some(rows) = state.rows.take() {
         for (key, xmin, xmax, row) in rows {
             ops.push(crabka_pgkv::WriteOp::Put {
                 key,
@@ -19398,8 +19454,284 @@ fn alter_table_ops(
             });
         }
     }
-    ops.extend(state.ops);
-    Ok((command("ALTER TABLE"), ops))
+    ops.append(&mut state.ops);
+    Ok(ops)
+}
+
+/// The subcommands that reshape a relation's *columns*, which `PostgreSQL`
+/// propagates down the inheritance and partition trees.
+///
+/// Constraint and storage subcommands are deliberately absent: they have their
+/// own recursion rules, and applying them here would create a second copy of a
+/// constraint on every child.
+fn action_recurses_to_descendants(action: &crabka_pgparser::ast::AlterTableAction) -> bool {
+    use crabka_pgparser::ast::AlterTableAction as Action;
+
+    matches!(
+        action,
+        Action::AddColumn { .. }
+            | Action::DropColumn { .. }
+            | Action::RenameColumn { .. }
+            | Action::SetType { .. }
+            | Action::SetNotNull(_)
+            | Action::DropNotNull(_)
+            | Action::SetDefault { .. }
+            | Action::DropDefault(_)
+    )
+}
+
+/// Whether the named relation abandoned the subcommand on its own existence
+/// check — `ADD COLUMN IF NOT EXISTS` for a column it already had, `DROP COLUMN
+/// IF EXISTS` for one it never had.
+///
+/// `PostgreSQL` drops the whole subcommand at that point, descendants included.
+/// Recursing anyway would let `ADD COLUMN IF NOT EXISTS` report a type conflict
+/// against a child, for a statement PostgreSQL treats as a no-op.
+fn skipped_by_existence_check(
+    action: &crabka_pgparser::ast::AlterTableAction,
+    columns_before: &HashSet<String>,
+) -> bool {
+    use crabka_pgparser::ast::AlterTableAction as Action;
+
+    match action {
+        Action::AddColumn {
+            if_not_exists: true,
+            column,
+        } => columns_before.contains(&column.name),
+        Action::DropColumn {
+            column,
+            if_exists: true,
+            ..
+        } => !columns_before.contains(column),
+        _ => false,
+    }
+}
+
+/// Every relation that takes its column shape from `parent`, however deep and
+/// through whichever tree.
+///
+/// One walk over both link kinds rather than two walks over one each: a
+/// partition can be declared `INHERITS`-style below an inheritance child, and a
+/// tree mixing the two would otherwise be visited only down to the first link
+/// of the other kind. The visited set makes the inheritance DAG — where a
+/// diamond's foot is reachable by two paths — yield each relation once, so a
+/// column is added to it once.
+fn column_shape_descendants(
+    kv: &dyn Kv,
+    parent: &crabka_pgcatalog::RelationName,
+) -> Result<Vec<crabka_pgcatalog::RelationName>, ExecError> {
+    let mut out = Vec::new();
+    let mut seen: HashSet<crabka_pgcatalog::RelationName> =
+        std::iter::once(parent.clone()).collect();
+    let mut pending = vec![parent.clone()];
+    while let Some(name) = pending.pop() {
+        for child in direct_children(kv, &name)? {
+            if seen.insert(child.clone()) {
+                out.push(child.clone());
+                pending.push(child);
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// The relations one level below `name` in either tree.
+fn direct_children(
+    kv: &dyn Kv,
+    name: &crabka_pgcatalog::RelationName,
+) -> Result<Vec<crabka_pgcatalog::RelationName>, ExecError> {
+    let mut children = crate::partition::partitions_of(kv, name)?
+        .into_iter()
+        .map(|partition| partition.name)
+        .collect::<Vec<_>>();
+    children.extend(crate::inheritance::children_of(kv, name)?);
+    Ok(children)
+}
+
+/// Refuse an `ALTER TABLE ONLY` whose subcommand `PostgreSQL` will not let stop
+/// at the named relation.
+///
+/// The rule is per-subcommand and differs between the two trees. `ADD COLUMN`,
+/// `RENAME COLUMN` and `ALTER COLUMN … TYPE` are refused whenever *any*
+/// descendant exists, because the change would leave the children a different
+/// shape from the parent that presents them. `DROP COLUMN` and `SET NOT NULL`
+/// are refused only for a partitioned table: on an inheritance parent
+/// PostgreSQL treats them as local changes, which is representable here.
+fn reject_only_that_would_skip_descendants(
+    kv: &dyn Kv,
+    table: &Table,
+    actions: &[crabka_pgparser::ast::AlterTableAction],
+) -> Result<(), ExecError> {
+    use crabka_pgparser::ast::AlterTableAction as Action;
+
+    if !actions.iter().any(action_recurses_to_descendants)
+        || direct_children(kv, &table.name)?.is_empty()
+    {
+        return Ok(());
+    }
+    let partitioned = crate::partition::scheme_of(kv, &table.name)?.is_some();
+    let refuse = |message: String, hint: Option<&str>| {
+        Err(ExecError::OnlyWouldSkipDescendants {
+            message,
+            hint: hint.map(ToString::to_string),
+        })
+    };
+    for action in actions {
+        match action {
+            Action::AddColumn { .. } => {
+                return refuse("column must be added to child tables too".into(), None);
+            }
+            Action::DropColumn { .. } if partitioned => {
+                return refuse(
+                    "cannot drop column from only the partitioned table when partitions exist"
+                        .into(),
+                    Some("Do not specify the ONLY keyword."),
+                );
+            }
+            Action::RenameColumn { column, .. } => {
+                return refuse(
+                    format!("inherited column \"{column}\" must be renamed in child tables too"),
+                    None,
+                );
+            }
+            Action::SetType { column, .. } => {
+                return refuse(
+                    format!(
+                        "type of inherited column \"{column}\" must be changed in child tables too"
+                    ),
+                    None,
+                );
+            }
+            Action::SetNotNull(_) if partitioned => {
+                return refuse(
+                    "constraint must be added to child tables too".into(),
+                    Some("Do not specify the ONLY keyword."),
+                );
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Repeat the column-shape subcommands against one descendant.
+///
+/// `parent` is the *named* relation as this statement has already rewritten it,
+/// not the descendant's immediate parent: an added column is copied from the
+/// shape the statement produced, so a grandchild receives exactly the column
+/// its root ancestor now has — same type, default, and NOT NULL — rather than a
+/// second independent resolution of the same `ColumnDef`.
+fn alter_descendant_ops(
+    kv: &dyn Kv,
+    name: &crabka_pgcatalog::RelationName,
+    parent: &Table,
+    actions: &[&crabka_pgparser::ast::AlterTableAction],
+    fctx: ForeignCtx<'_>,
+) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
+    let mut state = AlterTableState::new(crabka_pgcatalog::get_table(kv, name)?);
+    for action in actions {
+        alter_descendant_action_ops(kv, &mut state, action, parent, fctx)?;
+    }
+    alter_table_state_ops(kv, name, &mut state)
+}
+
+/// One column-shape subcommand as a descendant sees it.
+///
+/// `ADD COLUMN` is the only one that cannot simply be replayed. Everything else
+/// runs the parent's own arm, skipped when the descendant has no column of that
+/// name — a `DROP COLUMN` that a `RENAME` already carried past it, say.
+fn alter_descendant_action_ops(
+    kv: &dyn Kv,
+    state: &mut AlterTableState,
+    action: &crabka_pgparser::ast::AlterTableAction,
+    parent: &Table,
+    fctx: ForeignCtx<'_>,
+) -> Result<(), ExecError> {
+    use crabka_pgparser::ast::AlterTableAction as Action;
+
+    let named_column = match action {
+        Action::AddColumn { column, .. } => Some(column.name.as_str()),
+        Action::DropColumn { column, .. }
+        | Action::RenameColumn { column, .. }
+        | Action::SetType { column, .. }
+        | Action::SetDefault { column, .. }
+        | Action::SetNotNull(column)
+        | Action::DropNotNull(column)
+        | Action::DropDefault(column) => Some(column.as_str()),
+        _ => None,
+    };
+    match action {
+        Action::AddColumn { column, .. } => {
+            inherit_column_ops(kv, state, &column.name, parent, fctx)
+        }
+        // A descendant that never had the column has nothing to do; the
+        // statement is still the parent's, so it must not fail here.
+        _ if named_column.is_some_and(|column| state.table.column_index(column).is_none()) => {
+            Ok(())
+        }
+        _ => alter_table_action_ops(kv, state, action, fctx),
+    }
+}
+
+/// Give one descendant the column its ancestor just gained.
+///
+/// A descendant that already declares the name *merges* rather than gaining a
+/// second column — that is how `PostgreSQL` reconciles a child written with the
+/// column spelled out by hand — and merging is only possible when the two
+/// declarations agree on type.
+fn inherit_column_ops(
+    kv: &dyn Kv,
+    state: &mut AlterTableState,
+    column: &str,
+    parent: &Table,
+    fctx: ForeignCtx<'_>,
+) -> Result<(), ExecError> {
+    let Some(inherited) = parent
+        .column_index(column)
+        .map(|index| parent.columns[index].clone())
+    else {
+        // The parent's own pass must have added it; a column it does not have
+        // is not one a descendant can inherit.
+        return Ok(());
+    };
+    if let Some(index) = state.table.column_index(column) {
+        if state.table.columns[index].ty != inherited.ty {
+            return Err(ExecError::ChildColumnTypeMismatch {
+                child: state.table.name.name.clone(),
+                column: column.to_string(),
+            });
+        }
+        return Ok(());
+    }
+    let fill = match &inherited.default {
+        Some(ColumnDefault::Value(value)) => value.clone(),
+        _ => Datum::Null,
+    };
+    let added = state.table.columns.len();
+    let generated = inherited.generated.is_some();
+    let not_null = inherited.not_null;
+    let table_name = state.table.name.clone();
+    for (_, _, _, row) in state.rows_mut(kv)? {
+        row.push(fill.clone());
+    }
+    state.table.columns.push(inherited);
+    if generated {
+        let ddl_ctx = crate::clock::EvalCtx::for_ddl(fctx.resolution, fctx.catalog);
+        validate_generation_expressions(&state.table)?;
+        backfill_generated_column(kv, state, added, &ddl_ctx)?;
+    }
+    if not_null {
+        for (_rowid, _xmin, row) in &state.live_rows(kv)? {
+            if row.get(added).is_none_or(Datum::is_null) {
+                return Err(ExecError::ColumnContainsNullValues {
+                    column: column.to_string(),
+                    table: table_name.to_string(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The phase-2 pass order PostgreSQL assigns to the ALTER TABLE subcommands

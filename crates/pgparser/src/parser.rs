@@ -3387,9 +3387,10 @@ impl Parser {
         self.expect_ident_eq("alter")?;
         self.expect(&Token::Keyword(Keyword::Table))?;
         let if_exists = self.eat_if_exists()?;
-        // `ONLY t` / `t *` control inheritance recursion; a table never has
-        // descendants here, so both spellings name the same relation.
-        self.eat_ident_eq("only");
+        // `ONLY t` suppresses recursion into the relation's partitions and
+        // inheritance children; the `t *` spelling is the explicit form of the
+        // default, so it leaves `only` clear.
+        let only = self.eat_ident_eq("only");
         let table = self.relation_ref()?;
         if *self.peek() == Token::Star {
             self.bump();
@@ -3403,6 +3404,7 @@ impl Parser {
         Ok(Statement::AlterTable {
             table,
             if_exists,
+            only,
             actions,
         })
     }
@@ -17389,6 +17391,7 @@ mod tests {
         Statement::AlterTable {
             table: table.into(),
             if_exists: false,
+            only: false,
             actions,
         }
     }
@@ -17401,6 +17404,28 @@ mod tests {
             ),
             attributes: crate::ast::ConstraintAttributes::default(),
         })
+    }
+
+    /// `ONLY` is what stops a column-shape subcommand from reaching the
+    /// relation's partitions and inheritance children, so it has to survive
+    /// parsing rather than being eaten as noise. `t *` is the explicit spelling
+    /// of the default and must not set it.
+    #[test]
+    fn alter_table_carries_the_only_flag_that_suppresses_recursion() {
+        use assert2::assert;
+        for (sql, expected) in [
+            ("ALTER TABLE ONLY t DROP COLUMN c", true),
+            ("alter table only t drop column c", true),
+            ("ALTER TABLE IF EXISTS ONLY t DROP COLUMN c", true),
+            ("ALTER TABLE ONLY s.t DROP COLUMN c", true),
+            ("ALTER TABLE t DROP COLUMN c", false),
+            ("ALTER TABLE t * DROP COLUMN c", false),
+        ] {
+            let Statement::AlterTable { only, .. } = one(sql) else {
+                panic!("expected ALTER TABLE for {sql}");
+            };
+            assert!(only == expected, "{sql}");
+        }
     }
 
     #[test]
@@ -17467,6 +17492,7 @@ mod tests {
                 Statement::AlterTable {
                     table: "t".into(),
                     if_exists: true,
+                    only: false,
                     actions: vec![AlterTableAction::DropColumn {
                         column: "c".into(),
                         if_exists: true,

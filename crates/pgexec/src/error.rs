@@ -321,6 +321,21 @@ pub enum ExecError {
     /// `ATTACH PARTITION` found the candidate lacks a column the parent has
     /// (42804).
     ChildMissingColumn(String),
+    /// A descendant already declares the column an `ALTER TABLE … ADD COLUMN`
+    /// is propagating, under an incompatible type (42804). `PostgreSQL` merges
+    /// the two definitions when the types agree and reports this when they do
+    /// not.
+    ChildColumnTypeMismatch {
+        child: String,
+        column: String,
+    },
+    /// `ONLY` suppressed a recursion `PostgreSQL` requires, because the
+    /// relation has descendants that the subcommand would put out of step
+    /// (42P16). The wording is per-subcommand, and two of them carry a hint.
+    OnlyWouldSkipDescendants {
+        message: String,
+        hint: Option<String>,
+    },
     /// `PARTITION OF` named a relation that is not partitioned (42P17).
     NotPartitioned(String),
     /// A row write, or a back-validation scan, broke referential integrity.
@@ -877,6 +892,17 @@ impl ExecError {
                 "42804",
                 format!("child table is missing column \"{column}\""),
             ),
+            ExecError::ChildColumnTypeMismatch { child, column } => PgError::error(
+                "42804",
+                format!("child table \"{child}\" has different type for column \"{column}\""),
+            ),
+            ExecError::OnlyWouldSkipDescendants { message, hint } => {
+                let error = PgError::error("42P16", message);
+                match hint {
+                    Some(hint) => error.with_hint(hint),
+                    None => error,
+                }
+            }
             ExecError::NotPartitioned(relation) => {
                 PgError::error("42P17", format!("\"{relation}\" is not partitioned"))
             }
