@@ -6,13 +6,13 @@
 test files, not the adopted corpus's statement matches. The checked-in monotone
 floor remains `6/231`; this review is still non-monotone against that floor and
 does not ratchet it. Serial completes all 231 files with zero infrastructure
-failures, leaving 203 semantic failures across 173703 canonical changed lines
-and 4659 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
+failures, leaving 203 semantic failures across 171797 canonical changed lines
+and 4714 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
 postflight probe succeeds, and the infrastructure report is empty.
 
 The measurement immediately before this wave was `22/231` at 176686 changed
 lines / 4606 hunks, from the same runner and the same pinned corpus. The
-waves below are therefore `+6` exact files and `-2298` changed lines with
+waves below are therefore `+6` exact files and `-4204` changed lines with
 **zero newly failing files**: `int4`, `int2`, `roleattributes`, `lseg`, `line` and `circle` become exact,
 and 4 files gain a combined 22 lines.
 
@@ -406,6 +406,30 @@ and their certified artifact describe current conformance.
       returns rows it should hide, which is a worse failure than the syntax
       error, and this program has already shipped one RLS information leak (see
       the pushdown entry above). Parse and enforce together, or not at all.
+- [x] **Row-level security, end to end.** Ownership, a policy catalog, a
+      fail-closed read gate, enforcement on every command, and qual deparsing.
+      Certified in two runs: `-1657` lines for the feature itself (`rowsecurity`
+      4109 -> 2886, `psql` -276) and `-249` for the follow-ups (`rowsecurity`
+      -> 2752, `truncate` -39, `privileges` -26, `select_views` -25). 28/231
+      held throughout and no file newly failed.
+      The design point worth keeping: `RawScan` has private fields and one
+      consumer, so a seventh read path cannot be added without producing one,
+      and a `RawScan` cannot become a `Relation` outside the gate. Default-deny
+      is an OR-fold seeded `FALSE`, not a branch. `WITH CHECK` runs inside
+      `fire_before_row`, because a `BEFORE ROW` trigger returns the row that is
+      actually written and a check placed ahead of it can be laundered past.
+      Views use invoker semantics deliberately: owner rights are only safe once
+      `GRANT` is enforced, and `has_table_privilege` still returns true
+      unconditionally, so owner rights would make any view over an RLS table a
+      universal bypass. That pairing is phase 2 and must land as one change.
+      `select_parallel` rose `+10`: folding aggregates over an inheritance tree
+      routed one more query into `inherited_scan`, whose
+      `child table is missing column` defect already occurred 41 times because
+      `ALTER TABLE ADD COLUMN` does not recurse to children. An error there
+      replaces a silently wrong count, which is the better failure.
+- [ ] Make `ALTER TABLE` recurse to inheritance children. 42 occurrences of
+      `child table is missing column` across nine files trace to it, and it
+      blocks `inherit` and `alter_table` far more than anything RLS touched.
 - [ ] Ratchet or repair the committed serial baseline. The gate in
       `crates/gres-conformance/pg-regress-baseline.json` was seeded once, in
       `179158c39`, and has never been ratcheted; `baseline.py update` correctly

@@ -3208,7 +3208,31 @@ impl Parser {
                 Token::Ident(s) if s == "function" || s == "procedure" || s == "routine" => {
                     self.alter_routine_statement()
                 }
-                Token::Keyword(Keyword::Table) => emitted(I::AlterTable, self.alter_table()),
+                // PostgreSQL's own synopsis lists the row-security subcommands
+                // as their own entry in the command inventory, so a statement
+                // carrying one reports that identity rather than plain
+                // `ALTER TABLE` — the compatibility matrix has a row for it.
+                Token::Keyword(Keyword::Table) => {
+                    self.alter_table().map(|statement| ParsedStatement {
+                        command_identity: match &statement {
+                            crate::ast::Statement::AlterTable { actions, .. }
+                                if actions.iter().any(|action| {
+                                    matches!(
+                                        action,
+                                        crate::ast::AlterTableAction::EnableRowSecurity
+                                            | crate::ast::AlterTableAction::DisableRowSecurity
+                                            | crate::ast::AlterTableAction::ForceRowSecurity
+                                            | crate::ast::AlterTableAction::NoForceRowSecurity
+                                    )
+                                }) =>
+                            {
+                                I::AlterTableEnableRowLevelSecurity
+                            }
+                            _ => I::AlterTable,
+                        },
+                        statement,
+                    })
+                }
                 Token::Keyword(Keyword::Index) => emitted(I::AlterIndex, self.alter_index()),
                 Token::Keyword(Keyword::Schema) => emitted(I::AlterSchema, self.alter_schema()),
                 Token::Keyword(Keyword::Server) => emitted(I::AlterServer, self.alter_server()),

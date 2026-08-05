@@ -133,6 +133,30 @@ const COMMAND_PROBES: &[CommandProbe] = &[
         refusal: None,
     },
     CommandProbe {
+        command: "ALTER TABLE ENABLE ROW LEVEL SECURITY",
+        sql: "ALTER TABLE parser_commands_probe ENABLE ROW LEVEL SECURITY",
+        expected_statement: "AlterTable",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "CREATE POLICY",
+        sql: "CREATE POLICY parser_commands_policy ON parser_commands_probe FOR SELECT TO PUBLIC USING (true)",
+        expected_statement: "CreatePolicy",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "ALTER POLICY",
+        sql: "ALTER POLICY parser_commands_policy ON parser_commands_probe USING (false)",
+        expected_statement: "AlterPolicy",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "DROP POLICY",
+        sql: "DROP POLICY parser_commands_policy ON parser_commands_probe",
+        expected_statement: "DropPolicy",
+        refusal: None,
+    },
+    CommandProbe {
         command: "CREATE TRIGGER",
         sql: "CREATE TRIGGER parser_commands_trigger BEFORE INSERT ON parser_commands_probe FOR EACH ROW EXECUTE FUNCTION parser_commands_trigger_fn()",
         expected_statement: "CreateTrigger",
@@ -967,6 +991,11 @@ fn statement_shape(statement: &Statement) -> &'static str {
         Statement::CreateTrigger(_) => "CreateTrigger",
         Statement::AlterTrigger { .. } => "AlterTrigger",
         Statement::DropTrigger { .. } => "DropTrigger",
+        Statement::CreatePolicy(_) => "CreatePolicy",
+        Statement::AlterPolicy { .. } => "AlterPolicy",
+        Statement::DropPolicy { .. } => "DropPolicy",
+        Statement::GrantRoles { .. } => "GrantRoles",
+        Statement::RevokeRoles { .. } => "RevokeRoles",
         Statement::CreateEventTrigger(_) => "CreateEventTrigger",
         Statement::AlterEventTrigger { .. } => "AlterEventTrigger",
         Statement::DropEventTrigger { .. } => "DropEventTrigger",
@@ -1128,7 +1157,7 @@ mod tests {
 
         assert!(report.format_version == PARSER_COMMAND_REPORT_FORMAT_VERSION);
         assert!(
-            report.commands.len() == 158,
+            report.commands.len() == 162,
             "all resolved command rows need probes"
         );
         assert!(report.commands.windows(2).all(|pair| pair[0] < pair[1]));
@@ -1166,7 +1195,7 @@ mod tests {
 
         assert!(json["format_version"] == PARSER_COMMAND_REPORT_FORMAT_VERSION);
         assert!(json["commands"][0] == "ABORT");
-        assert!(json["probes"].as_array().map(Vec::len) == Some(158));
+        assert!(json["probes"].as_array().map(Vec::len) == Some(162));
         let refusal = json["probes"]
             .as_array()
             .expect("probe array")

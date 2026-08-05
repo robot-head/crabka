@@ -38,6 +38,10 @@ command_identities!(
     (AlterSubscription, "ALTER SUBSCRIPTION"),
     (AlterSystem, "ALTER SYSTEM"),
     (AlterTable, "ALTER TABLE"),
+    (
+        AlterTableEnableRowLevelSecurity,
+        "ALTER TABLE ENABLE ROW LEVEL SECURITY"
+    ),
     (AlterTablespace, "ALTER TABLESPACE"),
     (
         AlterTextSearchConfiguration,

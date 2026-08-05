@@ -57,9 +57,21 @@ fn probe_setup(command: &str) -> &'static [&'static str] {
             &["CREATE TABLESPACE parser_commands_space LOCATION '/tmp/parser_commands_space'"]
         }
         "CREATE TABLE INHERITS" => &["CREATE TABLE parser_commands_parent (id int4)"],
-        "ALTER TABLE" | "COMMENT" | "CREATE INDEX" | "CREATE TABLE AS" | "DELETE"
-        | "DROP INDEX" | "DROP TABLE" | "INSERT" | "MERGE" | "SELECT INTO" | "TABLE"
-        | "TRUNCATE" | "UPDATE" => &["CREATE TABLE parser_commands_probe (id int4)"],
+        "ALTER TABLE"
+        | "ALTER TABLE ENABLE ROW LEVEL SECURITY"
+        | "COMMENT"
+        | "CREATE INDEX"
+        | "CREATE POLICY"
+        | "CREATE TABLE AS"
+        | "DELETE"
+        | "DROP INDEX"
+        | "DROP TABLE"
+        | "INSERT"
+        | "MERGE"
+        | "SELECT INTO"
+        | "TABLE"
+        | "TRUNCATE"
+        | "UPDATE" => &["CREATE TABLE parser_commands_probe (id int4)"],
         "GRANT" | "REVOKE" => &[
             "CREATE TABLE parser_commands_probe (id int4)",
             "CREATE ROLE parser_commands_role",
@@ -118,6 +130,10 @@ fn probe_setup(command: &str) -> &'static [&'static str] {
             &["CREATE DOMAIN parser_commands_domain AS int4 CHECK (VALUE > 0)"]
         }
         "ALTER SCHEMA" | "DROP SCHEMA" => &["CREATE SCHEMA parser_commands_schema"],
+        "ALTER POLICY" | "DROP POLICY" => &[
+            "CREATE TABLE parser_commands_probe (id int4)",
+            "CREATE POLICY parser_commands_policy ON parser_commands_probe FOR SELECT TO PUBLIC USING (true)",
+        ],
         "CREATE TRIGGER" => &[
             "CREATE TABLE parser_commands_probe (id int4)",
             "CREATE FUNCTION parser_commands_trigger_fn() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$",
@@ -171,7 +187,7 @@ async fn execute_probe(command: &str, sql: &str) {
 #[tokio::test]
 async fn every_resolved_behavior_probe_reaches_the_session_contract() {
     let report = parser_command_report().expect("behavior manifest parses");
-    assert!(report.probes.len() == 158);
+    assert!(report.probes.len() == 162);
     let mut executed = 0;
     let mut refused = 0;
     for probe in report.probes {
@@ -207,7 +223,7 @@ async fn every_resolved_behavior_probe_reaches_the_session_contract() {
         );
         refused += 1;
     }
-    assert!(executed == 115);
+    assert!(executed == 119);
     assert!(refused == 43);
 }
 
