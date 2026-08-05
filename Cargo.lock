@@ -1075,9 +1075,9 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "base64"
-version = "0.23.0"
+version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b25655df2c3cdd83c5e5b293b88acd880332b2ddadd7c30ac43144fdc0033da9"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "base64ct"
@@ -1100,7 +1100,7 @@ version = "0.19.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a0cd0bd35a28836d528d2b58ad499bc3c5641d59379421b1be9eeb0c2f2b912a"
 dependencies = [
- "base64 0.23.0",
+ "base64 0.23.1",
  "blowfish",
  "getrandom 0.4.3",
  "subtle",
@@ -2369,7 +2369,7 @@ dependencies = [
  "assert2",
  "async-trait",
  "axum",
- "base64 0.23.0",
+ "base64 0.23.1",
  "bytes",
  "clap",
  "crabka-audit",
@@ -3021,7 +3021,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum",
- "base64 0.23.0",
+ "base64 0.23.1",
  "bytes",
  "clap",
  "connectrpc-axum",
@@ -3200,7 +3200,7 @@ name = "crabka-logql"
 version = "0.3.9"
 dependencies = [
  "assert2",
- "base64 0.23.0",
+ "base64 0.23.1",
  "chrono",
  "chrono-tz",
  "crabka-blockstore",
@@ -3347,7 +3347,7 @@ dependencies = [
  "assert2",
  "async-trait",
  "axum",
- "base64 0.23.0",
+ "base64 0.23.1",
  "clap",
  "crabka-blockstore",
  "crabka-client-admin",
@@ -3395,7 +3395,7 @@ dependencies = [
  "assert2",
  "async-trait",
  "axum",
- "base64 0.23.0",
+ "base64 0.23.1",
  "bytes",
  "chrono",
  "clap",
@@ -3474,7 +3474,7 @@ version = "0.3.9"
 dependencies = [
  "assert2",
  "async-trait",
- "base64 0.23.0",
+ "base64 0.23.1",
  "bigdecimal",
  "bytes",
  "crabka-pgcatalog",
@@ -3562,7 +3562,7 @@ version = "0.3.9"
 dependencies = [
  "assert2",
  "async-trait",
- "base64 0.23.0",
+ "base64 0.23.1",
  "bytes",
  "crabka-trace-context",
  "hmac",
@@ -3635,7 +3635,7 @@ dependencies = [
  "assert2",
  "async-trait",
  "axum",
- "base64 0.23.0",
+ "base64 0.23.1",
  "bytes",
  "clap",
  "connectrpc-axum",
@@ -3934,7 +3934,7 @@ dependencies = [
  "arc-swap",
  "assert2",
  "axum",
- "base64 0.23.0",
+ "base64 0.23.1",
  "bcrypt",
  "bytes",
  "clap",
@@ -4008,7 +4008,7 @@ dependencies = [
  "arc-swap",
  "assert2",
  "async-trait",
- "base64 0.23.0",
+ "base64 0.23.1",
  "bytes",
  "codspeed-criterion-compat",
  "crabka-units",
@@ -4125,7 +4125,7 @@ dependencies = [
  "assert2",
  "async-trait",
  "axum",
- "base64 0.23.0",
+ "base64 0.23.1",
  "bytes",
  "clap",
  "crabka-blockstore",
