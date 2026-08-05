@@ -636,7 +636,9 @@ pub enum Statement {
     },
     /* SQL parity matrix row: GRANT. */ GrantTablePrivileges {
         privileges: Vec<String>,
-        table: RelationRef,
+        /// One statement may name several relations, and `PostgreSQL` applies
+        /// the whole privilege set to each of them.
+        tables: Vec<RelationRef>,
         grantees: Vec<String>,
     },
     /* SQL parity matrix row: GRANT. */ GrantSchemaPrivileges {
@@ -646,7 +648,9 @@ pub enum Statement {
     },
     /* SQL parity matrix row: REVOKE. */ RevokeTablePrivileges {
         privileges: Vec<String>,
-        table: RelationRef,
+        /// One statement may name several relations, and `PostgreSQL` applies
+        /// the whole privilege set to each of them.
+        tables: Vec<RelationRef>,
         grantees: Vec<String>,
     },
     /* SQL parity matrix row: REVOKE. */ RevokeSchemaPrivileges {

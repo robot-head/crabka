@@ -723,3 +723,30 @@ async fn has_table_privilege_covers_the_implicit_holders() {
     assert!(sqlstate == "22023");
     assert!(message == "unrecognized privilege type: \"FLY\"");
 }
+
+/// One `GRANT` may name several relations, and the whole privilege set applies
+/// to each of them — `GRANT SELECT ON s1, s2 TO r` is two grants, not one grant
+/// of a pair. The upstream `rowsecurity` test relies on this: a single
+/// unparsed `GRANT SELECT ON z1,z2 TO …` denied every later access to both.
+#[tokio::test]
+async fn one_grant_may_name_several_relations() {
+    let engine = SqlEngine::new();
+    let mut alice = engine.connect();
+    run(&mut alice, SETUP).await;
+    run(
+        &mut alice,
+        "CREATE TABLE second (id int4); INSERT INTO second VALUES (9);
+         ALTER TABLE second OWNER TO alice",
+    )
+    .await;
+
+    run(&mut alice, "GRANT SELECT ON document, second TO bob").await;
+    let mut bob = engine.connect();
+    run(&mut bob, "SET SESSION AUTHORIZATION bob").await;
+    assert!(permitted(&mut bob, "SELECT id FROM document").await);
+    assert!(permitted(&mut bob, "SELECT id FROM second").await);
+
+    run(&mut alice, "REVOKE SELECT ON document, second FROM bob").await;
+    assert!(!permitted(&mut bob, "SELECT id FROM document").await);
+    assert!(!permitted(&mut bob, "SELECT id FROM second").await);
+}

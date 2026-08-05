@@ -3881,12 +3881,12 @@ impl Parser {
         // PostgreSQL's `TABLE` object-type keyword is optional: `GRANT SELECT ON
         // t TO r` names a table exactly as `... ON TABLE t ...` does.
         self.eat_keyword(Keyword::Table);
-        let table = self.relation_ref()?;
+        let tables = self.relation_ref_list()?;
         self.expect(&Token::Keyword(Keyword::To))?;
         let grantees = self.object_name_list()?;
         Ok(crate::ast::Statement::GrantTablePrivileges {
             privileges,
-            table,
+            tables,
             grantees,
         })
     }
@@ -3926,12 +3926,12 @@ impl Parser {
             });
         }
         self.eat_keyword(Keyword::Table);
-        let table = self.relation_ref()?;
+        let tables = self.relation_ref_list()?;
         self.expect(&Token::Keyword(Keyword::From))?;
         let grantees = self.object_name_list()?;
         Ok(crate::ast::Statement::RevokeTablePrivileges {
             privileges,
-            table,
+            tables,
             grantees,
         })
     }
@@ -4007,6 +4007,17 @@ impl Parser {
             ));
         }
         Ok(privileges)
+    }
+
+    /// The comma-separated relation list a `GRANT`/`REVOKE` names. `PostgreSQL`
+    /// applies the whole privilege set to every relation in it, so a statement
+    /// naming two tables is two grants, not one grant of a pair.
+    fn relation_ref_list(&mut self) -> Result<Vec<crate::ast::RelationRef>, ParseError> {
+        let mut names = vec![self.relation_ref()?];
+        while self.eat_comma() {
+            names.push(self.relation_ref()?);
+        }
+        Ok(names)
     }
 
     fn object_name_list(&mut self) -> Result<Vec<String>, ParseError> {

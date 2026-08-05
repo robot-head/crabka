@@ -1284,15 +1284,21 @@ pub(crate) fn execute_ddl(
         }
         Statement::GrantTablePrivileges {
             privileges,
-            table,
+            tables,
             grantees,
         } => {
-            let ops = crabka_pgcatalog::grant_table_privileges_ops(
-                kv,
-                &resolve_relation(kv, resolution, table, SchemaDisposition::Utility)?,
-                grantees,
-                privileges,
-            )?;
+            // One statement naming several relations is several grants, each
+            // carrying the whole privilege set, so every name is resolved and
+            // applied before any of them is written.
+            let mut ops = Vec::new();
+            for table in tables {
+                ops.extend(crabka_pgcatalog::grant_table_privileges_ops(
+                    kv,
+                    &resolve_relation(kv, resolution, table, SchemaDisposition::Utility)?,
+                    grantees,
+                    privileges,
+                )?);
+            }
             Ok((command("GRANT"), ops))
         }
         // `WITH ADMIN OPTION` / `ADMIN OPTION FOR` are dropped: a membership is
@@ -1329,15 +1335,21 @@ pub(crate) fn execute_ddl(
         }
         Statement::RevokeTablePrivileges {
             privileges,
-            table,
+            tables,
             grantees,
         } => {
-            let ops = crabka_pgcatalog::revoke_table_privileges_ops(
-                kv,
-                &resolve_relation(kv, resolution, table, SchemaDisposition::Utility)?,
-                grantees,
-                privileges,
-            )?;
+            // One statement naming several relations is several grants, each
+            // carrying the whole privilege set, so every name is resolved and
+            // applied before any of them is written.
+            let mut ops = Vec::new();
+            for table in tables {
+                ops.extend(crabka_pgcatalog::revoke_table_privileges_ops(
+                    kv,
+                    &resolve_relation(kv, resolution, table, SchemaDisposition::Utility)?,
+                    grantees,
+                    privileges,
+                )?);
+            }
             Ok((command("REVOKE"), ops))
         }
         Statement::RevokeSchemaPrivileges {
