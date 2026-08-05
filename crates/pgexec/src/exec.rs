@@ -82,6 +82,14 @@ pub(crate) struct ForeignCtx<'a> {
     /// accepted and then committed. That left a table that violates its own
     /// unique index.
     pub own_xid: Option<u64>,
+    /// The session's `row_security` GUC. `false` makes a query that a policy
+    /// would have filtered fail with 42501 instead.
+    ///
+    /// It rides here rather than on `EvalCtx` for a reason worth keeping: this
+    /// struct has two construction sites, `EvalCtx` has seventeen across nine
+    /// files, and a security input that seventeen call sites must remember to
+    /// set is one that some of them will not.
+    pub row_security: bool,
 }
 
 impl ForeignCtx<'_> {
@@ -95,6 +103,20 @@ impl ForeignCtx<'_> {
             catalog: None,
             reserved_table_ids: None,
             own_xid: None,
+            row_security: true,
+        }
+    }
+
+    /// The role this session acts as for ownership and row security.
+    ///
+    /// `PUBLIC` is a pseudo-role that owns nothing and holds no attributes; a
+    /// session carrying it authenticated as nobody and is acting as the
+    /// bootstrap superuser, which is the role its decisions must be made under.
+    pub(crate) fn effective_role(&self) -> &str {
+        if self.current_user == crabka_pgcatalog::PUBLIC_ROLE {
+            crabka_pgcatalog::BOOTSTRAP_ROLE
+        } else {
+            self.current_user
         }
     }
 
@@ -109,27 +131,12 @@ impl ForeignCtx<'_> {
             )
     }
 
-    /// The role a relation this session creates belongs to.
-    ///
-    /// `PUBLIC` is a pseudo-role: it owns nothing, and a session carries it as
-    /// the placeholder for "no role was authenticated". Such a connection is
-    /// acting as the bootstrap superuser, so that is the role its relations are
-    /// recorded under — never `public`, which no `pg_authid` row and no
-    /// `pg_get_userbyid` answer corresponds to.
-    fn owner(&self) -> &str {
-        if self.current_user == crabka_pgcatalog::PUBLIC_ROLE {
-            crabka_pgcatalog::BOOTSTRAP_ROLE
-        } else {
-            self.current_user
-        }
-    }
-
     /// Ownership and id allocation for a relation this statement creates. Every
     /// `CREATE` path in `execute_ddl` goes through here, so a new relation
     /// cannot acquire an owner other than the session's own without naming one.
     fn table_creation(&self) -> crabka_pgcatalog::TableCreation<'_> {
         crabka_pgcatalog::TableCreation {
-            owner: self.owner(),
+            owner: self.effective_role(),
             id: self.table_id(),
         }
     }
@@ -189,6 +196,8 @@ pub(crate) struct WriteContext<'a> {
     /// end-of-statement drain and a commit-time one would report the same thing
     /// at the same moment.
     pub deferred_fk: Option<&'a std::sync::Mutex<crate::fk::DeferredConstraints>>,
+    /// The row-security recursion guard for the queries that feed this write.
+    pub policy_stack: &'a crate::rls::PolicyStack,
 }
 
 impl<'a> WriteContext<'a> {
@@ -211,7 +220,18 @@ impl<'a> WriteContext<'a> {
             fctx: self.fctx,
             range_scanner: self.range_scanner,
             blocking_query_memory: self.blocking_query_memory,
+            security_role: self.fctx.effective_role(),
+            policy_stack: self.policy_stack,
         }
+    }
+
+    /// The row-security decision context this write makes its decisions in.
+    fn rls(&self) -> crate::rls::RlsCtx<'_> {
+        crate::rls::RlsCtx::new(
+            self.catalog_kv,
+            self.fctx.effective_role(),
+            self.fctx.row_security,
+        )
     }
 }
 
@@ -514,7 +534,7 @@ pub(crate) fn execute_ddl(
             let table = crabka_pgcatalog::Table {
                 id,
                 name: name.clone(),
-                owner: fctx.owner().to_string(),
+                owner: fctx.effective_role().to_string(),
                 columns: cols,
                 sharded: *sharded,
                 row_security: false,
@@ -1315,7 +1335,7 @@ pub(crate) fn execute_ddl(
                     &srv.name,
                     table.options,
                     crabka_pgcatalog::TableCreation {
-                        owner: fctx.owner(),
+                        owner: fctx.effective_role(),
                         id: crabka_pgcatalog::TableIdSource::Reserved(id),
                     },
                 )?;
@@ -4190,9 +4210,12 @@ async fn execute_write_body(
             )?;
             let mut n: u64 = 0;
             let mut returned_rows = returning.as_ref().map(|_| Vec::new()).unwrap_or_default();
-            for (rowid, _xmin, scanned_row) in
-                write_candidate_rows(write_ctx, &t, source.probe_filter(filter.as_ref()))?
-            {
+            for (rowid, _xmin, scanned_row) in write_candidate_rows(
+                write_ctx,
+                &t,
+                crabka_pgcatalog::policy::PolicyCommand::Update,
+                source.probe_filter(filter.as_ref()),
+            )? {
                 // 1. Filter on the snapshot-visible row FIRST — do not lock rows
                 //    that don't match the WHERE clause (avoids over-locking and
                 //    restores row-level write concurrency for different rows).
@@ -4321,9 +4344,12 @@ async fn execute_write_body(
             )?;
             let mut n: u64 = 0;
             let mut returned_rows = returning.as_ref().map(|_| Vec::new()).unwrap_or_default();
-            for (rowid, _xmin, scanned_row) in
-                write_candidate_rows(write_ctx, &t, source.probe_filter(filter.as_ref()))?
-            {
+            for (rowid, _xmin, scanned_row) in write_candidate_rows(
+                write_ctx,
+                &t,
+                crabka_pgcatalog::policy::PolicyCommand::Delete,
+                source.probe_filter(filter.as_ref()),
+            )? {
                 // 1. Filter on the snapshot-visible row FIRST — do not lock rows
                 //    that don't match the WHERE clause.
                 if source
@@ -5191,7 +5217,15 @@ async fn execute_merge(
     scope.columns.extend(source_rel.scope.columns.clone());
     let spec = ReturningSpec::new(&t, qualifier, returning.as_ref(), Some(&scope), true)?;
 
-    let target_rows = write_candidate_rows(write_ctx, &t, None)?;
+    // MERGE reaches rows through its own join and may update or delete them.
+    // `UPDATE` is the narrower of the two policy commands a matched row can
+    // meet, and a row this statement cannot update it also cannot delete.
+    let target_rows = write_candidate_rows(
+        write_ctx,
+        &t,
+        crabka_pgcatalog::policy::PolicyCommand::Update,
+        None,
+    )?;
     let mut matched: HashSet<u64> = HashSet::new();
     let mut returned_rows = Vec::new();
     let mut n: u64 = 0;
@@ -7486,26 +7520,37 @@ fn choose_write_index_probe(
 /// by rowid; the caller still applies the FULL residual filter and the
 /// under-lock EvalPlanQual re-check to every candidate, so the affected rows,
 /// RETURNING output, and lock order are identical to the full scan.
+/// The stored rows an `UPDATE`/`DELETE`/`MERGE` may act on, after row security.
+///
+/// This is the write side's counterpart to the read gate: an `UPDATE` that
+/// could change a row a `SELECT` would not have shown is the exact hazard the
+/// programme exists to avoid, so the `USING` qual is applied here, where every
+/// row-selecting write path already passes.
 fn write_candidate_rows(
     write_ctx: &WriteContext<'_>,
     table: &Table,
+    command: crabka_pgcatalog::policy::PolicyCommand,
     filter: Option<&Expr>,
 ) -> Result<Vec<(u64, u64, Vec<Datum>)>, ExecError> {
-    if let Some((index, value)) = choose_write_index_probe(write_ctx.catalog_kv, table, filter)? {
-        let rows = lookup_local_index_equal(&write_ctx.mvcc_read(), table, &index, &[value])?;
-        return Ok(rows
+    let using = crate::rls::RowSecurityUsing::compile(&write_ctx.rls(), table, command)?;
+    let rows = if let Some((index, value)) =
+        choose_write_index_probe(write_ctx.catalog_kv, table, filter)?
+    {
+        lookup_local_index_equal(&write_ctx.mvcc_read(), table, &index, &[value])?
             .into_iter()
             .map(|row| (row.rowid, row.xmin, row.row))
-            .collect());
-    }
-    scan_live(
-        write_ctx.kv,
-        write_ctx.global,
-        write_ctx.global_snapshot,
-        write_ctx.snapshot,
-        Some(write_ctx.xid),
-        table,
-    )
+            .collect()
+    } else {
+        scan_live(
+            write_ctx.kv,
+            write_ctx.global,
+            write_ctx.global_snapshot,
+            write_ctx.snapshot,
+            Some(write_ctx.xid),
+            table,
+        )?
+    };
+    using.retain_visible(table, rows, write_ctx.eval_ctx)
 }
 
 /// Build timestamp-transaction writes for sharded-table autocommit DML.
@@ -11133,33 +11178,20 @@ fn partitioned_scan(
     read_ctx: &crate::subquery::SubCtx<'_>,
     parent: &Table,
     qualifier: &str,
-) -> Result<Relation, ExecError> {
-    let scope = Scope::single(parent, qualifier);
-    let mut rows = Vec::new();
+) -> Result<crate::rls::RawScan, ExecError> {
+    let mut tree = crate::rls::RawScan::tree_of(parent, qualifier);
     for leaf in crate::partition::leaves_of(read_ctx.catalog_kv, &parent.name)? {
         let leaf_table = crabka_pgcatalog::get_table(read_ctx.catalog_kv, &leaf)?;
         let ordinals = column_mapping(parent, &leaf_table)?;
-        let relation = build_table_expr(
-            read_ctx,
-            &crabka_pgparser::ast::TableExpr::Table {
-                name: crabka_pgparser::ast::RelationRef::qualified(&leaf.schema, &leaf.name),
-                only: true,
-                alias: None,
-                columns: None,
-                sample: None,
-            },
-            None,
-            None,
-            None,
-        )?;
-        rows.extend(relation.rows.into_iter().map(|row| {
-            ordinals
-                .iter()
-                .map(|ordinal| row.get(*ordinal).cloned().unwrap_or(Datum::Null))
-                .collect::<Vec<_>>()
-        }));
+        // Straight to the scan, not back through `build_table_expr`: re-entering
+        // there would run each leaf through the row-security gate under the
+        // LEAF's policies, and then run the whole append through it again under
+        // the parent's. PostgreSQL applies the parent's policies to the tree and
+        // none of the children's, so the leaf's rows must arrive here ungated.
+        let leaf_scan = scan_stored_relation(read_ctx, &leaf_table, &leaf.name, true, None, None)?;
+        tree.absorb(leaf_scan, &ordinals);
     }
-    Ok(Relation { scope, rows })
+    Ok(tree)
 }
 
 /// Read a table and all inheritance descendants as rows shaped like the parent.
@@ -11167,41 +11199,153 @@ fn inherited_scan(
     read_ctx: &crate::subquery::SubCtx<'_>,
     parent: &Table,
     qualifier: &str,
-) -> Result<Relation, ExecError> {
-    let scope = Scope::single(parent, qualifier);
+) -> Result<crate::rls::RawScan, ExecError> {
     let mut relations = vec![parent.name.clone()];
     relations.extend(crate::inheritance::descendants(
         read_ctx.catalog_kv,
         &parent.name,
     )?);
-    let mut rows = Vec::new();
+    let mut tree = crate::rls::RawScan::tree_of(parent, qualifier);
     for relation_name in relations {
         let table = crabka_pgcatalog::get_table(read_ctx.catalog_kv, &relation_name)?;
         let ordinals = column_mapping(parent, &table)?;
-        let relation = build_table_expr(
-            read_ctx,
-            &crabka_pgparser::ast::TableExpr::Table {
-                name: crabka_pgparser::ast::RelationRef::qualified(
-                    &relation_name.schema,
-                    &relation_name.name,
-                ),
-                only: true,
-                alias: None,
-                columns: None,
-                sample: None,
-            },
-            None,
-            None,
-            None,
-        )?;
-        rows.extend(relation.rows.into_iter().map(|row| {
-            ordinals
-                .iter()
-                .map(|ordinal| row.get(*ordinal).cloned().unwrap_or(Datum::Null))
-                .collect::<Vec<_>>()
-        }));
+        // See `partitioned_scan`: the child's rows are governed by the parent's
+        // policies, so they must not pass through the gate on their own.
+        let child = scan_stored_relation(read_ctx, &table, &relation_name.name, true, None, None)?;
+        tree.absorb(child, &ordinals);
     }
-    Ok(Relation { scope, rows })
+    Ok(tree)
+}
+
+/// Every way the executor reads the rows of one stored relation, behind one
+/// signature.
+///
+/// The `TableExpr::Table` arm used to have five separate `return Ok(Relation)`
+/// exits for a stored relation — the inheritance scan, the partition scan, the
+/// foreign scan, the local-index fast path and the ordinary MVCC scan — and a
+/// sixth would have been added the same way. They all funnel through here now,
+/// and here is the only place that can produce a [`crate::rls::RawScan`], whose
+/// only exit in turn is [`crate::rls::apply_row_security`]. A new scan path
+/// either goes through the gate or does not compile.
+///
+/// Wrapping `build_table_expr` instead would have been wrong: `inherited_scan`
+/// and `partitioned_scan` read each child relation, so a wrapper would apply the
+/// gate once per child under that child's policies and then again over the
+/// append under the parent's.
+fn scan_stored_relation(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    t: &Table,
+    qualifier: &str,
+    only: bool,
+    bounds: Option<&ScanBounds>,
+    scan_plan: Option<&crate::plan_dist::DistributedScanPlan>,
+) -> Result<crate::rls::RawScan, ExecError> {
+    let catalog_kv = read_ctx.catalog_kv;
+    if !only && !crate::inheritance::children_of(catalog_kv, &t.name)?.is_empty() {
+        return inherited_scan(read_ctx, t, qualifier);
+    }
+    // A partitioned parent owns no rows: reading it is an append over its
+    // leaves. Doing this before every other scan path is what keeps a
+    // partitioned relation from silently answering empty.
+    if crate::partition::is_partitioned(catalog_kv, &t.name)? {
+        return partitioned_scan(read_ctx, t, qualifier);
+    }
+    let scope = Scope::single(t, qualifier);
+    // SP40: a foreign table reads through the registered scanner, not the local
+    // MVCC version store. `build_from` materializes BEFORE WHERE, so this scan
+    // runs even for `WHERE false` — there is no skip path.
+    if let Some(meta) = &t.foreign {
+        let scanner = read_ctx.fctx.scanner.ok_or_else(|| {
+            ExecError::Unsupported("foreign tables require the `kafka` feature".into())
+        })?;
+        let server = crabka_pgcatalog::get_server(catalog_kv, &meta.server)?;
+        // A per-user mapping is optional: fall back to no credentials when the
+        // current user has none registered for this server.
+        let mapping = crabka_pgcatalog::get_user_mapping(
+            catalog_kv,
+            read_ctx.fctx.current_user,
+            &meta.server,
+        )
+        .ok();
+        // SP40 Task 14: pass the pushed-down slice when present (single foreign
+        // table). The residual WHERE still re-filters locally, so results are
+        // identical whether or not the scan honors `bounds`.
+        let default_bounds = ScanBounds::default();
+        let scan_bounds = bounds.unwrap_or(&default_bounds);
+        let mut rows =
+            scanner.scan(t, &server, mapping.as_ref(), scan_bounds, read_ctx.eval_ctx)?;
+        resolve_scanned_regclass(catalog_kv, t, &mut rows)?;
+        return Ok(crate::rls::RawScan::of_relation(t, scope, rows));
+    }
+    let default_scan_plan = crate::plan_dist::DistributedScanPlan::default();
+    let requested = scan_plan.unwrap_or(&default_scan_plan);
+    let decision = crate::rls::decide(
+        &read_ctx.rls(),
+        t,
+        crabka_pgcatalog::policy::PolicyCommand::Select,
+    )?;
+    // Sanitize where the `ScanRequest` is built rather than trusting each caller
+    // to have stripped its own plan: an aggregate folded inside the scanner sums
+    // rows the qual has not removed yet, and a top-K truncates before it runs.
+    let sanitized = crate::rls::sanitize_scan_plan(&decision, requested);
+    let distributed_plan = sanitized.as_ref().unwrap_or(requested);
+    if let Some(unrestricted) = crate::rls::UnrestrictedTable::from_decision(&decision, t)
+        && let Some(rows) = try_scan_with_local_index(read_ctx, unrestricted, distributed_plan)?
+    {
+        let mut rows: Vec<Vec<Datum>> = rows.into_iter().map(|scanned| scanned.row).collect();
+        resolve_scanned_regclass(catalog_kv, t, &mut rows)?;
+        return Ok(crate::rls::RawScan::of_relation(t, scope, rows));
+    }
+    let scan_request = ScanRequest {
+        local: read_ctx.kv,
+        global: read_ctx.global,
+        global_snapshot: read_ctx.gsnap,
+        snapshot: read_ctx.snapshot,
+        own_xid: read_ctx.own,
+        read_ts: None,
+        own_start_ts: None,
+        table: t,
+        interval: RowInterval::ALL,
+        predicate: distributed_plan.predicate.clone(),
+        projection: distributed_plan.projection.clone(),
+        partial_aggregate: distributed_plan.partial_aggregate.clone(),
+        top_k: distributed_plan.top_k.clone(),
+    };
+    let rows = match crate::scanner::collect_cursor_bounded(
+        read_ctx.range_scanner,
+        scan_request,
+        read_ctx.blocking_query_memory,
+    ) {
+        Ok(rows) => rows,
+        Err(error) if should_retry_without_scan_pushdown(&error, distributed_plan) => {
+            crate::scanner::collect_cursor_bounded(
+                read_ctx.range_scanner,
+                ScanRequest {
+                    local: read_ctx.kv,
+                    global: read_ctx.global,
+                    global_snapshot: read_ctx.gsnap,
+                    snapshot: read_ctx.snapshot,
+                    own_xid: read_ctx.own,
+                    read_ts: None,
+                    own_start_ts: None,
+                    table: t,
+                    interval: RowInterval::ALL,
+                    predicate: PredicatePushdown::FullScan,
+                    projection: crate::ProjectionPushdown::All,
+                    partial_aggregate: None,
+                    top_k: None,
+                },
+                read_ctx.blocking_query_memory,
+            )?
+        }
+        Err(error) => return Err(error),
+    }
+    .into_iter()
+    .map(|scanned| scanned.row)
+    .collect();
+    let mut rows: Vec<Vec<Datum>> = rows;
+    resolve_scanned_regclass(catalog_kv, t, &mut rows)?;
+    Ok(crate::rls::RawScan::of_relation(t, scope, rows))
 }
 
 /// For each of `target`'s columns, the ordinal of the same-named column in
@@ -11245,6 +11389,134 @@ fn route_row_to_leaf(
     route_row_to_leaf(kv, &child, &child_row)
 }
 
+/// Read one base-relation `FROM` item: a CTE, a transition relation, a virtual
+/// catalog relation, a view, or a stored relation.
+///
+/// Split out of [`build_table_expr`]'s match rather than written inline. That
+/// function recurses — through a join side, a derived table, and a `plpgsql`
+/// set-returning function that calls itself — and in an unoptimized build a
+/// frame holds slots for every arm's locals whether that arm ran or not, so an
+/// arm this size is paid at every level of the recursion.
+fn build_base_table(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    te: &crabka_pgparser::ast::TableExpr,
+    bounds: Option<&ScanBounds>,
+    scan_plan: Option<&crate::plan_dist::DistributedScanPlan>,
+) -> Result<Relation, ExecError> {
+    use crabka_pgparser::ast::TableExpr;
+    let TableExpr::Table {
+        name,
+        only,
+        alias,
+        columns,
+        sample,
+    } = te
+    else {
+        return Err(ExecError::Unsupported(
+            "build_base_table expects a base relation".into(),
+        ));
+    };
+    let catalog_kv = read_ctx.catalog_kv;
+    let resolution = read_ctx.fctx.resolution;
+    let ctes = read_ctx.ctes;
+    let ctx = read_ctx.eval_ctx;
+    // A base-table alias may rename the leading columns (`t AS q(x, y)`),
+    // exactly like a derived table's. The rename applies to whatever the
+    // name resolves to — a CTE, a view, a catalog relation, or a stored
+    // table — so it wraps the ordinary build rather than duplicating it.
+    if let Some(names) = columns {
+        let base = build_table_expr(
+            read_ctx,
+            &TableExpr::Table {
+                name: name.clone(),
+                only: *only,
+                alias: alias.clone(),
+                columns: None,
+                sample: sample.clone(),
+            },
+            bounds,
+            scan_plan,
+            None,
+        )?;
+        let qualifier = alias.clone().unwrap_or_else(|| name.to_string());
+        return crate::values::requalify_derived(base, &qualifier, &Some(names.clone()));
+    }
+    if let Some(sample) = sample {
+        let base = build_table_expr(
+            read_ctx,
+            &TableExpr::Table {
+                name: name.clone(),
+                only: *only,
+                alias: alias.clone(),
+                columns: columns.clone(),
+                sample: None,
+            },
+            bounds,
+            scan_plan,
+            None,
+        )?;
+        return apply_tablesample(base, sample, ctx);
+    }
+    // A CTE is never schema-qualified, so `public.t` names the stored
+    // relation even where a CTE `t` is in scope, as PostgreSQL does.
+    if name.schema.is_none()
+        && let Some(rel) = ctes.lookup(&name.name)
+    {
+        let qualifier = alias.as_deref().unwrap_or(&name.name);
+        return Ok(crate::cte::requalify_cte(rel, qualifier));
+    }
+    if name.schema.is_none()
+        && let Some(runtime) = &ctx.transition_relations
+        && let Some(transition) = runtime
+            .lock()
+            .expect("transition relation mutex")
+            .get(&name.name)
+            .cloned()
+    {
+        let qualifier = alias.as_deref().unwrap_or(&name.name);
+        return Ok(Relation {
+            scope: Scope {
+                columns: transition
+                    .columns
+                    .into_iter()
+                    .map(|(name, ty)| ColumnBinding {
+                        qualifier: Some(qualifier.to_string()),
+                        name,
+                        ty,
+                    })
+                    .collect(),
+            },
+            rows: transition.rows,
+        });
+    }
+    let name = &resolve_relation(catalog_kv, resolution, name, SchemaDisposition::Reference)?;
+    if let Some(rel) = virtual_catalog_relation(catalog_kv, name, alias.as_deref(), ctx)? {
+        return Ok(rel);
+    }
+    match crabka_pgcatalog::get_view(catalog_kv, name) {
+        Ok(view) => {
+            let statement = crabka_pgparser::parse(&view.definition)?;
+            let [Statement::Query(query)] = statement.as_slice() else {
+                return Err(ExecError::Unsupported(
+                    "stored view definition is not a query".into(),
+                ));
+            };
+            let relation = crate::query::query_to_relation(read_ctx, query)?;
+            let qualifier = alias.as_deref().unwrap_or(&view.name.name);
+            return requalify_view_relation(relation, &view, qualifier);
+        }
+        Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => {}
+        Err(error) => return Err(error.into()),
+    }
+    let t = crabka_pgcatalog::get_table(catalog_kv, name)?;
+    let qualifier = alias.as_deref().unwrap_or(&t.name.name);
+    // One scan, one gate. Every stored-relation read the executor does
+    // arrives here, and `RawScan` cannot become a `Relation` any other
+    // way.
+    let raw = scan_stored_relation(read_ctx, &t, qualifier, *only, bounds, scan_plan)?;
+    crate::rls::apply_row_security(read_ctx, raw)
+}
+
 fn build_table_expr(
     read_ctx: &crate::subquery::SubCtx<'_>,
     te: &crabka_pgparser::ast::TableExpr,
@@ -11257,209 +11529,10 @@ fn build_table_expr(
     // applies the same predicate again to the relation this returns.
     filter: Option<&Expr>,
 ) -> Result<Relation, ExecError> {
-    let catalog_kv = read_ctx.catalog_kv;
-    let resolution = read_ctx.fctx.resolution;
-    let kv = read_ctx.kv;
-    let global = read_ctx.global;
-    let gsnap = read_ctx.gsnap;
-    let snapshot = read_ctx.snapshot;
-    let own = read_ctx.own;
-    let ctes = read_ctx.ctes;
     let ctx = read_ctx.eval_ctx;
-    let fctx = read_ctx.fctx;
-    let range_scanner = read_ctx.range_scanner;
     use crabka_pgparser::ast::TableExpr;
     match te {
-        TableExpr::Table {
-            name,
-            only,
-            alias,
-            columns,
-            sample,
-        } => {
-            // A base-table alias may rename the leading columns (`t AS q(x, y)`),
-            // exactly like a derived table's. The rename applies to whatever the
-            // name resolves to — a CTE, a view, a catalog relation, or a stored
-            // table — so it wraps the ordinary build rather than duplicating it.
-            if let Some(names) = columns {
-                let base = build_table_expr(
-                    read_ctx,
-                    &TableExpr::Table {
-                        name: name.clone(),
-                        only: *only,
-                        alias: alias.clone(),
-                        columns: None,
-                        sample: sample.clone(),
-                    },
-                    bounds,
-                    scan_plan,
-                    None,
-                )?;
-                let qualifier = alias.clone().unwrap_or_else(|| name.to_string());
-                return crate::values::requalify_derived(base, &qualifier, &Some(names.clone()));
-            }
-            if let Some(sample) = sample {
-                let base = build_table_expr(
-                    read_ctx,
-                    &TableExpr::Table {
-                        name: name.clone(),
-                        only: *only,
-                        alias: alias.clone(),
-                        columns: columns.clone(),
-                        sample: None,
-                    },
-                    bounds,
-                    scan_plan,
-                    None,
-                )?;
-                return apply_tablesample(base, sample, ctx);
-            }
-            // A CTE is never schema-qualified, so `public.t` names the stored
-            // relation even where a CTE `t` is in scope, as PostgreSQL does.
-            if name.schema.is_none()
-                && let Some(rel) = ctes.lookup(&name.name)
-            {
-                let qualifier = alias.as_deref().unwrap_or(&name.name);
-                return Ok(crate::cte::requalify_cte(rel, qualifier));
-            }
-            if name.schema.is_none()
-                && let Some(runtime) = &ctx.transition_relations
-                && let Some(transition) = runtime
-                    .lock()
-                    .expect("transition relation mutex")
-                    .get(&name.name)
-                    .cloned()
-            {
-                let qualifier = alias.as_deref().unwrap_or(&name.name);
-                return Ok(Relation {
-                    scope: Scope {
-                        columns: transition
-                            .columns
-                            .into_iter()
-                            .map(|(name, ty)| ColumnBinding {
-                                qualifier: Some(qualifier.to_string()),
-                                name,
-                                ty,
-                            })
-                            .collect(),
-                    },
-                    rows: transition.rows,
-                });
-            }
-            let name =
-                &resolve_relation(catalog_kv, resolution, name, SchemaDisposition::Reference)?;
-            if let Some(rel) = virtual_catalog_relation(catalog_kv, name, alias.as_deref(), ctx)? {
-                return Ok(rel);
-            }
-            match crabka_pgcatalog::get_view(catalog_kv, name) {
-                Ok(view) => {
-                    let statement = crabka_pgparser::parse(&view.definition)?;
-                    let [Statement::Query(query)] = statement.as_slice() else {
-                        return Err(ExecError::Unsupported(
-                            "stored view definition is not a query".into(),
-                        ));
-                    };
-                    let relation = crate::query::query_to_relation(read_ctx, query)?;
-                    let qualifier = alias.as_deref().unwrap_or(&view.name.name);
-                    return requalify_view_relation(relation, &view, qualifier);
-                }
-                Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => {}
-                Err(error) => return Err(error.into()),
-            }
-            let t = crabka_pgcatalog::get_table(catalog_kv, name)?;
-            let qualifier = alias.as_deref().unwrap_or(&t.name.name);
-            if !*only && !crate::inheritance::children_of(catalog_kv, &t.name)?.is_empty() {
-                return inherited_scan(read_ctx, &t, qualifier);
-            }
-            // A partitioned parent owns no rows: reading it is an append over
-            // its leaves. Doing this before every other scan path is what keeps
-            // a partitioned relation from silently answering empty.
-            if crate::partition::is_partitioned(catalog_kv, &t.name)? {
-                return partitioned_scan(read_ctx, &t, qualifier);
-            }
-            // SP40: a foreign table reads through the registered scanner, not the
-            // local MVCC version store. `build_from` materializes BEFORE WHERE, so
-            // this scan runs even for `WHERE false` — there is no skip path.
-            if let Some(meta) = &t.foreign {
-                let scanner = fctx.scanner.ok_or_else(|| {
-                    ExecError::Unsupported("foreign tables require the `kafka` feature".into())
-                })?;
-                let server = crabka_pgcatalog::get_server(catalog_kv, &meta.server)?;
-                // A per-user mapping is optional: fall back to no credentials when
-                // the current user has none registered for this server.
-                let mapping =
-                    crabka_pgcatalog::get_user_mapping(catalog_kv, fctx.current_user, &meta.server)
-                        .ok();
-                // SP40 Task 14: pass the pushed-down slice when present (single
-                // foreign table). The residual WHERE still re-filters locally, so
-                // results are identical whether or not the scan honors `bounds`.
-                let default_bounds = ScanBounds::default();
-                let scan_bounds = bounds.unwrap_or(&default_bounds);
-                let mut rows = scanner.scan(&t, &server, mapping.as_ref(), scan_bounds, ctx)?;
-                resolve_scanned_regclass(catalog_kv, &t, &mut rows)?;
-                let scope = Scope::single(&t, qualifier);
-                return Ok(Relation { scope, rows });
-            }
-            let scope = Scope::single(&t, qualifier);
-            let default_scan_plan = crate::plan_dist::DistributedScanPlan::default();
-            let distributed_plan = scan_plan.unwrap_or(&default_scan_plan);
-            if let Some(rows) = try_scan_with_local_index(read_ctx, &t, distributed_plan)? {
-                let mut rows: Vec<Vec<Datum>> =
-                    rows.into_iter().map(|scanned| scanned.row).collect();
-                resolve_scanned_regclass(catalog_kv, &t, &mut rows)?;
-                return Ok(Relation { scope, rows });
-            }
-            let scan_request = ScanRequest {
-                local: kv,
-                global,
-                global_snapshot: gsnap,
-                snapshot,
-                own_xid: own,
-                read_ts: None,
-                own_start_ts: None,
-                table: &t,
-                interval: RowInterval::ALL,
-                predicate: distributed_plan.predicate.clone(),
-                projection: distributed_plan.projection.clone(),
-                partial_aggregate: distributed_plan.partial_aggregate.clone(),
-                top_k: distributed_plan.top_k.clone(),
-            };
-            let rows = match crate::scanner::collect_cursor_bounded(
-                range_scanner,
-                scan_request,
-                read_ctx.blocking_query_memory,
-            ) {
-                Ok(rows) => rows,
-                Err(error) if should_retry_without_scan_pushdown(&error, distributed_plan) => {
-                    crate::scanner::collect_cursor_bounded(
-                        range_scanner,
-                        ScanRequest {
-                            local: kv,
-                            global,
-                            global_snapshot: gsnap,
-                            snapshot,
-                            own_xid: own,
-                            read_ts: None,
-                            own_start_ts: None,
-                            table: &t,
-                            interval: RowInterval::ALL,
-                            predicate: PredicatePushdown::FullScan,
-                            projection: crate::ProjectionPushdown::All,
-                            partial_aggregate: None,
-                            top_k: None,
-                        },
-                        read_ctx.blocking_query_memory,
-                    )?
-                }
-                Err(error) => return Err(error),
-            }
-            .into_iter()
-            .map(|scanned| scanned.row)
-            .collect();
-            let mut rows: Vec<Vec<Datum>> = rows;
-            resolve_scanned_regclass(catalog_kv, &t, &mut rows)?;
-            Ok(Relation { scope, rows })
-        }
+        table @ TableExpr::Table { .. } => build_base_table(read_ctx, table, bounds, scan_plan),
         TableExpr::Join {
             left,
             right,
@@ -11723,6 +11796,18 @@ fn try_distributed_inner_equi_join(
     {
         return Ok(None);
     }
+    // The scanner joins both relations remotely and returns joined tuples, so
+    // neither side's rows ever pass a row-security qual. Both sides must be
+    // proven unrestricted, and the proofs shadow the raw tables so the rest of
+    // this function cannot reach around them.
+    let rls = read_ctx.rls();
+    let (Some(left_table), Some(right_table)) = (
+        crate::rls::UnrestrictedTable::read(&rls, &left_table)?,
+        crate::rls::UnrestrictedTable::read(&rls, &right_table)?,
+    ) else {
+        return Ok(None);
+    };
+    let (left_table, right_table) = (left_table.get(), right_table.get());
     let left_qualifier = left_alias.as_deref().unwrap_or(&left_table.name.name);
     let right_qualifier = right_alias.as_deref().unwrap_or(&right_table.name.name);
     fn qualified_key(expr: &Expr) -> Option<(&str, &str)> {
@@ -11763,7 +11848,7 @@ fn try_distributed_inner_equi_join(
         return Ok(None);
     };
     let planned =
-        range_scanner.join_strategy_for_keys(&left_table, &right_table, &[left_key], &[right_key]);
+        range_scanner.join_strategy_for_keys(left_table, right_table, &[left_key], &[right_key]);
     let strategy = match planned {
         crate::plan_dist::JoinStrategy::Broadcast { small_table_id }
             if small_table_id == u64::from(left_table.id) =>
@@ -11778,8 +11863,8 @@ fn try_distributed_inner_equi_join(
         crate::plan_dist::JoinStrategy::Broadcast { .. } => JoinExecutionStrategy::Gather,
         crate::plan_dist::JoinStrategy::CoPartitioned
             if hash_sharding_matches_join_keys(
-                &left_table,
-                &right_table,
+                left_table,
+                right_table,
                 left_column,
                 right_column,
             ) =>
@@ -11847,16 +11932,16 @@ fn try_distributed_inner_equi_join(
     // The join result is the left table's columns followed by the right's, so
     // the right table's `regclass` columns sit past the left's width.
     let mut rows = rows;
-    let mut regclass_columns = regclass_column_indexes(&left_table, 0);
+    let mut regclass_columns = regclass_column_indexes(left_table, 0);
     regclass_columns.extend(regclass_column_indexes(
-        &right_table,
+        right_table,
         left_table.columns.len(),
     ));
     resolve_regclass_at(read_ctx.catalog_kv, &regclass_columns, &mut rows)?;
-    let mut scope = Scope::single(&left_table, left_qualifier);
+    let mut scope = Scope::single(left_table, left_qualifier);
     scope
         .columns
-        .extend(Scope::single(&right_table, right_qualifier).columns);
+        .extend(Scope::single(right_table, right_qualifier).columns);
     Ok(Some(Relation { scope, rows }))
 }
 
@@ -11876,11 +11961,19 @@ fn hash_sharding_matches_join_keys(
     left_hash.columns.as_slice() == [left_column] && right_hash.columns.as_slice() == [right_column]
 }
 
+/// An equality or full-text probe over a local index, for a relation proven not
+/// to be under row security.
+///
+/// It takes an [`crate::rls::UnrestrictedTable`] rather than a `&Table` because
+/// an index probe returns the rows the index points at, which is not the same
+/// set as the rows a policy admits. A relation with policies has no
+/// `UnrestrictedTable` to offer and falls through to the ordinary gated scan.
 fn try_scan_with_local_index(
     read_ctx: &crate::subquery::SubCtx<'_>,
-    table: &Table,
+    unrestricted: crate::rls::UnrestrictedTable<'_>,
     plan: &crate::plan_dist::DistributedScanPlan,
 ) -> Result<Option<Vec<ScannedRow>>, ExecError> {
+    let table = unrestricted.get();
     if table.sharded || plan.partial_aggregate.is_some() {
         return Ok(None);
     }
@@ -12001,19 +12094,27 @@ fn try_execute_partial_aggregate_pushdown(
     else {
         return Ok(None);
     };
+    // The range owners fold the aggregate over every visible row, which is not
+    // the same set as the rows a policy admits, and a sum cannot be un-summed
+    // afterwards. Shadowing the raw table with the proof leaves no way to reach
+    // it unproven.
+    let Some(table) = crate::rls::UnrestrictedTable::read(&read_ctx.rls(), &table)? else {
+        return Ok(None);
+    };
+    let table = table.get();
     let spec = if s.group_by.is_empty() {
-        crate::plan_dist::plan_scan(&table, s.filter.as_ref(), &s.projection).partial_aggregate
+        crate::plan_dist::plan_scan(table, s.filter.as_ref(), &s.projection).partial_aggregate
     } else {
-        crate::plan_dist::grouped_partial_aggregate_for_select(&table, &s.projection, &s.group_by)
+        crate::plan_dist::grouped_partial_aggregate_for_select(table, &s.projection, &s.group_by)
     };
     let Some(spec) = spec else {
         return Ok(None);
     };
-    let predicate = match crate::plan_dist::strict_predicate_for_filter(&table, s.filter.as_ref()) {
+    let predicate = match crate::plan_dist::strict_predicate_for_filter(table, s.filter.as_ref()) {
         Ok(predicate) => predicate,
         Err(_) => return Ok(None),
     };
-    let scope = Scope::single(&table, &qualifier);
+    let scope = Scope::single(table, &qualifier);
     let (fields, _out_exprs, tys) = resolve_projection(&s.projection, &scope)?;
     let rows = read_ctx.range_scanner.scan(ScanRequest {
         local: read_ctx.kv,
@@ -12023,7 +12124,7 @@ fn try_execute_partial_aggregate_pushdown(
         own_xid: read_ctx.own,
         read_ts: None,
         own_start_ts: None,
-        table: &table,
+        table,
         interval: RowInterval::ALL,
         predicate,
         projection: crate::ProjectionPushdown::All,
@@ -12124,10 +12225,13 @@ fn is_plain_local_join_table(
     if name.schema.is_none() && read_ctx.ctes.lookup(&name.name).is_some() {
         return Ok(false);
     }
-    Ok(
-        scan_plan_table(read_ctx.catalog_kv, read_ctx.fctx.resolution, name)?
-            .is_some_and(|table| !table.sharded),
-    )
+    let Some(table) = scan_plan_table(read_ctx.catalog_kv, read_ctx.fctx.resolution, name)? else {
+        return Ok(false);
+    };
+    // The counting path returns a count and no rows, so nothing downstream can
+    // filter it: a side under row security keeps the ordinary path, which
+    // materializes both sides through the gate and counts the same join.
+    Ok(!table.sharded && crate::rls::UnrestrictedTable::read(&read_ctx.rls(), &table)?.is_some())
 }
 
 /// Stream a supported local aggregate through per-page partial-aggregate
@@ -12157,14 +12261,20 @@ fn try_execute_local_streaming_aggregate(
     else {
         return Ok(None);
     };
-    let Some(plan) = local_streaming_aggregate_plan(&table, s) else {
+    // The fold happens page by page inside the scanner, over every visible row,
+    // before any policy qual could have removed one. Shadowing keeps the raw
+    // table out of reach for the rest of the function.
+    let Some(table) = crate::rls::UnrestrictedTable::read(&read_ctx.rls(), &table)? else {
         return Ok(None);
     };
-    let predicates = match crate::plan_dist::strict_predicate_for_filter(&table, s.filter.as_ref())
-    {
+    let table = table.get();
+    let Some(plan) = local_streaming_aggregate_plan(table, s) else {
+        return Ok(None);
+    };
+    let predicates = match crate::plan_dist::strict_predicate_for_filter(table, s.filter.as_ref()) {
         Ok(predicate) => vec![predicate],
         Err(_) => {
-            let Some(predicates) = count_star_or_predicates(&table, s, &plan) else {
+            let Some(predicates) = count_star_or_predicates(table, s, &plan) else {
                 return Ok(None);
             };
             Vec::from(predicates)
@@ -12173,11 +12283,11 @@ fn try_execute_local_streaming_aggregate(
     // An equality probe over a local index reads less than any table scan:
     // keep that existing path (and its materializing budget) for those filters.
     if predicates.len() == 1
-        && choose_local_index_equality(read_ctx.catalog_kv, &table, &predicates[0])?.is_some()
+        && choose_local_index_equality(read_ctx.catalog_kv, table, &predicates[0])?.is_some()
     {
         return Ok(None);
     }
-    let scope = Scope::single(&table, &qualifier);
+    let scope = Scope::single(table, &qualifier);
     let (fields, out_exprs, tys) = resolve_projection(&s.projection, &scope)?;
     let states = predicates
         .into_iter()
@@ -12192,7 +12302,7 @@ fn try_execute_local_streaming_aggregate(
                     own_xid: read_ctx.own,
                     read_ts: None,
                     own_start_ts: None,
-                    table: &table,
+                    table,
                     interval: RowInterval::ALL,
                     predicate,
                     projection: crate::ProjectionPushdown::All,
@@ -12571,11 +12681,69 @@ fn select_modifiers_allow_partial_aggregate(s: &SelectStmt) -> bool {
                 .all(|(order, group)| order.asc && order.expr == *group))
 }
 
-fn top_k_pushdown_for_select(
+/// The scan plan for a `SELECT` whose `FROM` is exactly one stored relation.
+///
+/// Split out of `select_to_relation_with_ctes` rather than written inline: that
+/// function sits on the recursion path of a `plpgsql` set-returning function
+/// calling itself, and in an unoptimized build every local it holds is
+/// multiplied by the recursion depth.
+fn single_table_scan_plan(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    s: &SelectStmt,
+) -> Result<Option<crate::plan_dist::DistributedScanPlan>, ExecError> {
+    let [
+        crabka_pgparser::ast::TableExpr::Table {
+            name,
+            alias,
+            columns: None,
+            sample: None,
+            ..
+        },
+    ] = s.from.as_slice()
+    else {
+        return Ok(None);
+    };
+    if name.schema.is_some() || read_ctx.ctes.lookup(&name.name).is_some() {
+        return Ok(None);
+    }
+    let Some(table) = scan_plan_table(read_ctx.catalog_kv, read_ctx.fctx.resolution, name)? else {
+        return Ok(None);
+    };
+    let mut plan = crate::plan_dist::plan_scan(&table, s.filter.as_ref(), &s.projection);
+    plan.projection = crate::ProjectionPushdown::All;
+    plan.partial_aggregate = None;
+    let qualifier = alias.as_deref().unwrap_or(&table.name.name);
+    plan.top_k = top_k_pushdown_for_relation(read_ctx, &table, qualifier, s)?;
+    Ok(Some(plan))
+}
+
+/// The per-range top-K request for a relation proven not to be under row
+/// security.
+///
+/// Top-K truncates the row set inside the scanner, before any policy qual runs,
+/// so a restricted relation must not have one. It takes the proof rather than a
+/// `&Table` so that is a compile error rather than a review comment;
+/// [`crate::rls::sanitize_scan_plan`] strips a top-K at the scan-request
+/// construction site as well, since a plan can reach that site from more than
+/// one caller.
+fn top_k_pushdown_for_relation(
+    read_ctx: &crate::subquery::SubCtx<'_>,
     table: &Table,
     qualifier: &str,
     s: &SelectStmt,
 ) -> Result<Option<crate::TopKSpec>, ExecError> {
+    let Some(unrestricted) = crate::rls::UnrestrictedTable::read(&read_ctx.rls(), table)? else {
+        return Ok(None);
+    };
+    top_k_pushdown_for_select(unrestricted, qualifier, s)
+}
+
+fn top_k_pushdown_for_select(
+    unrestricted: crate::rls::UnrestrictedTable<'_>,
+    qualifier: &str,
+    s: &SelectStmt,
+) -> Result<Option<crate::TopKSpec>, ExecError> {
+    let table = unrestricted.get();
     // A select-list set-returning function expands each source row into many, so
     // a LIMIT pushed onto the SOURCE scan would cut rows the expansion still owes.
     if !table.sharded
@@ -12752,7 +12920,6 @@ pub(crate) fn select_to_relation_with_ctes(
     s: &SelectStmt,
 ) -> Result<Relation, ExecError> {
     let catalog_kv = read_ctx.catalog_kv;
-    let resolution = read_ctx.fctx.resolution;
     let ctes = read_ctx.ctes;
     let ctx = read_ctx.eval_ctx;
     let fctx = read_ctx.fctx;
@@ -12791,30 +12958,7 @@ pub(crate) fn select_to_relation_with_ctes(
         if let Some(relation) = try_execute_local_join_count(read_ctx, s)? {
             return Ok(relation);
         }
-        let scan_plan = match s.from.as_slice() {
-            [
-                crabka_pgparser::ast::TableExpr::Table {
-                    name,
-                    alias,
-                    columns: None,
-                    sample: None,
-                    ..
-                },
-            ] if (name.schema.is_none() && ctes.lookup(&name.name).is_none())
-                && scan_plan_table(catalog_kv, resolution, name)?.is_some() =>
-            {
-                let table = scan_plan_table(catalog_kv, resolution, name)?
-                    .expect("the guard just resolved this relation");
-                let mut plan =
-                    crate::plan_dist::plan_scan(&table, s.filter.as_ref(), &s.projection);
-                plan.projection = crate::ProjectionPushdown::All;
-                plan.partial_aggregate = None;
-                let qualifier = alias.as_deref().unwrap_or(&table.name.name);
-                plan.top_k = top_k_pushdown_for_select(&table, qualifier, s)?;
-                Some(plan)
-            }
-            _ => None,
-        };
+        let scan_plan = single_table_scan_plan(read_ctx, s)?;
         build_from(
             read_ctx,
             &s.from,
@@ -19314,7 +19458,7 @@ fn alter_table_action_ops(
             // `CURRENT_USER`/`USER` in an owner position name the session's
             // role, the same spelling `ALTER TABLESPACE … OWNER TO` accepts.
             let role = match role.as_str() {
-                "current_user" | "user" => fctx.owner(),
+                "current_user" | "user" => fctx.effective_role(),
                 named => named,
             };
             // `PUBLIC` is a pseudo-role with no `pg_authid` row, so PostgreSQL

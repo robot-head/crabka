@@ -166,24 +166,30 @@ fn catalog_func(name: &str) -> Option<CatalogFunc> {
 }
 
 /// The `has_<objectkind>_privilege` family, which shares one implementation.
+///
+/// **Every one of them returns `true` unconditionally** — no per-object
+/// privilege enforcement exists yet. Row-level security reads this list to
+/// refuse a policy qual that names any of them, since such a qual would admit
+/// every row to every role instead of the subset it appears to describe.
+pub(crate) const PRIVILEGE_FUNCTIONS: [&str; 14] = [
+    "has_table_privilege",
+    "has_column_privilege",
+    "has_any_column_privilege",
+    "has_database_privilege",
+    "has_schema_privilege",
+    "has_sequence_privilege",
+    "has_function_privilege",
+    "has_language_privilege",
+    "has_server_privilege",
+    "has_foreign_data_wrapper_privilege",
+    "has_tablespace_privilege",
+    "has_type_privilege",
+    "has_parameter_privilege",
+    "has_largeobject_privilege",
+];
+
 fn is_privilege_func(name: &str) -> bool {
-    matches!(
-        name,
-        "has_table_privilege"
-            | "has_column_privilege"
-            | "has_any_column_privilege"
-            | "has_database_privilege"
-            | "has_schema_privilege"
-            | "has_sequence_privilege"
-            | "has_function_privilege"
-            | "has_language_privilege"
-            | "has_server_privilege"
-            | "has_foreign_data_wrapper_privilege"
-            | "has_tablespace_privilege"
-            | "has_type_privilege"
-            | "has_parameter_privilege"
-            | "has_largeobject_privilege"
-    )
+    PRIVILEGE_FUNCTIONS.contains(&name)
 }
 
 /// Is `name` one of this family's functions?

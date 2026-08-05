@@ -89,6 +89,7 @@ mod query;
 mod read_gate;
 mod regexp_fn;
 mod relname;
+pub mod rls;
 mod routine;
 mod rowexpr;
 pub mod scanner;

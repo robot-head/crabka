@@ -42,6 +42,18 @@ pub(crate) struct SubCtx<'a> {
     pub range_scanner: &'a dyn crate::scanner::RangeScanner,
     /// Memory retained by one blocking query operator.
     pub blocking_query_memory: crabka_units::ByteSize,
+    /// The role whose row-security policies this read is subject to.
+    ///
+    /// Ordinarily the session's own role. It lives here rather than being
+    /// re-derived from `fctx.current_user` at each use because `SubCtx` is the
+    /// one value already threaded through every read path: substituting a
+    /// view's owner for the body of that view is then one assignment, not
+    /// twenty extra arguments.
+    pub security_role: &'a str,
+    /// The relations whose policy quals are being evaluated on this read, so a
+    /// policy that reads its own relation reports 42P17 instead of recursing
+    /// until the stack runs out.
+    pub policy_stack: &'a crate::rls::PolicyStack,
 }
 
 impl<'a> SubCtx<'a> {
@@ -61,7 +73,14 @@ impl<'a> SubCtx<'a> {
             fctx: self.fctx,
             range_scanner: self.range_scanner,
             blocking_query_memory: self.blocking_query_memory,
+            security_role: self.security_role,
+            policy_stack: self.policy_stack,
         }
+    }
+
+    /// The row-security decision context this read makes its decisions in.
+    pub(crate) fn rls(&self) -> crate::rls::RlsCtx<'_> {
+        crate::rls::RlsCtx::new(self.catalog_kv, self.security_role, self.fctx.row_security)
     }
 }
 

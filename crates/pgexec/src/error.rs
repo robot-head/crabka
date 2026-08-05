@@ -253,8 +253,16 @@ pub enum ExecError {
     SequenceLimit(String),
     /// Object state does not satisfy a command precondition (55000).
     ObjectNotInPrerequisiteState(String),
-    /// A scalar function's own error. It carries the SQLSTATE and the message
-    /// PostgreSQL spells out at that call site: `setseed`'s range check
+    /// `row_security = off` and the named relation has a row-security policy
+    /// that would have applied (42501). `PostgreSQL` fails the statement rather
+    /// than quietly returning a filtered result the caller did not ask for.
+    RowSecurityRefused(String),
+    /// A row-security policy qual reads the relation its own policy protects
+    /// (42P17). The qual is user-supplied SQL, so following the recursion would
+    /// be a remotely triggerable stack overflow.
+    PolicyRecursion(String),
+    /// A scalar function's own error, carrying the SQLSTATE and the message
+    /// PostgreSQL spells out at that call site — `setseed`'s range check
     /// (22023), `format`'s specifier diagnostics (22023/22004), `encode`'s
     /// unknown encoding, and `split_part`'s zero field position. Both parts vary
     /// per call, so neither can go into a dedicated variant.
@@ -778,6 +786,16 @@ impl ExecError {
             ExecError::StackDepthExceeded => PgError::error("54001", "stack depth limit exceeded"),
             ExecError::SequenceLimit(m) => PgError::error("2200H", m),
             ExecError::ObjectNotInPrerequisiteState(m) => PgError::error("55000", m),
+            ExecError::RowSecurityRefused(relation) => PgError::error(
+                "42501",
+                format!(
+                    "query would be affected by row-level security policy for table \"{relation}\""
+                ),
+            ),
+            ExecError::PolicyRecursion(relation) => PgError::error(
+                "42P17",
+                format!("infinite recursion detected in policy for relation \"{relation}\""),
+            ),
             ExecError::FunctionError { sqlstate, message } => PgError::error(sqlstate, message),
             ExecError::UndefinedPartitionKeyColumn(column) => PgError::error(
                 "42703",

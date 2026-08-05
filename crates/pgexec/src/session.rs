@@ -1417,6 +1417,14 @@ impl GucState {
             .ok_or_else(|| ExecError::UnrecognizedParameter(name.to_string()))
     }
 
+    /// The `row_security` setting as a bool. Unknown or unparseable renders as
+    /// `false`, which fails the statement rather than silently unfiltering it.
+    fn row_security(&self) -> bool {
+        self.slots
+            .get("row_security")
+            .is_some_and(|slot| matches!(slot.effective(), GucValue::Bool(true)))
+    }
+
     fn effective_map(&self) -> BTreeMap<String, String> {
         self.slots
             .iter()
@@ -2604,6 +2612,10 @@ pub struct SqlSession {
     backend_pid: i32,
     session_user: String,
     current_role: String,
+    /// The row-security recursion guard, one per session. A session runs one
+    /// statement at a time and every entry is popped before the statement
+    /// returns, so it is empty again between statements.
+    policy_stack: crate::rls::PolicyStack,
     state: TxnState,
     prepared: HashMap<String, SqlPrepared>,
     portals: HashMap<String, SqlPortal>,
@@ -3057,6 +3069,7 @@ impl SqlSession {
             backend_pid,
             session_user: "public".into(),
             current_role: "public".into(),
+            policy_stack: crate::rls::PolicyStack::default(),
             state: TxnState::Idle,
             prepared: HashMap::new(),
             portals: HashMap::new(),
@@ -3273,10 +3286,23 @@ impl SqlSession {
             eval_ctx: statement.eval_ctx,
             prune_horizon: statement.prune_horizon,
             lock_wait_cap: self.lock_wait_cap,
-            fctx: crate::exec::ForeignCtx::none(),
+            fctx: crate::exec::ForeignCtx {
+                // The write path's row-security decisions are made as the
+                // session's own role, not as the `public` placeholder a
+                // context with no scanner otherwise carries.
+                current_user: &self.current_role,
+                row_security: self.guc.row_security(),
+                ..crate::exec::ForeignCtx::none()
+            },
             range_scanner: self.range_scanner.as_ref(),
             blocking_query_memory: self.blocking_query_memory,
             ctes: statement.ctes,
+            // One guard per session: a session runs one statement at a time and
+            // every entry is popped before the statement returns, so the stack
+            // is empty again by the next one. Threading a fresh one through each
+            // statement would put it in an `async fn`'s frame, on the recursion
+            // path of a `plpgsql` function that calls itself.
+            policy_stack: &self.policy_stack,
             // Only an open block has a later statement that could repair a
             // deferred violation, so only an open block promotes checks out of
             // the statement queue. An autocommit statement is its own
@@ -6908,6 +6934,7 @@ impl SqlSession {
         let session_locks = Arc::clone(&self.session_locks);
         let session_lock_id = self.session_lock_id;
         let guc_values = self.guc.effective_map();
+        let row_security = self.guc.row_security();
         let guc_settings = self.guc.settings();
         let prepared = self.prepared_statement_rows();
         let stmt = stmt.clone();
@@ -6939,7 +6966,9 @@ impl SqlSession {
                 catalog: None,
                 reserved_table_ids: None,
                 own_xid,
+                row_security,
             };
+            let policy_stack = crate::rls::PolicyStack::default();
             let read_ctx = crate::subquery::SubCtx {
                 catalog_kv: catalog_kv.as_ref(),
                 kv: kv.as_ref(),
@@ -6952,6 +6981,8 @@ impl SqlSession {
                 fctx,
                 range_scanner: &statement_scanner,
                 blocking_query_memory,
+                security_role: fctx.effective_role(),
+                policy_stack: &policy_stack,
             };
             with_query_cancel_runtime(Some(cancel.canceled), || {
                 with_guc_runtime(guc_values, guc_settings, prepared, || {
@@ -7950,6 +7981,7 @@ impl SqlSession {
                 TxnState::InTransaction(ctx) => ctx.xid,
                 _ => None,
             },
+            row_security: self.guc.row_security(),
         };
         let inheritance_notices =
             crate::exec::inheritance_merge_notices(&*self.catalog_kv, &resolution, stmt)?;
@@ -8220,6 +8252,8 @@ impl SqlSession {
         let blocking_query_memory = self.blocking_query_memory;
         let lock_wait_cap = self.lock_wait_cap;
         let lock_owner = self.lock_owner;
+        let current_role = self.current_role.clone();
+        let row_security = self.guc.row_security();
         let (request_tx, request_rx) = mpsc::channel(1);
         let (worker_id, mut cancel, finished) = self.register_worker();
         // Re-enter the statement's span on the pool thread; the current-thread
@@ -8242,6 +8276,12 @@ impl SqlSession {
                 .build()
                 .map_err(|error| ExecError::Unsupported(error.to_string()))?;
             let ctes = crate::cte::CteContext::empty();
+            let fctx = crate::exec::ForeignCtx {
+                current_user: &current_role,
+                row_security,
+                ..crate::exec::ForeignCtx::none()
+            };
+            let policy_stack = crate::rls::PolicyStack::default();
             let read_ctx = crate::subquery::SubCtx {
                 catalog_kv: catalog_kv.as_ref(),
                 kv: kv.as_ref(),
@@ -8251,9 +8291,11 @@ impl SqlSession {
                 own: Some(xid),
                 ctes: &ctes,
                 eval_ctx: &eval_ctx,
-                fctx: crate::exec::ForeignCtx::none(),
+                fctx,
                 range_scanner: range_scanner.as_ref(),
                 blocking_query_memory,
+                security_role: fctx.effective_role(),
+                policy_stack: &policy_stack,
             };
             crate::routine::with_scalar_runtime(&catalog_kv, Some(request_tx), || {
                 runtime.block_on(async {
@@ -8295,7 +8337,9 @@ impl SqlSession {
         let defer_constraints = matches!(self.state, TxnState::InTransaction(_));
         let lock_wait_cap = self.lock_wait_cap;
         let lock_owner = self.lock_owner;
+        let current_role = self.current_role.clone();
         let guc_values = self.guc.effective_map();
+        let row_security = self.guc.row_security();
         let guc_settings = self.guc.settings();
         let prepared = self.prepared_statement_rows();
         let (request_tx, request_rx) = mpsc::channel(1);
@@ -8328,6 +8372,7 @@ impl SqlSession {
                 }
             };
             let ctes = crate::cte::CteContext::empty();
+            let policy_stack = crate::rls::PolicyStack::default();
             let write_ctx = crate::exec::WriteContext {
                 catalog_kv: catalog_kv.as_ref(),
                 kv: kv.as_ref(),
@@ -8343,11 +8388,16 @@ impl SqlSession {
                 eval_ctx: &eval_ctx,
                 prune_horizon,
                 lock_wait_cap,
-                fctx: crate::exec::ForeignCtx::none(),
+                fctx: crate::exec::ForeignCtx {
+                    current_user: &current_role,
+                    row_security,
+                    ..crate::exec::ForeignCtx::none()
+                },
                 range_scanner: range_scanner.as_ref(),
                 blocking_query_memory,
                 ctes: &ctes,
                 deferred_fk: defer_constraints.then(|| &*deferred_fk),
+                policy_stack: &policy_stack,
             };
             with_guc_runtime(guc_values, guc_settings, prepared, || {
                 crate::trigger::with_after_trigger_queue(|| {
