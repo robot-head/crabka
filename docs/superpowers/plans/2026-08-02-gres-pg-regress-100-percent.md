@@ -6,13 +6,13 @@
 test files, not the adopted corpus's statement matches. The checked-in monotone
 floor remains `6/231`; this review is still non-monotone against that floor and
 does not ratchet it. Serial completes all 231 files with zero infrastructure
-failures, leaving 203 semantic failures across 171336 canonical changed lines
-and 4718 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
+failures, leaving 203 semantic failures across 169794 canonical changed lines
+and 4730 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
 postflight probe succeeds, and the infrastructure report is empty.
 
 The measurement immediately before this wave was `22/231` at 176686 changed
 lines / 4606 hunks, from the same runner and the same pinned corpus. The
-waves below are therefore `+6` exact files and `-4665` changed lines with
+waves below are therefore `+6` exact files and `-6207` changed lines with
 **zero newly failing files**: `int4`, `int2`, `roleattributes`, `lseg`, `line` and `circle` become exact,
 and 4 files gain a combined 22 lines.
 
@@ -496,6 +496,25 @@ and their certified artifact describe current conformance.
       lines only when the WHOLE group finishes, and the `subselect` group takes
       6.3 minutes normally. A stall detector under ~10 minutes reports healthy
       runs as hung -- that mistake cost one killed run here.
+- [x] **Persistence modifiers on `CREATE TABLE AS`, and the relation
+      visibility it exposed.** Certified `-1542` together, the largest single
+      movement of this program. `psql` 8121 -> 6754, `plancache` -94,
+      `create_index_spgist` -51, `inherit` -18, `with` -18.
+      The parser half was small: `create_table_as` expected `TABLE` straight
+      after `CREATE`, so `CREATE TEMP TABLE … AS SELECT` was a syntax error
+      while both `CREATE TABLE … AS` and `CREATE TEMP TABLE (cols)` parsed.
+      43 statements across a dozen files. `SELECT … INTO TEMP` was separately
+      accepting the keyword and creating a permanent relation.
+      Alone that measured `+23`, because the newly-created temporary relations
+      revealed that `pg_table_is_visible` answered `true` unconditionally, so
+      `\d` listed every previous test session's temporary tables. Fixing it was
+      worth `-1565` on its own.
+      **That is the third predicate found stubbed permissive**, after
+      `has_table_privilege` and the `has_*_privilege` family. They share a
+      shape: a predicate that can only ever *hide* things, returning true, and
+      therefore invisible until whatever it should hide starts existing. Grep
+      the rest of that family rather than waiting to trip over them —
+      `pg_type_is_visible` and `pg_function_is_visible` sit in the same list.
 - [ ] Ratchet or repair the committed serial baseline. The gate in
       `crates/gres-conformance/pg-regress-baseline.json` was seeded once, in
       `179158c39`, and has never been ratcheted; `baseline.py update` correctly
