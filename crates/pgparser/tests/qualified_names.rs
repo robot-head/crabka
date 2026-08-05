@@ -40,8 +40,8 @@ fn named_relation(sql: &str) -> RelationRef {
         | Statement::CreateIndex { table, .. }
         | Statement::GrantTablePrivileges { table, .. }
         | Statement::RevokeTablePrivileges { table, .. } => table,
+        Statement::Truncate { mut targets, .. } => targets.remove(0).name,
         Statement::DropTable { mut names, .. }
-        | Statement::Truncate { mut names, .. }
         | Statement::DropType { mut names, .. }
         | Statement::DropDomain { mut names, .. }
         | Statement::LockTable {

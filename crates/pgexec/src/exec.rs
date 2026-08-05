@@ -839,6 +839,7 @@ pub(crate) fn execute_ddl(
             or_replace,
             temporary,
             columns: aliases,
+            options,
         } => {
             // The body is analysed before the view's own name is placed,
             // because what it reads decides where the view can go: a view over
@@ -890,6 +891,13 @@ pub(crate) fn execute_ddl(
             // `OR REPLACE` over an existing VIEW redefines it in place, provided
             // the new query keeps every existing output column. A non-view
             // relation of that name is still 42P07, as it is without OR REPLACE.
+            // The reloptions are recorded on the view and nothing reads them
+            // yet — see `crabka_pgcatalog::ViewOptions` for why honouring
+            // `security_invoker` has to wait for table-privilege enforcement.
+            let options = crabka_pgcatalog::ViewOptions {
+                security_invoker: options.security_invoker,
+                security_barrier: options.security_barrier,
+            };
             let ops = if *or_replace && crabka_pgcatalog::get_view(kv, name).is_ok() {
                 let existing = crabka_pgcatalog::get_view(kv, name)?;
                 check_view_columns_replaceable(&existing.columns, &columns, name)?;
@@ -897,6 +905,7 @@ pub(crate) fn execute_ddl(
                     name: name.clone(),
                     definition: definition.clone(),
                     columns,
+                    options,
                 })]
             } else {
                 let mut created = ensure_schema_ops(kv, &name.schema)?;
@@ -905,6 +914,7 @@ pub(crate) fn execute_ddl(
                     name,
                     definition.clone(),
                     columns,
+                    options,
                 )?);
                 created
             };
@@ -1175,6 +1185,29 @@ pub(crate) fn execute_ddl(
                 privileges,
             )?;
             Ok((command("GRANT"), ops))
+        }
+        // `WITH ADMIN OPTION` / `ADMIN OPTION FOR` are dropped: a membership is
+        // stored as a bare key with no payload, so there is nowhere to record
+        // the admin right and nothing that would read it back.
+        Statement::GrantRoles {
+            roles,
+            members,
+            admin_option: _,
+        } => {
+            let ops = crabka_pgcatalog::grant_role_memberships_ops(kv, roles, members)?;
+            Ok((command("GRANT ROLE"), ops))
+        }
+        Statement::RevokeRoles {
+            roles,
+            members,
+            admin_option,
+        } => {
+            // The names are checked either way; `ADMIN OPTION FOR` then keeps
+            // the membership and strips only the admin right, which is all this
+            // catalog does not hold, so it writes nothing.
+            let ops = crabka_pgcatalog::revoke_role_memberships_ops(kv, roles, members)?;
+            let ops = if *admin_option { Vec::new() } else { ops };
+            Ok((command("REVOKE ROLE"), ops))
         }
         Statement::GrantSchemaPrivileges {
             privileges,
@@ -3208,15 +3241,31 @@ async fn execute_write_with_ctes(
     Ok((outcome, ops))
 }
 
+/// The relations a `TRUNCATE` names, dropping each target's `ONLY` flag.
+///
+/// `TRUNCATE` empties exactly what it is given and never walks down an
+/// inheritance tree, so `ONLY` asks for the behaviour that is already in force
+/// and its absence promises nothing extra. The flag is parsed and kept on the
+/// statement so the two spellings stop being a syntax error apart.
+fn truncate_names(
+    targets: &[crabka_pgparser::ast::TruncateTarget],
+) -> Vec<crabka_pgparser::ast::RelationRef> {
+    targets.iter().map(|target| target.name.clone()).collect()
+}
+
 fn statement_trigger_targets(
     write_ctx: &WriteContext<'_>,
     stmt: &Statement,
 ) -> Result<Vec<(Table, crate::trigger::DmlEvent, Vec<String>)>, ExecError> {
-    if let Statement::Truncate { names, cascade, .. } = stmt {
+    if let Statement::Truncate {
+        targets, cascade, ..
+    } = stmt
+    {
+        let written = truncate_names(targets);
         let names = resolve_relations(
             write_ctx.catalog_kv,
             write_ctx.eval_ctx.resolution(),
-            names,
+            &written,
             SchemaDisposition::Utility,
         )?;
         let tables = names
@@ -3909,6 +3958,12 @@ async fn execute_view_dml(
             let read = write_ctx.read_ctx(ctes);
             let target_expr = crabka_pgparser::ast::TableExpr::Table {
                 name: reference.clone(),
+                // Pinned to `true` whatever the statement wrote. UPDATE and
+                // DELETE do not descend into inheritance children yet, so
+                // scanning them here would collect rows the write path has no
+                // way to address. `Statement::{Update,Delete}::only` carries
+                // what was written; this is the line that starts reading it the
+                // day DML recursion lands.
                 only: true,
                 alias: alias.clone(),
                 columns: None,
@@ -3973,6 +4028,12 @@ async fn execute_view_dml(
             let read = write_ctx.read_ctx(ctes);
             let target_expr = crabka_pgparser::ast::TableExpr::Table {
                 name: reference.clone(),
+                // Pinned to `true` whatever the statement wrote. UPDATE and
+                // DELETE do not descend into inheritance children yet, so
+                // scanning them here would collect rows the write path has no
+                // way to address. `Statement::{Update,Delete}::only` carries
+                // what was written; this is the line that starts reading it the
+                // day DML recursion lands.
                 only: true,
                 alias: alias.clone(),
                 columns: None,
@@ -4521,7 +4582,7 @@ async fn execute_write_body(
         }
         Statement::Merge { .. } => Box::pin(execute_merge(write_ctx, ctes, stmt, writes)).await,
         Statement::Truncate {
-            names,
+            targets,
             restart_identity,
             cascade,
         } => {
@@ -4532,9 +4593,15 @@ async fn execute_write_body(
             }
             // Validate every name (and refuse sharded targets) before touching
             // any table: the statement is all-or-nothing across the list.
-            let mut named = Vec::with_capacity(names.len());
+            //
+            // A target's `ONLY` is not consulted: `TRUNCATE` empties exactly the
+            // relations named plus whatever `CASCADE` pulls in, and never
+            // descends into inheritance children, so writing `ONLY` asks for
+            // what it already does.
+            let written = truncate_names(targets);
+            let mut named = Vec::with_capacity(written.len());
             for name in
-                resolve_relations(catalog_kv, resolution, names, SchemaDisposition::Utility)?
+                resolve_relations(catalog_kv, resolution, &written, SchemaDisposition::Utility)?
             {
                 let t = crabka_pgcatalog::get_table(catalog_kv, &name)?;
                 if table_uses_global_visibility(&t) {
@@ -4564,6 +4631,7 @@ async fn execute_write_body(
                         schema: Some(table.name.schema.clone()),
                         name: table.name.name.clone(),
                     },
+                    only: true,
                     alias: None,
                     filter: None,
                     using: Vec::new(),
@@ -19636,7 +19704,15 @@ fn alter_table_action_ops(
             // answers a handover to it the same way it answers a handover to a
             // name nobody holds. Letting it through would leave a relation
             // owned by something no ownership test can ever match.
-            if role == crabka_pgcatalog::PUBLIC_ROLE || !crabka_pgcatalog::role_exists(kv, role)? {
+            //
+            // The bootstrap role is the opposite case. It has no stored record
+            // either, but it is the default owner of every relation, so
+            // refusing to name it would reject `OWNER TO CURRENT_USER` from an
+            // unauthenticated session — whose effective role is exactly that —
+            // while the relation it names is already owned by it.
+            let known = role == crabka_pgcatalog::BOOTSTRAP_ROLE
+                || crabka_pgcatalog::role_exists(kv, role)?;
+            if role == crabka_pgcatalog::PUBLIC_ROLE || !known {
                 return Err(ExecError::UndefinedObject(format!(
                     "role \"{role}\" does not exist"
                 )));

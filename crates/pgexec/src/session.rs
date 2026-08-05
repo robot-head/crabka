@@ -2244,6 +2244,8 @@ fn establishes_transaction_activity(stmt: &Statement) -> bool {
         | Statement::GrantSchemaPrivileges { .. }
         | Statement::RevokeTablePrivileges { .. }
         | Statement::RevokeSchemaPrivileges { .. }
+        | Statement::GrantRoles { .. }
+        | Statement::RevokeRoles { .. }
         | Statement::ImportForeignSchema { .. }
         | Statement::CreateTrigger(_)
         | Statement::AlterTrigger { .. }
@@ -6076,6 +6078,8 @@ impl SqlSession {
             | Statement::GrantSchemaPrivileges { .. }
             | Statement::RevokeTablePrivileges { .. }
             | Statement::RevokeSchemaPrivileges { .. }
+            | Statement::GrantRoles { .. }
+            | Statement::RevokeRoles { .. }
             | Statement::ImportForeignSchema { .. }
             | Statement::CreateTrigger(_)
             | Statement::AlterTrigger { .. }
@@ -7679,7 +7683,10 @@ impl SqlSession {
                     // emptied costs only its own disposition rather than every
                     // other relation's.
                     let emptied = Box::pin(self.run_write(&Statement::Truncate {
-                        names: vec![reference],
+                        targets: vec![crabka_pgparser::ast::TruncateTarget {
+                            name: reference,
+                            only: true,
+                        }],
                         restart_identity: false,
                         cascade: false,
                     }))

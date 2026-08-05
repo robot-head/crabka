@@ -2565,6 +2565,7 @@ mod tests {
             &RelationName::public("aview"),
             "SELECT 1".into(),
             columns(&[("one", ColumnType::Int4)]),
+            crabka_pgcatalog::ViewOptions::default(),
         )
         .expect("create view");
         let child_columns = columns(&[

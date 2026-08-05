@@ -215,6 +215,25 @@ async fn owner_to_current_user_names_the_session_role() {
     }
 }
 
+/// A session that never authenticated may still name itself as an owner.
+///
+/// Its effective role is the bootstrap role, which has no `pg_authid` row — so
+/// an existence check that consults only stored records refuses the handover
+/// while the relation is already owned by exactly that role. The upstream
+/// `vacuum` test does this (`ALTER TABLE vacowned_parted OWNER TO
+/// CURRENT_USER` after a `RESET ROLE`) and caught it.
+#[tokio::test]
+async fn owner_to_current_user_works_for_a_session_that_never_authenticated() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run(&mut session, "CREATE TABLE unclaimed (id int4)").await;
+    let before = ownership_of(&mut session, "unclaimed").await;
+
+    run(&mut session, "ALTER TABLE unclaimed OWNER TO CURRENT_USER").await;
+
+    assert!(ownership_of(&mut session, "unclaimed").await == before);
+}
+
 /// Handing a relation to a name no role holds is 42704 and leaves the owner
 /// where it was. `PUBLIC` counts as such a name: it is a pseudo-role with no
 /// `pg_authid` row, so a relation must never come to rest on it.

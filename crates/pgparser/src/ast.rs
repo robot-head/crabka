@@ -265,6 +265,29 @@ pub struct RoleOptions {
     pub bypassrls: Option<bool>,
 }
 
+/// One relation named by `TRUNCATE`. `ONLY` binds to a single name, so
+/// `TRUNCATE ONLY a, b` restricts `a` and not `b`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TruncateTarget {
+    pub name: RelationRef,
+    /// `TRUNCATE ONLY t` — see [`Statement::Delete`]'s `only` for what the
+    /// executor does with it today.
+    pub only: bool,
+}
+
+/// The reloptions a `CREATE VIEW … WITH (…)` list may set. Both default to
+/// false, which is what `PostgreSQL` gives a view written without the clause.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ViewOptions {
+    /// `security_invoker` — the view's body is checked against the *querying*
+    /// role's permissions and row-security policies rather than the owner's.
+    pub security_invoker: bool,
+    /// `security_barrier` — a user-supplied qualifier may not be evaluated
+    /// before the view's own, so a leaky function cannot observe rows the view
+    /// was written to hide.
+    pub security_barrier: bool,
+}
+
 #[rustfmt::skip]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
@@ -391,6 +414,9 @@ pub enum Statement {
         /// The optional `VIEW name (a, b, c)` alias list, which renames the
         /// query's output columns positionally.
         columns: Option<Vec<String>>,
+        /// `WITH (security_invoker, security_barrier)` — the reloptions written
+        /// on the view, all defaulting to false.
+        options: ViewOptions,
     },
     DropTable {
         /// One entry per name in `DROP TABLE a, b, c`; the drop is
@@ -471,6 +497,9 @@ pub enum Statement {
     },
     Update {
         table: RelationRef,
+        /// `UPDATE ONLY t …` — the statement stops at `t` instead of descending
+        /// into its inheritance children. See [`Statement::Delete`]'s `only`.
+        only: bool,
         /// The statement's `WITH` list, which may contain data-modifying CTEs.
         with: Option<WithClause>,
         /// `UPDATE t AS x …`: the target's alias, which replaces the table name
@@ -485,6 +514,14 @@ pub enum Statement {
     },
     Delete {
         table: RelationRef,
+        /// `DELETE FROM ONLY t …` — the statement stops at `t` instead of
+        /// descending into its inheritance children.
+        ///
+        /// The executor does not descend either way yet, so today the flag
+        /// records what was written rather than changing what is deleted; the
+        /// scan it feeds is pinned in `crabka_pgexec`. It is carried here so
+        /// that the day DML recursion lands there is a flag to honour.
+        only: bool,
         /// The statement's `WITH` list, which may contain data-modifying CTEs.
         with: Option<WithClause>,
         /// `DELETE FROM t AS x …`: see [`Statement::Update`]'s `alias`.
@@ -525,8 +562,9 @@ pub enum Statement {
     Vacuum,
     Truncate {
         /// One entry per name in `TRUNCATE a, b, c`; the statement is
-        /// all-or-nothing across the list, matching `PostgreSQL`.
-        names: Vec<RelationRef>,
+        /// all-or-nothing across the list, matching `PostgreSQL`. `ONLY` is
+        /// per-name, so each target carries its own flag.
+        targets: Vec<TruncateTarget>,
         /// `RESTART IDENTITY` was given (`CONTINUE IDENTITY` is the default).
         restart_identity: bool,
         /// `CASCADE` was given, widening the truncated set to every table
@@ -583,6 +621,27 @@ pub enum Statement {
         privileges: Vec<String>,
         schemas: Vec<String>,
         grantees: Vec<String>,
+    },
+    /// `GRANT <role> [, …] TO <member> [, …] [WITH ADMIN OPTION]` — role
+    /// membership, which shares its storage with `CREATE ROLE … IN ROLE`.
+    /* SQL parity matrix row: GRANT. */ GrantRoles {
+        /// The roles being handed out; each member gains their privileges.
+        roles: Vec<String>,
+        /// The roles receiving the membership.
+        members: Vec<String>,
+        /// `WITH ADMIN OPTION` was written. The catalog has no column for it —
+        /// membership is a bare key with no payload — so it is parsed for
+        /// fidelity and discarded by the executor.
+        admin_option: bool,
+    },
+    /// `REVOKE [ADMIN OPTION FOR] <role> [, …] FROM <member> [, …]`.
+    /* SQL parity matrix row: REVOKE. */ RevokeRoles {
+        roles: Vec<String>,
+        members: Vec<String>,
+        /// `ADMIN OPTION FOR` was written, which in `PostgreSQL` strips the
+        /// admin right and leaves the membership. Nothing stores the admin
+        /// right here, so see [`Statement::GrantRoles`].
+        admin_option: bool,
     },
     /* SQL parity matrix row: SET ROLE. */ SetRole {
         role: Option<String>,

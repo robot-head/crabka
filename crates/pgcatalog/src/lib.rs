@@ -573,6 +573,25 @@ pub struct View {
     pub name: RelationName,
     pub definition: String,
     pub columns: Vec<Column>,
+    /// `pg_class.reloptions` — the `WITH (…)` list the view was written with.
+    pub options: ViewOptions,
+}
+
+/// The `CREATE VIEW … WITH (…)` reloptions this catalog keeps.
+///
+/// Both are **recorded and not yet honoured**. Row security evaluates every
+/// view with invoker semantics regardless of `security_invoker`, deliberately:
+/// owner-rights views would be a universal row-security bypass while
+/// `has_table_privilege` answers `true` unconditionally, because any role could
+/// read an owner's rows through a view it was never granted. `security_barrier`
+/// is likewise inert — the planner does not reorder a view's own qualifiers
+/// below a user-supplied one, so there is nothing yet for the barrier to stop.
+/// Storing them now means the flags are already on disk when table privileges
+/// and qualifier reordering arrive.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ViewOptions {
+    pub security_invoker: bool,
+    pub security_barrier: bool,
 }
 
 impl Table {
@@ -2247,6 +2266,7 @@ pub fn create_view_ops(
     name: &RelationName,
     definition: String,
     columns: Vec<Column>,
+    options: ViewOptions,
 ) -> Result<Vec<WriteOp>, CatalogError> {
     if relation_exists(kv, name)? {
         return Err(CatalogError::DuplicateTable(name.to_string()));
@@ -2255,6 +2275,7 @@ pub fn create_view_ops(
         name: name.clone(),
         definition,
         columns,
+        options,
     };
     Ok(vec![WriteOp::Put {
         key: view_key(name),
@@ -2272,8 +2293,9 @@ pub fn create_view(
     name: &RelationName,
     definition: String,
     columns: Vec<Column>,
+    options: ViewOptions,
 ) -> Result<(), CatalogError> {
-    kv.write_batch(&create_view_ops(kv, name, definition, columns)?)?;
+    kv.write_batch(&create_view_ops(kv, name, definition, columns, options)?)?;
     Ok(())
 }
 
@@ -3987,6 +4009,72 @@ pub fn create_role_with_memberships_ops(
     Ok(ops)
 }
 
+/// Build the membership records for `GRANT <role> [, …] TO <member> [, …]`.
+///
+/// This is the second spelling of what `CREATE ROLE … IN ROLE` writes: the same
+/// key, the same empty payload, so [`role_has_privs_of`] and [`role_can_set`]
+/// see a membership granted either way without knowing which statement made it.
+/// Re-granting an existing membership is a no-op rather than an error, matching
+/// `PostgreSQL`.
+///
+/// # Errors
+///
+/// Returns undefined-object when a named role does not exist, or storage errors
+/// from the catalog KV seam.
+pub fn grant_role_memberships_ops(
+    kv: &dyn Kv,
+    roles: &[String],
+    members: &[String],
+) -> Result<Vec<WriteOp>, CatalogError> {
+    let mut ops = Vec::with_capacity(roles.len() * members.len());
+    for role in roles {
+        if !role_exists(kv, role)? {
+            return Err(CatalogError::UndefinedObject(role.clone()));
+        }
+        for member in members {
+            if !role_exists(kv, member)? {
+                return Err(CatalogError::UndefinedObject(member.clone()));
+            }
+            ops.push(WriteOp::Put {
+                key: role_membership_key(member, role),
+                value: Vec::new(),
+            });
+        }
+    }
+    Ok(ops)
+}
+
+/// Build the deletes for `REVOKE <role> [, …] FROM <member> [, …]`.
+///
+/// Revoking a membership that was never granted is a no-op, as it is in
+/// `PostgreSQL`; only an unknown *role* is an error.
+///
+/// # Errors
+///
+/// Returns undefined-object when a named role does not exist, or storage errors
+/// from the catalog KV seam.
+pub fn revoke_role_memberships_ops(
+    kv: &dyn Kv,
+    roles: &[String],
+    members: &[String],
+) -> Result<Vec<WriteOp>, CatalogError> {
+    let mut ops = Vec::with_capacity(roles.len() * members.len());
+    for role in roles {
+        if !role_exists(kv, role)? {
+            return Err(CatalogError::UndefinedObject(role.clone()));
+        }
+        for member in members {
+            if !role_exists(kv, member)? {
+                return Err(CatalogError::UndefinedObject(member.clone()));
+            }
+            ops.push(WriteOp::Delete {
+                key: role_membership_key(member, role),
+            });
+        }
+    }
+    Ok(ops)
+}
+
 /// Whether `member` may assume `role`, including inherited memberships.
 ///
 /// # Errors
@@ -5602,11 +5690,16 @@ mod tests {
     fn views_persist_schema_share_relation_namespace_and_drop() {
         let kv = MemKv::new();
         let columns = vec![Column::new("total", ColumnType::Int4)];
+        let options = ViewOptions {
+            security_invoker: true,
+            security_barrier: false,
+        };
         create_view(
             &kv,
             &rel("sales_view"),
             "SELECT 1 AS total".into(),
             columns.clone(),
+            options,
         )
         .expect("create view");
         assert_eq!(
@@ -5615,6 +5708,7 @@ mod tests {
                 name: rel("sales_view"),
                 definition: "SELECT 1 AS total".into(),
                 columns,
+                options,
             }
         );
         assert_eq!(
@@ -5624,9 +5718,15 @@ mod tests {
             "42P07"
         );
         assert_eq!(
-            create_view(&kv, &rel("sales_view"), "SELECT 1".into(), vec![])
-                .expect_err("duplicate view")
-                .sqlstate(),
+            create_view(
+                &kv,
+                &rel("sales_view"),
+                "SELECT 1".into(),
+                vec![],
+                ViewOptions::default()
+            )
+            .expect_err("duplicate view")
+            .sqlstate(),
             "42P07"
         );
         drop_view(&kv, &rel("sales_view")).expect("drop view");

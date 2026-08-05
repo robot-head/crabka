@@ -21,7 +21,7 @@ use crate::{
     CheckConstraint, Column, ColumnDefault, ExclusionOperator, ForeignDataWrapper, ForeignKey,
     ForeignServer, ForeignTableMeta, HashSharding, IdentityKind, Index, IndexConstraint,
     IndexMethod, IndexPlacement, MatchType, ReferentialAction, Sequence, ShardingStrategy,
-    TableOptions, UserMapping, View,
+    TableOptions, UserMapping, View, ViewOptions,
 };
 
 /// Everything [`deserialize_schema`] recovers from a stored table schema:
@@ -1909,7 +1909,7 @@ pub fn deserialize_user_mapping(bytes: &[u8]) -> Result<UserMapping, KvError> {
 
 // ── Views ─────────────────────────────────────────────────────────────────────
 
-const VIEW_VERSION: u8 = 1;
+const VIEW_VERSION: u8 = 2;
 
 /// Serialize a view definition and its resolved output schema.
 ///
@@ -1930,6 +1930,8 @@ pub fn serialize_view(view: &View) -> Vec<u8> {
         write_str(&mut out, &column.name);
         write_type(&mut out, column.ty);
     }
+    out.push(u8::from(view.options.security_invoker));
+    out.push(u8::from(view.options.security_barrier));
     out
 }
 
@@ -1969,6 +1971,10 @@ pub fn deserialize_view(bytes: &[u8]) -> Result<View, KvError> {
             identity: None,
         });
     }
+    let options = ViewOptions {
+        security_invoker: take_u8(&mut cur)? != 0,
+        security_barrier: take_u8(&mut cur)? != 0,
+    };
     if !cur.is_empty() {
         return Err(KvError::CorruptRow("trailing bytes in view record".into()));
     }
@@ -1976,6 +1982,7 @@ pub fn deserialize_view(bytes: &[u8]) -> Result<View, KvError> {
         name,
         definition,
         columns,
+        options,
     })
 }
 

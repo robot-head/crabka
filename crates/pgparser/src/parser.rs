@@ -3826,6 +3826,21 @@ impl Parser {
 
     fn grant_table_privileges(&mut self) -> Result<crate::ast::Statement, ParseError> {
         self.expect_ident_eq("grant")?;
+        // `GRANT a, b TO c` hands out role membership; `GRANT SELECT ON t TO c`
+        // hands out a privilege. Both open with a comma-separated word list, so
+        // the two are told apart the way PostgreSQL's grammar does: by whether
+        // `ON` or `TO` closes the list.
+        if self.at_role_grant_list() {
+            let roles = self.object_name_list()?;
+            self.expect(&Token::Keyword(Keyword::To))?;
+            let members = self.object_name_list()?;
+            let admin_option = self.eat_with_admin_option()?;
+            return Ok(crate::ast::Statement::GrantRoles {
+                roles,
+                members,
+                admin_option,
+            });
+        }
         let privileges = self.privilege_list_until_on()?;
         self.expect(&Token::Keyword(Keyword::On))?;
         if self.eat_keyword(Keyword::Schema) {
@@ -3853,6 +3868,26 @@ impl Parser {
 
     fn revoke_table_privileges(&mut self) -> Result<crate::ast::Statement, ParseError> {
         self.expect_ident_eq("revoke")?;
+        // `REVOKE ADMIN OPTION FOR a FROM b` strips the admin right and keeps
+        // the membership; the bare form drops the membership itself.
+        let admin_option = self.peek_ident_eq("admin")
+            && matches!(self.peek2(), Token::Ident(w) if w.eq_ignore_ascii_case("option"))
+            && *self.peek_n(2) == Token::Keyword(Keyword::For);
+        if admin_option {
+            self.bump();
+            self.bump();
+            self.bump();
+        }
+        if admin_option || self.at_role_grant_list() {
+            let roles = self.object_name_list()?;
+            self.expect(&Token::Keyword(Keyword::From))?;
+            let members = self.object_name_list()?;
+            return Ok(crate::ast::Statement::RevokeRoles {
+                roles,
+                members,
+                admin_option,
+            });
+        }
         let privileges = self.privilege_list_until_on()?;
         self.expect(&Token::Keyword(Keyword::On))?;
         if self.eat_keyword(Keyword::Schema) {
@@ -3886,6 +3921,41 @@ impl Parser {
             Some(self.expect_object_name()?)
         };
         Ok(crate::ast::Statement::SetRole { role, reset: false })
+    }
+
+    /// Whether the word list starting here is a `GRANT`/`REVOKE` *role* list
+    /// rather than a privilege list.
+    ///
+    /// A privilege list is closed by `ON`; a role list by `TO` (`GRANT`) or
+    /// `FROM` (`REVOKE`). Scanning for whichever comes first is what makes
+    /// `GRANT SELECT ON t TO r` and `GRANT selectors TO r` distinguishable
+    /// without reserving any of the words in between. Parenthesised column
+    /// lists (`GRANT SELECT (a, b) ON …`) are skipped so a `to` column name
+    /// cannot masquerade as the list terminator.
+    fn at_role_grant_list(&self) -> bool {
+        let mut offset = 0;
+        let mut depth = 0usize;
+        loop {
+            match self.peek_n(offset) {
+                Token::Eof | Token::Semicolon => return false,
+                Token::LParen => depth += 1,
+                Token::RParen => depth = depth.saturating_sub(1),
+                Token::Keyword(Keyword::On) if depth == 0 => return false,
+                Token::Keyword(Keyword::To | Keyword::From) if depth == 0 => return true,
+                _ => {}
+            }
+            offset += 1;
+        }
+    }
+
+    /// The `[WITH ADMIN OPTION]` tail of `GRANT <role> TO <member>`.
+    fn eat_with_admin_option(&mut self) -> Result<bool, ParseError> {
+        if !self.eat_keyword(Keyword::With) {
+            return Ok(false);
+        }
+        self.expect_ident_eq("admin")?;
+        self.expect_ident_eq("option")?;
+        Ok(true)
     }
 
     fn privilege_list_until_on(&mut self) -> Result<Vec<String>, ParseError> {
@@ -5446,6 +5516,7 @@ impl Parser {
     fn update(&mut self) -> Result<crate::ast::Statement, ParseError> {
         use crate::ast::Statement;
         self.expect(&Token::Keyword(Keyword::Update))?;
+        let only = self.eat_only();
         let table = self.relation_ref()?;
         let alias = self.opt_dml_target_alias()?;
         self.expect(&Token::Keyword(Keyword::Set))?;
@@ -5463,6 +5534,7 @@ impl Parser {
         let returning = self.returning_clause()?;
         Ok(Statement::Update {
             table,
+            only,
             with: None,
             alias,
             assignments,
@@ -5470,6 +5542,25 @@ impl Parser {
             filter,
             returning,
         })
+    }
+
+    /// The optional `ONLY` in front of a DML target relation.
+    ///
+    /// `only` is a plain identifier to this lexer, so it is taken as the
+    /// keyword only when another name follows it. That keeps `TRUNCATE only`
+    /// meaning the table called `only`, which is all it could have meant here
+    /// before, while `TRUNCATE ONLY t` reads as `PostgreSQL` reads it.
+    fn eat_only(&mut self) -> bool {
+        if self.peek_ident_eq("only")
+            && matches!(
+                self.peek2(),
+                Token::Ident(_) | Token::Keyword(Keyword::Public | Keyword::Data)
+            )
+        {
+            self.bump();
+            return true;
+        }
+        false
     }
 
     /// The optional alias on an `UPDATE`/`DELETE`/`MERGE` target. Only the
@@ -5567,6 +5658,7 @@ impl Parser {
         use crate::ast::Statement;
         self.expect(&Token::Keyword(Keyword::Delete))?;
         self.expect(&Token::Keyword(Keyword::From))?;
+        let only = self.eat_only();
         let table = self.relation_ref()?;
         let alias = self.opt_dml_target_alias()?;
         let using = if self.eat_keyword(Keyword::Using) {
@@ -5582,6 +5674,7 @@ impl Parser {
         let returning = self.returning_clause()?;
         Ok(Statement::Delete {
             table,
+            only,
             with: None,
             alias,
             using,
@@ -5798,7 +5891,7 @@ impl Parser {
     fn table_query_body(&mut self) -> Result<crate::ast::SelectStmt, ParseError> {
         use crate::ast::{SelectItem, SelectStmt, TableExpr};
         self.expect(&Token::Keyword(Keyword::Table))?;
-        let only = self.eat_ident_eq("only");
+        let only = self.eat_only();
         let name = self.relation_ref()?;
         if *self.peek() == Token::Star {
             self.bump();
@@ -7618,6 +7711,7 @@ impl Parser {
         let name = self.relation_ref()?;
         // `VIEW name (a, b, c)` renames the query's output columns positionally.
         let columns = self.opt_column_aliases()?;
+        let options = self.view_options()?;
         self.expect(&Token::Keyword(Keyword::As))?;
         let definition_start = self.peek_pos();
         let query = self.query_expr()?;
@@ -7632,7 +7726,84 @@ impl Parser {
             or_replace,
             temporary,
             columns,
+            options,
         })
+    }
+
+    /// The optional `WITH (…)` reloption list on `CREATE VIEW`.
+    ///
+    /// `PostgreSQL` gives a view three reloptions. Two are recorded —
+    /// `security_invoker` and `security_barrier` — and `check_option` is
+    /// accepted and dropped, because nothing here enforces a view's `WITH CHECK
+    /// OPTION` yet. Anything else is the same `unrecognized parameter` refusal
+    /// `PostgreSQL` raises, rather than a silent acceptance that would make a
+    /// misspelled `security_barrier` look like it took effect.
+    fn view_options(&mut self) -> Result<crate::ast::ViewOptions, ParseError> {
+        let mut options = crate::ast::ViewOptions::default();
+        if !self.eat_keyword(Keyword::With) {
+            return Ok(options);
+        }
+        self.expect(&Token::LParen)?;
+        loop {
+            let start = self.peek_pos();
+            let name = self.expect_ident()?.to_ascii_lowercase();
+            match name.as_str() {
+                "security_invoker" => options.security_invoker = self.reloption_bool()?,
+                "security_barrier" => options.security_barrier = self.reloption_bool()?,
+                "check_option" => {
+                    if *self.peek() == Token::Eq {
+                        self.bump();
+                        self.expect_ident()?;
+                    }
+                }
+                other => {
+                    return Err(ParseError::new_sqlstate(
+                        "22023",
+                        format!("unrecognized parameter \"{other}\""),
+                        start,
+                    ));
+                }
+            }
+            if !self.eat_comma() {
+                break;
+            }
+        }
+        self.expect(&Token::RParen)?;
+        Ok(options)
+    }
+
+    /// A boolean reloption's value. A bare name is `true`, which is how
+    /// `WITH (security_barrier)` reads; `= <word>` takes `PostgreSQL`'s
+    /// `parse_bool` spellings.
+    fn reloption_bool(&mut self) -> Result<bool, ParseError> {
+        if *self.peek() != Token::Eq {
+            return Ok(true);
+        }
+        self.bump();
+        let start = self.peek_pos();
+        let written = match self.bump() {
+            Token::Ident(word) => word,
+            Token::Keyword(Keyword::True) => "true".into(),
+            Token::Keyword(Keyword::False) => "false".into(),
+            // `on` is a keyword to this lexer (`ON` joins); `off` is not.
+            Token::Keyword(Keyword::On) => "on".into(),
+            Token::IntLit(digits) => digits,
+            other => {
+                return Err(ParseError::new(
+                    format!("expected a boolean reloption value, found {other:?}"),
+                    start,
+                ));
+            }
+        };
+        match written.to_ascii_lowercase().as_str() {
+            "true" | "on" | "yes" | "1" => Ok(true),
+            "false" | "off" | "no" | "0" => Ok(false),
+            other => Err(ParseError::new_sqlstate(
+                "22023",
+                format!("invalid value for boolean option: \"{other}\""),
+                start,
+            )),
+        }
     }
 
     fn create_sequence(&mut self) -> Result<crate::ast::Statement, ParseError> {
@@ -8649,10 +8820,10 @@ impl Parser {
     fn truncate(&mut self) -> Result<crate::ast::Statement, ParseError> {
         self.expect_ident_eq("truncate")?;
         let _ = self.eat_keyword(Keyword::Table);
-        let mut names = vec![self.relation_ref()?];
+        let mut targets = vec![self.truncate_target()?];
         while *self.peek() == Token::Comma {
             self.bump();
-            names.push(self.relation_ref()?);
+            targets.push(self.truncate_target()?);
         }
         let restart_identity = if self.eat_ident_eq("restart") {
             self.expect_ident_eq("identity")?;
@@ -8670,10 +8841,22 @@ impl Parser {
             false
         };
         Ok(crate::ast::Statement::Truncate {
-            names,
+            targets,
             restart_identity,
             cascade,
         })
+    }
+
+    /// One `[ONLY] name [*]` entry of a `TRUNCATE` list. The trailing `*` is
+    /// `PostgreSQL`'s explicit spelling of the default (descend into children)
+    /// and carries no information beyond the absence of `ONLY`.
+    fn truncate_target(&mut self) -> Result<crate::ast::TruncateTarget, ParseError> {
+        let only = self.eat_only();
+        let name = self.relation_ref()?;
+        if *self.peek() == Token::Star {
+            self.bump();
+        }
+        Ok(crate::ast::TruncateTarget { name, only })
     }
 
     /// Consume one storage-parameter value (`WITH (key = value)`): a numeric
@@ -10444,7 +10627,7 @@ impl Parser {
         if self.peek_ident_eq("rows") && *self.peek2() == Token::Keyword(Keyword::From) {
             return self.rows_from(lateral);
         }
-        let only = self.eat_ident_eq("only");
+        let only = self.eat_only();
         let name = self.relation_ref()?;
         // `ident (` in FROM position is a set-returning function call
         // (`unnest(tags) AS u(tag)`), never a table. A qualified call keeps its
@@ -12490,6 +12673,175 @@ mod tests {
         ));
     }
 
+    /// `GRANT a TO b` is role membership, not a privilege grant. Both open with
+    /// a comma-separated word list, so what closes it — `ON` for a privilege,
+    /// `TO`/`FROM` for a role — is what tells them apart.
+    #[test]
+    fn grant_and_revoke_split_role_membership_from_privileges() {
+        use assert2::assert;
+        struct Case {
+            sql: &'static str,
+            want: Statement,
+        }
+        let cases = [
+            Case {
+                sql: "GRANT r1 TO r2",
+                want: Statement::GrantRoles {
+                    roles: vec!["r1".into()],
+                    members: vec!["r2".into()],
+                    admin_option: false,
+                },
+            },
+            Case {
+                sql: "GRANT r1, r2 TO r3, PUBLIC WITH ADMIN OPTION",
+                want: Statement::GrantRoles {
+                    roles: vec!["r1".into(), "r2".into()],
+                    members: vec!["r3".into(), "public".into()],
+                    admin_option: true,
+                },
+            },
+            Case {
+                sql: "REVOKE r1 FROM r2",
+                want: Statement::RevokeRoles {
+                    roles: vec!["r1".into()],
+                    members: vec!["r2".into()],
+                    admin_option: false,
+                },
+            },
+            Case {
+                sql: "REVOKE ADMIN OPTION FOR r1, r2 FROM r3",
+                want: Statement::RevokeRoles {
+                    roles: vec!["r1".into(), "r2".into()],
+                    members: vec!["r3".into()],
+                    admin_option: true,
+                },
+            },
+        ];
+        for case in cases {
+            assert!(one(case.sql) == case.want, "case: {}", case.sql);
+        }
+
+        // A column list inside a privilege grant holds words that would
+        // otherwise close a role list, so the scan skips it and the statement
+        // still takes the privilege branch — where column-level grants are a
+        // separate, unimplemented thing, which is what it fails as.
+        assert!(
+            crate::parse("GRANT SELECT (a, b) ON t TO r")
+                .expect_err("column-level grants are not supported")
+                .to_string()
+                .contains("privilege list")
+        );
+        assert!(matches!(
+            one("GRANT ALL ON SCHEMA s TO r"),
+            Statement::GrantSchemaPrivileges { .. }
+        ));
+    }
+
+    /// `CREATE VIEW … WITH (…)` records the reloptions it was written with, and
+    /// refuses a name it does not know rather than dropping it.
+    #[test]
+    fn create_view_records_its_reloptions() {
+        use assert2::assert;
+
+        use crate::ast::ViewOptions;
+        let cases = [
+            ("CREATE VIEW v AS SELECT 1", ViewOptions::default()),
+            (
+                "CREATE VIEW v WITH (security_invoker) AS SELECT 1",
+                ViewOptions {
+                    security_invoker: true,
+                    security_barrier: false,
+                },
+            ),
+            (
+                "CREATE VIEW v WITH (security_barrier = TRUE) AS SELECT 1",
+                ViewOptions {
+                    security_invoker: false,
+                    security_barrier: true,
+                },
+            ),
+            (
+                "CREATE VIEW v WITH (security_invoker = on, security_barrier = off) AS SELECT 1",
+                ViewOptions {
+                    security_invoker: true,
+                    security_barrier: false,
+                },
+            ),
+            (
+                // `check_option` is accepted and dropped: nothing enforces a
+                // view's WITH CHECK OPTION yet.
+                "CREATE VIEW v WITH (check_option = cascaded, security_barrier = 1) AS SELECT 1",
+                ViewOptions {
+                    security_invoker: false,
+                    security_barrier: true,
+                },
+            ),
+        ];
+        for (sql, want) in cases {
+            let Statement::CreateView { options, .. } = one(sql) else {
+                panic!("expected CREATE VIEW from {sql}");
+            };
+            assert!(options == want, "case: {sql}");
+        }
+        for sql in [
+            "CREATE VIEW v WITH (securty_invoker) AS SELECT 1",
+            "CREATE VIEW v WITH (security_invoker = maybe) AS SELECT 1",
+        ] {
+            assert!(
+                crate::parse(sql).expect_err("refused").sqlstate() == "22023",
+                "case: {sql}"
+            );
+        }
+    }
+
+    /// `ONLY` in front of a DML target is the keyword, not the table name. It
+    /// stays an ordinary identifier when no name follows it, so a relation
+    /// actually called `only` is still reachable.
+    #[test]
+    fn only_binds_to_the_dml_target() {
+        use assert2::assert;
+        let Statement::Update { table, only, .. } = one("UPDATE ONLY t SET a = 1") else {
+            panic!("expected UPDATE");
+        };
+        assert!(table == crate::ast::RelationRef::bare("t"));
+        assert!(only);
+
+        let Statement::Update {
+            table, only, alias, ..
+        } = one("UPDATE t SET a = 1")
+        else {
+            panic!("expected UPDATE");
+        };
+        assert!(table == crate::ast::RelationRef::bare("t"));
+        assert!(!only);
+        assert!(alias == None);
+
+        let Statement::Delete { table, only, .. } = one("DELETE FROM ONLY public.t") else {
+            panic!("expected DELETE");
+        };
+        assert!(table == written_relation("public.t"));
+        assert!(only);
+
+        // A bare `only` with no name after it is the relation `only`, on every
+        // statement that takes the keyword.
+        for sql in [
+            "UPDATE only SET a = 1",
+            "DELETE FROM only",
+            "SELECT * FROM only",
+            "TABLE only",
+        ] {
+            assert!(
+                crate::parse(sql).is_ok(),
+                "case: {sql} — `only` alone names a relation"
+            );
+        }
+        let Statement::Update { table, only, .. } = one("UPDATE only SET a = 1") else {
+            panic!("expected UPDATE");
+        };
+        assert!(table == crate::ast::RelationRef::bare("only"));
+        assert!(!only);
+    }
+
     /// `TABLE t` is a query body, so it may spell a derived table exactly as
     /// the equivalent `SELECT *` does.
     #[test]
@@ -12667,6 +13019,7 @@ mod tests {
             or_replace,
             temporary,
             columns,
+            options,
         } = one("CREATE VIEW \"Sales View\" AS SELECT id FROM orders WHERE id > 1")
         else {
             panic!("expected CREATE VIEW");
@@ -12676,6 +13029,7 @@ mod tests {
         assert!(!or_replace);
         assert!(!temporary);
         assert_eq!(columns, None);
+        assert2::assert!(options == crate::ast::ViewOptions::default());
 
         // `OR REPLACE`, the storage-class words, and the positional column alias
         // list all reach the same statement. `TEMP`/`TEMPORARY` is carried
@@ -13547,79 +13901,115 @@ mod tests {
         use assert2::assert;
         struct Case {
             sql: &'static str,
-            names: &'static [&'static str],
+            /// Each written name and whether `ONLY` preceded it.
+            targets: &'static [(&'static str, bool)],
             restart_identity: bool,
             cascade: bool,
         }
         // The pgbench -i statement verbatim, the bare no-TABLE form, the
         // identity option tails, and both drop-behaviour spellings. Every name
-        // in the list takes a schema qualifier, not just the first.
+        // in the list takes a schema qualifier, not just the first, and `ONLY`
+        // binds to one name rather than to the whole list.
         let cases = &[
             Case {
                 sql: "truncate table pgbench_accounts, pgbench_branches, pgbench_history, pgbench_tellers",
-                names: &[
-                    "pgbench_accounts",
-                    "pgbench_branches",
-                    "pgbench_history",
-                    "pgbench_tellers",
+                targets: &[
+                    ("pgbench_accounts", false),
+                    ("pgbench_branches", false),
+                    ("pgbench_history", false),
+                    ("pgbench_tellers", false),
                 ],
                 restart_identity: false,
                 cascade: false,
             },
             Case {
                 sql: "TRUNCATE t",
-                names: &["t"],
+                targets: &[("t", false)],
                 restart_identity: false,
                 cascade: false,
             },
             Case {
                 sql: "TRUNCATE TABLE t RESTART IDENTITY",
-                names: &["t"],
+                targets: &[("t", false)],
                 restart_identity: true,
                 cascade: false,
             },
             Case {
                 sql: "TRUNCATE t CONTINUE IDENTITY",
-                names: &["t"],
+                targets: &[("t", false)],
                 restart_identity: false,
                 cascade: false,
             },
             Case {
                 sql: "TRUNCATE t, u CASCADE",
-                names: &["t", "u"],
+                targets: &[("t", false), ("u", false)],
                 restart_identity: false,
                 cascade: true,
             },
             Case {
                 sql: "TRUNCATE t RESTART IDENTITY RESTRICT",
-                names: &["t"],
+                targets: &[("t", false)],
                 restart_identity: true,
                 cascade: false,
             },
             Case {
                 sql: "TRUNCATE t RESTART IDENTITY CASCADE",
-                names: &["t"],
+                targets: &[("t", false)],
                 restart_identity: true,
                 cascade: true,
             },
             Case {
                 sql: "TRUNCATE a, public.b",
-                names: &["a", "public.b"],
+                targets: &[("a", false), ("public.b", false)],
                 restart_identity: false,
                 cascade: false,
             },
             Case {
                 sql: "TRUNCATE public.a, pg_temp.b, c CASCADE",
-                names: &["public.a", "pg_temp.b", "c"],
+                targets: &[("public.a", false), ("pg_temp.b", false), ("c", false)],
                 restart_identity: false,
                 cascade: true,
+            },
+            Case {
+                sql: "TRUNCATE ONLY t",
+                targets: &[("t", true)],
+                restart_identity: false,
+                cascade: false,
+            },
+            Case {
+                sql: "TRUNCATE TABLE ONLY public.a, b, ONLY c CASCADE",
+                targets: &[("public.a", true), ("b", false), ("c", true)],
+                restart_identity: false,
+                cascade: true,
+            },
+            // The trailing `*` is PostgreSQL's explicit spelling of the default,
+            // so it parses to exactly the same statement as the bare name.
+            Case {
+                sql: "TRUNCATE t *",
+                targets: &[("t", false)],
+                restart_identity: false,
+                cascade: false,
+            },
+            // `only` with nothing after it is still the table called `only`.
+            Case {
+                sql: "TRUNCATE only",
+                targets: &[("only", false)],
+                restart_identity: false,
+                cascade: false,
             },
         ];
         for case in cases {
             assert!(
                 one(case.sql)
                     == Statement::Truncate {
-                        names: case.names.iter().copied().map(written_relation).collect(),
+                        targets: case
+                            .targets
+                            .iter()
+                            .map(|&(name, only)| crate::ast::TruncateTarget {
+                                name: written_relation(name),
+                                only,
+                            })
+                            .collect(),
                         restart_identity: case.restart_identity,
                         cascade: case.cascade,
                     },
@@ -13959,6 +14349,7 @@ mod tests {
             one("DELETE FROM t"),
             Statement::Delete {
                 table: "t".into(),
+                only: false,
                 with: None,
                 alias: None,
                 filter: None,

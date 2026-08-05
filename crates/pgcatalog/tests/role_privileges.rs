@@ -4,8 +4,8 @@
 
 use assert2::assert;
 use crabka_pgcatalog::{
-    RoleAttribute, RoleAttributes, create_role_with_memberships_ops, role_can_set,
-    role_has_privs_of,
+    RoleAttribute, RoleAttributes, create_role_with_memberships_ops, grant_role_memberships_ops,
+    revoke_role_memberships_ops, role_can_set, role_has_privs_of,
 };
 use crabka_pgkv::{Kv, MemKv};
 
@@ -214,4 +214,85 @@ fn a_role_reachable_by_two_paths_is_still_reached() {
                 has_privs: true,
             }
     );
+}
+
+/// `GRANT <role> TO <member>` writes the record `CREATE ROLE … IN ROLE` writes,
+/// so a membership made either way reaches both predicates — including through
+/// a role that was itself admitted by the other spelling.
+#[test]
+fn granted_membership_is_the_same_record_as_in_role() {
+    let kv = catalog(&[
+        role("apex", &[]),
+        role("middle", &["apex"]),
+        role("base", &[]),
+    ]);
+    assert!(
+        verdicts(&kv, "base", "apex")
+            == Verdicts {
+                can_set: false,
+                has_privs: false,
+            }
+    );
+
+    let ops = grant_role_memberships_ops(&kv, &["middle".into()], &["base".into()])
+        .expect("grant role ops");
+    kv.write_batch(&ops).expect("catalog batch");
+    // The new edge is traversed exactly like an `IN ROLE` one, so `apex` is
+    // reached transitively through the `IN ROLE` edge above it.
+    assert!(
+        verdicts(&kv, "base", "apex")
+            == Verdicts {
+                can_set: true,
+                has_privs: true,
+            }
+    );
+
+    let ops = revoke_role_memberships_ops(&kv, &["middle".into()], &["base".into()])
+        .expect("revoke role ops");
+    kv.write_batch(&ops).expect("catalog batch");
+    assert!(
+        verdicts(&kv, "base", "apex")
+            == Verdicts {
+                can_set: false,
+                has_privs: false,
+            }
+    );
+}
+
+/// Re-granting an existing membership and revoking one that was never granted
+/// are both no-ops, as they are in `PostgreSQL`; only an unknown role is an
+/// error, on either side of the `TO`.
+#[test]
+fn repeat_grants_are_idempotent_and_unknown_roles_are_refused() {
+    let kv = catalog(&[role("apex", &[]), role("base", &["apex"])]);
+    let roles = ["apex".to_string()];
+    let members = ["base".to_string()];
+
+    let ops = grant_role_memberships_ops(&kv, &roles, &members).expect("regrant");
+    kv.write_batch(&ops).expect("catalog batch");
+    assert!(role_has_privs_of(&kv, "base", "apex").expect("has privs"));
+
+    let ops = revoke_role_memberships_ops(&kv, &roles, &members).expect("revoke");
+    kv.write_batch(&ops).expect("catalog batch");
+    let ops = revoke_role_memberships_ops(&kv, &roles, &members).expect("revoke again");
+    kv.write_batch(&ops).expect("catalog batch");
+    assert!(!role_has_privs_of(&kv, "base", "apex").expect("has privs"));
+
+    for (roles, members) in [
+        (["ghost".to_string()], ["base".to_string()]),
+        (["apex".to_string()], ["ghost".to_string()]),
+    ] {
+        assert!(
+            grant_role_memberships_ops(&kv, &roles, &members)
+                .expect_err("unknown role")
+                .sqlstate()
+                == "42704"
+        );
+        assert!(
+            revoke_role_memberships_ops(&kv, &roles, &members)
+                .expect_err("unknown role")
+                .sqlstate()
+                == "42704"
+        );
+    }
 }

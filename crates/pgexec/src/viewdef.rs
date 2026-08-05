@@ -747,6 +747,7 @@ mod tests {
                 .iter()
                 .map(|name| Column::new(*name, ColumnType::Int4))
                 .collect(),
+            options: crabka_pgcatalog::ViewOptions::default(),
         }
     }
 
