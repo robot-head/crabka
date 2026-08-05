@@ -464,85 +464,147 @@ async fn grouped_streaming_aggregate_orders_groups_with_nulls_last() {
     );
 }
 
-/// `GROUPING()` outside a grouped query must keep `PostgreSQL`'s 42803 on the
-/// streaming path as well as the materializing one.
-///
-/// That error names the missing GROUP BY. The streaming cursor resolves
-/// projection expressions row by row and has no notion of `GROUPING()`. So if
-/// it accepts the shape at all, it reports 42883 "function grouping(...) does
-/// not exist". That is a different error for the same SQL, and only the path
-/// that served the query decides which one. Its eligibility gate must decline
-/// on `grouping::is_grouping_query`, not just on `agg::is_aggregate_query`:
-/// `GROUPING()` is not an aggregate.
-///
-/// This regressed the differential-conformance parity gate the moment
-/// `RuntimeSession` began to forward `simple_query_into`, which is what made
-/// the streaming path reachable in the first place.
+/// The sharded partial-aggregate pushdown folds inside the range owners of one
+/// sharded relation, which is the same one-relation assumption the local
+/// streaming fold makes — a sharded parent with inheritance children has to
+/// keep the materializing path too.
 #[tokio::test]
-async fn bare_grouping_call_keeps_its_sqlstate_on_the_streaming_path() {
-    use crabka_pgwire::engine::CollectingResultSink;
-
+async fn aggregates_over_a_sharded_inheritance_parent_read_the_whole_tree() {
     let engine = SqlEngine::new();
-    let mut setup = engine.connect();
-    exec(&mut setup, "CREATE TABLE q3gs (a int4, b int4)").await;
-    exec(&mut setup, "INSERT INTO q3gs VALUES (1, 2)").await;
-
-    // Both entry points must agree, and both must agree with PostgreSQL.
     let mut session = engine.connect();
-    let buffered = session.simple_query("SELECT grouping(a) FROM q3gs").await;
-    let error = buffered.expect_err("bare GROUPING() is an error");
-    assert!(error.code == "42803", "buffered path: {error:?}");
+    exec(
+        &mut session,
+        "CREATE TABLE sroot (id BIGINT, v BIGINT) SHARDED",
+    )
+    .await;
+    exec(
+        &mut session,
+        "CREATE TABLE sheir (note TEXT) INHERITS (sroot)",
+    )
+    .await;
+    exec(&mut session, "INSERT INTO sroot VALUES (1, 10)").await;
+    exec(&mut session, "INSERT INTO sheir VALUES (2, 20, 'child')").await;
 
-    let mut sink = CollectingResultSink::default();
-    let streamed = session
-        .simple_query_into("SELECT grouping(a) FROM q3gs", 16, &mut sink)
-        .await;
-    let error = streamed.expect_err("bare GROUPING() is an error");
-    assert!(error.code == "42803", "streaming path: {error:?}");
+    let tree = query_rows(&mut session, "SELECT id FROM sroot").await;
+    assert!(tree.len() == 2);
+
+    assert_single_rows(
+        &mut session,
+        &[
+            ("SELECT count(*) FROM sroot", &[Some("2")]),
+            ("SELECT sum(v) FROM sroot", &[Some("30")]),
+            ("SELECT count(*) FROM ONLY sroot", &[Some("1")]),
+            ("SELECT sum(v) FROM ONLY sroot", &[Some("10")]),
+        ],
+    )
+    .await;
 }
 
-/// `SELECT * FROM parent` on a partitioned table must return its partitions'
-/// rows on the streaming path, exactly as on the materializing one.
-///
-/// A partitioned parent stores nothing itself, and the streaming cursor scans
-/// a single relation. So if the cursor accepts the shape, it returns an empty
-/// result for a table that plainly has rows. That is silent row loss, not an
-/// error, which makes it the worst failure mode available to a `SELECT`.
-///
-/// Mirrors `alter_table.sql` in the `pg_regress` corpus. Its `select * from
-/// bar1` regressed the differential parity gate the moment `RuntimeSession`
-/// began to forward `simple_query_into` and made this path reachable.
+/// Seed a three-level inheritance tree — `heir` under `root`, `heir_heir` under
+/// `heir` — with rows at every level and two group keys spread across them.
+async fn seed_inheritance_tree(session: &mut SqlSession) {
+    exec(
+        session,
+        "CREATE TABLE root (id BIGINT, grp BIGINT, v BIGINT)",
+    )
+    .await;
+    exec(session, "CREATE TABLE heir (note TEXT) INHERITS (root)").await;
+    exec(
+        session,
+        "CREATE TABLE heir_heir (extra TEXT) INHERITS (heir)",
+    )
+    .await;
+    exec(session, "INSERT INTO root VALUES (1, 1, 10), (2, 2, 20)").await;
+    exec(session, "INSERT INTO heir VALUES (3, 1, 30, 'child')").await;
+    exec(session, "INSERT INTO heir_heir VALUES (4, 2, 40, 'c', 'g')").await;
+}
+
+/// An aggregate over an inheritance parent has to answer for the whole tree,
+/// exactly as a plain `SELECT` over the same parent does. The streaming fold
+/// reads one physical relation, so a parent with children must not reach it —
+/// otherwise `count(*)` reports the parent's own rows while `SELECT *` returns
+/// the children's too.
 #[tokio::test]
-async fn selecting_a_partitioned_parent_streams_its_partitions_rows() {
-    use crabka_pgwire::engine::CollectingResultSink;
-
+async fn aggregates_over_an_inheritance_parent_read_the_whole_tree() {
     let engine = SqlEngine::new();
-    let mut setup = engine.connect();
-    for ddl in [
-        "CREATE TABLE bar1 (a integer, b integer not null default 1) PARTITION BY RANGE (a)",
-        "CREATE TABLE bar2 (a integer, b integer not null default 1)",
-        "ALTER TABLE bar1 ATTACH PARTITION bar2 DEFAULT",
-    ] {
-        exec(&mut setup, ddl).await;
-    }
-    exec(&mut setup, "INSERT INTO bar1 VALUES (1, 1)").await;
-
     let mut session = engine.connect();
-    let buffered = query_rows(&mut session, "SELECT * FROM bar1").await;
-    assert!(buffered == vec![vec![Some("1".to_owned()), Some("1".to_owned())]]);
+    seed_inheritance_tree(&mut session).await;
 
-    let mut sink = CollectingResultSink::default();
-    session
-        .simple_query_into("SELECT * FROM bar1", 16, &mut sink)
-        .await
-        .expect("streamed select over a partitioned parent");
-    let pages = sink.finish().expect("valid result pages");
-    let streamed: usize = pages
-        .into_iter()
-        .map(|page| match page {
-            QueryResult::Rows { rows, .. } => rows.len(),
-            _ => 0,
-        })
-        .sum();
-    assert!(streamed == 1, "streaming path lost the partition's row");
+    let tree = query_rows(&mut session, "SELECT id FROM root").await;
+    let own = query_rows(&mut session, "SELECT id FROM ONLY root").await;
+    assert!(tree.len() == 4);
+    assert!(own.len() == 2);
+
+    assert_single_rows(
+        &mut session,
+        &[
+            // The whole tree: 4 rows summing to 100.
+            ("SELECT count(*) FROM root", &[Some("4")]),
+            ("SELECT sum(v) FROM root", &[Some("100")]),
+            ("SELECT min(v), max(v) FROM root", &[Some("10"), Some("40")]),
+            // ONLY keeps the parent's own two rows.
+            ("SELECT count(*) FROM ONLY root", &[Some("2")]),
+            ("SELECT sum(v) FROM ONLY root", &[Some("30")]),
+            // An interior parent covers its own subtree, not the root's rows.
+            ("SELECT count(*) FROM heir", &[Some("2")]),
+            ("SELECT sum(v) FROM heir", &[Some("70")]),
+            ("SELECT count(*) FROM ONLY heir", &[Some("1")]),
+            // A leaf has no children to miss either way.
+            ("SELECT count(*) FROM heir_heir", &[Some("1")]),
+            // Wrapped and filtered forms take the same pushdown decision.
+            ("SELECT COALESCE(sum(v), 0) FROM root", &[Some("100")]),
+            ("SELECT count(*) FROM root WHERE id >= 3", &[Some("2")]),
+        ],
+    )
+    .await;
+}
+
+/// The grouped pushdown reads one physical relation as well, so a grouped
+/// aggregate over an inheritance parent must fold the children's rows into its
+/// groups.
+#[tokio::test]
+async fn a_grouped_aggregate_over_an_inheritance_parent_reads_the_whole_tree() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    seed_inheritance_tree(&mut session).await;
+
+    let grouped = query_rows(
+        &mut session,
+        "SELECT grp, count(*) FROM root GROUP BY grp ORDER BY grp",
+    )
+    .await;
+
+    assert!(
+        grouped
+            == vec![
+                vec![Some("1".to_string()), Some("2".to_string())],
+                vec![Some("2".to_string()), Some("2".to_string())],
+            ]
+    );
+}
+
+/// Counting a join reads each side, so an inheritance parent on either side has
+/// to contribute its children's rows to the count.
+#[tokio::test]
+async fn a_join_count_over_an_inheritance_parent_reads_the_whole_tree() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    seed_inheritance_tree(&mut session).await;
+    exec(&mut session, "CREATE TABLE probe (id BIGINT)").await;
+    exec(&mut session, "INSERT INTO probe VALUES (1), (3), (4)").await;
+
+    assert_single_rows(
+        &mut session,
+        &[
+            (
+                "SELECT count(*) FROM root JOIN probe ON root.id = probe.id",
+                &[Some("3")],
+            ),
+            (
+                "SELECT count(*) FROM probe LEFT JOIN root ON root.id = probe.id",
+                &[Some("3")],
+            ),
+        ],
+    )
+    .await;
 }

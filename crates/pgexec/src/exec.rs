@@ -12681,6 +12681,7 @@ fn single_local_base_table(
     let [
         crabka_pgparser::ast::TableExpr::Table {
             name,
+            only,
             alias,
             columns: None,
             sample: None,
@@ -12712,11 +12713,30 @@ fn single_local_base_table(
     if table.sharded
         || table.foreign.is_some()
         || crate::partition::is_partitioned(catalog_kv, name)?
+        || reads_inheritance_children(catalog_kv, *only, name)?
     {
         return Ok(None);
     }
     let qualifier = alias.clone().unwrap_or_else(|| table.name.name.clone());
     Ok(Some((table, qualifier)))
+}
+
+/// Whether reading `name` here means reading rows this relation does not
+/// physically hold — an inheritance parent named without `ONLY`.
+///
+/// The aggregate pushdowns fold over exactly one relation's row space, so a
+/// parent whose children hold rows would report its own rows only, while a
+/// plain `SELECT` over the same FROM returns the whole tree. `ONLY` asks for
+/// just the parent's rows, which is what the pushdown already computes.
+fn reads_inheritance_children(
+    catalog_kv: &dyn Kv,
+    only: bool,
+    name: &crabka_pgcatalog::RelationName,
+) -> Result<bool, ExecError> {
+    if only {
+        return Ok(false);
+    }
+    Ok(!crate::inheritance::children_of(catalog_kv, name)?.is_empty())
 }
 
 /// Match a FROM that is exactly one sharded base table.
@@ -12734,6 +12754,7 @@ fn single_sharded_base_table(
     let [
         crabka_pgparser::ast::TableExpr::Table {
             name,
+            only,
             alias,
             columns: None,
             sample: None,
@@ -12760,7 +12781,10 @@ fn single_sharded_base_table(
         Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    if !table.sharded || table.foreign.is_some() {
+    if !table.sharded
+        || table.foreign.is_some()
+        || reads_inheritance_children(catalog_kv, *only, name)?
+    {
         return Ok(None);
     }
     let qualifier = alias.clone().unwrap_or_else(|| table.name.name.clone());
