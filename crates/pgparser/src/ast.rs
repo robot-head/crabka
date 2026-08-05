@@ -135,6 +135,72 @@ pub enum AlterTriggerAction {
     DependsOnExtension { extension: String, dependent: bool },
 }
 
+/// A row-security policy qual, kept both parsed and exactly as written.
+///
+/// The catalog stores the source text, because `pg_policy.polqual` and
+/// `pg_get_expr` have to hand it back; the executor needs the parsed form to
+/// evaluate it. Capturing both here — the way [`CreateTrigger::when`] and
+/// [`CreateTrigger::when_source`] do — means the two can never disagree about
+/// what the user wrote.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PolicyQual {
+    pub expr: Expr,
+    /// Exact source of the qual, without its enclosing parentheses.
+    pub source: String,
+}
+
+/// The command a `CREATE POLICY … FOR <cmd>` names.
+///
+/// `ALL` is not a shorthand for the other four: `PostgreSQL` applies an `ALL`
+/// policy to every command *in addition to* any command-specific policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyCommand {
+    All,
+    Select,
+    Insert,
+    Update,
+    Delete,
+}
+
+/// `CREATE POLICY name ON table [AS {PERMISSIVE|RESTRICTIVE}] [FOR cmd]
+/// [TO role[, …]] [USING (expr)] [WITH CHECK (expr)]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreatePolicy {
+    pub name: String,
+    pub table: RelationRef,
+    /// `AS PERMISSIVE` (the default) ORs into a row's visibility; `AS
+    /// RESTRICTIVE` ANDs onto it and can only ever remove rows.
+    pub permissive: bool,
+    pub command: PolicyCommand,
+    /// The roles named by `TO`. **Empty means `PUBLIC`** — every role — which
+    /// is also how the catalog encodes it.
+    pub roles: Vec<String>,
+    pub using: Option<PolicyQual>,
+    pub with_check: Option<PolicyQual>,
+}
+
+/// The actions `ALTER POLICY` supports in `PostgreSQL` 18.
+///
+/// `PostgreSQL` has no syntax for changing a policy's command or its
+/// permissive/restrictive kind after creation, and none for *removing* a qual,
+/// so neither is representable here.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AlterPolicyAction {
+    RenameTo(String),
+    /// `[TO roles] [USING (expr)] [WITH CHECK (expr)]`.
+    Change(Box<AlterPolicyChange>),
+}
+
+/// The fields one `ALTER POLICY … TO/USING/WITH CHECK` rewrites. `None` leaves
+/// the stored value alone; an empty `roles` vector is the meaningful value
+/// `TO PUBLIC`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlterPolicyChange {
+    pub roles: Option<Vec<String>>,
+    pub using: Option<PolicyQual>,
+    pub with_check: Option<PolicyQual>,
+}
+
 /// Events supported by `CREATE EVENT TRIGGER` in `PostgreSQL` 18.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventTriggerEvent {
@@ -213,6 +279,18 @@ pub enum Statement {
         action: AlterTriggerAction,
     },
     DropTrigger {
+        name: String,
+        table: RelationRef,
+        if_exists: bool,
+        cascade: bool,
+    },
+    CreatePolicy(CreatePolicy),
+    AlterPolicy {
+        name: String,
+        table: RelationRef,
+        action: AlterPolicyAction,
+    },
+    DropPolicy {
         name: String,
         table: RelationRef,
         if_exists: bool,
@@ -1691,6 +1769,14 @@ pub enum AlterTableAction {
         concurrently: bool,
         finalize: bool,
     },
+    /// `ENABLE ROW LEVEL SECURITY`.
+    EnableRowSecurity,
+    /// `DISABLE ROW LEVEL SECURITY`.
+    DisableRowSecurity,
+    /// `FORCE ROW LEVEL SECURITY` — the owner stops bypassing its own policies.
+    ForceRowSecurity,
+    /// `NO FORCE ROW LEVEL SECURITY`.
+    NoForceRowSecurity,
     /// `SET SCHEMA name`, `SET {LOGGED|UNLOGGED}`,
     /// `CLUSTER ON`, `SET WITHOUT CLUSTER`, `{EN,DIS}ABLE TRIGGER`, … — the
     /// subcommands that parse but have no counterpart in Crabka's storage

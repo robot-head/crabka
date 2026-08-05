@@ -137,6 +137,7 @@ const PG_CATALOG_RELATIONS: &[&str] = &[
     "pg_language",
     "pg_locks",
     "pg_partitioned_table",
+    "pg_policies",
     "pg_policy",
     "pg_opclass",
     "pg_opfamily",
@@ -195,6 +196,7 @@ static RELATION_NAMES: &[&str] = &[
     "pg_language",
     "pg_locks",
     "pg_partitioned_table",
+    "pg_policies",
     "pg_policy",
     "pg_opclass",
     "pg_opfamily",
@@ -286,6 +288,7 @@ fn system_view_oid(name: &str) -> i32 {
         "pg_tables" => 120_005,
         "pg_views" => 120_006,
         "pg_shmem_allocations_numa" => 120_007,
+        "pg_policies" => 120_008,
         "information_schema.applicable_roles" => 120_010,
         "information_schema.column_privileges" => 120_011,
         "information_schema.constraint_column_usage" => 120_012,
@@ -641,6 +644,8 @@ pub(crate) fn rows(
             "libnuma initialization failed or NUMA is not supported on this platform".into(),
         )),
         "pg_stat_activity" => Ok(pg_stat_activity_rows(backend_pid)),
+        "pg_policies" => pg_policies_rows(kv),
+        "pg_policy" => pg_policy_rows(kv),
         "pg_tables" => pg_tables_rows(kv),
         "pg_tablespace" => pg_tablespace_rows(kv),
         "pg_trigger" => pg_trigger_rows(kv),
@@ -1167,6 +1172,19 @@ fn pg_catalog_columns_rest(name: &str) -> Vec<Column> {
             ("laninline", Int4),
             ("lanvalidator", Int4),
             ("lanacl", ColumnType::Array(ElemType::Text)),
+        ]),
+        // PostgreSQL's `pg_policies` view, in its column order. `polroles` is
+        // an OID array in the catalog and a name array here, which is the whole
+        // point of the view.
+        "pg_policies" => cols(&[
+            ("schemaname", Text),
+            ("tablename", Text),
+            ("policyname", Text),
+            ("permissive", Text),
+            ("roles", ColumnType::Array(ElemType::Text)),
+            ("cmd", Text),
+            ("qual", Text),
+            ("with_check", Text),
         ]),
         "pg_policy" => cols(&[
             ("oid", Int4),
@@ -2350,6 +2368,95 @@ fn pg_indexes_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         .collect()
 }
 
+/// `pg_policy`, PostgreSQL's own catalog: one row per policy, roles as OIDs.
+///
+/// A policy's `TO PUBLIC` is the zero OID in `polroles`, not an empty array —
+/// reading an empty array as "no role matches" is the inversion the whole
+/// default-deny fold exists to avoid, so the projection spells the convention
+/// out the way PostgreSQL stores it.
+fn pg_policy_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let role_oids = role_oids(kv)?;
+    let relation_oids = policy_relation_oids(kv)?;
+    crabka_pgcatalog::policy::list_policies(kv)?
+        .into_iter()
+        .map(|policy| {
+            let roles = if policy.applies_to_public() {
+                vec![Datum::Int4(0)]
+            } else {
+                policy
+                    .roles
+                    .iter()
+                    .map(|role| Datum::Int4(role_oids.get(role).copied().unwrap_or(0)))
+                    .collect()
+            };
+            Ok(vec![
+                int(i32::try_from(policy.oid).unwrap_or(0)),
+                text(&policy.name),
+                int(relation_oids
+                    .get(&policy.table_id)
+                    .map_or(0, |(oid, _)| *oid)),
+                text(&policy.command.catalog_code().to_string()),
+                Datum::Bool(policy.permissive),
+                Datum::Array(crabka_pgtypes::ArrayValue::new(ElemType::Int4, roles)),
+                policy.using.as_deref().map_or(Datum::Null, text),
+                policy.with_check.as_deref().map_or(Datum::Null, text),
+            ])
+        })
+        .collect()
+}
+
+/// `pg_policies`, the readable view over `pg_policy`: relation and role names
+/// instead of OIDs, and the command spelled as a word.
+fn pg_policies_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let relation_oids = policy_relation_oids(kv)?;
+    crabka_pgcatalog::policy::list_policies(kv)?
+        .into_iter()
+        .map(|policy| {
+            let relation = relation_oids.get(&policy.table_id).map(|(_, name)| name);
+            let roles = policy
+                .roles
+                .iter()
+                .map(|role| text(role))
+                .collect::<Vec<_>>();
+            Ok(vec![
+                relation.map_or(Datum::Null, |name| text(&name.schema)),
+                relation.map_or(Datum::Null, |name| text(&name.name)),
+                text(&policy.name),
+                text(if policy.permissive {
+                    "PERMISSIVE"
+                } else {
+                    "RESTRICTIVE"
+                }),
+                // PostgreSQL renders `TO PUBLIC` as the one-element array
+                // `{public}` here, not as an empty array.
+                Datum::Array(crabka_pgtypes::ArrayValue::new(
+                    ElemType::Text,
+                    if roles.is_empty() {
+                        vec![text("public")]
+                    } else {
+                        roles
+                    },
+                )),
+                text(policy.command.keyword()),
+                policy.using.as_deref().map_or(Datum::Null, text),
+                policy.with_check.as_deref().map_or(Datum::Null, text),
+            ])
+        })
+        .collect()
+}
+
+/// Every relation that can carry a policy, by table id, with the `pg_class` oid
+/// and name each projection needs. One catalog listing rather than one lookup
+/// per policy.
+fn policy_relation_oids(
+    kv: &dyn Kv,
+) -> Result<BTreeMap<crabka_pgcatalog::TableId, (i32, crabka_pgcatalog::RelationName)>, ExecError> {
+    crabka_pgcatalog::list_tables(kv)?
+        .into_iter()
+        .map(|table| Ok((table.id, (table_relation_oid(table.id)?, table.name))))
+        .collect()
+}
+
 fn pg_tables_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let indexed = crabka_pgcatalog::list_indexes(kv)?
         .into_iter()
@@ -2367,7 +2474,7 @@ fn pg_tables_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 Datum::Bool(indexed.contains(&table.name)),
                 Datum::Bool(false),
                 Datum::Bool(false),
-                Datum::Bool(false),
+                Datum::Bool(table.row_security),
             ]
         })
         .collect())

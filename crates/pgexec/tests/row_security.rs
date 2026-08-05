@@ -1,16 +1,16 @@
-//! Row-level security, wired into every read path and dormant.
+//! Row-level security, reached through the catalog rather than through SQL.
 //!
-//! No SQL can enable row security yet — `ALTER TABLE … ENABLE ROW LEVEL
-//! SECURITY` and `CREATE POLICY` are still parse errors — so these tests reach
-//! the catalog directly through the seam the enforcement path reads:
+//! These were written while no statement could enable row security, so they
+//! reach the catalog directly through the seam the enforcement path reads:
 //! `crabka_pgcatalog::policy` for the policies and
 //! `crabka_pgcatalog::set_row_security_ops` for the relation's flag. The engine
 //! is built over a store the test also holds, so a policy written this way is
 //! exactly the policy the executor sees.
 //!
-//! The first test is the one that matters most. Everything else here describes
-//! behaviour that cannot happen yet; that one pins the behaviour that *does*
-//! happen — every existing query, unchanged.
+//! They are kept as written: the first two pin that a *stored* policy on a
+//! relation whose flag is clear changes nothing, which is the property every
+//! relation in every other test in the repository depends on. The SQL surface
+//! is covered by `row_security_sql.rs`.
 
 use std::sync::Arc;
 
@@ -432,31 +432,48 @@ async fn a_policy_qual_that_probes_privileges_is_refused() {
     assert!(message.contains("has_table_privilege"));
 }
 
-/// The SQL surface is still exactly where slice 2 left it: nothing can turn row
-/// security on, which is what makes every test above describe a state a user
-/// cannot reach.
+/// The SQL surface reaches the flag now, and reaches it through the statements
+/// `PostgreSQL` spells it with — the whole point of this slice.
 #[tokio::test]
-async fn no_statement_can_enable_row_security() {
+async fn the_four_row_security_subcommands_move_the_stored_flags() {
+    struct Case {
+        sql: &'static str,
+        row_security: bool,
+        force: bool,
+    }
+    let cases = [
+        Case {
+            sql: "ALTER TABLE document ENABLE ROW LEVEL SECURITY",
+            row_security: true,
+            force: false,
+        },
+        Case {
+            sql: "ALTER TABLE document FORCE ROW LEVEL SECURITY",
+            row_security: true,
+            force: true,
+        },
+        Case {
+            sql: "ALTER TABLE document NO FORCE ROW LEVEL SECURITY",
+            row_security: true,
+            force: false,
+        },
+        Case {
+            sql: "ALTER TABLE document DISABLE ROW LEVEL SECURITY",
+            row_security: false,
+            force: false,
+        },
+    ];
     let fixture = fixture();
     let mut session = fixture.engine.connect();
     run(&mut session, "CREATE TABLE document (id int4)").await;
-    let mut refusals = Vec::new();
-    for sql in [
-        "ALTER TABLE document ENABLE ROW LEVEL SECURITY",
-        "ALTER TABLE document FORCE ROW LEVEL SECURITY",
-        "CREATE POLICY p ON document USING (true)",
-    ] {
-        refusals.push(error_of(&mut session, sql).await.0);
+    for case in cases {
+        run(&mut session, case.sql).await;
+        let table = crabka_pgcatalog::get_table(
+            fixture.kv.as_ref(),
+            &crabka_pgcatalog::RelationName::public("document"),
+        )
+        .expect("relation exists");
+        assert!(table.row_security == case.row_security, "{}", case.sql);
+        assert!(table.force_row_security == case.force, "{}", case.sql);
     }
-    // The exact codes are whatever the unchanged grammar already produced —
-    // `FORCE` lands in the `ALTER TABLE` catch-all's 0A000, the other two are
-    // outright syntax errors. What matters is that all three still refuse.
-    assert!(refusals == vec!["42601", "0A000", "42601"], "{refusals:?}");
-    let row_security = crabka_pgcatalog::get_table(
-        fixture.kv.as_ref(),
-        &crabka_pgcatalog::RelationName::public("document"),
-    )
-    .expect("relation exists")
-    .row_security;
-    assert!(!row_security);
 }

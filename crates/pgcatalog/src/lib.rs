@@ -2342,9 +2342,7 @@ pub fn put_index_ops(index: &Index) -> Vec<WriteOp> {
 pub fn replace_table_schema_ops(
     kv: &dyn Kv,
     name: &RelationName,
-    columns: &[Column],
-    checks: &[CheckConstraint],
-    owner: &str,
+    table: &Table,
 ) -> Result<Vec<WriteOp>, CatalogError> {
     let bytes = kv
         .get(&catalog_key(name))?
@@ -2352,7 +2350,24 @@ pub fn replace_table_schema_ops(
     let (id, _, options, _, foreign, _) = deserialize_schema(&bytes)?;
     Ok(vec![WriteOp::Put {
         key: catalog_key(name),
-        value: serialize_schema(id, columns, options, owner, foreign.as_ref(), checks),
+        value: serialize_schema(
+            id,
+            &table.columns,
+            TableOptions {
+                // The row-security flags come from the working relation rather
+                // than from storage: `ALTER TABLE … ENABLE ROW LEVEL SECURITY`
+                // folds into the same `Table` every other subcommand edits, and
+                // one write of the schema record has to carry all of them.
+                // Reading them back from storage here would quietly undo the
+                // subcommand.
+                row_security: table.row_security,
+                force_row_security: table.force_row_security,
+                ..options
+            },
+            &table.owner,
+            foreign.as_ref(),
+            &table.checks,
+        ),
     }])
 }
 
@@ -2363,9 +2378,6 @@ pub fn replace_table_schema_ops(
 /// LEVEL SECURITY` alone means nothing, and a caller that could move one
 /// without the other could leave a relation forced-but-not-enabled, which reads
 /// as "unprotected".
-///
-/// Nothing in the SQL surface reaches this yet — `ALTER TABLE … ENABLE ROW
-/// LEVEL SECURITY` is still a parse error, and enforcement is a later slice.
 ///
 /// # Errors
 ///
@@ -5387,8 +5399,16 @@ mod tests {
             expr: "id > 0".into(),
             validated: true,
         }];
-        let ops = replace_table_schema_ops(&kv, &rel("t"), &columns, &checks, &before.owner)
-            .expect("replace ops");
+        let ops = replace_table_schema_ops(
+            &kv,
+            &rel("t"),
+            &Table {
+                columns: columns.clone(),
+                checks: checks.clone(),
+                ..before.clone()
+            },
+        )
+        .expect("replace ops");
         kv.write_batch(&ops).expect("write");
 
         let after = get_table(&kv, &rel("t")).expect("table");

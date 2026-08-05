@@ -257,6 +257,22 @@ pub enum ExecError {
     /// that would have applied (42501). `PostgreSQL` fails the statement rather
     /// than quietly returning a filtered result the caller did not ask for.
     RowSecurityRefused(String),
+    /// A row a statement wrote does not satisfy the relation's row-security
+    /// policies (42501).
+    RowSecurityCheckViolation {
+        relation: String,
+        /// The policy that rejected the row, when exactly one produced the
+        /// qual. `PostgreSQL` leaves the name out of a violation folded from
+        /// several policies.
+        policy: Option<String>,
+        /// The qual came from the policy's `USING` clause, because the policy
+        /// declares no `WITH CHECK` of its own.
+        using_expression: bool,
+        /// The row was found by the statement rather than composed by it — the
+        /// conflicting row an `ON CONFLICT DO UPDATE` is about to change.
+        /// `PostgreSQL` calls that one the *target* row.
+        target_row: bool,
+    },
     /// A row-security policy qual reads the relation its own policy protects
     /// (42P17). The qual is user-supplied SQL, so following the recursion would
     /// be a remotely triggerable stack overflow.
@@ -792,6 +808,28 @@ impl ExecError {
                     "query would be affected by row-level security policy for table \"{relation}\""
                 ),
             ),
+            ExecError::RowSecurityCheckViolation {
+                relation,
+                policy,
+                using_expression,
+                target_row,
+            } => {
+                let subject = if target_row { "target" } else { "new" };
+                let named = policy
+                    .as_ref()
+                    .map_or_else(String::new, |name| format!(" \"{name}\""));
+                let using = if using_expression {
+                    " (USING expression)"
+                } else {
+                    ""
+                };
+                PgError::error(
+                    "42501",
+                    format!(
+                        "{subject} row violates row-level security policy{named}{using} for table \"{relation}\""
+                    ),
+                )
+            }
             ExecError::PolicyRecursion(relation) => PgError::error(
                 "42P17",
                 format!("infinite recursion detected in policy for relation \"{relation}\""),

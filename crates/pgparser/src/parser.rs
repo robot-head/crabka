@@ -3049,6 +3049,7 @@ impl Parser {
                     Token::Ident(s) if s == "trigger" => {
                         emitted(I::DropTrigger, self.drop_trigger())
                     }
+                    Token::Ident(s) if s == "policy" => emitted(I::DropPolicy, self.drop_policy()),
                     Token::Keyword(Keyword::Foreign) => {
                         // DROP FOREIGN ... — look at the third token to distinguish
                         // DROP FOREIGN DATA WRAPPER from DROP FOREIGN TABLE.
@@ -3203,6 +3204,7 @@ impl Parser {
                     emitted(I::AlterEventTrigger, self.alter_event_trigger())
                 }
                 Token::Ident(s) if s == "trigger" => emitted(I::AlterTrigger, self.alter_trigger()),
+                Token::Ident(s) if s == "policy" => emitted(I::AlterPolicy, self.alter_policy()),
                 Token::Ident(s) if s == "function" || s == "procedure" || s == "routine" => {
                     self.alter_routine_statement()
                 }
@@ -3394,6 +3396,14 @@ impl Parser {
 
     fn alter_table_action(&mut self) -> Result<crate::ast::AlterTableAction, ParseError> {
         use crate::ast::{AlterTableAction, ColumnDef};
+
+        // Must precede the ENABLE/DISABLE TRIGGER production and the
+        // `consume_unsupported_subcommand` catch-all at the end: both would
+        // otherwise swallow these, and the catch-all turns a security-relevant
+        // subcommand into a silent 0A000.
+        if let Some(action) = self.row_security_action()? {
+            return Ok(action);
+        }
 
         if self.peek_ident_eq("enable") || self.peek_ident_eq("disable") {
             let enabled = self.eat_ident_eq("enable");
@@ -3595,7 +3605,41 @@ impl Parser {
         Ok(AlterTableAction::Unsupported(label))
     }
 
-    /// `TYPE <type> [COLLATE c] [USING <expr>]`. The `TYPE` (or `SET DATA
+    /// `{ENABLE | DISABLE | FORCE | NO FORCE} ROW LEVEL SECURITY`, or `None`
+    /// when the subcommand ahead is something else.
+    ///
+    /// Every branch commits only after it has seen the whole `ROW LEVEL
+    /// SECURITY` tail, so `ENABLE TRIGGER` and `ENABLE ALWAYS RULE` fall
+    /// through untouched.
+    fn row_security_action(&mut self) -> Result<Option<crate::ast::AlterTableAction>, ParseError> {
+        use crate::ast::AlterTableAction;
+
+        let action = if self.peek_ident_eq("enable") && self.peek2_ident_eq("row") {
+            AlterTableAction::EnableRowSecurity
+        } else if self.peek_ident_eq("disable") && self.peek2_ident_eq("row") {
+            AlterTableAction::DisableRowSecurity
+        } else if self.peek_ident_eq("force") && self.peek2_ident_eq("row") {
+            AlterTableAction::ForceRowSecurity
+        } else if self.peek_ident_eq("no")
+            && matches!(self.peek2(), Token::Ident(word) if word.eq_ignore_ascii_case("force"))
+        {
+            self.bump();
+            AlterTableAction::NoForceRowSecurity
+        } else {
+            return Ok(None);
+        };
+        // The lead-in word (and, for NO FORCE, the second one) is consumed here
+        // rather than above so a failed match leaves the cursor where it was.
+        self.bump();
+        self.expect_ident_eq("row")?;
+        // `LEVEL` is a keyword token (isolation levels), so both spellings have
+        // to be accepted here.
+        self.expect_keyword_or_ident(Keyword::Level, "level")?;
+        self.expect_ident_eq("security")?;
+        Ok(Some(action))
+    }
+
+    /// `TYPE <type> [COLLATE c] [USING <expr>]` — the `TYPE` (or `SET DATA
     /// TYPE`) lead-in is already consumed.
     fn alter_column_type(
         &mut self,
@@ -4391,6 +4435,9 @@ impl Parser {
             }
             Token::Ident(word) if word == "trigger" || word == "constraint" => {
                 emitted(I::CreateTrigger, self.create_trigger())
+            }
+            Token::Ident(word) if word == "policy" => {
+                emitted(I::CreatePolicy, self.create_policy())
             }
             Token::Keyword(Keyword::Or)
                 if matches!(self.peek_n(self.create_object_keyword_offset() + 1), Token::Ident(replace) if replace == "replace")
@@ -7211,6 +7258,193 @@ impl Parser {
         }))
     }
 
+    /// A parenthesised policy qual, captured both parsed and as written.
+    ///
+    /// The catalog stores the source text — `pg_policy.polqual` has to hand it
+    /// back — and the enforcement path evaluates the parsed form, so both come
+    /// out of one production rather than the text being re-derived later.
+    fn policy_qual(&mut self) -> Result<crate::ast::PolicyQual, ParseError> {
+        self.expect(&Token::LParen)?;
+        let start = self.peek_pos();
+        let expr = self.expr(0)?;
+        let end = self.peek_pos();
+        self.expect(&Token::RParen)?;
+        Ok(crate::ast::PolicyQual {
+            expr,
+            source: self.source[start..end].trim().to_string(),
+        })
+    }
+
+    /// `TO role[, …]`. `PUBLIC` collapses to the empty list, which is how both
+    /// `PostgreSQL` and the catalog encode "every role".
+    fn policy_roles(&mut self) -> Result<Vec<String>, ParseError> {
+        let named = self.object_name_list()?;
+        if named.iter().any(|role| role == "public") {
+            return Ok(Vec::new());
+        }
+        Ok(named)
+    }
+
+    /// `[USING (expr)] [WITH CHECK (expr)]`, in either order — `PostgreSQL`
+    /// fixes the order, but accepting both costs nothing and neither clause is
+    /// ambiguous.
+    fn policy_quals(
+        &mut self,
+    ) -> Result<
+        (
+            Option<crate::ast::PolicyQual>,
+            Option<crate::ast::PolicyQual>,
+        ),
+        ParseError,
+    > {
+        let mut using = None;
+        let mut with_check = None;
+        loop {
+            if using.is_none() && self.eat_keyword(Keyword::Using) {
+                using = Some(self.policy_qual()?);
+                continue;
+            }
+            if with_check.is_none() && self.eat_keyword(Keyword::With) {
+                self.expect_ident_eq("check")?;
+                with_check = Some(self.policy_qual()?);
+                continue;
+            }
+            break;
+        }
+        Ok((using, with_check))
+    }
+
+    /// `CREATE POLICY name ON table [AS {PERMISSIVE|RESTRICTIVE}]
+    /// [FOR {ALL|SELECT|INSERT|UPDATE|DELETE}] [TO role[, …]]
+    /// [USING (expr)] [WITH CHECK (expr)]`.
+    fn create_policy(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::{CreatePolicy, PolicyCommand, Statement};
+
+        self.expect(&Token::Keyword(Keyword::Create))?;
+        self.expect_ident_eq("policy")?;
+        let name = self.expect_object_name()?;
+        self.expect(&Token::Keyword(Keyword::On))?;
+        let table = self.relation_ref()?;
+
+        let permissive = if self.eat_keyword(Keyword::As) {
+            let position = self.peek_pos();
+            let kind = self.expect_ident()?;
+            match kind.to_ascii_lowercase().as_str() {
+                "permissive" => true,
+                "restrictive" => false,
+                other => {
+                    return Err(ParseError::new(
+                        format!("unrecognized row security option \"{other}\""),
+                        position,
+                    ));
+                }
+            }
+        } else {
+            true
+        };
+
+        let command = if self.eat_keyword(Keyword::For) {
+            self.policy_command()?
+        } else {
+            PolicyCommand::All
+        };
+
+        let roles = if self.eat_keyword(Keyword::To) {
+            self.policy_roles()?
+        } else {
+            Vec::new()
+        };
+
+        let (using, with_check) = self.policy_quals()?;
+        Ok(Statement::CreatePolicy(CreatePolicy {
+            name,
+            table,
+            permissive,
+            command,
+            roles,
+            using,
+            with_check,
+        }))
+    }
+
+    fn policy_command(&mut self) -> Result<crate::ast::PolicyCommand, ParseError> {
+        use crate::ast::PolicyCommand;
+        let position = self.peek_pos();
+        if self.eat_keyword(Keyword::All) {
+            return Ok(PolicyCommand::All);
+        }
+        if self.eat_keyword(Keyword::Select) {
+            return Ok(PolicyCommand::Select);
+        }
+        if self.eat_keyword(Keyword::Insert) {
+            return Ok(PolicyCommand::Insert);
+        }
+        if self.eat_keyword(Keyword::Update) {
+            return Ok(PolicyCommand::Update);
+        }
+        if self.eat_keyword(Keyword::Delete) {
+            return Ok(PolicyCommand::Delete);
+        }
+        Err(ParseError::new(
+            format!(
+                "unrecognized policy command, expected ALL, SELECT, INSERT, UPDATE or DELETE, found {:?}",
+                self.peek()
+            ),
+            position,
+        ))
+    }
+
+    /// `ALTER POLICY name ON table {RENAME TO new | [TO roles] [USING (e)]
+    /// [WITH CHECK (e)]}`.
+    fn alter_policy(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::{AlterPolicyAction, AlterPolicyChange, Statement};
+
+        self.expect_ident_eq("alter")?;
+        self.expect_ident_eq("policy")?;
+        let name = self.expect_object_name()?;
+        self.expect(&Token::Keyword(Keyword::On))?;
+        let table = self.relation_ref()?;
+        let action = if self.eat_ident_eq("rename") {
+            self.expect_keyword_or_ident(Keyword::To, "to")?;
+            AlterPolicyAction::RenameTo(self.expect_object_name()?)
+        } else {
+            let roles = if self.eat_keyword(Keyword::To) {
+                Some(self.policy_roles()?)
+            } else {
+                None
+            };
+            let (using, with_check) = self.policy_quals()?;
+            AlterPolicyAction::Change(Box::new(AlterPolicyChange {
+                roles,
+                using,
+                with_check,
+            }))
+        };
+        Ok(Statement::AlterPolicy {
+            name,
+            table,
+            action,
+        })
+    }
+
+    /// `DROP POLICY [IF EXISTS] name ON table [CASCADE | RESTRICT]`.
+    fn drop_policy(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::Statement;
+        self.expect(&Token::Keyword(Keyword::Drop))?;
+        self.expect_ident_eq("policy")?;
+        let if_exists = self.eat_if_exists()?;
+        let name = self.expect_object_name()?;
+        self.expect(&Token::Keyword(Keyword::On))?;
+        let table = self.relation_ref()?;
+        let cascade = self.eat_drop_behavior();
+        Ok(Statement::DropPolicy {
+            name,
+            table,
+            if_exists,
+            cascade,
+        })
+    }
+
     fn alter_trigger(&mut self) -> Result<crate::ast::Statement, ParseError> {
         use crate::ast::{AlterTriggerAction, Statement};
         self.expect_ident_eq("alter")?;
@@ -9480,6 +9714,11 @@ impl Parser {
 
     /// Is the current token the identifier `want` (case-insensitively)? The
     /// non-consuming counterpart of [`Self::eat_ident_eq`].
+    /// Whether the token *after* the next one is the identifier `want`.
+    fn peek2_ident_eq(&self, want: &str) -> bool {
+        matches!(self.peek2(), Token::Ident(word) if word.eq_ignore_ascii_case(want))
+    }
+
     fn peek_ident_eq(&self, want: &str) -> bool {
         matches!(self.peek(), Token::Ident(s) if s.eq_ignore_ascii_case(want))
     }

@@ -2248,6 +2248,9 @@ fn establishes_transaction_activity(stmt: &Statement) -> bool {
         | Statement::CreateTrigger(_)
         | Statement::AlterTrigger { .. }
         | Statement::DropTrigger { .. }
+        | Statement::CreatePolicy(_)
+        | Statement::AlterPolicy { .. }
+        | Statement::DropPolicy { .. }
         | Statement::CreateEventTrigger(_)
         | Statement::AlterEventTrigger { .. }
         | Statement::DropEventTrigger { .. }
@@ -6077,6 +6080,9 @@ impl SqlSession {
             | Statement::CreateTrigger(_)
             | Statement::AlterTrigger { .. }
             | Statement::DropTrigger { .. }
+            | Statement::CreatePolicy(_)
+            | Statement::AlterPolicy { .. }
+            | Statement::DropPolicy { .. }
             | Statement::CreateEventTrigger(_)
             | Statement::AlterEventTrigger { .. }
             | Statement::DropEventTrigger { .. }
@@ -6121,21 +6127,8 @@ impl SqlSession {
             Statement::Set { name, value, .. }
                 if name == crabka_pgparser::ast::COPY_FROM_STDIN_SENTINEL =>
             {
-                let copy = decode_copy_stmt(value).map_err(ExecError::Remote)?;
-                match &copy.source {
-                    CopySource::Stdin => Err(ExecError::Unsupported(
-                        "COPY FROM STDIN requires pgwire CopyData messages".into(),
-                    )),
-                    CopySource::File(path) => {
-                        let data = tokio::fs::read(path).await.map_err(|error| {
-                            ExecError::Remote(PgError::error(
-                                "58P01",
-                                format!("could not open file \"{path}\" for reading: {error}"),
-                            ))
-                        })?;
-                        self.run_copy_in(&copy, vec![bytes::Bytes::from(data)]).await
-                    }
-                }
+                self.run_copy_from(decode_copy_stmt(value).map_err(ExecError::Remote)?)
+                    .await
             }
             Statement::Query(q) if q.locking.is_some() => self.run_query_locking(q).await,
             // A `WITH` list that modifies data makes the whole statement a
@@ -8801,6 +8794,35 @@ impl SqlSession {
         }
     }
 
+    /// `COPY … FROM` reaching the executor rather than the wire's copy-in mode:
+    /// a file source, or a `STDIN` source on a path that cannot stream one.
+    ///
+    /// Split out of `run_one` rather than written inline: `run_one`'s future is
+    /// re-entered once per nested SQL function call, so every local it holds is
+    /// paid for on each level of that recursion, and this arm's file buffer is
+    /// the largest of them.
+    async fn run_copy_from(&mut self, copy: CopyStmt) -> Result<QueryResult, ExecError> {
+        // Before the source is even looked at: a `COPY … FROM STDIN` reaching
+        // here came in over the simple-query path, and its refusal has to be
+        // the one the wire path gives before announcing copy-in mode.
+        self.refuse_copy_from_under_row_security(&copy)?;
+        match &copy.source {
+            CopySource::Stdin => Err(ExecError::Unsupported(
+                "COPY FROM STDIN requires pgwire CopyData messages".into(),
+            )),
+            CopySource::File(path) => {
+                let data = tokio::fs::read(path).await.map_err(|error| {
+                    ExecError::Remote(PgError::error(
+                        "58P01",
+                        format!("could not open file \"{path}\" for reading: {error}"),
+                    ))
+                })?;
+                self.run_copy_in(&copy, vec![bytes::Bytes::from(data)])
+                    .await
+            }
+        }
+    }
+
     async fn run_copy_in(
         &mut self,
         copy: &CopyStmt,
@@ -8812,6 +8834,10 @@ impl SqlSession {
         if matches!(copy.format, CopyFormat::Csv) {
             return Err(ExecError::Unsupported("COPY CSV is not supported".into()));
         }
+        // `COPY … FROM 'file'` never enters copy-in mode, so it reaches here
+        // without passing `copy_in_start`. Both entry points must refuse, or
+        // one of them loads rows past a policy.
+        self.refuse_copy_from_under_row_security(copy)?;
         let data_len = chunks.iter().map(bytes::Bytes::len).sum();
         let mut data = Vec::with_capacity(data_len);
         for chunk in chunks {
@@ -11466,6 +11492,67 @@ impl SqlSession {
     /// `CopyInResponse` the wire layer answers with before entering copy-in
     /// mode. Shared by the simple-protocol (`begin_copy_in`) and
     /// extended-protocol (`execute` on a COPY portal) start paths.
+    /// Refuse `COPY … FROM` into a relation row security would filter, before
+    /// the statement runs.
+    ///
+    /// `PostgreSQL` refuses it outright — `COPY FROM` bypasses the executor's
+    /// `WITH CHECK` machinery, so it tells the caller to use `INSERT` instead
+    /// rather than loading rows past a policy. The timing matters as much as
+    /// the refusal: this has to fire *before* the `CopyInResponse` goes out,
+    /// because once psql is in copy-in mode it reads every following script
+    /// line as data, and the session and the client stay desynchronised for the
+    /// rest of the file.
+    ///
+    /// With `row_security = off` the answer is the same 42501 every other
+    /// statement gets, since a policy would have applied.
+    /// Takes the statement rather than a resolved relation so the `Table` it
+    /// reads lives in this frame and not in the caller's: one caller is
+    /// `run_one`, whose future is re-entered once per nested SQL function call,
+    /// and widening it costs stack on every level of that recursion.
+    fn refuse_copy_from_under_row_security(&self, copy: &CopyStmt) -> Result<(), ExecError> {
+        let table = crabka_pgcatalog::get_table(
+            self.catalog_kv.as_ref(),
+            &crate::relname::resolve_relation(
+                self.catalog_kv.as_ref(),
+                &self.resolution_scope(),
+                &copy.table,
+                crate::relname::SchemaDisposition::Utility,
+            )?,
+        )?;
+        let role = self.current_role_for_row_security();
+        let rls = crate::rls::RlsCtx::new(self.catalog_kv.as_ref(), &role, self.guc.row_security());
+        match crate::rls::decide(
+            &rls,
+            &table,
+            crabka_pgcatalog::policy::PolicyCommand::Insert,
+        )? {
+            crate::rls::RowSecurity::Open => Ok(()),
+            crate::rls::RowSecurity::Refuse { relation } => {
+                Err(ExecError::RowSecurityRefused(relation))
+            }
+            crate::rls::RowSecurity::Restricted { .. } => Err(ExecError::Unsupported(
+                "COPY FROM not supported with row-level security. Use INSERT statements instead."
+                    .into(),
+            )),
+        }
+    }
+
+    /// The role this session's row-security decisions are made under.
+    ///
+    /// The same mapping [`crate::exec::ForeignCtx::effective_role`] applies:
+    /// `PUBLIC` is a pseudo-role that owns nothing and holds no attributes, so
+    /// a session carrying it authenticated as nobody and is acting as the
+    /// bootstrap superuser. Deriving it here rather than reading it off a
+    /// `ForeignCtx` is what lets the COPY pre-check run before any statement
+    /// context exists.
+    fn current_role_for_row_security(&self) -> String {
+        if self.current_role == crabka_pgcatalog::PUBLIC_ROLE {
+            crabka_pgcatalog::BOOTSTRAP_ROLE.to_string()
+        } else {
+            self.current_role.clone()
+        }
+    }
+
     fn copy_in_start(&mut self, copy: &CopyStmt) -> Result<CopyInResponse, PgError> {
         if matches!(self.state, TxnState::Failed(_)) {
             return Err(ExecError::InFailedTransaction.into_pg());
@@ -11484,6 +11571,8 @@ impl SqlSession {
         .map_err(ExecError::into_pg)?;
         let table = crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &name)
             .map_err(ExecError::from)
+            .map_err(ExecError::into_pg)?;
+        self.refuse_copy_from_under_row_security(copy)
             .map_err(ExecError::into_pg)?;
         let target_count = match &copy.columns {
             Some(columns) => columns.len(),

@@ -1,12 +1,11 @@
 //! Row-level security: the one place raw rows of a stored relation may be
 //! turned into a relation the rest of the executor can see.
 //!
-//! **Nothing here fires yet.** Every decision keys off
-//! [`crabka_pgcatalog::Table::row_security`], and no reachable SQL sets that
-//! flag — there is no `ALTER TABLE … ENABLE ROW LEVEL SECURITY` production and
-//! no executor DDL arm for one. The module is wired into every read path so
-//! that flipping the flag is the whole of the next slice, and so that the
-//! wiring can be reviewed and tested while it is still inert.
+//! Every decision keys off [`crabka_pgcatalog::Table::row_security`], which
+//! `ALTER TABLE … ENABLE ROW LEVEL SECURITY` sets and `CREATE POLICY` fills in
+//! around. Reads pass through [`apply_row_security`]; writes pass through
+//! [`RowSecurityUsing`] on the rows they may act on and [`RowSecurityCheck`] on
+//! the rows they leave behind.
 //!
 //! # Why the types are shaped like this
 //!
@@ -327,6 +326,42 @@ fn role_is_exempt(ctx: &RlsCtx<'_>) -> Result<bool, ExecError> {
     Ok(attributes.has(RoleAttribute::Superuser) || attributes.has(RoleAttribute::BypassRls))
 }
 
+/// Whether `role` is the cluster superuser, for the ownership tests that
+/// `PostgreSQL` lets a superuser pass.
+///
+/// Deliberately *not* [`role_is_exempt`], which also admits `BYPASSRLS`.
+/// Bypassing a policy and being allowed to delete one are different powers, and
+/// conflating them would let any `BYPASSRLS` role strip another role's
+/// protection rather than merely see past it.
+///
+/// # Errors
+///
+/// Returns storage/corruption errors from the catalog KV seam.
+pub(crate) fn role_is_superuser(kv: &dyn Kv, role: &str) -> Result<bool, ExecError> {
+    if role == crabka_pgcatalog::BOOTSTRAP_ROLE {
+        return Ok(true);
+    }
+    match crabka_pgcatalog::get_role(kv, role) {
+        Ok(role) => Ok(role.attributes.has(RoleAttribute::Superuser)),
+        Err(crabka_pgcatalog::CatalogError::UndefinedObject(_)) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Refuse, at `CREATE`/`ALTER POLICY` time, a qual row security cannot evaluate
+/// safely yet.
+///
+/// Validating here rather than at first enforcement means a policy that could
+/// never be applied is a DDL error the author sees, not a surprise on somebody
+/// else's later `SELECT`.
+///
+/// # Errors
+///
+/// Returns 0A000 for a qual that probes table privileges, or a parse error.
+pub(crate) fn validate_policy_qual(source: &str) -> Result<(), ExecError> {
+    compile_qual(source).map(|_| ())
+}
+
 /// The relation's policies that apply to `command` for `ctx.role`.
 fn applicable_policies(
     ctx: &RlsCtx<'_>,
@@ -560,81 +595,239 @@ impl RowSecurityUsing {
     }
 }
 
+/// The two write-side checks `PostgreSQL` runs. They differ in both the qual
+/// they read and the row they name in the error, and the two always vary
+/// together — so they are one value rather than two booleans a caller could
+/// pair the wrong way round.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CheckSubject {
+    /// The row the statement is about to write. Reads each policy's `WITH
+    /// CHECK`, falling back to its `USING` when it declares none — so a policy
+    /// that hides a row also forbids writing one it would hide.
+    NewRow,
+    /// The stored row an `INSERT … ON CONFLICT DO UPDATE` found and is about to
+    /// change. Reads the `USING` qual whatever the policy's `WITH CHECK` says,
+    /// because the question is "may I see this row", not "may I write this
+    /// one" — and failing it is an error, not a skip, since silently declining
+    /// to update would tell the caller the row is not there.
+    TargetRow,
+}
+
+impl CheckSubject {
+    /// The source text this subject checks against, and whether it came from
+    /// the policy's `USING` clause (which the error message names).
+    fn qual_of(self, policy: &Policy) -> Option<(&str, bool)> {
+        match self {
+            Self::NewRow => match policy.with_check.as_deref() {
+                Some(source) => Some((source, false)),
+                None => policy.using.as_deref().map(|source| (source, true)),
+            },
+            Self::TargetRow => policy.using.as_deref().map(|source| (source, true)),
+        }
+    }
+}
+
+/// Why a write may skip its row-security check.
+///
+/// Every exemption is a named variant rather than a bare `None`, so the set of
+/// writes that reach storage unchecked is one enum long and each one carries
+/// its own justification.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum CheckExemption {
+    /// `DELETE` removes a row rather than writing one, and `PostgreSQL`'s
+    /// policies carry no `WITH CHECK` for it. The row it removes was already
+    /// filtered by the `USING` qual at `write_candidate_rows`.
+    RemovesRows,
+    /// A referential action (`ON DELETE CASCADE`, `ON UPDATE SET NULL`, …),
+    /// which `PostgreSQL` runs as the referenced relation's owner with row
+    /// security off — the check would otherwise let a policy break referential
+    /// integrity.
+    ReferentialAction,
+    /// A sharded relation, whose writes go through the timestamp path and carry
+    /// no session context to decide a policy under.
+    ///
+    /// Backed by a refusal rather than a hope: [`refuse_sharded_row_security`]
+    /// rejects `ALTER TABLE … ENABLE ROW LEVEL SECURITY` on a sharded relation,
+    /// and the timestamp write path re-asserts it, so this exemption can never
+    /// apply to a relation that has policies.
+    ShardedRelation,
+}
+
+/// Refuse to put a sharded relation under row security.
+///
+/// A sharded write is planned by the timestamp path, which has no read context
+/// to evaluate a policy qual against. Rather than let such a relation carry a
+/// flag nothing enforces — a silent total bypass — the flag cannot be set.
+///
+/// # Errors
+///
+/// Returns 0A000 when `table` is sharded.
+pub(crate) fn refuse_sharded_row_security(table: &Table) -> Result<(), ExecError> {
+    if table.sharded {
+        return Err(ExecError::Unsupported(format!(
+            "row-level security on sharded relation \"{}\" is not supported",
+            table.name.name
+        )));
+    }
+    Ok(())
+}
+
+/// One policy's contribution to a write-side check, kept separable so the
+/// error can name the policy that rejected the row the way `PostgreSQL` does.
+struct PolicyCheckQual {
+    qual: Expr,
+    /// The policy's name, when exactly one policy produced this qual.
+    /// `PostgreSQL` leaves the name out of a violation folded from several.
+    policy: Option<String>,
+    /// The qual came from the policy's `USING` clause.
+    from_using: bool,
+}
+
+enum CheckPlan {
+    Open,
+    Refuse { relation: String },
+    Restricted(Box<RestrictedCheck>),
+}
+
+/// The compiled quals a write must satisfy, and how a failure names itself.
+struct RestrictedCheck {
+    relation: String,
+    /// Which row this check judges, which is also how the violation names it.
+    subject: CheckSubject,
+    /// The permissive policies' quals, OR-folded into one.
+    permissive: PolicyCheckQual,
+    /// The restrictive policies, each checked on its own so the violation names
+    /// the one that rejected the row.
+    restrictive: Vec<PolicyCheckQual>,
+}
+
 /// The `WITH CHECK` qual a row a statement writes must satisfy.
 ///
-/// Constructed and tested, but **not yet called from any write path**, and that
-/// is deliberate rather than an oversight. `PostgreSQL` runs `WITH CHECK` after
-/// `BEFORE ROW` triggers, because a `BEFORE` trigger returns a *replacement*
-/// row and that replacement is what gets written; a check that ran before the
-/// trigger would let a trigger launder a row past its own policy. Placing it
-/// correctly means routing it through `trigger::fire_before_row`, which is the
-/// write-enforcement slice's work. Wiring it into `finish_written_row` now — the
-/// obvious-looking spot — would ship the bug.
-pub struct RowSecurityCheck(RowSecurity);
+/// `PostgreSQL` runs this **after** `BEFORE ROW` triggers, because a `BEFORE`
+/// trigger returns a *replacement* row and that replacement is what gets
+/// written; a check that ran before the trigger would let a trigger launder a
+/// row past its own policy. That is why the only caller is
+/// [`crate::trigger::fire_before_row`], which holds the row the write will
+/// actually use — putting it in `finish_written_row`, the obvious-looking spot,
+/// would ship the bug.
+pub(crate) struct RowSecurityCheck(CheckPlan);
 
 impl RowSecurityCheck {
-    /// Decide the `WITH CHECK` side for a write against `table`.
-    ///
-    /// A policy with no `WITH CHECK` qual falls back to its `USING` qual, as
-    /// `PostgreSQL` does, so a policy that hides a row also forbids writing
-    /// one it would hide.
+    /// Decide the write-side check for `command` against `table`.
     ///
     /// # Errors
     ///
     /// Returns catalog errors, or a refusal to compile an unsafe policy qual.
-    pub fn compile(
+    pub(crate) fn compile(
         ctx: &RlsCtx<'_>,
         table: &Table,
         command: PolicyCommand,
+        subject: CheckSubject,
     ) -> Result<Self, ExecError> {
         if bypass_applies(ctx, table)? {
-            return Ok(Self(RowSecurity::Open));
+            return Ok(Self(CheckPlan::Open));
         }
         let relation = table.name.name.clone();
         let applicable = applicable_policies(ctx, table, command)?;
         if !ctx.row_security && !applicable.is_empty() {
-            return Ok(Self(RowSecurity::Refuse { relation }));
+            return Ok(Self(CheckPlan::Refuse { relation }));
         }
         let mut permissive = Vec::new();
         let mut restrictive = Vec::new();
         for policy in applicable {
-            let Some(source) = policy.with_check.as_deref().or(policy.using.as_deref()) else {
+            let Some((source, from_using)) = subject.qual_of(&policy) else {
                 continue;
             };
-            let qual = compile_qual(source)?;
+            let checked = PolicyCheckQual {
+                qual: compile_qual(source)?,
+                policy: Some(policy.name.clone()),
+                from_using,
+            };
             if policy.permissive {
-                permissive.push(qual);
+                permissive.push(checked);
             } else {
-                restrictive.push(qual);
+                restrictive.push(checked);
             }
         }
-        Ok(Self(RowSecurity::Restricted {
+        Ok(Self(CheckPlan::Restricted(Box::new(RestrictedCheck {
             relation,
-            qual: combine_policy_quals(permissive, restrictive),
-        }))
+            subject,
+            permissive: fold_permissive_checks(permissive),
+            restrictive,
+        }))))
     }
 
-    /// Whether a row this statement is about to write satisfies the policy.
+    /// A check for a write that row security does not reach, for the stated
+    /// reason.
+    pub(crate) const fn exempt(_why: CheckExemption) -> Self {
+        Self(CheckPlan::Open)
+    }
+
+    /// Raise 42501 unless the row this statement is about to write satisfies
+    /// the relation's policies.
     ///
     /// # Errors
     ///
-    /// Returns 42501 when `row_security = off` and a policy would have applied,
-    /// or an evaluation error from the qual.
-    pub fn permits_row(
+    /// Returns 42501 when the row fails a policy, or when `row_security = off`
+    /// and a policy would have applied; and evaluation errors from the qual.
+    pub(crate) fn permit_row(
         &self,
         table: &Table,
         row: &[Datum],
         ctx: &crate::clock::EvalCtx,
-    ) -> Result<bool, ExecError> {
-        match &self.0 {
-            RowSecurity::Open => Ok(true),
-            RowSecurity::Refuse { relation } => {
-                Err(ExecError::RowSecurityRefused(relation.clone()))
+    ) -> Result<(), ExecError> {
+        let restricted = match &self.0 {
+            CheckPlan::Open => return Ok(()),
+            CheckPlan::Refuse { relation } => {
+                return Err(ExecError::RowSecurityRefused(relation.clone()));
             }
-            RowSecurity::Restricted { relation, qual } => {
-                crate::exec::row_matches(Some(qual), &Scope::single(table, relation), row, ctx)
+            CheckPlan::Restricted(restricted) => restricted.as_ref(),
+        };
+        let RestrictedCheck {
+            relation,
+            subject,
+            permissive,
+            restrictive,
+        } = restricted;
+        let scope = Scope::single(table, relation);
+        // The permissive fold first, then each restrictive policy on its own:
+        // PostgreSQL reports the first check the row fails, and a restrictive
+        // policy can only ever be the reason a row that passed the permissive
+        // fold is still rejected.
+        for checked in std::iter::once(permissive).chain(restrictive) {
+            if !crate::exec::row_matches(Some(&checked.qual), &scope, row, ctx)? {
+                return Err(ExecError::RowSecurityCheckViolation {
+                    relation: relation.clone(),
+                    policy: checked.policy.clone(),
+                    using_expression: checked.from_using,
+                    target_row: *subject == CheckSubject::TargetRow,
+                });
             }
         }
+        Ok(())
+    }
+}
+
+/// OR-fold the permissive checks, keeping the policy's name when exactly one
+/// contributed.
+///
+/// The `FALSE` seed is the same identity [`combine_policy_quals`] relies on:
+/// row security with nothing permissive applicable rejects every row without
+/// anyone writing that case.
+fn fold_permissive_checks(permissive: Vec<PolicyCheckQual>) -> PolicyCheckQual {
+    let single = match permissive.as_slice() {
+        [only] => (only.policy.clone(), only.from_using),
+        _ => (None, false),
+    };
+    let qual = permissive
+        .into_iter()
+        .fold(Expr::BoolLiteral(false), |left, right| {
+            binary(BinaryOp::Or, left, right.qual)
+        });
+    PolicyCheckQual {
+        qual,
+        policy: single.0,
+        from_using: single.1,
     }
 }
 
@@ -1089,18 +1282,26 @@ mod tests {
         role(&kv, "stranger", crabka_pgcatalog::RoleAttributes::default());
         let ctx = RlsCtx::new(&kv, "stranger", true);
         let table = table(true, false);
-        let check =
-            RowSecurityCheck::compile(&ctx, &table, PolicyCommand::Insert).expect("compile");
+        let check = RowSecurityCheck::compile(
+            &ctx,
+            &table,
+            PolicyCommand::Insert,
+            crate::rls::CheckSubject::NewRow,
+        )
+        .expect("compile");
         let eval = crate::clock::EvalCtx::test_default();
+        let rejected = check
+            .permit_row(&table, &[crabka_pgtypes::Datum::Int4(1)], &eval)
+            .expect_err("a row the USING qual hides may not be written");
         assert!(
-            !check
-                .permits_row(&table, &[crabka_pgtypes::Datum::Int4(1)], &eval)
-                .expect("evaluate")
+            rejected.into_pg().message
+                == "new row violates row-level security policy \"visible\" (USING expression) \
+                    for table \"document\""
         );
         assert!(
             check
-                .permits_row(&table, &[crabka_pgtypes::Datum::Int4(3)], &eval)
-                .expect("evaluate")
+                .permit_row(&table, &[crabka_pgtypes::Datum::Int4(3)], &eval)
+                .is_ok()
         );
     }
 }

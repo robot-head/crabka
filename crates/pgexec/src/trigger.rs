@@ -1540,15 +1540,46 @@ fn queue_catalog_trigger(
     Ok(())
 }
 
+/// The relation a `BEFORE ROW` trigger fires for, together with the
+/// row-security check the row it leaves behind must satisfy.
+///
+/// One value rather than two arguments because the pairing is a decision each
+/// write path makes and can get wrong: a row routed into a partition leaf is
+/// judged by the policies of the *parent* the statement named, not the leaf
+/// whose triggers run. Naming the pair makes that choice visible at every call
+/// site instead of hiding it between two adjacent arguments.
+#[derive(Clone, Copy)]
+pub(crate) struct WriteTarget<'a> {
+    pub table: &'a Table,
+    pub check: &'a crate::rls::RowSecurityCheck,
+}
+
+/// Fire the relation's `BEFORE ROW` triggers, then judge the row they leave
+/// behind against the target's check.
+///
+/// The row-security check lives here rather than in
+/// [`crate::exec::finish_written_row`] because a `BEFORE ROW` trigger returns a
+/// *replacement* row, and the replacement is what actually gets written: a
+/// check that ran before the trigger would let the trigger launder a row past
+/// its own policy. `PostgreSQL` runs `ExecWithCheckOptions` after
+/// `ExecBRInsertTriggers` for the same reason. Every write path in the executor
+/// passes through this one function, so putting it here covers all of them and
+/// makes a new write path that skips the check fail to compile rather than fail
+/// to check.
+///
+/// A `DELETE` writes no row and carries
+/// [`crate::rls::CheckExemption::RemovesRows`]; its rows were already filtered
+/// by the `USING` qual at `write_candidate_rows`.
 pub(crate) fn fire_before_row(
     kv: &dyn Kv,
-    table: &Table,
+    target: WriteTarget<'_>,
     event: DmlEvent,
     updated: &[String],
     old: Option<&[crabka_pgtypes::Datum]>,
     mut new: Option<Vec<crabka_pgtypes::Datum>>,
     ctx: &crate::clock::EvalCtx,
 ) -> Result<Option<Vec<crabka_pgtypes::Datum>>, ExecError> {
+    let WriteTarget { table, check } = target;
     for trigger in crabka_pgcatalog::trigger::triggers_for_table(kv, table.id)? {
         if trigger.timing != TriggerTiming::Before
             || trigger.level != TriggerLevel::Row
@@ -1587,10 +1618,13 @@ pub(crate) fn fire_before_row(
         }
     }
     if event == DmlEvent::Delete {
-        Ok(old.map(|row| row.to_vec()))
-    } else {
-        Ok(new)
+        return Ok(old.map(|row| row.to_vec()));
     }
+    // The row every trigger has had its say about is the one the policy judges.
+    if let Some(row) = &new {
+        check.permit_row(table, row, ctx)?;
+    }
+    Ok(new)
 }
 
 pub(crate) fn fire_instead_row(

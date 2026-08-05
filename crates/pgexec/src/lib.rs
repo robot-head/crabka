@@ -84,6 +84,7 @@ mod pattern;
 pub mod plan_dist;
 mod plpgsql;
 mod plpgsql_sqlstate;
+mod policy_ddl;
 mod procarray;
 mod query;
 mod read_gate;

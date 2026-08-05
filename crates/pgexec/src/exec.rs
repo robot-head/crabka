@@ -226,6 +226,21 @@ impl<'a> WriteContext<'a> {
     }
 
     /// The row-security decision context this write makes its decisions in.
+    /// The check a row this statement writes into `table` must satisfy, for the
+    /// policy command the statement runs under.
+    fn row_check(
+        &self,
+        table: &Table,
+        command: crabka_pgcatalog::policy::PolicyCommand,
+    ) -> Result<crate::rls::RowSecurityCheck, ExecError> {
+        crate::rls::RowSecurityCheck::compile(
+            &self.rls(),
+            table,
+            command,
+            crate::rls::CheckSubject::NewRow,
+        )
+    }
+
     fn rls(&self) -> crate::rls::RlsCtx<'_> {
         crate::rls::RlsCtx::new(
             self.catalog_kv,
@@ -355,6 +370,35 @@ pub(crate) fn execute_ddl(
             name,
             resolve_relation(kv, resolution, table, SchemaDisposition::Reference)?,
             *if_exists,
+        ),
+        Statement::CreatePolicy(policy) => crate::policy_ddl::create(
+            kv,
+            policy,
+            resolve_relation(kv, resolution, &policy.table, SchemaDisposition::Reference)?,
+            fctx,
+        ),
+        Statement::AlterPolicy {
+            name,
+            table,
+            action,
+        } => crate::policy_ddl::alter(
+            kv,
+            name,
+            resolve_relation(kv, resolution, table, SchemaDisposition::Reference)?,
+            action,
+            fctx,
+        ),
+        Statement::DropPolicy {
+            name,
+            table,
+            if_exists,
+            ..
+        } => crate::policy_ddl::drop(
+            kv,
+            name,
+            resolve_relation(kv, resolution, table, SchemaDisposition::Reference)?,
+            *if_exists,
+            fctx,
         ),
         Statement::CreateEventTrigger(trigger) => {
             crate::trigger::create_event(kv, trigger, fctx.current_user)
@@ -2908,7 +2952,12 @@ impl crate::fk::FkCascade for StatementCascade<'_, '_> {
         let Some(next) = next else {
             if crate::trigger::fire_before_row(
                 write_ctx.catalog_kv,
-                table,
+                crate::trigger::WriteTarget {
+                    table,
+                    check: &crate::rls::RowSecurityCheck::exempt(
+                        crate::rls::CheckExemption::ReferentialAction,
+                    ),
+                },
                 crate::trigger::DmlEvent::Delete,
                 &[],
                 Some(&cur_row),
@@ -2946,7 +2995,12 @@ impl crate::fk::FkCascade for StatementCascade<'_, '_> {
         };
         let Some(next) = crate::trigger::fire_before_row(
             write_ctx.catalog_kv,
-            table,
+            crate::trigger::WriteTarget {
+                table,
+                check: &crate::rls::RowSecurityCheck::exempt(
+                    crate::rls::CheckExemption::ReferentialAction,
+                ),
+            },
             crate::trigger::DmlEvent::Update,
             &updated_columns,
             Some(&cur_row),
@@ -3671,6 +3725,10 @@ async fn partitioned_insert(
     // Resolved once per leaf rather than once per row: a relation in no foreign
     // key must pay one boolean test per write, not a catalog read.
     let mut leaf_fk: HashMap<TableId, crate::fk::StatementFkContext> = HashMap::new();
+    // PostgreSQL judges a routed row by the policies of the relation the
+    // statement named, never the leaf's own — the same rule the read gate
+    // applies to a partition tree.
+    let check = write_ctx.row_check(&parent, crabka_pgcatalog::policy::PolicyCommand::Insert)?;
     for row_exprs in &rows {
         let full = build_insert_row(&parent, &target_idx, row_exprs, ctx)?;
         let Some((leaf, leaf_row)) = route_row_to_leaf(catalog_kv, &parent, &full)? else {
@@ -3678,7 +3736,10 @@ async fn partitioned_insert(
         };
         let Some(leaf_row) = crate::trigger::fire_before_row(
             catalog_kv,
-            &leaf,
+            crate::trigger::WriteTarget {
+                table: &leaf,
+                check: &check,
+            },
             crate::trigger::DmlEvent::Insert,
             &[],
             None,
@@ -4037,6 +4098,8 @@ async fn execute_write_body(
             }
             let local_indexes = writable_local_indexes(catalog_kv, &t)?;
             let fk_ctx = crate::fk::StatementFkContext::resolve(catalog_kv, &t)?;
+            let insert_check =
+                write_ctx.row_check(&t, crabka_pgcatalog::policy::PolicyCommand::Insert)?;
             // Arbiter resolution is statement-level: a bad conflict target is an
             // error even when no row would have conflicted.
             let arbiters = match on_conflict {
@@ -4073,7 +4136,10 @@ async fn execute_write_body(
                 let full = build_insert_row(&t, &target_idx, row_exprs, ctx)?;
                 let Some(full) = crate::trigger::fire_before_row(
                     catalog_kv,
-                    &t,
+                    crate::trigger::WriteTarget {
+                        table: &t,
+                        check: &insert_check,
+                    },
                     crate::trigger::DmlEvent::Insert,
                     &[],
                     None,
@@ -4210,6 +4276,8 @@ async fn execute_write_body(
             )?;
             let mut n: u64 = 0;
             let mut returned_rows = returning.as_ref().map(|_| Vec::new()).unwrap_or_default();
+            let update_check =
+                write_ctx.row_check(&t, crabka_pgcatalog::policy::PolicyCommand::Update)?;
             for (rowid, _xmin, scanned_row) in write_candidate_rows(
                 write_ctx,
                 &t,
@@ -4264,7 +4332,10 @@ async fn execute_write_body(
                     .collect();
                 let Some(next) = crate::trigger::fire_before_row(
                     catalog_kv,
-                    &t,
+                    crate::trigger::WriteTarget {
+                        table: &t,
+                        check: &update_check,
+                    },
                     crate::trigger::DmlEvent::Update,
                     &updated_columns,
                     Some(&cur_row),
@@ -4389,7 +4460,12 @@ async fn execute_write_body(
                 if !is_truncate
                     && crate::trigger::fire_before_row(
                         catalog_kv,
-                        &t,
+                        crate::trigger::WriteTarget {
+                            table: &t,
+                            check: &crate::rls::RowSecurityCheck::exempt(
+                                crate::rls::CheckExemption::RemovesRows,
+                            ),
+                        },
                         crate::trigger::DmlEvent::Delete,
                         &[],
                         Some(&cur_row),
@@ -5323,9 +5399,14 @@ async fn execute_merge(
             })
             .collect::<Result<Vec<_>, ExecError>>()?;
         let full = build_insert_row(&t, &target_idx, &evaluated, ctx)?;
+        let merge_insert_check =
+            write_ctx.row_check(&t, crabka_pgcatalog::policy::PolicyCommand::Insert)?;
         let Some(full) = crate::trigger::fire_before_row(
             write_ctx.catalog_kv,
-            &t,
+            crate::trigger::WriteTarget {
+                table: &t,
+                check: &merge_insert_check,
+            },
             crate::trigger::DmlEvent::Insert,
             &[],
             None,
@@ -5492,7 +5573,11 @@ async fn apply_merge_row_action(
                 .collect::<Vec<_>>();
             let Some(next) = crate::trigger::fire_before_row(
                 write_ctx.catalog_kv,
-                t,
+                crate::trigger::WriteTarget {
+                    table: t,
+                    check: &write_ctx
+                        .row_check(t, crabka_pgcatalog::policy::PolicyCommand::Update)?,
+                },
                 crate::trigger::DmlEvent::Update,
                 &updated_columns,
                 Some(&cur_row),
@@ -5537,7 +5622,12 @@ async fn apply_merge_row_action(
         MergeAction::Delete => {
             if crate::trigger::fire_before_row(
                 write_ctx.catalog_kv,
-                t,
+                crate::trigger::WriteTarget {
+                    table: t,
+                    check: &crate::rls::RowSecurityCheck::exempt(
+                        crate::rls::CheckExemption::RemovesRows,
+                    ),
+                },
                 crate::trigger::DmlEvent::Delete,
                 &[],
                 Some(&cur_row),
@@ -5671,6 +5761,12 @@ pub(crate) async fn execute_copy_write(
     // routes to a partition leaf belongs to a different relation, so that case
     // — and only that case — reads again below.
     let parent_indexes = writable_local_indexes(catalog_kv, &table)?;
+    // The relation the COPY named governs every routed row, exactly as it does
+    // for a partitioned INSERT. `COPY … FROM` into a relation under row
+    // security is refused before the statement runs (see the session's copy-in
+    // start), so this check is the second line rather than the first.
+    let copy_check =
+        write_ctx.row_check(&table, crabka_pgcatalog::policy::PolicyCommand::Insert)?;
     // Hoisted for the same reason as the index set, and cached per routed leaf
     // below: one resolution per relation, never one per row.
     let parent_fk = crate::fk::StatementFkContext::resolve(catalog_kv, &table)?;
@@ -5726,7 +5822,10 @@ pub(crate) async fn execute_copy_write(
         };
         let Some(full) = crate::trigger::fire_before_row(
             catalog_kv,
-            &table,
+            crate::trigger::WriteTarget {
+                table: &table,
+                check: &copy_check,
+            },
             crate::trigger::DmlEvent::Insert,
             &[],
             None,
@@ -7013,6 +7112,19 @@ async fn apply_insert_conflict_update(
     ops: &mut Vec<crabka_pgkv::WriteOp>,
 ) -> Result<Option<Vec<Datum>>, ExecError> {
     let ctx = write_ctx.eval_ctx;
+    // `ON CONFLICT DO UPDATE` reaches its row through the arbiter index probe,
+    // not through `write_candidate_rows`, so it has no share of the structural
+    // USING gate and needs this named check of its own. PostgreSQL raises
+    // rather than skipping: quietly declining to update a row the caller has
+    // just been told exists would itself disclose the row's existence, and the
+    // caller would see neither an insert nor an update.
+    crate::rls::RowSecurityCheck::compile(
+        &write_ctx.rls(),
+        table,
+        crabka_pgcatalog::policy::PolicyCommand::Update,
+        crate::rls::CheckSubject::TargetRow,
+    )?
+    .permit_row(table, update.cur_row, ctx)?;
     let scope = Scope::insert_conflict(table);
     let mut bindings = update.cur_row.to_vec();
     bindings.extend_from_slice(update.proposed);
@@ -7036,7 +7148,10 @@ async fn apply_insert_conflict_update(
         .collect::<Vec<_>>();
     let Some(next) = crate::trigger::fire_before_row(
         write_ctx.catalog_kv,
-        table,
+        crate::trigger::WriteTarget {
+            table,
+            check: &write_ctx.row_check(table, crabka_pgcatalog::policy::PolicyCommand::Update)?,
+        },
         crate::trigger::DmlEvent::Update,
         &updated_columns,
         Some(update.cur_row),
@@ -7609,6 +7724,17 @@ pub(crate) fn execute_timestamp_write(
             "timestamp writes require a sharded table".into(),
         ));
     }
+    // The row-security exemption this path's writes carry
+    // (`CheckExemption::ShardedRelation`) is only sound because a sharded
+    // relation cannot be put under row security. Re-asserted here rather than
+    // assumed, so a future path that sets the flag fails loudly instead of
+    // writing unchecked rows.
+    if table.row_security {
+        return Err(ExecError::Unsupported(format!(
+            "row-level security on sharded relation \"{}\" is not supported",
+            table.name.name
+        )));
+    }
     let indexes = crabka_pgcatalog::list_table_indexes(catalog_kv, &table.name)?;
     let global_indexes: Vec<_> = indexes
         .iter()
@@ -7777,7 +7903,12 @@ fn execute_timestamp_insert(
         let full = build_insert_row(table, &target_idx, row_exprs, ctx)?;
         let Some(full) = crate::trigger::fire_before_row(
             catalog_kv,
-            table,
+            crate::trigger::WriteTarget {
+                table,
+                check: &crate::rls::RowSecurityCheck::exempt(
+                    crate::rls::CheckExemption::ShardedRelation,
+                ),
+            },
             crate::trigger::DmlEvent::Insert,
             &[],
             None,
@@ -7863,7 +7994,12 @@ fn execute_timestamp_update(
             .collect::<Vec<_>>();
         let Some(next) = crate::trigger::fire_before_row(
             catalog_kv,
-            table,
+            crate::trigger::WriteTarget {
+                table,
+                check: &crate::rls::RowSecurityCheck::exempt(
+                    crate::rls::CheckExemption::ShardedRelation,
+                ),
+            },
             crate::trigger::DmlEvent::Update,
             &updated,
             Some(&row),
@@ -7932,7 +8068,12 @@ fn execute_timestamp_delete(
         }
         if crate::trigger::fire_before_row(
             catalog_kv,
-            table,
+            crate::trigger::WriteTarget {
+                table,
+                check: &crate::rls::RowSecurityCheck::exempt(
+                    crate::rls::CheckExemption::RemovesRows,
+                ),
+            },
             crate::trigger::DmlEvent::Delete,
             &[],
             Some(&row),
@@ -13833,6 +13974,8 @@ fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         row.relpersistence = crabka_pgcatalog::relpersistence_of(&table.name.schema);
         row.reltablespace = crabka_pgcatalog::relation_tablespace_oid(catalog_kv, &table.name)?;
         row.relowner = role_oid_of(&role_oids, &table.owner);
+        row.relrowsecurity = table.row_security;
+        row.relforcerowsecurity = table.force_row_security;
         table_owner_oids.insert(table.name.clone(), row.relowner);
         rows.push(row.build()?);
     }
@@ -13960,6 +14103,7 @@ fn virtual_pg_class_properties(name: &str, oid: i32) -> (&'static str, i32) {
             name,
             "pg_indexes"
                 | "pg_locks"
+                | "pg_policies"
                 | "pg_prepared_statements"
                 | "pg_replication_slots"
                 | "pg_roles"
@@ -14006,6 +14150,10 @@ struct PgClassRow<'a> {
     relam: i32,
     relfilenode: i32,
     relispartition: bool,
+    /// `pg_class.relrowsecurity` / `relforcerowsecurity`. Only stored relations
+    /// can carry row security; every other relation kind leaves these false.
+    relrowsecurity: bool,
+    relforcerowsecurity: bool,
     reltablespace: u32,
     /// The `pg_authid.oid` of the owning role. Only stored relations carry a
     /// real owner; the catalog's own relations belong to the bootstrap
@@ -14037,6 +14185,8 @@ impl<'a> PgClassRow<'a> {
             relam: if relkind == "r" { 2 } else { 0 },
             relfilenode,
             relispartition: false,
+            relrowsecurity: false,
+            relforcerowsecurity: false,
             reltablespace: 0,
             relowner: crate::catalog_fn::BOOTSTRAP_ROLE_OID,
             relpersistence: 'p',
@@ -14075,8 +14225,8 @@ impl<'a> PgClassRow<'a> {
             Datum::Bool(self.relhasrules),
             Datum::Bool(self.relhastriggers),
             Datum::Bool(false),
-            Datum::Bool(false),
-            Datum::Bool(false),
+            Datum::Bool(self.relrowsecurity),
+            Datum::Bool(self.relforcerowsecurity),
             Datum::Bool(true),
             text("d"),
             Datum::Bool(self.relispartition),
@@ -18710,13 +18860,8 @@ impl AlterTableState {
     /// The catalog as this statement has already rewritten it: the working
     /// column and `CHECK` lists, plus every catalog op staged so far.
     fn staged_catalog<'a>(&self, kv: &'a dyn Kv) -> Result<StagedKv<'a>, ExecError> {
-        let mut ops = crabka_pgcatalog::replace_table_schema_ops(
-            kv,
-            &self.table.name,
-            &self.table.columns,
-            &self.table.checks,
-            &self.table.owner,
-        )?;
+        let mut ops =
+            crabka_pgcatalog::replace_table_schema_ops(kv, &self.table.name, &self.table)?;
         ops.extend_from_slice(&self.ops);
         Ok(StagedKv::new(kv, &ops))
     }
@@ -18872,13 +19017,7 @@ fn alter_table_ops(
 
     // The schema record is written once, after every action has folded into the
     // working column/CHECK lists.
-    let mut ops = crabka_pgcatalog::replace_table_schema_ops(
-        kv,
-        table_name,
-        &state.table.columns,
-        &state.table.checks,
-        &state.table.owner,
-    )?;
+    let mut ops = crabka_pgcatalog::replace_table_schema_ops(kv, table_name, &state.table)?;
     if let Some(rows) = state.rows {
         for (key, xmin, xmax, row) in rows {
             ops.push(crabka_pgkv::WriteOp::Put {
@@ -18927,6 +19066,10 @@ fn alter_table_action_pass(action: &crabka_pgparser::ast::AlterTableAction) -> u
         | Action::SetTablespace(_)
         | Action::OwnerTo(_)
         | Action::SetTriggerMode { .. }
+        | Action::EnableRowSecurity
+        | Action::DisableRowSecurity
+        | Action::ForceRowSecurity
+        | Action::NoForceRowSecurity
         | Action::AttachPartition { .. }
         | Action::DetachPartition { .. }
         | Action::Unsupported(_) => 6,
@@ -18957,6 +19100,10 @@ fn alter_action_label(action: &crabka_pgparser::ast::AlterTableAction) -> &'stat
         Action::SetTablespace(_) => "SET TABLESPACE",
         Action::OwnerTo(_) => "OWNER TO",
         Action::SetTriggerMode { .. } => "ENABLE/DISABLE TRIGGER",
+        Action::EnableRowSecurity => "ENABLE ROW LEVEL SECURITY",
+        Action::DisableRowSecurity => "DISABLE ROW LEVEL SECURITY",
+        Action::ForceRowSecurity => "FORCE ROW LEVEL SECURITY",
+        Action::NoForceRowSecurity => "NO FORCE ROW LEVEL SECURITY",
         Action::AttachPartition { .. } => "ATTACH PARTITION",
         Action::DetachPartition { .. } => "DETACH PARTITION",
         Action::Unsupported(_) => "ALTER",
@@ -19473,6 +19620,26 @@ fn alter_table_action_ops(
             // The schema record is rewritten once, after every action; folding
             // the new owner into the working table is what makes it durable.
             state.table.owner = role.to_string();
+            Ok(())
+        }
+        // The four row-security subcommands fold into the working relation the
+        // way OWNER TO does; the schema record is written once, after every
+        // action. A sharded relation is refused rather than flagged: its writes
+        // go through the timestamp path, which cannot evaluate a policy, so the
+        // flag would be stored and never enforced.
+        Action::EnableRowSecurity | Action::DisableRowSecurity => {
+            // Owner-only, like the policy DDL: DISABLE by a role that does not
+            // own the relation would strip its protection outright, which is
+            // the one ALTER TABLE subcommand that can grant rows.
+            crate::policy_ddl::require_owner(kv, &state.table, fctx)?;
+            crate::rls::refuse_sharded_row_security(&state.table)?;
+            state.table.row_security = matches!(action, Action::EnableRowSecurity);
+            Ok(())
+        }
+        Action::ForceRowSecurity | Action::NoForceRowSecurity => {
+            crate::policy_ddl::require_owner(kv, &state.table, fctx)?;
+            crate::rls::refuse_sharded_row_security(&state.table)?;
+            state.table.force_row_security = matches!(action, Action::ForceRowSecurity);
             Ok(())
         }
         Action::SetTriggerMode { selector, mode } => {

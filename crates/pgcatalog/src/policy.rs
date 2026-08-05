@@ -1,12 +1,9 @@
 //! Durable row-level-security policy records — the storage behind `pg_policy`.
 //!
-//! Nothing here is reachable from SQL. No parser production and no executor DDL
-//! arm writes a policy, so the SQL surface still rejects `CREATE POLICY` and
-//! `ALTER TABLE … ENABLE ROW LEVEL SECURITY` exactly as it did before this
-//! module existed. That is deliberate: a policy that can be *created* but is
-//! not yet *enforced* returns the rows it is supposed to hide, which is
-//! strictly worse than a syntax error. Enforcement is a later slice; this
-//! module is storage and its own tests.
+//! Storage only: `CREATE`/`ALTER`/`DROP POLICY` reach this through
+//! `crabka_pgexec::policy_ddl`, which owns the ownership test and the
+//! qual validation, and enforcement reads it back through
+//! `crabka_pgexec::rls`.
 //!
 //! A policy's `USING` and `WITH CHECK` quals are stored as **source text**, not
 //! as a parsed expression — the same choice [`crate::CheckConstraint::expr`]

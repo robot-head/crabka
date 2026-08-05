@@ -138,8 +138,18 @@ fn replacing_a_schema_record_writes_the_owner_it_is_given() {
         create(&kv, &orders, "regress_owner");
 
         let widened = [columns(), vec![Column::new("note", ColumnType::Text)]].concat();
-        let ops = replace_table_schema_ops(&kv, &orders, &widened, &checks(), owner)
-            .expect("replace ops");
+        let stored = get_table(&kv, &orders).expect("stored table");
+        let ops = replace_table_schema_ops(
+            &kv,
+            &orders,
+            &Table {
+                columns: widened.clone(),
+                checks: checks(),
+                owner: owner.into(),
+                ..stored
+            },
+        )
+        .expect("replace ops");
         kv.write_batch(&ops).expect("catalog batch");
 
         assert!(

@@ -159,8 +159,15 @@ fn replacing_a_schema_record_preserves_the_row_security_flags() {
     let id = create(&kv, &orders, options);
 
     let widened = [columns(), vec![Column::new("note", ColumnType::Text)]].concat();
-    let ops =
-        replace_table_schema_ops(&kv, &orders, &widened, &[], BOOTSTRAP_ROLE).expect("replace ops");
+    let ops = replace_table_schema_ops(
+        &kv,
+        &orders,
+        &Table {
+            columns: widened.clone(),
+            ..expected_table(id, &orders, options)
+        },
+    )
+    .expect("replace ops");
     apply(&kv, &ops);
 
     assert!(
