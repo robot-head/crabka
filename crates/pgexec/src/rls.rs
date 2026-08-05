@@ -16,8 +16,16 @@
 //! [`apply_row_security`]. An optimizer that wants to skip the gate cannot —
 //! it has nothing to return. A pushdown that wants a relation's `Table` takes
 //! an [`UnrestrictedTable`], which can only be built from an explicit
-//! [`RowSecurity::Open`] decision. Both properties are enforced by the
-//! compiler, not by remembering to call something.
+//! [`RowSecurity::Open`] decision *and* a [`crate::privilege::ReadPermit`].
+//! Both properties are enforced by the compiler, not by remembering to call
+//! something.
+//!
+//! The permit is the second half, and it was added after the first half had
+//! already caught the same bug once: `SELECT count(*)` reaches the aggregate
+//! pushdown, which proved the relation unrestricted by row security and then
+//! read it without anyone having asked whether the session could read it at
+//! all. Making the privilege proof part of the same value is why that shape
+//! cannot come back.
 //!
 //! # Why the fold has no branches
 //!
@@ -110,23 +118,49 @@ pub(crate) enum RowSecurity {
 pub(crate) struct UnrestrictedTable<'a>(&'a Table);
 
 impl<'a> UnrestrictedTable<'a> {
-    /// Decide row security for `table` and admit it only if the answer was an
-    /// explicit bypass.
+    /// Check that the session may read `table` at all, decide row security for
+    /// it, and admit it only if both answers were an explicit bypass.
+    ///
+    /// The privilege side declines by returning `None` rather than by raising
+    /// 42501. Every caller of this function is an optimizer fast path whose
+    /// fallback is the ordinary gated read, and that read raises the denial
+    /// itself, in the order `PostgreSQL` raises it and naming the relation the
+    /// query actually named. Declining here is therefore fail-closed twice
+    /// over: the pushdown does not happen, and the path that does happen is the
+    /// one that checks.
     ///
     /// # Errors
     ///
     /// Returns storage/corruption errors from the catalog KV seam, or a
     /// refusal to compile an unsafe policy qual.
-    pub(crate) fn read(ctx: &RlsCtx<'_>, table: &'a Table) -> Result<Option<Self>, ExecError> {
+    pub(crate) fn read(
+        privileges: &crate::privilege::PrivilegeCtx<'_>,
+        ctx: &RlsCtx<'_>,
+        table: &'a Table,
+    ) -> Result<Option<Self>, ExecError> {
+        let Some(permit) = crate::privilege::ReadPermit::offer(privileges, table)? else {
+            return Ok(None);
+        };
         Ok(Self::from_decision(
+            &permit,
             &decide(ctx, table, PolicyCommand::Select)?,
             table,
         ))
     }
 
     /// Admit `table` when `decision` is an explicit bypass, for a caller that
-    /// has already made the decision and would otherwise make it twice.
-    pub(crate) const fn from_decision(decision: &RowSecurity, table: &'a Table) -> Option<Self> {
+    /// holds a permit already and has already made the row-security decision.
+    ///
+    /// The permit is taken by reference and never read: it is there so this
+    /// constructor cannot be reached without one, which is what makes
+    /// "unrestricted" mean *both* freedoms rather than only the row-security
+    /// one. Six optimizer pushdowns take an `UnrestrictedTable`; a seventh
+    /// written the same way is safe by construction.
+    pub(crate) const fn from_decision(
+        _permit: &crate::privilege::ReadPermit,
+        decision: &RowSecurity,
+        table: &'a Table,
+    ) -> Option<Self> {
         match decision {
             RowSecurity::Open => Some(Self(table)),
             RowSecurity::Restricted { .. } | RowSecurity::Refuse { .. } => None,
@@ -442,11 +476,9 @@ fn binary(op: BinaryOp, left: Expr, right: Expr) -> Expr {
 /// Returns 0A000 for a qual that probes table privileges, or a parse error.
 fn compile_qual(source: &str) -> Result<Expr, ExecError> {
     if let Some(probe) = privilege_probe(source) {
-        // Every `has_*_privilege` function returns true unconditionally today
-        // (see `catalog_fn`), because no per-relation privilege enforcement
-        // exists. A policy written around one would therefore admit every row
-        // to every role — the exact leak this module exists to prevent. Refuse
-        // until privileges are enforced.
+        // These few still return true unconditionally (see `catalog_fn`), and a
+        // policy written around one would therefore admit every row to every
+        // role — the exact leak this module exists to prevent.
         return Err(ExecError::Unsupported(format!(
             "row-level-security policy qual uses {probe}, which is not enforced yet"
         )));
@@ -454,18 +486,45 @@ fn compile_qual(source: &str) -> Result<Expr, ExecError> {
     Ok(crabka_pgparser::parser::parse_expression(source)?)
 }
 
-/// The first privilege-probing function named anywhere in a qual's source.
+/// The privilege functions a policy qual still may not name.
+///
+/// This was once the whole `has_*_privilege` family, because the whole family
+/// answered `true`. The relation-scoped members now answer from the grants
+/// `GRANT` wrote — see [`crate::privilege`] — so a policy may use them, and
+/// upstream `PostgreSQL` policies do. What is left is the object kinds this
+/// catalog stores no ACL for at all: a database, a language, a tablespace, a
+/// type, a foreign server or wrapper, a large object, a routine, a sequence, a
+/// configuration parameter. For those the function is still a constant `true`,
+/// so a policy resting on one would silently admit everything, and refusing it
+/// at `CREATE POLICY` is the fail-closed answer.
+const UNENFORCED_PRIVILEGE_FUNCTIONS: &[&str] = &[
+    "has_database_privilege",
+    "has_schema_privilege",
+    "has_sequence_privilege",
+    "has_function_privilege",
+    "has_language_privilege",
+    "has_server_privilege",
+    "has_foreign_data_wrapper_privilege",
+    "has_tablespace_privilege",
+    "has_type_privilege",
+    "has_parameter_privilege",
+    "has_largeobject_privilege",
+];
+
+/// The first still-unenforced privilege function named anywhere in a qual's
+/// source.
 ///
 /// Deliberately textual, and deliberately over-eager. The expression walkers in
 /// `exec` do not descend into a subquery's own clauses, so a tree walk would
-/// miss `EXISTS (SELECT … WHERE has_table_privilege(…))` — the one shape most
+/// miss `EXISTS (SELECT … WHERE has_function_privilege(…))` — the one shape most
 /// worth catching. Matching the source text over-rejects (a column that happens
 /// to be named after one of these functions is refused too) and never
 /// under-rejects, which is the direction a security check should fail in.
 fn privilege_probe(source: &str) -> Option<&'static str> {
     let lowered = source.to_ascii_lowercase();
-    crate::catalog_fn::PRIVILEGE_FUNCTIONS
-        .into_iter()
+    UNENFORCED_PRIVILEGE_FUNCTIONS
+        .iter()
+        .copied()
         .find(|name| lowered.contains(name))
 }
 
@@ -898,6 +957,17 @@ mod tests {
         kv.write_batch(&ops).expect("apply");
     }
 
+    /// A permit for the relation, taken as its owner — these cases are about
+    /// the row-security half of `UnrestrictedTable`, so the privilege half is
+    /// satisfied the way it always is for an owner.
+    fn owner_permit(kv: &MemKv) -> crate::privilege::ReadPermit {
+        crate::privilege::ReadPermit::acquire(
+            &crate::privilege::PrivilegeCtx::new(kv, OWNER),
+            &table(false, false),
+        )
+        .expect("the owner may read its own relation")
+    }
+
     /// Render a decision as a short label so a table-driven case states one
     /// expectation rather than a match arm.
     fn label(decision: &RowSecurity) -> &'static str {
@@ -921,7 +991,14 @@ mod tests {
             let decision =
                 decide(&ctx, &table(false, false), PolicyCommand::Select).expect("decide");
             assert!(decision == RowSecurity::Open);
-            assert!(UnrestrictedTable::from_decision(&decision, &table(false, false)).is_some());
+            assert!(
+                UnrestrictedTable::from_decision(
+                    &owner_permit(&kv),
+                    &decision,
+                    &table(false, false)
+                )
+                .is_some()
+            );
         }
     }
 
@@ -935,7 +1012,10 @@ mod tests {
         let ctx = RlsCtx::new(&kv, "stranger", true);
         let decision = decide(&ctx, &table(true, false), PolicyCommand::Select).expect("decide");
         assert!(label(&decision) == "restricted");
-        assert!(UnrestrictedTable::from_decision(&decision, &table(true, false)).is_none());
+        assert!(
+            UnrestrictedTable::from_decision(&owner_permit(&kv), &decision, &table(true, false))
+                .is_none()
+        );
     }
 
     #[test]
@@ -1209,22 +1289,52 @@ mod tests {
         );
     }
 
-    /// A policy qual that probes table privileges is refused rather than
-    /// compiled: those functions return true unconditionally today, so the
-    /// policy would admit every row to every role.
+    /// A policy qual may probe *table* privileges, because those functions now
+    /// answer from the grants `GRANT` wrote rather than saying yes to everyone.
+    ///
+    /// The object kinds this catalog stores no ACL for are still refused: a
+    /// policy resting on one of those would admit every row to every role,
+    /// which is the leak the blanket refusal was there to stop.
     #[test]
-    fn a_privilege_probing_qual_is_refused() {
-        for source in [
-            "has_table_privilege('document', 'SELECT')",
-            "id > 0 AND HAS_COLUMN_PRIVILEGE('document', 'id', 'SELECT')",
-            "EXISTS (SELECT 1 WHERE has_any_column_privilege('document', 'SELECT'))",
-        ] {
-            let kv = store(&[policy("probe", true, source, &[])]);
+    fn only_still_unenforced_privilege_probes_are_refused() {
+        struct Case {
+            source: &'static str,
+            refused: bool,
+        }
+        let cases = [
+            Case {
+                source: "has_table_privilege('document', 'SELECT')",
+                refused: false,
+            },
+            Case {
+                source: "id > 0 AND HAS_COLUMN_PRIVILEGE('document', 'id', 'SELECT')",
+                refused: false,
+            },
+            Case {
+                source: "EXISTS (SELECT 1 WHERE has_any_column_privilege('document', 'SELECT'))",
+                refused: false,
+            },
+            Case {
+                source: "has_function_privilege('f()', 'EXECUTE')",
+                refused: true,
+            },
+            Case {
+                source: "EXISTS (SELECT 1 WHERE has_largeobject_privilege(1, 'SELECT'))",
+                refused: true,
+            },
+        ];
+        for case in cases {
+            let kv = store(&[policy("probe", true, case.source, &[])]);
             role(&kv, "stranger", crabka_pgcatalog::RoleAttributes::default());
             let ctx = RlsCtx::new(&kv, "stranger", true);
-            let error = decide(&ctx, &table(true, false), PolicyCommand::Select)
-                .expect_err("privilege probe should be refused");
-            assert!(error.into_pg().message.contains("not enforced yet"));
+            let decided = decide(&ctx, &table(true, false), PolicyCommand::Select);
+            match decided {
+                Ok(_) => assert!(!case.refused, "{} should be refused", case.source),
+                Err(error) => {
+                    assert!(case.refused, "{} should compile", case.source);
+                    assert!(error.into_pg().message.contains("not enforced yet"));
+                }
+            }
         }
     }
 

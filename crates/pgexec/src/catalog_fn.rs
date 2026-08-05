@@ -924,9 +924,22 @@ fn invalid_size_unit(input: &str, unit: &str) -> ExecError {
     )
 }
 
-/// The `has_*_privilege` family. crabka's single bootstrap role owns every
-/// object, so every recognized privilege on an existing object is held; an
-/// unrecognized privilege name is PostgreSQL's 22023, which is what callers
+/// The `has_*_privilege` family.
+///
+/// The relation-scoped members answer from the grants `GRANT`/`REVOKE` actually
+/// wrote — see [`crate::privilege`], which is the same decision every `SELECT`,
+/// `INSERT`, `UPDATE`, `DELETE` and `TRUNCATE` is gated on, so the answer and
+/// the enforcement cannot drift apart.
+///
+/// The rest still answer `true` unconditionally, and that is a statement about
+/// what this catalog stores rather than an oversight: there is no ACL for a
+/// database, a language, a tablespace, a type, a foreign server, a large object
+/// or a routine, so there is nothing for a grant to have written and nothing an
+/// enforcement path could read. [`crate::rls::validate_policy_qual`] still
+/// refuses a policy written around one of those, for exactly the reason it once
+/// refused all of them.
+///
+/// An unrecognized privilege name is `PostgreSQL`'s 22023, which is what callers
 /// actually depend on catching.
 fn has_privilege(name: &str, vals: &[Datum], ctx: &EvalCtx) -> Result<Datum, ExecError> {
     let Some(Datum::Text(privilege)) = vals.last() else {
@@ -945,14 +958,130 @@ fn has_privilege(name: &str, vals: &[Datum], ctx: &EvalCtx) -> Result<Datum, Exe
             message: format!("unrecognized privilege type: \"{privilege}\""),
         });
     }
-    // A relation-scoped test must still fail on a missing relation; the object
-    // argument is the one before the privilege name.
-    if (name == "has_table_privilege" || name == "has_any_column_privilege")
-        && let (Some(object), Some(kv)) = (vals.get(vals.len() - 2), ctx.catalog())
-    {
-        resolve_relation_oid(kv, ctx.resolution(), object)?;
+    let Some(shape) = RelationPrivilegeCall::of(name, vals.len()) else {
+        return Ok(Datum::Bool(true));
+    };
+    let Some(kv) = ctx.catalog() else {
+        return Ok(Datum::Bool(true));
+    };
+    // A relation-scoped test must still fail on a missing relation, before any
+    // question about grants is asked.
+    let oid = resolve_relation_oid(kv, ctx.resolution(), &vals[shape.relation])?;
+    let Some((relation, owner, kind)) = relation_acl_target(kv, oid)? else {
+        // A relation with no catalog record of its own — a virtual catalog
+        // relation, an index, a sequence. PostgreSQL grants `SELECT` on the
+        // system catalogs to `PUBLIC`, and none of the others carry a table ACL
+        // here, so the honest answer for all of them is the one that says yes.
+        return Ok(Datum::Bool(true));
+    };
+    let role = match shape.role.map(|at| &vals[at]) {
+        Some(argument) => role_argument_name(kv, argument)?,
+        None => ctx.current_user.clone(),
+    };
+    let role = effective_privilege_role(&role);
+    let privilege_ctx = crate::privilege::PrivilegeCtx::new(kv, &role);
+    let wanted = bare.to_ascii_uppercase();
+    if !crabka_pgcatalog::TABLE_PRIVILEGES.contains(&wanted.as_str()) {
+        // A privilege that is recognized somewhere but cannot be granted on a
+        // relation (`CONNECT`, `USAGE`, `EXECUTE`, …). PostgreSQL raises 22023
+        // for these in a relation position; answering `true` is what this
+        // function did before privileges were enforced, and keeping it there
+        // confines this change to the answers that were actually wrong.
+        return Ok(Datum::Bool(true));
     }
-    Ok(Datum::Bool(true))
+    // A column privilege is a table privilege here: no column-level grant can be
+    // stored, so `GRANT SELECT (a) ON t` cannot have narrowed anything and the
+    // table-level answer is the whole answer. `kind` likewise does not change
+    // the decision — it only changes how a denial would be spelled, and this
+    // function returns a boolean rather than raising one.
+    let _ = kind;
+    crate::privilege::holds_named(&privilege_ctx, &relation, &owner, &wanted).map(Datum::Bool)
+}
+
+/// Where a relation-scoped `has_*_privilege` call keeps its arguments.
+///
+/// Each of the three has an optional leading role argument, so the positions
+/// are counted from the end: the privilege name is last, and the relation sits
+/// a fixed distance in front of it.
+struct RelationPrivilegeCall {
+    /// The index of the relation argument.
+    relation: usize,
+    /// The index of the role argument, when the call names one.
+    role: Option<usize>,
+}
+
+impl RelationPrivilegeCall {
+    fn of(name: &str, arity: usize) -> Option<Self> {
+        // (minimum arity without a role, arguments between relation and privilege)
+        let (minimum, trailing) = match name {
+            "has_table_privilege" | "has_any_column_privilege" => (2, 0),
+            "has_column_privilege" => (3, 1),
+            _ => return None,
+        };
+        if arity < minimum {
+            return None;
+        }
+        Some(Self {
+            relation: arity.checked_sub(trailing + 2)?,
+            role: (arity > minimum).then_some(0),
+        })
+    }
+}
+
+/// The relation an ACL question is about: its name, its owner, and whether
+/// `PostgreSQL` would call it a table or a view.
+///
+/// `None` for an oid that names no ACL-bearing relation.
+fn relation_acl_target(
+    kv: &dyn Kv,
+    oid: i32,
+) -> Result<Option<(RelationName, String, crate::privilege::RelationKind)>, ExecError> {
+    for table in crabka_pgcatalog::list_tables(kv)? {
+        if crate::catalog_rel::table_relation_oid(table.id)? == oid {
+            return Ok(Some((
+                table.name,
+                table.owner,
+                crate::privilege::RelationKind::Table,
+            )));
+        }
+    }
+    let view_oids = crate::catalog_rel::view_oids(kv)?;
+    for view in crabka_pgcatalog::list_views(kv)? {
+        if view_oids.get(&view.name) == Some(&oid) {
+            return Ok(Some((
+                view.name,
+                view.owner,
+                crate::privilege::RelationKind::View,
+            )));
+        }
+    }
+    Ok(None)
+}
+
+/// The role a `has_*_privilege` role argument names, given as a name or an oid.
+fn role_argument_name(kv: &dyn Kv, argument: &Datum) -> Result<String, ExecError> {
+    match argument {
+        Datum::Text(name) => Ok(name.clone()),
+        other => match user_by_id(kv, other)? {
+            Datum::Text(name) => Ok(name),
+            _ => Ok(String::new()),
+        },
+    }
+}
+
+/// The role a privilege question is really about.
+///
+/// `PUBLIC` in the `current_user` position means the session authenticated as
+/// nobody, and every other decision in the engine reads that as the bootstrap
+/// superuser — see `ForeignCtx::effective_role`. Answering these functions under
+/// a different role than the enforcement path uses would let a session be told
+/// it may not read a relation it can read.
+fn effective_privilege_role(role: &str) -> String {
+    if role == crabka_pgcatalog::PUBLIC_ROLE {
+        crabka_pgcatalog::BOOTSTRAP_ROLE.to_string()
+    } else {
+        role.to_string()
+    }
 }
 
 fn recognized_privilege(privilege: &str) -> bool {

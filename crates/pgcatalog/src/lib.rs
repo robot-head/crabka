@@ -572,6 +572,10 @@ pub struct Table {
 pub struct View {
     pub name: RelationName,
     pub definition: String,
+    /// The role that owns the relation — `pg_class.relowner`. Set from the
+    /// creating session's `current_user`, and what lets a privilege check admit
+    /// the owner of a view it has granted nobody else access to.
+    pub owner: String,
     pub columns: Vec<Column>,
     /// `pg_class.reloptions` — the `WITH (…)` list the view was written with.
     pub options: ViewOptions,
@@ -579,15 +583,17 @@ pub struct View {
 
 /// The `CREATE VIEW … WITH (…)` reloptions this catalog keeps.
 ///
-/// Both are **recorded and not yet honoured**. Row security evaluates every
-/// view with invoker semantics regardless of `security_invoker`, deliberately:
-/// owner-rights views would be a universal row-security bypass while
-/// `has_table_privilege` answers `true` unconditionally, because any role could
-/// read an owner's rows through a view it was never granted. `security_barrier`
-/// is likewise inert — the planner does not reorder a view's own qualifiers
-/// below a user-supplied one, so there is nothing yet for the barrier to stop.
-/// Storing them now means the flags are already on disk when table privileges
-/// and qualifier reordering arrive.
+/// Both are **recorded and not yet honoured**. Every view is evaluated with
+/// invoker semantics regardless of `security_invoker`: its own ACL is checked
+/// on [`View::owner`], and then its body reads each relation it names under the
+/// caller's own grants and policies. Owner-rights semantics are a deliberate
+/// separate step, because they change the bound that makes invoker semantics
+/// safe — *a view can never show you a row you could not have read yourself* —
+/// and that change should be reviewed on its own rather than folded into the
+/// work that made the ACL check possible. `security_barrier` is likewise inert:
+/// the planner does not reorder a view's own qualifiers below a user-supplied
+/// one, so there is nothing yet for the barrier to stop. Storing them now means
+/// the flags are already on disk when either arrives.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ViewOptions {
     pub security_invoker: bool,
@@ -2124,10 +2130,8 @@ pub fn rename_table_ops(
             value: renamed_index,
         });
     }
-    for (privilege_key, privilege) in scan_table_privileges(kv)? {
-        if privilege.table != *name {
-            continue;
-        }
+    for (privilege_key, bytes) in kv.scan_prefix(&table_privilege_relation_prefix(name))? {
+        let privilege = deserialize_table_privilege(&bytes)?;
         ops.push(WriteOp::Delete { key: privilege_key });
         ops.push(WriteOp::Put {
             key: table_privilege_key(new_name, &privilege.grantee, &privilege.privilege),
@@ -2258,6 +2262,9 @@ pub fn create_table_with_options_ops(
 
 /// Build the write batch that creates a view without persisting it.
 ///
+/// `owner` is the creating session's `current_user`; the catalog's own
+/// convenience callers pass [`BOOTSTRAP_ROLE`].
+///
 /// # Errors
 ///
 /// Returns duplicate-relation or storage/corruption errors from the catalog KV seam.
@@ -2267,6 +2274,7 @@ pub fn create_view_ops(
     definition: String,
     columns: Vec<Column>,
     options: ViewOptions,
+    owner: &str,
 ) -> Result<Vec<WriteOp>, CatalogError> {
     if relation_exists(kv, name)? {
         return Err(CatalogError::DuplicateTable(name.to_string()));
@@ -2274,6 +2282,7 @@ pub fn create_view_ops(
     let view = View {
         name: name.clone(),
         definition,
+        owner: owner.to_string(),
         columns,
         options,
     };
@@ -2285,6 +2294,8 @@ pub fn create_view_ops(
 
 /// Create a view and its output schema in one atomic batch.
 ///
+/// `owner` is the creating session's `current_user`.
+///
 /// # Errors
 ///
 /// Returns duplicate-relation or storage/corruption errors from the catalog KV seam.
@@ -2294,8 +2305,11 @@ pub fn create_view(
     definition: String,
     columns: Vec<Column>,
     options: ViewOptions,
+    owner: &str,
 ) -> Result<(), CatalogError> {
-    kv.write_batch(&create_view_ops(kv, name, definition, columns, options)?)?;
+    kv.write_batch(&create_view_ops(
+        kv, name, definition, columns, options, owner,
+    )?)?;
     Ok(())
 }
 
@@ -2438,9 +2452,11 @@ pub fn set_row_security_ops(
 /// Returns undefined-relation or storage/corruption errors from the catalog KV seam.
 pub fn drop_view_ops(kv: &dyn Kv, name: &RelationName) -> Result<Vec<WriteOp>, CatalogError> {
     if kv.get(&view_key(name))?.is_some() {
-        return Ok(vec![WriteOp::Delete {
+        let mut ops = vec![WriteOp::Delete {
             key: view_key(name),
-        }]);
+        }];
+        ops.extend(drop_table_privilege_ops(kv, name)?);
+        return Ok(ops);
     }
     if kv.get(&catalog_key(name))?.is_some() {
         return Err(CatalogError::WrongObjectType(name.to_string()));
@@ -3910,12 +3926,28 @@ pub fn drop_table_ops(kv: &dyn Kv, name: &RelationName) -> Result<Vec<WriteOp>, 
     // out again, so leaving them behind would attach one relation's policies to
     // an unrelated later one.
     ops.extend(policy::drop_policies_for_table_ops(kv, table.id)?);
+    ops.extend(drop_table_privilege_ops(kv, name)?);
     Ok(ops)
 }
 
-/// Drop a table in one atomic batch.
+/// Delete every grant recorded against a relation name.
 ///
-/// The batch deletes the catalog entry, the sequence, and all the table's rows.
+/// Grants are keyed by name, and a dropped name can be created again, so a
+/// stranded grant would authorize a relation its grantee was never given
+/// anything on.
+fn drop_table_privilege_ops(
+    kv: &dyn Kv,
+    name: &RelationName,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    Ok(kv
+        .scan_prefix(&table_privilege_relation_prefix(name))?
+        .into_iter()
+        .map(|(key, _)| WriteOp::Delete { key })
+        .collect())
+}
+
+/// Drop a table: delete the catalog entry, the sequence, and all its rows — one
+/// atomic batch.
 ///
 /// # Errors
 ///
@@ -4272,6 +4304,24 @@ pub fn drop_role_ops(kv: &dyn Kv, name: &str) -> Result<Vec<WriteOp>, CatalogErr
     Ok(ops)
 }
 
+/// The table privileges `PostgreSQL` 18 recognises, which is what `ALL
+/// PRIVILEGES` on a relation names.
+///
+/// Public because it is also the set a privilege *question* may be asked about:
+/// `has_table_privilege` must tell a name that could have been granted apart
+/// from one that could not, and deriving that list a second time is how the two
+/// would drift.
+pub const TABLE_PRIVILEGES: &[&str] = &[
+    "SELECT",
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "TRUNCATE",
+    "REFERENCES",
+    "TRIGGER",
+    "MAINTAIN",
+];
+
 /// Build write ops for recording table privilege grants.
 ///
 /// # Errors
@@ -4283,18 +4333,7 @@ pub fn grant_table_privileges_ops(
     grantees: &[String],
     privileges: &[String],
 ) -> Result<Vec<WriteOp>, CatalogError> {
-    let _ = get_table(kv, table)?;
-    let mut ops = Vec::new();
-    for grantee in grantees {
-        let _ = get_role(kv, grantee)?;
-        for privilege in privileges {
-            ops.push(WriteOp::Put {
-                key: table_privilege_key(table, grantee, privilege),
-                value: serialize_table_privilege(table, grantee, privilege),
-            });
-        }
-    }
-    Ok(ops)
+    table_privilege_ops(kv, table, grantees, privileges, true)
 }
 
 /// Build write ops for removing recorded table privilege grants.
@@ -4308,17 +4347,64 @@ pub fn revoke_table_privileges_ops(
     grantees: &[String],
     privileges: &[String],
 ) -> Result<Vec<WriteOp>, CatalogError> {
-    let _ = get_table(kv, table)?;
+    table_privilege_ops(kv, table, grantees, privileges, false)
+}
+
+fn table_privilege_ops(
+    kv: &dyn Kv,
+    table: &RelationName,
+    grantees: &[String],
+    privileges: &[String],
+    grant: bool,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    // `GRANT … ON` names a relation, not specifically a table: a view is a
+    // grantable object in its own right and the regression suite grants on one.
+    if !relation_exists(kv, table)? {
+        return Err(CatalogError::UndefinedTable(table.to_string()));
+    }
     let mut ops = Vec::new();
     for grantee in grantees {
-        let _ = get_role(kv, grantee)?;
-        for privilege in privileges {
-            ops.push(WriteOp::Delete {
-                key: table_privilege_key(table, grantee, privilege),
+        // `PUBLIC` and the bootstrap superuser are roles with no `pg_authid`
+        // row, so validating them against stored records would reject the two
+        // grantees any cluster always has.
+        if grantee != PUBLIC_ROLE && grantee != BOOTSTRAP_ROLE {
+            let _ = get_role(kv, grantee)?;
+        }
+        for privilege in expand_table_privileges(privileges) {
+            let key = table_privilege_key(table, grantee, &privilege);
+            ops.push(if grant {
+                WriteOp::Put {
+                    value: serialize_table_privilege(table, grantee, &privilege),
+                    key,
+                }
+            } else {
+                WriteOp::Delete { key }
             });
         }
     }
     Ok(ops)
+}
+
+/// Resolve a statement's privilege list to the exact set of names a grant is
+/// stored under.
+///
+/// `ALL` is expanded at *both* grant and revoke time rather than stored as a
+/// name of its own, so the two spellings compose the way `PostgreSQL`'s
+/// per-privilege ACL bits do: `GRANT ALL` then `REVOKE SELECT` leaves the other
+/// seven behind, and `GRANT SELECT` then `REVOKE ALL` removes it. A stored
+/// `ALL` row would answer neither question.
+fn expand_table_privileges(privileges: &[String]) -> Vec<String> {
+    privileges
+        .iter()
+        .flat_map(|privilege| {
+            let privilege = privilege.trim().to_ascii_uppercase();
+            if privilege == "ALL" || privilege == "ALL PRIVILEGES" {
+                TABLE_PRIVILEGES.iter().map(|p| (*p).to_string()).collect()
+            } else {
+                vec![privilege]
+            }
+        })
+        .collect()
 }
 
 /// List recorded table privileges.
@@ -4333,6 +4419,49 @@ pub fn list_table_privileges(kv: &dyn Kv) -> Result<Vec<TablePrivilege>, Catalog
             .map(|(_, privilege)| privilege)
             .collect()
     })
+}
+
+/// Every recorded grant on one relation.
+///
+/// This scans the relation's own key range rather than filtering
+/// [`list_table_privileges`], because an enforcement check runs on every
+/// statement, once per relation the statement touches. Filtering the full list
+/// would make each of those checks cost the whole cluster's grants — a table
+/// nobody has granted anything on would still pay for every other relation's
+/// ACL. The key layout puts schema and name first precisely so this is a range.
+///
+/// # Errors
+///
+/// Returns storage/corruption errors from the catalog KV seam.
+pub fn table_privileges_of(
+    kv: &dyn Kv,
+    relation: &RelationName,
+) -> Result<Vec<TablePrivilege>, CatalogError> {
+    kv.scan_prefix(&table_privilege_relation_prefix(relation))?
+        .into_iter()
+        .map(|(_, bytes)| deserialize_table_privilege(&bytes))
+        .collect()
+}
+
+/// Whether `grantee` itself holds `privilege` on `relation`.
+///
+/// A point lookup on the one key that would record it. This answers only the
+/// literal question — it does not consider `PUBLIC`, role membership, or
+/// ownership, all of which the caller composes on top.
+///
+/// # Errors
+///
+/// Returns storage/corruption errors from the catalog KV seam.
+pub fn has_stored_table_privilege(
+    kv: &dyn Kv,
+    relation: &RelationName,
+    grantee: &str,
+    privilege: &str,
+) -> Result<bool, CatalogError> {
+    let privilege = privilege.to_ascii_uppercase();
+    Ok(kv
+        .get(&table_privilege_key(relation, grantee, &privilege))?
+        .is_some())
 }
 
 /// Build write ops for schema privilege grants.
@@ -4464,9 +4593,22 @@ fn role_membership_key(member: &str, role: &str) -> Vec<u8> {
     key
 }
 
-fn table_privilege_key(table: &RelationName, grantee: &str, privilege: &str) -> Vec<u8> {
+/// The key range holding exactly one relation's grants.
+///
+/// Every full key is built by extending this, so the range a scan walks and the
+/// key a write lands on cannot drift apart. The parts are length-prefixed, so
+/// `t`'s range does not swallow `t2`'s.
+fn table_privilege_relation_prefix(table: &RelationName) -> Vec<u8> {
     let mut key = TABLE_PRIVILEGE_PREFIX.to_vec();
-    for part in [&table.schema, &table.name, grantee, privilege] {
+    for part in [&table.schema, &table.name] {
+        key::push_key_part(&mut key, part);
+    }
+    key
+}
+
+fn table_privilege_key(table: &RelationName, grantee: &str, privilege: &str) -> Vec<u8> {
+    let mut key = table_privilege_relation_prefix(table);
+    for part in [grantee, privilege] {
         key::push_key_part(&mut key, part);
     }
     key
@@ -5638,6 +5780,266 @@ mod tests {
         assert!(list_table_privileges(&kv).expect("privileges").is_empty());
     }
 
+    fn grant(kv: &dyn Kv, relation: &RelationName, grantee: &str, privileges: &[&str]) {
+        let ops = grant_table_privileges_ops(
+            kv,
+            relation,
+            &[grantee.to_string()],
+            &privileges
+                .iter()
+                .map(|p| (*p).to_string())
+                .collect::<Vec<_>>(),
+        )
+        .expect("grant ops");
+        kv.write_batch(&ops).expect("grant write");
+    }
+
+    fn revoke(kv: &dyn Kv, relation: &RelationName, grantee: &str, privileges: &[&str]) {
+        let ops = revoke_table_privileges_ops(
+            kv,
+            relation,
+            &[grantee.to_string()],
+            &privileges
+                .iter()
+                .map(|p| (*p).to_string())
+                .collect::<Vec<_>>(),
+        )
+        .expect("revoke ops");
+        kv.write_batch(&ops).expect("revoke write");
+    }
+
+    /// The privilege names recorded against `relation`, sorted so a comparison
+    /// does not depend on scan order.
+    fn privilege_names(kv: &dyn Kv, relation: &RelationName) -> Vec<String> {
+        let mut names: Vec<String> = table_privileges_of(kv, relation)
+            .expect("privileges")
+            .into_iter()
+            .map(|privilege| privilege.privilege)
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn sorted_all_table_privileges() -> Vec<String> {
+        let mut all: Vec<String> = TABLE_PRIVILEGES.iter().map(|p| (*p).to_string()).collect();
+        all.sort();
+        all
+    }
+
+    fn view_fixture(kv: &dyn Kv, name: &str) {
+        create_view(
+            kv,
+            &rel(name),
+            "SELECT 1 AS total".into(),
+            vec![Column::new("total", ColumnType::Int4)],
+            ViewOptions::default(),
+            BOOTSTRAP_ROLE,
+        )
+        .expect("create view");
+    }
+
+    #[test]
+    fn grant_all_on_a_view_to_public_records_every_table_privilege() {
+        use assert2::assert;
+
+        let kv = MemKv::new();
+        view_fixture(&kv, "atest12v");
+        grant(&kv, &rel("atest12v"), PUBLIC_ROLE, &["ALL"]);
+
+        assert!(privilege_names(&kv, &rel("atest12v")) == sorted_all_table_privileges());
+        assert!(
+            table_privileges_of(&kv, &rel("atest12v"))
+                .expect("privileges")
+                .iter()
+                .all(|privilege| privilege.table == rel("atest12v")
+                    && privilege.grantee == PUBLIC_ROLE)
+        );
+    }
+
+    #[test]
+    fn all_is_expanded_at_grant_and_revoke_so_the_two_compose() {
+        use assert2::assert;
+
+        // (granted, revoked, what should remain)
+        let cases: [(&[&str], &[&str], &[&str]); 5] = [
+            (
+                &["ALL"],
+                &["SELECT"],
+                &[
+                    "DELETE",
+                    "INSERT",
+                    "MAINTAIN",
+                    "REFERENCES",
+                    "TRIGGER",
+                    "TRUNCATE",
+                    "UPDATE",
+                ],
+            ),
+            (&["SELECT"], &["ALL"], &[]),
+            (&["ALL PRIVILEGES"], &["all"], &[]),
+            (&["select", "insert"], &["SELECT"], &["INSERT"]),
+            (
+                &["ALL"],
+                &["update", "delete"],
+                &[
+                    "INSERT",
+                    "MAINTAIN",
+                    "REFERENCES",
+                    "SELECT",
+                    "TRIGGER",
+                    "TRUNCATE",
+                ],
+            ),
+        ];
+
+        for (index, (granted, revoked, remaining)) in cases.into_iter().enumerate() {
+            let kv = MemKv::new();
+            let relation = rel(&format!("t{index}"));
+            create_table(&kv, &relation, cols()).expect("table");
+            grant(&kv, &relation, PUBLIC_ROLE, granted);
+            revoke(&kv, &relation, PUBLIC_ROLE, revoked);
+
+            let expected: Vec<String> = remaining.iter().map(|p| (*p).to_string()).collect();
+            assert!(privilege_names(&kv, &relation) == expected);
+        }
+    }
+
+    #[test]
+    fn table_privileges_of_returns_only_the_named_relation() {
+        use assert2::assert;
+
+        let kv = MemKv::new();
+        // `t` is a byte-prefix of `t2`: a scan over unlength-prefixed key parts
+        // would hand `t`'s lookup `t2`'s grants as well.
+        create_table(&kv, &rel("t"), cols()).expect("t");
+        create_table(&kv, &rel("t2"), cols()).expect("t2");
+        grant(&kv, &rel("t"), PUBLIC_ROLE, &["SELECT"]);
+        grant(&kv, &rel("t2"), PUBLIC_ROLE, &["INSERT", "UPDATE"]);
+
+        assert!(privilege_names(&kv, &rel("t")) == vec!["SELECT".to_string()]);
+        assert!(
+            privilege_names(&kv, &rel("t2")) == vec!["INSERT".to_string(), "UPDATE".to_string()]
+        );
+        assert!(list_table_privileges(&kv).expect("privileges").len() == 3);
+    }
+
+    #[test]
+    fn public_and_bootstrap_are_grantable_without_a_stored_role() {
+        use assert2::assert;
+
+        let kv = MemKv::new();
+        create_table(&kv, &rel("docs"), cols()).expect("table");
+
+        for grantee in [PUBLIC_ROLE, BOOTSTRAP_ROLE] {
+            assert!(
+                grant_table_privileges_ops(
+                    &kv,
+                    &rel("docs"),
+                    &[grantee.to_string()],
+                    &["SELECT".to_string()],
+                )
+                .is_ok()
+            );
+        }
+        assert!(
+            grant_table_privileges_ops(
+                &kv,
+                &rel("docs"),
+                &["nobody".to_string()],
+                &["SELECT".to_string()],
+            )
+            .expect_err("an unheld name is not a grantee")
+                == CatalogError::UndefinedObject("nobody".into())
+        );
+    }
+
+    #[test]
+    fn granting_on_something_that_is_no_relation_is_undefined_table() {
+        use assert2::assert;
+
+        let kv = MemKv::new();
+        for ops in [
+            grant_table_privileges_ops(
+                &kv,
+                &rel("missing"),
+                &[PUBLIC_ROLE.to_string()],
+                &["SELECT".to_string()],
+            ),
+            revoke_table_privileges_ops(
+                &kv,
+                &rel("missing"),
+                &[PUBLIC_ROLE.to_string()],
+                &["SELECT".to_string()],
+            ),
+        ] {
+            assert!(
+                ops.expect_err("no such relation")
+                    == CatalogError::UndefinedTable(rel("missing").to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn has_stored_table_privilege_is_a_case_insensitive_point_lookup() {
+        use assert2::assert;
+
+        let kv = MemKv::new();
+        create_table(&kv, &rel("docs"), cols()).expect("table");
+        create_role(&kv, "reader", false).expect("role");
+        grant(&kv, &rel("docs"), "reader", &["select"]);
+
+        for probe in ["SELECT", "select", "SeLeCt"] {
+            assert!(
+                has_stored_table_privilege(&kv, &rel("docs"), "reader", probe).expect("lookup")
+            );
+        }
+        assert!(
+            !has_stored_table_privilege(&kv, &rel("docs"), "reader", "INSERT").expect("lookup")
+        );
+        assert!(
+            !has_stored_table_privilege(&kv, &rel("docs"), PUBLIC_ROLE, "SELECT").expect("lookup")
+        );
+    }
+
+    #[test]
+    fn dropping_a_relation_takes_its_grants_with_it() {
+        use assert2::assert;
+
+        let kv = MemKv::new();
+        create_table(&kv, &rel("docs"), cols()).expect("table");
+        view_fixture(&kv, "docs_v");
+        grant(&kv, &rel("docs"), PUBLIC_ROLE, &["ALL"]);
+        grant(&kv, &rel("docs_v"), PUBLIC_ROLE, &["SELECT"]);
+
+        drop_table(&kv, &rel("docs")).expect("drop table");
+        assert!(privilege_names(&kv, &rel("docs")).is_empty());
+        assert!(privilege_names(&kv, &rel("docs_v")) == vec!["SELECT".to_string()]);
+
+        drop_view(&kv, &rel("docs_v")).expect("drop view");
+        assert!(list_table_privileges(&kv).expect("privileges").is_empty());
+
+        // A recreated name must start with no grants, which is the leak the
+        // deletion exists to prevent.
+        create_table(&kv, &rel("docs"), cols()).expect("recreate");
+        assert!(
+            !has_stored_table_privilege(&kv, &rel("docs"), PUBLIC_ROLE, "SELECT").expect("get")
+        );
+    }
+
+    #[test]
+    fn renaming_a_table_moves_its_grants_to_the_new_name() {
+        use assert2::assert;
+
+        let kv = MemKv::new();
+        create_table(&kv, &rel("docs"), cols()).expect("table");
+        grant(&kv, &rel("docs"), PUBLIC_ROLE, &["ALL"]);
+        let ops = rename_table_ops(&kv, &rel("docs"), &rel("papers")).expect("rename ops");
+        kv.write_batch(&ops).expect("rename write");
+
+        assert!(privilege_names(&kv, &rel("docs")).is_empty());
+        assert!(privilege_names(&kv, &rel("papers")) == sorted_all_table_privileges());
+    }
+
     fn check_crud(kv: &dyn Kv) {
         let id = create_table(kv, &rel("t"), cols()).expect("create");
         let t = get_table(kv, &rel("t")).expect("lookup");
@@ -5700,6 +6102,7 @@ mod tests {
             "SELECT 1 AS total".into(),
             columns.clone(),
             options,
+            "analyst",
         )
         .expect("create view");
         assert_eq!(
@@ -5707,6 +6110,7 @@ mod tests {
             View {
                 name: rel("sales_view"),
                 definition: "SELECT 1 AS total".into(),
+                owner: "analyst".into(),
                 columns,
                 options,
             }
@@ -5723,7 +6127,8 @@ mod tests {
                 &rel("sales_view"),
                 "SELECT 1".into(),
                 vec![],
-                ViewOptions::default()
+                ViewOptions::default(),
+                BOOTSTRAP_ROLE,
             )
             .expect_err("duplicate view")
             .sqlstate(),

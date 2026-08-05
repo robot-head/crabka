@@ -277,6 +277,17 @@ pub enum ExecError {
     /// (42P17). The qual is user-supplied SQL, so following the recursion would
     /// be a remotely triggerable stack overflow.
     PolicyRecursion(String),
+    /// The session holds no grant for what it asked to do with a relation
+    /// (42501). `PostgreSQL` names the *kind* of relation, not the command, and
+    /// never says which privilege was missing — telling an unprivileged caller
+    /// which grant would have worked is itself a disclosure.
+    PermissionDenied {
+        /// `PostgreSQL`'s noun for the relation: `table`, `view`.
+        kind: &'static str,
+        /// The relation's bare name, unqualified, the way `PostgreSQL` spells
+        /// it here even when the statement named a schema.
+        relation: String,
+    },
     /// A scalar function's own error, carrying the SQLSTATE and the message
     /// PostgreSQL spells out at that call site — `setseed`'s range check
     /// (22023), `format`'s specifier diagnostics (22023/22004), `encode`'s
@@ -802,6 +813,9 @@ impl ExecError {
             ExecError::StackDepthExceeded => PgError::error("54001", "stack depth limit exceeded"),
             ExecError::SequenceLimit(m) => PgError::error("2200H", m),
             ExecError::ObjectNotInPrerequisiteState(m) => PgError::error("55000", m),
+            ExecError::PermissionDenied { kind, relation } => {
+                PgError::error("42501", format!("permission denied for {kind} {relation}"))
+            }
             ExecError::RowSecurityRefused(relation) => PgError::error(
                 "42501",
                 format!(

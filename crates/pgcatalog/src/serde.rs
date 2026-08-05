@@ -1909,7 +1909,7 @@ pub fn deserialize_user_mapping(bytes: &[u8]) -> Result<UserMapping, KvError> {
 
 // ── Views ─────────────────────────────────────────────────────────────────────
 
-const VIEW_VERSION: u8 = 2;
+const VIEW_VERSION: u8 = 3;
 
 /// Serialize a view definition and its resolved output schema.
 ///
@@ -1921,6 +1921,7 @@ pub fn serialize_view(view: &View) -> Vec<u8> {
     let mut out = vec![VIEW_VERSION];
     write_relation(&mut out, &view.name);
     write_str(&mut out, &view.definition);
+    write_str(&mut out, &view.owner);
     out.extend_from_slice(
         &u32::try_from(view.columns.len())
             .expect("view column count must fit in u32")
@@ -1956,6 +1957,7 @@ pub fn deserialize_view(bytes: &[u8]) -> Result<View, KvError> {
     }
     let name = read_relation(&mut cur)?;
     let definition = read_string(&mut cur)?;
+    let owner = read_string(&mut cur)?;
     let column_count = usize::try_from(u32::from_be_bytes(
         take_n(&mut cur, 4)?.try_into().expect("4"),
     ))
@@ -1981,6 +1983,7 @@ pub fn deserialize_view(bytes: &[u8]) -> Result<View, KvError> {
     Ok(View {
         name,
         definition,
+        owner,
         columns,
         options,
     })
@@ -2806,6 +2809,44 @@ mod tests {
     #[test]
     fn truncated_errors_not_panics() {
         assert!(deserialize_schema(&[SCHEMA_VERSION, 0, 0]).is_err());
+    }
+
+    #[test]
+    fn roundtrip_view_preserves_owner() {
+        use assert2::assert;
+
+        for owner in ["postgres", "regress_view_user", ""] {
+            let view = View {
+                name: RelationName::public("sales_view"),
+                definition: "SELECT 1 AS total, 'x'::text AS label".into(),
+                owner: owner.into(),
+                columns: vec![
+                    Column::new("total", ColumnType::Int4),
+                    Column::new("label", ColumnType::Text),
+                ],
+                options: ViewOptions {
+                    security_invoker: true,
+                    security_barrier: true,
+                },
+            };
+            assert!(deserialize_view(&serialize_view(&view)).expect("round trip") == view);
+        }
+    }
+
+    #[test]
+    fn view_record_from_a_superseded_version_is_rejected() {
+        use assert2::assert;
+
+        let view = View {
+            name: RelationName::public("v"),
+            definition: "SELECT 1".into(),
+            owner: "postgres".into(),
+            columns: Vec::new(),
+            options: ViewOptions::default(),
+        };
+        let mut bytes = serialize_view(&view);
+        bytes[0] = VIEW_VERSION - 1;
+        assert!(deserialize_view(&bytes).is_err());
     }
 
     #[test]

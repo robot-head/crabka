@@ -220,11 +220,41 @@ async fn stored_policies_do_not_change_a_write_while_row_security_is_off() {
     assert!(query(&mut session, "SELECT count(*) FROM document").await == vec!["4".to_string()]);
 }
 
-/// A session acting as a role that neither owns the relation nor is exempt.
-async fn as_stranger(engine: &SqlEngine) -> SqlSession {
-    let mut session = engine.connect();
+/// A session acting as a role that neither owns the relation nor is exempt,
+/// holding `SELECT` on every relation [`FIXTURE_SQL`] creates.
+///
+/// The grants are part of the fixture, not part of what is measured: these
+/// tests pin which rows a policy admits to a non-owner, and a role with no
+/// grant would be refused at the privilege gate before any policy ran, so a
+/// permission denial would mask the row-security behaviour under test. They are
+/// written straight into the catalog, the same seam [`store_policy`] uses.
+async fn as_stranger(fixture: &Fixture) -> SqlSession {
+    let mut session = fixture.engine.connect();
     run(&mut session, "CREATE ROLE stranger; SET ROLE stranger").await;
+    grant_select(fixture.kv.as_ref(), "stranger");
     session
+}
+
+/// Record a `SELECT` grant on every relation [`FIXTURE_SQL`] creates.
+fn grant_select(kv: &dyn Kv, role: &str) {
+    for relation in [
+        "document",
+        "shipment",
+        "parent",
+        "child",
+        "measure",
+        "measure_low",
+        "measure_high",
+    ] {
+        let ops = crabka_pgcatalog::grant_table_privileges_ops(
+            kv,
+            &crabka_pgcatalog::RelationName::public(relation),
+            &[role.to_string()],
+            &["SELECT".to_string()],
+        )
+        .expect("grant select");
+        kv.write_batch(&ops).expect("apply grant");
+    }
 }
 
 /// With the flag set, the fold decides what the role sees — and the aggregate
@@ -246,7 +276,7 @@ async fn an_enabled_relation_filters_every_read_shape() {
         enable_row_security(fixture.kv.as_ref(), relation, false);
     }
 
-    let mut stranger = as_stranger(&fixture.engine).await;
+    let mut stranger = as_stranger(&fixture).await;
     // The materializing scan.
     assert!(
         query(&mut stranger, "SELECT id FROM document ORDER BY id").await
@@ -301,7 +331,7 @@ async fn a_tree_is_governed_by_the_relation_that_was_named() {
     enable_row_security(fixture.kv.as_ref(), "parent", false);
     enable_row_security(fixture.kv.as_ref(), "child", false);
 
-    let mut stranger = as_stranger(&fixture.engine).await;
+    let mut stranger = as_stranger(&fixture).await;
     // The parent's qual hides the child's row; the child's own deny-everything
     // policy took no part.
     assert!(
@@ -328,7 +358,7 @@ async fn row_security_off_refuses_a_query_a_policy_would_have_affected() {
     );
     enable_row_security(fixture.kv.as_ref(), "document", false);
 
-    let mut stranger = as_stranger(&fixture.engine).await;
+    let mut stranger = as_stranger(&fixture).await;
     run(&mut stranger, "SET row_security = off").await;
     let (sqlstate, message) = error_of(&mut stranger, "SELECT id FROM document").await;
     assert!(sqlstate == "42501");
@@ -364,7 +394,7 @@ async fn a_self_referencing_policy_raises_infinite_recursion() {
     );
     enable_row_security(fixture.kv.as_ref(), "document", false);
 
-    let mut stranger = as_stranger(&fixture.engine).await;
+    let mut stranger = as_stranger(&fixture).await;
     let (sqlstate, message) = error_of(&mut stranger, "SELECT id FROM document").await;
     assert!(sqlstate == "42P17");
     assert!(message == "infinite recursion detected in policy for relation \"document\"");
@@ -408,28 +438,68 @@ async fn force_row_level_security_binds_the_owner() {
     assert!(query(&mut owner, "SELECT count(*) FROM document").await == vec!["2".to_string()]);
 }
 
-/// A policy qual built around a privilege probe is refused rather than applied:
-/// `has_table_privilege` and its family return true unconditionally today, so
-/// the policy would admit every row instead of the subset it appears to name.
+/// **Which privilege probes a policy qual may rest on.**
+///
+/// The relation-scoped ones answer from the grants `GRANT` recorded, so a
+/// policy may use them and the answer moves with the grant — `stranger` holds
+/// `SELECT` on `document` and nothing else, and the same function on the same
+/// relation therefore admits every row for `SELECT` and no row for `DELETE`.
+/// The object kinds this catalog stores no ACL for still answer `true`
+/// unconditionally, so a policy resting on one would silently admit everything
+/// and is refused instead.
 #[tokio::test]
-async fn a_policy_qual_that_probes_privileges_is_refused() {
-    let fixture = fixture();
-    let mut owner = fixture.engine.connect();
-    run(&mut owner, FIXTURE_SQL).await;
-    let id = table_id(fixture.kv.as_ref(), "document");
-    store_policy(
-        fixture.kv.as_ref(),
-        &Policy {
-            using: Some("has_table_privilege('document', 'SELECT')".into()),
-            ..deny_everything(id, "trusts_privileges")
+async fn a_policy_qual_may_probe_a_relation_privilege_but_not_an_unenforced_one() {
+    struct Case {
+        qual: &'static str,
+        /// The ids the policy admits, or `None` where the qual is refused.
+        visible: Option<&'static [&'static str]>,
+    }
+    let cases = [
+        Case {
+            qual: "has_function_privilege('lower(text)', 'EXECUTE')",
+            visible: None,
         },
-    );
-    enable_row_security(fixture.kv.as_ref(), "document", false);
+        Case {
+            qual: "has_table_privilege('document', 'SELECT')",
+            visible: Some(&["1", "2", "3", "4", "5"]),
+        },
+        Case {
+            qual: "has_table_privilege('document', 'DELETE')",
+            visible: Some(&[]),
+        },
+    ];
 
-    let mut stranger = as_stranger(&fixture.engine).await;
-    let (sqlstate, message) = error_of(&mut stranger, "SELECT id FROM document").await;
-    assert!(sqlstate == "0A000");
-    assert!(message.contains("has_table_privilege"));
+    for case in cases {
+        let fixture = fixture();
+        let mut owner = fixture.engine.connect();
+        run(&mut owner, FIXTURE_SQL).await;
+        let id = table_id(fixture.kv.as_ref(), "document");
+        store_policy(
+            fixture.kv.as_ref(),
+            &Policy {
+                using: Some(case.qual.into()),
+                ..deny_everything(id, "probes_privileges")
+            },
+        );
+        enable_row_security(fixture.kv.as_ref(), "document", false);
+
+        let mut stranger = as_stranger(&fixture).await;
+        match case.visible {
+            None => {
+                let (sqlstate, message) = error_of(&mut stranger, "SELECT id FROM document").await;
+                assert!(sqlstate == "0A000", "{}", case.qual);
+                assert!(message.contains("has_function_privilege"), "{}", case.qual);
+            }
+            Some(expected) => {
+                let expected: Vec<String> = expected.iter().map(|id| (*id).to_string()).collect();
+                assert!(
+                    query(&mut stranger, "SELECT id FROM document ORDER BY id").await == expected,
+                    "{}",
+                    case.qual
+                );
+            }
+        }
+    }
 }
 
 /// A qual the catalog holds but the parser cannot read still projects a row.

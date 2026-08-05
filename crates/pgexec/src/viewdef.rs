@@ -790,6 +790,7 @@ mod tests {
         View {
             name: RelationName::public("v"),
             definition: definition.into(),
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             columns: columns
                 .iter()
                 .map(|name| Column::new(*name, ColumnType::Int4))

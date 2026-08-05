@@ -228,11 +228,25 @@ impl<'a> WriteContext<'a> {
     /// The row-security decision context this write makes its decisions in.
     /// The check a row this statement writes into `table` must satisfy, for the
     /// policy command the statement runs under.
+    ///
+    /// Also where the privilege to write that row at all is tested. Every write
+    /// path already compiles a check here before it writes anything, including
+    /// the `INSERT` paths that never reach `write_candidate_rows` — a plain
+    /// `INSERT`, `INSERT … SELECT`, a partition-routed insert, `MERGE`'s insert
+    /// action, and `COPY … FROM`. Putting the test anywhere else would mean
+    /// finding all of them again.
     fn row_check(
         &self,
         table: &Table,
         command: crabka_pgcatalog::policy::PolicyCommand,
     ) -> Result<crate::rls::RowSecurityCheck, ExecError> {
+        crate::privilege::require(
+            &self.privileges(),
+            &table.name,
+            &table.owner,
+            crate::privilege::RelationKind::Table,
+            crate::privilege::Privilege::for_written_row(command),
+        )?;
         crate::rls::RowSecurityCheck::compile(
             &self.rls(),
             table,
@@ -247,6 +261,11 @@ impl<'a> WriteContext<'a> {
             self.fctx.effective_role(),
             self.fctx.row_security,
         )
+    }
+
+    /// The privilege decision context this write makes its decisions in.
+    fn privileges(&self) -> crate::privilege::PrivilegeCtx<'_> {
+        crate::privilege::PrivilegeCtx::new(self.catalog_kv, self.fctx.effective_role())
     }
 }
 
@@ -892,8 +911,9 @@ pub(crate) fn execute_ddl(
             // the new query keeps every existing output column. A non-view
             // relation of that name is still 42P07, as it is without OR REPLACE.
             // The reloptions are recorded on the view and nothing reads them
-            // yet — see `crabka_pgcatalog::ViewOptions` for why honouring
-            // `security_invoker` has to wait for table-privilege enforcement.
+            // yet — see `crabka_pgcatalog::ViewOptions` for why owner-rights
+            // semantics are a step of their own now that the view's own ACL is
+            // enforced.
             let options = crabka_pgcatalog::ViewOptions {
                 security_invoker: options.security_invoker,
                 security_barrier: options.security_barrier,
@@ -901,9 +921,14 @@ pub(crate) fn execute_ddl(
             let ops = if *or_replace && crabka_pgcatalog::get_view(kv, name).is_ok() {
                 let existing = crabka_pgcatalog::get_view(kv, name)?;
                 check_view_columns_replaceable(&existing.columns, &columns, name)?;
+                // `OR REPLACE` redefines a view rather than creating one, so it
+                // keeps the owner it already had — PostgreSQL's `CREATE OR
+                // REPLACE VIEW` does not transfer ownership, and letting it
+                // would let anyone who may replace a view also take its grants.
                 vec![crabka_pgcatalog::put_view_op(&crabka_pgcatalog::View {
                     name: name.clone(),
                     definition: definition.clone(),
+                    owner: existing.owner,
                     columns,
                     options,
                 })]
@@ -915,6 +940,7 @@ pub(crate) fn execute_ddl(
                     definition.clone(),
                     columns,
                     options,
+                    fctx.effective_role(),
                 )?);
                 created
             };
@@ -4342,8 +4368,15 @@ async fn execute_write_body(
             for (rowid, _xmin, scanned_row) in write_candidate_rows(
                 write_ctx,
                 &t,
-                crabka_pgcatalog::policy::PolicyCommand::Update,
+                crate::privilege::WriteAction::Update,
                 source.probe_filter(filter.as_ref()),
+                crate::privilege::dml_reads_target(
+                    &t,
+                    qualifier,
+                    filter.as_ref(),
+                    returning.as_ref(),
+                    assignments,
+                ),
             )? {
                 // 1. Filter on the snapshot-visible row FIRST — do not lock rows
                 //    that don't match the WHERE clause (avoids over-locking and
@@ -4479,8 +4512,24 @@ async fn execute_write_body(
             for (rowid, _xmin, scanned_row) in write_candidate_rows(
                 write_ctx,
                 &t,
-                crabka_pgcatalog::policy::PolicyCommand::Delete,
+                // A `TRUNCATE` desugars to one of these, and PostgreSQL
+                // authorizes it with the TRUNCATE privilege rather than DELETE.
+                // The truncate set is the statement's own record of which
+                // relations it is emptying, so it is also the honest answer to
+                // "which privilege authorized this delete".
+                if is_truncate {
+                    crate::privilege::WriteAction::Truncate
+                } else {
+                    crate::privilege::WriteAction::Delete
+                },
                 source.probe_filter(filter.as_ref()),
+                crate::privilege::dml_reads_target(
+                    &t,
+                    qualifier,
+                    filter.as_ref(),
+                    returning.as_ref(),
+                    &[],
+                ),
             )? {
                 // 1. Filter on the snapshot-visible row FIRST — do not lock rows
                 //    that don't match the WHERE clause.
@@ -4618,6 +4667,21 @@ async fn execute_write_body(
             // pulls in, which this engine has no NoticeResponse path for, so
             // `TruncateSet::cascaded` is computed and left unemitted.
             let set = crate::fk::expand_truncate_set(catalog_kv, &named, *cascade)?;
+            // Every relation the statement will empty, including the ones
+            // CASCADE pulled in, before the first row of the first one is
+            // touched: TRUNCATE is all-or-nothing, so a denial has to arrive
+            // before any work is done. The desugared DELETEs below carry
+            // `WriteAction::Truncate` and are authorized by this, not by the
+            // DELETE privilege.
+            for table in &set.tables {
+                crate::privilege::require(
+                    &write_ctx.privileges(),
+                    &table.name,
+                    &table.owner,
+                    crate::privilege::RelationKind::Table,
+                    crate::privilege::Privilege::Truncate,
+                )?;
+            }
             // Carried on the statement's write state so each desugared DELETE
             // suppresses exactly the parent-side keys whose child is in the set
             // — by construction every one of them, so no action ever fires.
@@ -5363,12 +5427,15 @@ async fn execute_merge(
 
     // MERGE reaches rows through its own join and may update or delete them.
     // `UPDATE` is the narrower of the two policy commands a matched row can
-    // meet, and a row this statement cannot update it also cannot delete.
+    // meet, and a row this statement cannot update it also cannot delete. Its
+    // `ON` condition always reads the target, so the `SELECT` privilege is not
+    // conditional here — `WriteAction::Merge` carries that.
     let target_rows = write_candidate_rows(
         write_ctx,
         &t,
-        crabka_pgcatalog::policy::PolicyCommand::Update,
+        crate::privilege::WriteAction::Merge,
         None,
+        true,
     )?;
     let mut matched: HashSet<u64> = HashSet::new();
     let mut returned_rows = Vec::new();
@@ -7182,10 +7249,20 @@ async fn apply_insert_conflict_update(
     let ctx = write_ctx.eval_ctx;
     // `ON CONFLICT DO UPDATE` reaches its row through the arbiter index probe,
     // not through `write_candidate_rows`, so it has no share of the structural
-    // USING gate and needs this named check of its own. PostgreSQL raises
-    // rather than skipping: quietly declining to update a row the caller has
-    // just been told exists would itself disclose the row's existence, and the
-    // caller would see neither an insert nor an update.
+    // USING gate or of the privilege test that sits beside it, and needs both
+    // named here. `SELECT` on top of the `INSERT` and `UPDATE` the surrounding
+    // insert path already demanded, because this arm hands the *stored* row to
+    // the `DO UPDATE SET` expressions and to `RETURNING`, which is a read of it.
+    crate::privilege::require(
+        &write_ctx.privileges(),
+        &table.name,
+        &table.owner,
+        crate::privilege::RelationKind::Table,
+        crate::privilege::Privilege::Select,
+    )?;
+    // PostgreSQL raises rather than skipping: quietly declining to update a row
+    // the caller has just been told exists would itself disclose the row's
+    // existence, and the caller would see neither an insert nor an update.
     crate::rls::RowSecurityCheck::compile(
         &write_ctx.rls(),
         table,
@@ -7703,19 +7780,29 @@ fn choose_write_index_probe(
 /// by rowid; the caller still applies the FULL residual filter and the
 /// under-lock EvalPlanQual re-check to every candidate, so the affected rows,
 /// RETURNING output, and lock order are identical to the full scan.
-/// The stored rows an `UPDATE`/`DELETE`/`MERGE` may act on, after row security.
+/// The stored rows an `UPDATE`/`DELETE`/`MERGE` may act on, after privileges
+/// and row security.
 ///
 /// This is the write side's counterpart to the read gate: an `UPDATE` that
 /// could change a row a `SELECT` would not have shown is the exact hazard the
-/// programme exists to avoid, so the `USING` qual is applied here, where every
-/// row-selecting write path already passes.
+/// programme exists to avoid, so both the privilege test and the `USING` qual
+/// are applied here, where every row-selecting write path already passes.
+///
+/// The privilege check runs before the rows are gathered, and the two decisions
+/// are driven by one [`crate::privilege::WriteAction`] rather than by a
+/// `PolicyCommand` beside a privilege — a caller handed both can pair them
+/// wrongly, and `TRUNCATE` (a `DELETE` policy command needing the `TRUNCATE`
+/// privilege) is exactly the pairing that would be got wrong.
 fn write_candidate_rows(
     write_ctx: &WriteContext<'_>,
     table: &Table,
-    command: crabka_pgcatalog::policy::PolicyCommand,
+    action: crate::privilege::WriteAction,
     filter: Option<&Expr>,
+    reads_target_columns: bool,
 ) -> Result<Vec<(u64, u64, Vec<Datum>)>, ExecError> {
-    let using = crate::rls::RowSecurityUsing::compile(&write_ctx.rls(), table, command)?;
+    crate::privilege::require_write(&write_ctx.privileges(), table, action, reads_target_columns)?;
+    let using =
+        crate::rls::RowSecurityUsing::compile(&write_ctx.rls(), table, action.policy_command())?;
     let rows = if let Some((index, value)) =
         choose_write_index_probe(write_ctx.catalog_kv, table, filter)?
     {
@@ -7734,6 +7821,19 @@ fn write_candidate_rows(
         )?
     };
     using.retain_visible(table, rows, write_ctx.eval_ctx)
+}
+
+/// The role a timestamp write is authorized as.
+///
+/// The same `PUBLIC` → bootstrap-superuser resolution
+/// [`ForeignCtx::effective_role`] applies, spelled here because this path is
+/// given an [`crate::clock::EvalCtx`] and no `ForeignCtx` at all.
+fn timestamp_write_role(ctx: &crate::clock::EvalCtx) -> String {
+    if ctx.current_user == crabka_pgcatalog::PUBLIC_ROLE {
+        crabka_pgcatalog::BOOTSTRAP_ROLE.to_string()
+    } else {
+        ctx.current_user.clone()
+    }
 }
 
 /// Build timestamp-transaction writes for sharded-table autocommit DML.
@@ -7792,6 +7892,21 @@ pub(crate) fn execute_timestamp_write(
             "timestamp writes require a sharded table".into(),
         ));
     }
+    // Privileges are not exempt the way row security is: a sharded relation
+    // still has an owner and still has grants, and this path writes it without
+    // ever reaching `WriteContext::row_check`. The role comes off the `EvalCtx`
+    // because that is the only session context a timestamp write is given.
+    crate::privilege::require(
+        &crate::privilege::PrivilegeCtx::new(catalog_kv, &timestamp_write_role(ctx)),
+        &table.name,
+        &table.owner,
+        crate::privilege::RelationKind::Table,
+        crate::privilege::Privilege::for_written_row(match stmt {
+            Statement::Insert { .. } => crabka_pgcatalog::policy::PolicyCommand::Insert,
+            Statement::Update { .. } => crabka_pgcatalog::policy::PolicyCommand::Update,
+            _ => crabka_pgcatalog::policy::PolicyCommand::Delete,
+        }),
+    )?;
     // The row-security exemption this path's writes carry
     // (`CheckExemption::ShardedRelation`) is only sound because a sharded
     // relation cannot be put under row security. Re-asserted here rather than
@@ -9690,9 +9805,9 @@ fn expr_references_scope(expr: &Expr, scope: &Scope) -> bool {
         .any(|child| expr_references_scope(child, scope))
 }
 
-/// The immediate sub-expressions of `expr`, including those reached through a
-/// subquery. The walk visits those by way of the subquery's own clauses.
-fn expr_children(expr: &Expr) -> Vec<&Expr> {
+/// The immediate sub-expressions of `expr` — including those reached through a
+/// subquery, which are visited by way of the subquery's own clauses.
+pub(crate) fn expr_children(expr: &Expr) -> Vec<&Expr> {
     let mut owned: Vec<&Expr> = Vec::new();
     match expr {
         Expr::Unary { expr, .. }
@@ -11387,6 +11502,7 @@ fn partitioned_scan(
     read_ctx: &crate::subquery::SubCtx<'_>,
     parent: &Table,
     qualifier: &str,
+    permit: &crate::privilege::ReadPermit,
 ) -> Result<crate::rls::RawScan, ExecError> {
     let mut tree = crate::rls::RawScan::tree_of(parent, qualifier);
     for leaf in crate::partition::leaves_of(read_ctx.catalog_kv, &parent.name)? {
@@ -11397,7 +11513,17 @@ fn partitioned_scan(
         // LEAF's policies, and then run the whole append through it again under
         // the parent's. PostgreSQL applies the parent's policies to the tree and
         // none of the children's, so the leaf's rows must arrive here ungated.
-        let leaf_scan = scan_stored_relation(read_ctx, &leaf_table, &leaf.name, true, None, None)?;
+        // Its privileges likewise: the leaf is read under the parent's permit,
+        // because reading a partitioned relation is not a read of each leaf.
+        let leaf_scan = scan_stored_relation(
+            read_ctx,
+            &leaf_table,
+            &leaf.name,
+            true,
+            None,
+            None,
+            &crate::privilege::ReadPermit::inherited(permit),
+        )?;
         tree.absorb(leaf_scan, &ordinals);
     }
     Ok(tree)
@@ -11408,6 +11534,7 @@ fn inherited_scan(
     read_ctx: &crate::subquery::SubCtx<'_>,
     parent: &Table,
     qualifier: &str,
+    permit: &crate::privilege::ReadPermit,
 ) -> Result<crate::rls::RawScan, ExecError> {
     let mut relations = vec![parent.name.clone()];
     relations.extend(crate::inheritance::descendants(
@@ -11419,8 +11546,17 @@ fn inherited_scan(
         let table = crabka_pgcatalog::get_table(read_ctx.catalog_kv, &relation_name)?;
         let ordinals = column_mapping(parent, &table)?;
         // See `partitioned_scan`: the child's rows are governed by the parent's
-        // policies, so they must not pass through the gate on their own.
-        let child = scan_stored_relation(read_ctx, &table, &relation_name.name, true, None, None)?;
+        // policies and read under the parent's permit, so they must not pass
+        // through either gate on their own.
+        let child = scan_stored_relation(
+            read_ctx,
+            &table,
+            &relation_name.name,
+            true,
+            None,
+            None,
+            &crate::privilege::ReadPermit::inherited(permit),
+        )?;
         tree.absorb(child, &ordinals);
     }
     Ok(tree)
@@ -11441,6 +11577,13 @@ fn inherited_scan(
 /// and `partitioned_scan` read each child relation, so a wrapper would apply the
 /// gate once per child under that child's policies and then again over the
 /// append under the parent's.
+///
+/// The [`crate::privilege::ReadPermit`] is the same idea one layer up: it is
+/// unforgeable outside `privilege`, so this function cannot be reached without
+/// someone having asked whether the session may read the relation at all. The
+/// tree scans hand their parent's permit down rather than taking one of their
+/// own, because `PostgreSQL` checks the ACL of the relation the query named and
+/// none of its descendants'.
 fn scan_stored_relation(
     read_ctx: &crate::subquery::SubCtx<'_>,
     t: &Table,
@@ -11448,16 +11591,17 @@ fn scan_stored_relation(
     only: bool,
     bounds: Option<&ScanBounds>,
     scan_plan: Option<&crate::plan_dist::DistributedScanPlan>,
+    permit: &crate::privilege::ReadPermit,
 ) -> Result<crate::rls::RawScan, ExecError> {
     let catalog_kv = read_ctx.catalog_kv;
     if !only && !crate::inheritance::children_of(catalog_kv, &t.name)?.is_empty() {
-        return inherited_scan(read_ctx, t, qualifier);
+        return inherited_scan(read_ctx, t, qualifier, permit);
     }
     // A partitioned parent owns no rows: reading it is an append over its
     // leaves. Doing this before every other scan path is what keeps a
     // partitioned relation from silently answering empty.
     if crate::partition::is_partitioned(catalog_kv, &t.name)? {
-        return partitioned_scan(read_ctx, t, qualifier);
+        return partitioned_scan(read_ctx, t, qualifier, permit);
     }
     let scope = Scope::single(t, qualifier);
     // SP40: a foreign table reads through the registered scanner, not the local
@@ -11498,7 +11642,7 @@ fn scan_stored_relation(
     // rows the qual has not removed yet, and a top-K truncates before it runs.
     let sanitized = crate::rls::sanitize_scan_plan(&decision, requested);
     let distributed_plan = sanitized.as_ref().unwrap_or(requested);
-    if let Some(unrestricted) = crate::rls::UnrestrictedTable::from_decision(&decision, t)
+    if let Some(unrestricted) = crate::rls::UnrestrictedTable::from_decision(permit, &decision, t)
         && let Some(rows) = try_scan_with_local_index(read_ctx, unrestricted, distributed_plan)?
     {
         let mut rows: Vec<Vec<Datum>> = rows.into_iter().map(|scanned| scanned.row).collect();
@@ -11704,6 +11848,18 @@ fn build_base_table(
     }
     match crabka_pgcatalog::get_view(catalog_kv, name) {
         Ok(view) => {
+            // A view carries its own ACL, checked before its body runs. The
+            // body itself still executes with INVOKER rights — every base
+            // relation it names is read under the session's own privileges and
+            // policies — so this is strictly an extra gate, never a way through
+            // one. Owner-rights views are a separate change for that reason.
+            crate::privilege::require(
+                &read_ctx.privileges(),
+                &view.name,
+                &view.owner,
+                crate::privilege::RelationKind::View,
+                crate::privilege::Privilege::Select,
+            )?;
             let statement = crabka_pgparser::parse(&view.definition)?;
             let [Statement::Query(query)] = statement.as_slice() else {
                 return Err(ExecError::Unsupported(
@@ -11719,10 +11875,15 @@ fn build_base_table(
     }
     let t = crabka_pgcatalog::get_table(catalog_kv, name)?;
     let qualifier = alias.as_deref().unwrap_or(&t.name.name);
-    // One scan, one gate. Every stored-relation read the executor does
-    // arrives here, and `RawScan` cannot become a `Relation` any other
-    // way.
-    let raw = scan_stored_relation(read_ctx, &t, qualifier, *only, bounds, scan_plan)?;
+    // One scan, one gate, and one permit. Every stored-relation read the
+    // executor does arrives here; `RawScan` cannot become a `Relation` any
+    // other way, and `scan_stored_relation` cannot be called without the
+    // permit. The permit is taken before the scan rather than after it so a
+    // denied read reads nothing at all — PostgreSQL checks permissions at
+    // executor start, and a check after the scan would let a leaky operator in
+    // the `WHERE` observe rows the caller may not see.
+    let permit = crate::privilege::ReadPermit::acquire(&read_ctx.privileges(), &t)?;
+    let raw = scan_stored_relation(read_ctx, &t, qualifier, *only, bounds, scan_plan, &permit)?;
     crate::rls::apply_row_security(read_ctx, raw)
 }
 
@@ -12010,9 +12171,10 @@ fn try_distributed_inner_equi_join(
     // proven unrestricted, and the proofs shadow the raw tables so the rest of
     // this function cannot reach around them.
     let rls = read_ctx.rls();
+    let privileges = read_ctx.privileges();
     let (Some(left_table), Some(right_table)) = (
-        crate::rls::UnrestrictedTable::read(&rls, &left_table)?,
-        crate::rls::UnrestrictedTable::read(&rls, &right_table)?,
+        crate::rls::UnrestrictedTable::read(&privileges, &rls, &left_table)?,
+        crate::rls::UnrestrictedTable::read(&privileges, &rls, &right_table)?,
     ) else {
         return Ok(None);
     };
@@ -12307,7 +12469,9 @@ fn try_execute_partial_aggregate_pushdown(
     // the same set as the rows a policy admits, and a sum cannot be un-summed
     // afterwards. Shadowing the raw table with the proof leaves no way to reach
     // it unproven.
-    let Some(table) = crate::rls::UnrestrictedTable::read(&read_ctx.rls(), &table)? else {
+    let Some(table) =
+        crate::rls::UnrestrictedTable::read(&read_ctx.privileges(), &read_ctx.rls(), &table)?
+    else {
         return Ok(None);
     };
     let table = table.get();
@@ -12440,7 +12604,9 @@ fn is_plain_local_join_table(
     // The counting path returns a count and no rows, so nothing downstream can
     // filter it: a side under row security keeps the ordinary path, which
     // materializes both sides through the gate and counts the same join.
-    Ok(!table.sharded && crate::rls::UnrestrictedTable::read(&read_ctx.rls(), &table)?.is_some())
+    Ok(!table.sharded
+        && crate::rls::UnrestrictedTable::read(&read_ctx.privileges(), &read_ctx.rls(), &table)?
+            .is_some())
 }
 
 /// Stream a supported local aggregate through per-page partial-aggregate
@@ -12473,7 +12639,9 @@ fn try_execute_local_streaming_aggregate(
     // The fold happens page by page inside the scanner, over every visible row,
     // before any policy qual could have removed one. Shadowing keeps the raw
     // table out of reach for the rest of the function.
-    let Some(table) = crate::rls::UnrestrictedTable::read(&read_ctx.rls(), &table)? else {
+    let Some(table) =
+        crate::rls::UnrestrictedTable::read(&read_ctx.privileges(), &read_ctx.rls(), &table)?
+    else {
         return Ok(None);
     };
     let table = table.get();
@@ -12965,7 +13133,9 @@ fn top_k_pushdown_for_relation(
     qualifier: &str,
     s: &SelectStmt,
 ) -> Result<Option<crate::TopKSpec>, ExecError> {
-    let Some(unrestricted) = crate::rls::UnrestrictedTable::read(&read_ctx.rls(), table)? else {
+    let Some(unrestricted) =
+        crate::rls::UnrestrictedTable::read(&read_ctx.privileges(), &read_ctx.rls(), table)?
+    else {
         return Ok(None);
     };
     top_k_pushdown_for_select(unrestricted, qualifier, s)
@@ -14083,6 +14253,7 @@ fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             crate::catalog_rel::namespace_oid(&view.name.schema),
         );
         row.relnatts = view.columns.len();
+        row.relowner = role_oid_of(&role_oids, &view.owner);
         row.relhasrules = true;
         row.relhastriggers =
             u32::try_from(oid).is_ok_and(|oid| triggered_relation_ids.contains(&oid));

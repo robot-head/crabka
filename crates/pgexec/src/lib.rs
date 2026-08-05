@@ -85,6 +85,7 @@ pub mod plan_dist;
 mod plpgsql;
 mod plpgsql_sqlstate;
 mod policy_ddl;
+mod privilege;
 mod procarray;
 mod query;
 mod read_gate;

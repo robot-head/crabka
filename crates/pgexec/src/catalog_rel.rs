@@ -2506,7 +2506,7 @@ fn pg_views_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             vec![
                 text(&view.name.schema),
                 text(&view.name.name),
-                text(crate::catalog_fn::OBJECT_OWNER),
+                text(&view.owner),
                 text(&crate::catalog_fn::view_definition_text(&view, false)),
             ]
         })

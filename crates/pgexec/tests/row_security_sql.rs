@@ -64,6 +64,19 @@ fn rows(values: &[&str]) -> Vec<String> {
 
 /// A relation owned by `alice`, five rows, with the index and tree shapes the
 /// bypass tests need.
+///
+/// `bob` holds a grant on everything he reads or writes here — `ALL` on
+/// `document`, which the tests below select from, insert into, update, delete
+/// from and truncate, and `SELECT` on the two tree parents, which they only
+/// read. Every test in this file is about which *rows* a policy admits; without
+/// the grants a non-owner would be refused at the privilege gate first, and a
+/// privilege denial would mask the row-security behaviour under test.
+///
+/// The children and the partition leaves are deliberately **not** granted. A
+/// tree is read under the privileges of the relation the query named, so a
+/// grant on `parent` reaches `child`'s rows and one on `measure` reaches both
+/// leaves — the same rule that makes the parent's policies, and not a child's,
+/// govern the whole tree. Granting them anyway would hide a regression in it.
 const SETUP: &str = r"
 CREATE ROLE alice;
 CREATE ROLE bob;
@@ -83,6 +96,9 @@ CREATE TABLE measure_low PARTITION OF measure FOR VALUES FROM (0) TO (10);
 CREATE TABLE measure_high PARTITION OF measure FOR VALUES FROM (10) TO (20);
 INSERT INTO measure VALUES (1, 5), (2, 15);
 ALTER TABLE measure OWNER TO alice;
+GRANT ALL ON document TO bob;
+GRANT SELECT ON parent TO bob;
+GRANT SELECT ON measure TO bob;
 ";
 
 /// An engine with [`SETUP`] applied, and a session acting as `alice`, who owns
@@ -254,6 +270,10 @@ async fn owner_and_bypassrls_exemptions() {
 
     let mut bootstrap = engine.connect();
     run(&mut bootstrap, "CREATE ROLE exempt WITH BYPASSRLS").await;
+    // `BYPASSRLS` exempts a role from policies, not from `GRANT`, so the
+    // exempt role still needs the read privilege — what is under test is that
+    // it sees the rows a policy would have hidden, not that it may read at all.
+    run(&mut alice, "GRANT SELECT ON document TO exempt").await;
     run(&mut alice, "ALTER TABLE document FORCE ROW LEVEL SECURITY").await;
     let mut exempt = engine.connect();
     run(&mut exempt, "SET ROLE exempt").await;
@@ -307,9 +327,9 @@ async fn update_and_delete_cannot_touch_an_invisible_row() {
 
     // TRUNCATE desugars to a DELETE per relation here, so it meets the same
     // `USING` qual and empties only what the role can see. `PostgreSQL` exempts
-    // TRUNCATE from row security and empties the whole relation, but it gates
-    // it on the TRUNCATE privilege, which is not enforced here — exempting it
-    // without that gate would let any role destroy a relation it cannot read.
+    // TRUNCATE from row security and empties the whole relation; keeping the
+    // qual is the conservative difference, and it never empties more than the
+    // role could have deleted a row at a time.
     run(&mut bob, "TRUNCATE document").await;
     assert!(
         query(&mut alice, "SELECT id FROM document ORDER BY id").await == rows(&["1", "2", "3"])
@@ -467,8 +487,12 @@ async fn merge_respects_both_using_and_with_check() {
     let (engine, mut alice) = owned_engine().await;
     run(
         &mut alice,
+        // The MERGE source is bob's to read and to delete from; what is under
+        // test is the target side's `USING` and `WITH CHECK`, so the source
+        // carries the grants that keep a privilege denial out of the way.
         "CREATE TABLE source (id int4, title text);
          INSERT INTO source VALUES (1, 'from-source'), (4, 'from-source'), (9, 'new');
+         GRANT SELECT, DELETE ON source TO bob;
          CREATE POLICY high ON document USING (id > 3) WITH CHECK (id < 9);
          ALTER TABLE document ENABLE ROW LEVEL SECURITY",
     )
@@ -604,6 +628,9 @@ async fn policy_ddl_lifecycle_and_ownership() {
     // The policy applied to bob and to nobody else.
     let mut carol = engine.connect();
     run(&mut carol, "CREATE ROLE carol; SET ROLE carol").await;
+    // Carol reads nothing because the policy names bob, not because she lacks
+    // the privilege — so she is given the same grant bob has.
+    run(&mut alice, "GRANT SELECT ON document TO carol").await;
     assert!(query(&mut carol, "SELECT count(*) FROM document").await == rows(&["0"]));
 
     run(&mut alice, "DROP POLICY high ON document").await;
@@ -788,18 +815,21 @@ async fn a_sharded_relation_cannot_be_put_under_row_security() {
 
 /// **Invoker semantics for views.**
 ///
-/// `PostgreSQL` filters a view body by the *view owner's* policies. That is only
-/// safe where `GRANT` is enforced, and it is not enforced here — every
-/// `has_*_privilege` returns true — so an owner-rights view over a relation
-/// under row security would be a universal bypass. Invoker semantics guarantee
-/// the bound that matters: a view can never show a row the caller could not
-/// have read from the base relation itself.
+/// `PostgreSQL` filters a view body by the *view owner's* policies, which turns
+/// an owner-rights view over a relation under row security into a bypass unless
+/// the view's own `GRANT` is what stops the caller. Invoker semantics guarantee
+/// the bound that matters without depending on that: a view can never show a row
+/// the caller could not have read from the base relation itself.
 #[tokio::test]
 async fn a_view_cannot_show_a_row_the_caller_could_not_read() {
     let (engine, mut alice) = owned_engine().await;
+    // A view is a grantable object of its own and its body reads the base
+    // relation with invoker rights, so bob needs both grants; the test is about
+    // which rows come back, not about being refused.
     run(
         &mut alice,
         "CREATE VIEW all_documents AS SELECT id, holder, title FROM document;
+         GRANT SELECT ON all_documents TO bob;
          CREATE POLICY high ON document USING (id > 3);
          ALTER TABLE document ENABLE ROW LEVEL SECURITY",
     )

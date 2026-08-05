@@ -171,9 +171,9 @@ async fn an_unknown_reloption_is_refused() {
 /// **The safety rule.** `security_invoker` is stored, not honoured: a view over
 /// a row-secured table shows the querying role exactly the rows that role could
 /// have selected directly, whether or not the option was written. Owner-rights
-/// views cannot be switched on while `has_table_privilege` answers `true`
-/// unconditionally, because every view over a protected table would become a
-/// way around its policies.
+/// views must never start working by accident: the day the option is honoured,
+/// a view whose owner bypasses the base relation's policies becomes a way
+/// around them for everyone the view is granted to.
 #[tokio::test]
 async fn security_invoker_does_not_change_what_a_view_shows() {
     for option in ["", " WITH (security_invoker)", " WITH (security_barrier)"] {
@@ -194,10 +194,17 @@ async fn security_invoker_does_not_change_what_a_view_shows() {
             &format!("CREATE VIEW doc_v{option} AS SELECT id, holder FROM document"),
         )
         .await;
+        // What is under test is which *rows* the view shows, so bob holds a
+        // grant on both the view and its base relation: without them the read
+        // would stop at a privilege denial and never reach the policy. A view
+        // needs its own grant, and its body still reads the base relation with
+        // invoker rights, so both are required.
         run(
             &mut alice,
             "ALTER TABLE document ENABLE ROW LEVEL SECURITY;
-             CREATE POLICY own ON document USING (holder = current_user);",
+             CREATE POLICY own ON document USING (holder = current_user);
+             GRANT SELECT ON document TO bob;
+             GRANT SELECT ON doc_v TO bob;",
         )
         .await;
 

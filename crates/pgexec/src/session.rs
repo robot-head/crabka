@@ -8812,7 +8812,7 @@ impl SqlSession {
         // Before the source is even looked at: a `COPY … FROM STDIN` reaching
         // here came in over the simple-query path, and its refusal has to be
         // the one the wire path gives before announcing copy-in mode.
-        self.refuse_copy_from_under_row_security(&copy)?;
+        self.precheck_copy_from(&copy)?;
         match &copy.source {
             CopySource::Stdin => Err(ExecError::Unsupported(
                 "COPY FROM STDIN requires pgwire CopyData messages".into(),
@@ -8844,7 +8844,7 @@ impl SqlSession {
         // `COPY … FROM 'file'` never enters copy-in mode, so it reaches here
         // without passing `copy_in_start`. Both entry points must refuse, or
         // one of them loads rows past a policy.
-        self.refuse_copy_from_under_row_security(copy)?;
+        self.precheck_copy_from(copy)?;
         let data_len = chunks.iter().map(bytes::Bytes::len).sum();
         let mut data = Vec::with_capacity(data_len);
         for chunk in chunks {
@@ -11512,11 +11512,15 @@ impl SqlSession {
     ///
     /// With `row_security = off` the answer is the same 42501 every other
     /// statement gets, since a policy would have applied.
+    /// The `INSERT` privilege rides the same pre-check for the same timing
+    /// reason, which is why this is `precheck_copy_from` rather than a
+    /// row-security-only guard.
+    ///
     /// Takes the statement rather than a resolved relation so the `Table` it
     /// reads lives in this frame and not in the caller's: one caller is
     /// `run_one`, whose future is re-entered once per nested SQL function call,
     /// and widening it costs stack on every level of that recursion.
-    fn refuse_copy_from_under_row_security(&self, copy: &CopyStmt) -> Result<(), ExecError> {
+    fn precheck_copy_from(&self, copy: &CopyStmt) -> Result<(), ExecError> {
         let table = crabka_pgcatalog::get_table(
             self.catalog_kv.as_ref(),
             &crate::relname::resolve_relation(
@@ -11527,6 +11531,18 @@ impl SqlSession {
             )?,
         )?;
         let role = self.current_role_for_row_security();
+        // The privilege test belongs here rather than only in
+        // `execute_copy_write`: a denial that arrives after `CopyInResponse` has
+        // gone out leaves psql in copy-in mode, feeding the rest of the script
+        // to the server as COPY data. Failing before the mode is entered is the
+        // difference between one error and a desynchronized session.
+        crate::privilege::require(
+            &crate::privilege::PrivilegeCtx::new(self.catalog_kv.as_ref(), &role),
+            &table.name,
+            &table.owner,
+            crate::privilege::RelationKind::Table,
+            crate::privilege::Privilege::Insert,
+        )?;
         let rls = crate::rls::RlsCtx::new(self.catalog_kv.as_ref(), &role, self.guc.row_security());
         match crate::rls::decide(
             &rls,
@@ -11579,8 +11595,7 @@ impl SqlSession {
         let table = crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &name)
             .map_err(ExecError::from)
             .map_err(ExecError::into_pg)?;
-        self.refuse_copy_from_under_row_security(copy)
-            .map_err(ExecError::into_pg)?;
+        self.precheck_copy_from(copy).map_err(ExecError::into_pg)?;
         let target_count = match &copy.columns {
             Some(columns) => columns.len(),
             None => table.columns.len(),

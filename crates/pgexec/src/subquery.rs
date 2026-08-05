@@ -82,6 +82,16 @@ impl<'a> SubCtx<'a> {
     pub(crate) fn rls(&self) -> crate::rls::RlsCtx<'_> {
         crate::rls::RlsCtx::new(self.catalog_kv, self.security_role, self.fctx.row_security)
     }
+
+    /// The privilege decision context this read makes its decisions in.
+    ///
+    /// The same role row security is judged under, deliberately: a view that
+    /// one day runs its body with owner rights must move both together, or a
+    /// role would read a relation under its own grants and someone else's
+    /// policies.
+    pub(crate) fn privileges(&self) -> crate::privilege::PrivilegeCtx<'_> {
+        crate::privilege::PrivilegeCtx::new(self.catalog_kv, self.security_role)
+    }
 }
 
 /// Rewrite every uncorrelated subquery in `s`'s expr-bearing clauses to a

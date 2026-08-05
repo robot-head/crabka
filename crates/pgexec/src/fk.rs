@@ -2566,6 +2566,7 @@ mod tests {
             "SELECT 1".into(),
             columns(&[("one", ColumnType::Int4)]),
             crabka_pgcatalog::ViewOptions::default(),
+            crabka_pgcatalog::BOOTSTRAP_ROLE,
         )
         .expect("create view");
         let child_columns = columns(&[

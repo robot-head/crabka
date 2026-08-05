@@ -55,6 +55,14 @@ fn rows(values: &[&str]) -> Vec<String> {
 /// Three roles, a table owned by `alice` whose only policy is written against
 /// the group, and two rows so a policy that applies is visibly different from
 /// one that does not.
+///
+/// `bob` is granted `SELECT` directly, and every other reader below is granted
+/// it as it is created: these tests measure which rows a membership makes
+/// visible, and a role with no grant would be refused outright before any
+/// policy ran, so the grant is what keeps a privilege denial from masking the
+/// row-security behaviour under test. It is deliberately *not* granted to
+/// `readers`, which would make the grant itself follow the membership and hide
+/// what the policy is doing.
 const SETUP: &str = r"
 CREATE ROLE alice;
 CREATE ROLE bob;
@@ -62,6 +70,7 @@ CREATE ROLE readers;
 CREATE TABLE document (id int4, holder text);
 INSERT INTO document VALUES (1, 'alice'), (2, 'bob');
 ALTER TABLE document OWNER TO alice;
+GRANT SELECT ON document TO bob;
 ";
 
 async fn engine_with_group_policy() -> SqlEngine {
@@ -113,6 +122,7 @@ async fn the_two_spellings_of_membership_agree() {
     run(&mut alice, "CREATE ROLE carol IN ROLE readers").await;
     run(&mut alice, "CREATE ROLE dave").await;
     run(&mut alice, "GRANT readers TO dave").await;
+    run(&mut alice, "GRANT SELECT ON document TO carol, dave").await;
 
     for role in ["carol", "dave"] {
         let mut session = as_role(&engine, role).await;
@@ -137,6 +147,7 @@ async fn list_forms_and_admin_option_are_accepted() {
     let engine = engine_with_group_policy().await;
     let mut alice = as_role(&engine, "alice").await;
     run(&mut alice, "CREATE ROLE writers; CREATE ROLE carol").await;
+    run(&mut alice, "GRANT SELECT ON document TO carol").await;
     run(
         &mut alice,
         "GRANT readers, writers TO bob, carol WITH ADMIN OPTION",
