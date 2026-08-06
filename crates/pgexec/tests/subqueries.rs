@@ -650,3 +650,351 @@ async fn a_boolean_connective_skips_the_operand_it_cannot_need() {
             == "22012"
     );
 }
+
+/// Every column of every row of a simple query's result, as text.
+async fn rows(client: &tokio_postgres::Client, sql: &str) -> Vec<Vec<Option<String>>> {
+    use tokio_postgres::SimpleQueryMessage;
+    let mut out = Vec::new();
+    for m in client.simple_query(sql).await.expect("query") {
+        if let SimpleQueryMessage::Row(row) = m {
+            out.push(
+                (0..row.len())
+                    .map(|i| row.get(i).map(std::string::ToString::to_string))
+                    .collect(),
+            );
+        }
+    }
+    out
+}
+
+/// The three-relation fixture the correlated select-list cases run over:
+/// `x` has a row with no match (2), one with exactly one (1 and 3), and `z`
+/// gives `1` two matching rows so the cardinality error has a source.
+async fn seed_correlated(client: &tokio_postgres::Client) {
+    for sql in [
+        "CREATE TABLE u1 (a int4)",
+        "CREATE TABLE u2 (b int4)",
+        "CREATE TABLE u3 (c int4, d int4)",
+        "INSERT INTO u1 VALUES (1), (2), (3)",
+        "INSERT INTO u2 VALUES (1), (3)",
+        "INSERT INTO u3 VALUES (1, 10), (1, 11), (3, 30)",
+    ] {
+        client.simple_query(sql).await.expect(sql);
+    }
+}
+
+/// A correlated subquery in a select item is evaluated once per source row, in
+/// every subquery form, and answers what `PostgreSQL` 18.4 answers.
+#[tokio::test]
+async fn correlated_subquery_forms_in_a_select_item() {
+    use assert2::assert;
+
+    let client = connect(spawn().await).await;
+    seed_correlated(&client).await;
+
+    let cases: &[(&str, &[&[Option<&str>]])] = &[
+        // A subquery matching no row is NULL, not a missing output row.
+        (
+            "SELECT x.a, (SELECT y.b FROM u2 y WHERE y.b = x.a) FROM u1 x ORDER BY x.a",
+            &[
+                &[Some("1"), Some("1")],
+                &[Some("2"), None],
+                &[Some("3"), Some("3")],
+            ],
+        ),
+        (
+            "SELECT x.a, EXISTS (SELECT 1 FROM u2 y WHERE y.b = x.a) FROM u1 x ORDER BY x.a",
+            &[
+                &[Some("1"), Some("t")],
+                &[Some("2"), Some("f")],
+                &[Some("3"), Some("t")],
+            ],
+        ),
+        (
+            "SELECT x.a, NOT EXISTS (SELECT 1 FROM u2 y WHERE y.b = x.a) FROM u1 x ORDER BY x.a",
+            &[
+                &[Some("1"), Some("f")],
+                &[Some("2"), Some("t")],
+                &[Some("3"), Some("f")],
+            ],
+        ),
+        (
+            "SELECT x.a, x.a IN (SELECT y.b FROM u2 y WHERE y.b = x.a) FROM u1 x ORDER BY x.a",
+            &[
+                &[Some("1"), Some("t")],
+                &[Some("2"), Some("f")],
+                &[Some("3"), Some("t")],
+            ],
+        ),
+        (
+            "SELECT x.a, x.a NOT IN (SELECT y.b FROM u2 y WHERE y.b = x.a) FROM u1 x ORDER BY x.a",
+            &[
+                &[Some("1"), Some("f")],
+                &[Some("2"), Some("t")],
+                &[Some("3"), Some("f")],
+            ],
+        ),
+        (
+            "SELECT x.a, x.a = ANY (SELECT y.b FROM u2 y WHERE y.b = x.a) FROM u1 x ORDER BY x.a",
+            &[
+                &[Some("1"), Some("t")],
+                &[Some("2"), Some("f")],
+                &[Some("3"), Some("t")],
+            ],
+        ),
+        (
+            "SELECT x.a, x.a >= ALL (SELECT y.b FROM u2 y WHERE y.b <= x.a) FROM u1 x ORDER BY x.a",
+            &[
+                &[Some("1"), Some("t")],
+                &[Some("2"), Some("t")],
+                &[Some("3"), Some("t")],
+            ],
+        ),
+        // `ARRAY(…)` folds the correlated rows into one array per source row.
+        (
+            "SELECT x.a, ARRAY(SELECT z.d FROM u3 z WHERE z.c = x.a ORDER BY z.d) \
+             FROM u1 x ORDER BY x.a",
+            &[
+                &[Some("1"), Some("{10,11}")],
+                &[Some("2"), Some("{}")],
+                &[Some("3"), Some("{30}")],
+            ],
+        ),
+        // An aggregate inside the correlated subquery folds that row's matches.
+        (
+            "SELECT x.a, (SELECT max(z.d) FROM u3 z WHERE z.c = x.a) FROM u1 x ORDER BY x.a",
+            &[
+                &[Some("1"), Some("11")],
+                &[Some("2"), None],
+                &[Some("3"), Some("30")],
+            ],
+        ),
+        // Correlation two levels deep: the innermost subquery reads the
+        // outermost query's row, through a query block that is itself deferred.
+        (
+            "SELECT x.a, (SELECT (SELECT z.d FROM u3 z WHERE z.c = x.a AND z.d = 30) \
+             FROM u2 y WHERE y.b = x.a) FROM u1 x ORDER BY x.a",
+            &[
+                &[Some("1"), None],
+                &[Some("2"), None],
+                &[Some("3"), Some("30")],
+            ],
+        ),
+        // Two correlated items in one select list, the second over a
+        // two-relation FROM — the shape `psql`'s `\d` column query uses.
+        (
+            "SELECT x.a, (SELECT y.b FROM u2 y WHERE y.b = x.a), \
+             (SELECT z.d FROM u3 z, u2 y WHERE z.c = x.a AND y.b = x.a AND z.d = 30) \
+             FROM u1 x ORDER BY x.a",
+            &[
+                &[Some("1"), Some("1"), None],
+                &[Some("2"), None, None],
+                &[Some("3"), Some("3"), Some("30")],
+            ],
+        ),
+        // The outer FROM may be a join; both of its relations are correlatable.
+        (
+            "SELECT x.a, w.b, (SELECT max(z.d) FROM u3 z WHERE z.c = x.a AND z.c = w.b) \
+             FROM u1 x JOIN u2 w ON w.b = x.a ORDER BY x.a",
+            &[
+                &[Some("1"), Some("1"), Some("11")],
+                &[Some("3"), Some("3"), Some("30")],
+            ],
+        ),
+        // A correlated select item survives being read through a derived table.
+        (
+            "SELECT * FROM (SELECT x.a, (SELECT y.b FROM u2 y WHERE y.b = x.a) AS c \
+             FROM u1 x) s ORDER BY s.a",
+            &[
+                &[Some("1"), Some("1")],
+                &[Some("2"), None],
+                &[Some("3"), Some("3")],
+            ],
+        ),
+        // A correlated select item alongside a correlated WHERE: the two use
+        // separate deferred plans and must not disturb each other.
+        (
+            "SELECT x.a, (SELECT max(z.d) FROM u3 z WHERE z.c = x.a) FROM u1 x \
+             WHERE EXISTS (SELECT 1 FROM u2 y WHERE y.b = x.a) ORDER BY x.a",
+            &[&[Some("1"), Some("11")], &[Some("3"), Some("30")]],
+        ),
+        // An uncorrelated subquery in the same select list still folds once.
+        (
+            "SELECT x.a, (SELECT max(b) FROM u2) FROM u1 x ORDER BY x.a",
+            &[
+                &[Some("1"), Some("3")],
+                &[Some("2"), Some("3")],
+                &[Some("3"), Some("3")],
+            ],
+        ),
+        // `SELECT *` must not expand to the hidden column the value is parked in.
+        (
+            "SELECT *, (SELECT y.b FROM u2 y WHERE y.b = x.a) FROM u1 x ORDER BY x.a",
+            &[
+                &[Some("1"), Some("1")],
+                &[Some("2"), None],
+                &[Some("3"), Some("3")],
+            ],
+        ),
+    ];
+
+    for (sql, expected) in cases {
+        let expected: Vec<Vec<Option<String>>> = expected
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.map(std::string::ToString::to_string))
+                    .collect()
+            })
+            .collect();
+        assert!(rows(&client, sql).await == expected, "{sql}");
+    }
+}
+
+/// A deferred select item still runs its subqueries lazily: a dead CASE branch
+/// and an unreached COALESCE argument never execute theirs.
+#[tokio::test]
+async fn correlated_select_item_folds_lazily() {
+    use assert2::assert;
+
+    let client = connect(spawn().await).await;
+    seed_correlated(&client).await;
+
+    // The division by zero sits in the branch taken only for a = 1, and the
+    // branch that IS taken there is the constant one.
+    assert!(
+        rows(
+            &client,
+            "SELECT x.a, CASE WHEN x.a > 1 THEN (SELECT y.b FROM u2 y WHERE y.b = x.a) \
+             ELSE -1 END FROM u1 x ORDER BY x.a"
+        )
+        .await
+            == vec![
+                vec![Some("1".into()), Some("-1".into())],
+                vec![Some("2".into()), None],
+                vec![Some("3".into()), Some("3".into())],
+            ]
+    );
+    assert!(
+        rows(
+            &client,
+            "SELECT x.a, COALESCE((SELECT y.b FROM u2 y WHERE y.b = x.a), 0) + 100 \
+             FROM u1 x ORDER BY x.a"
+        )
+        .await
+            == vec![
+                vec![Some("1".into()), Some("101".into())],
+                vec![Some("2".into()), Some("100".into())],
+                vec![Some("3".into()), Some("103".into())],
+            ]
+    );
+    // A reached branch still raises, so the probes above prove the dead branch
+    // was skipped rather than that the error was swallowed.
+    assert!(
+        err_code(
+            &client,
+            "SELECT CASE WHEN x.a > 0 THEN (SELECT 1 / (x.a - 1)) ELSE 0 END FROM u1 x"
+        )
+        .await
+            == "22012"
+    );
+}
+
+/// `ORDER BY`, `DISTINCT` and `DISTINCT ON` reach a correlated select item
+/// through every reference form `PostgreSQL` accepts.
+#[tokio::test]
+async fn correlated_select_item_orders_and_dedups() {
+    use assert2::assert;
+
+    let client = connect(spawn().await).await;
+    seed_correlated(&client).await;
+
+    let cases: &[(&str, &[&[Option<&str>]])] = &[
+        // By output ordinal.
+        (
+            "SELECT x.a, (SELECT y.b FROM u2 y WHERE y.b = x.a) FROM u1 x ORDER BY 2 NULLS FIRST",
+            &[
+                &[Some("2"), None],
+                &[Some("1"), Some("1")],
+                &[Some("3"), Some("3")],
+            ],
+        ),
+        // By output label.
+        (
+            "SELECT x.a, (SELECT y.b FROM u2 y WHERE y.b = x.a) AS c \
+             FROM u1 x ORDER BY c DESC NULLS LAST",
+            &[
+                &[Some("3"), Some("3")],
+                &[Some("1"), Some("1")],
+                &[Some("2"), None],
+            ],
+        ),
+        // By the correlated expression itself, which is not in the select list.
+        (
+            "SELECT x.a FROM u1 x ORDER BY (SELECT y.b FROM u2 y WHERE y.b = x.a) NULLS FIRST",
+            &[&[Some("2")], &[Some("1")], &[Some("3")]],
+        ),
+        // DISTINCT dedups the projected values, NULL included.
+        (
+            "SELECT DISTINCT (SELECT y.b FROM u2 y WHERE y.b = x.a) FROM u1 x \
+             ORDER BY 1 NULLS FIRST",
+            &[&[None], &[Some("1")], &[Some("3")]],
+        ),
+        // DISTINCT ON recognizes that its key and the ORDER BY key are the same
+        // correlated expression.
+        (
+            "SELECT DISTINCT ON ((SELECT y.b FROM u2 y WHERE y.b = x.a)) x.a FROM u1 x \
+             ORDER BY (SELECT y.b FROM u2 y WHERE y.b = x.a) NULLS FIRST, x.a",
+            &[&[Some("2")], &[Some("1")], &[Some("3")]],
+        ),
+        // LIMIT applies to the ordered output, as it does without correlation.
+        (
+            "SELECT x.a, (SELECT y.b FROM u2 y WHERE y.b = x.a) FROM u1 x ORDER BY x.a LIMIT 2",
+            &[&[Some("1"), Some("1")], &[Some("2"), None]],
+        ),
+    ];
+
+    for (sql, expected) in cases {
+        let expected: Vec<Vec<Option<String>>> = expected
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.map(std::string::ToString::to_string))
+                    .collect()
+            })
+            .collect();
+        assert!(rows(&client, sql).await == expected, "{sql}");
+    }
+}
+
+/// The errors a correlated select item raises are the ones `PostgreSQL` raises.
+#[tokio::test]
+async fn correlated_select_item_error_surface() {
+    use assert2::assert;
+
+    let client = connect(spawn().await).await;
+    seed_correlated(&client).await;
+
+    let cases = [
+        // More than one row from a scalar subquery.
+        (
+            "SELECT x.a, (SELECT z.d FROM u3 z WHERE z.c = x.a) FROM u1 x",
+            "21000",
+        ),
+        // More than one column from a scalar subquery.
+        (
+            "SELECT x.a, (SELECT z.c, z.d FROM u3 z WHERE z.c = x.a) FROM u1 x",
+            "42601",
+        ),
+        // A qualifier that is in no FROM clause at any level is still 42P01,
+        // rather than being treated as a correlation that happens to fail.
+        (
+            "SELECT x.a, (SELECT 1 FROM u2 y WHERE y.b = nosuch.a) FROM u1 x",
+            "42P01",
+        ),
+    ];
+
+    for (sql, code) in cases {
+        assert!(err_code(&client, sql).await == code, "{sql}");
+    }
+}
