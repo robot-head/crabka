@@ -6,13 +6,13 @@
 test files, not the adopted corpus's statement matches. The checked-in monotone
 floor remains `6/231`; this review is still non-monotone against that floor and
 does not ratchet it. Serial completes all 231 files with zero infrastructure
-failures, leaving 203 semantic failures across 169794 canonical changed lines
-and 4730 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
+failures, leaving 203 semantic failures across 169867 canonical changed lines
+and 4729 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
 postflight probe succeeds, and the infrastructure report is empty.
 
 The measurement immediately before this wave was `22/231` at 176686 changed
 lines / 4606 hunks, from the same runner and the same pinned corpus. The
-waves below are therefore `+6` exact files and `-6207` changed lines with
+waves below are therefore `+6` exact files and `-6134` changed lines with
 **zero newly failing files**: `int4`, `int2`, `roleattributes`, `lseg`, `line` and `circle` become exact,
 and 4 files gain a combined 22 lines.
 
@@ -474,47 +474,27 @@ and their certified artifact describe current conformance.
       (`exec.rs`), because `RETURNING` resolves against the leaf's order;
       gating that refusal on `returning.is_some()` looks correct but is a DML
       change with its own test surface.
-- [ ] **An intermittent hang wedges a session mid-schedule.** It has cost three
-      certification runs, at two different schedule positions, and is not tied
-      to any one change: a re-run of the *same commit* completed 231/231 after
-      one of them.
-      Signature, captured from `/proc` and `ss` while wedged: the gres process
-      has two threads, the tokio worker parked in `ep_poll` and the main thread
-      in `futex_do_wait`, so the runtime is IDLE -- yet a client socket sits
-      `ESTAB` with a request that never gets a reply, alongside a stale
-      `CLOSE-WAIT` gres never reaped. That is a lost wakeup or a task dropped
-      without responding, not a deadlock and not a slow query.
-      Observed at test 92 (group containing `subselect`) and twice at test 193
-      (group containing `truncate`). The last one wedged on a plain
-      `SELECT * FROM truncate_a` after `BEGIN; TRUNCATE; ROLLBACK;`, in a file
-      containing no CTAS at all, which ruled out the change under test.
-      Note `ptrace_scope` blocks `gdb -p` on this machine, so a backtrace needs
-      either root or a build that dumps its own state on a signal. Worth adding
-      that hook: three runs is ~2 hours, and the next occurrence is the cheapest
-      time to catch it.
-      Beware the diagnostic trap: pg_regress prints a parallel group's `ok`
-      lines only when the WHOLE group finishes, and the `subselect` group takes
-      6.3 minutes normally. A stall detector under ~10 minutes reports healthy
-      runs as hung -- that mistake cost one killed run here.
-- [x] **Persistence modifiers on `CREATE TABLE AS`, and the relation
-      visibility it exposed.** Certified `-1542` together, the largest single
-      movement of this program. `psql` 8121 -> 6754, `plancache` -94,
-      `create_index_spgist` -51, `inherit` -18, `with` -18.
-      The parser half was small: `create_table_as` expected `TABLE` straight
-      after `CREATE`, so `CREATE TEMP TABLE … AS SELECT` was a syntax error
-      while both `CREATE TABLE … AS` and `CREATE TEMP TABLE (cols)` parsed.
-      43 statements across a dozen files. `SELECT … INTO TEMP` was separately
-      accepting the keyword and creating a permanent relation.
-      Alone that measured `+23`, because the newly-created temporary relations
-      revealed that `pg_table_is_visible` answered `true` unconditionally, so
-      `\d` listed every previous test session's temporary tables. Fixing it was
-      worth `-1565` on its own.
-      **That is the third predicate found stubbed permissive**, after
-      `has_table_privilege` and the `has_*_privilege` family. They share a
-      shape: a predicate that can only ever *hide* things, returning true, and
-      therefore invisible until whatever it should hide starts existing. Grep
-      the rest of that family rather than waiting to trip over them —
-      `pg_type_is_visible` and `pg_function_is_visible` sit in the same list.
+- [x] **The "intermittent hang" was never a hang.** Corrected by profiling a
+      live specimen: the process sits at 99.9% CPU, not idle. The earlier
+      recorded signature -- runtime parked in `ep_poll` while a client waits --
+      was a sampling artifact from looking at two threads and missing the
+      spinner, which is a third thread that only exists under load. `gdb -p` is
+      blocked by `ptrace_scope=1` here, but `perf record --tid` works and is
+      what settled it.
+      Two real costs were behind it. `eval` resolved every column reference by
+      name per row against a linear scan (fixed: `BoundExpr`, `-22%` on
+      `subselect`, flat rather than linear in scope width). And `memoize` takes
+      **895 s -- 41% of the whole run's wall clock**, because `lateral_join`'s
+      inner-relation cache requires a join index over the LEFT relation and the
+      whole thing is gated on `blocking_query_memory`; under the certified
+      20 MiB policy `can_cache` is never true, so each of 10 000 outer rows
+      re-executes a full 10 000-row scan. The cache is there; the memory policy
+      defeats it.
+- [ ] Make the lateral cache usable under the 20 MiB policy. Caching the inner
+      relation should not require indexing the outer one -- a cached entry could
+      fall back to an unindexed join and still save the re-execution, which is
+      the expensive part. `memoize` is the single biggest wall-clock item in the
+      suite and this is why every certification takes ~36 minutes.
 - [ ] Ratchet or repair the committed serial baseline. The gate in
       `crates/gres-conformance/pg-regress-baseline.json` was seeded once, in
       `179158c39`, and has never been ratcheted; `baseline.py update` correctly
