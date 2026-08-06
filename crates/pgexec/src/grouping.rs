@@ -394,13 +394,13 @@ fn augmented_rows(
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut out = Vec::with_capacity(rows.len().saturating_mul(plan.sets.len()));
     let mut bytes = 0usize;
+    let group_by = crate::bind::bind_all(&plan.group_by, scope);
     for row in rows {
         // The grouping expressions are evaluated once per input row; a set only
         // decides which of those values survives into its key.
-        let keys = plan
-            .group_by
+        let keys = group_by
             .iter()
-            .map(|g| crate::eval::eval(g, scope, row, ctx))
+            .map(|g| crate::eval::eval(g.expr(), scope, row, ctx))
             .collect::<Result<Vec<_>, ExecError>>()?;
         for (ordinal, set) in plan.sets.iter().enumerate() {
             let mut augmented = row.clone();

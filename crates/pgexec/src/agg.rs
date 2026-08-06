@@ -2419,10 +2419,13 @@ pub(crate) fn aggregate_rows(
     let mut accs: Vec<Vec<Acc>> = Vec::new();
     let mut index: HashMap<Vec<Datum>, usize> = HashMap::new();
     let mut group_bytes = 0usize;
+    // The grouping keys are the same expressions for every row, so resolve
+    // their column references once rather than once per row.
+    let bound_group_by = crate::bind::bind_all(&group_by, scope);
     for row in &rows {
-        let mut key = Vec::with_capacity(group_by.len());
-        for g in &group_by {
-            key.push(crate::eval::eval(g, scope, row, ctx)?);
+        let mut key = Vec::with_capacity(bound_group_by.len());
+        for g in &bound_group_by {
+            key.push(crate::eval::eval(g.expr(), scope, row, ctx)?);
         }
         let gi = match index.get(&key) {
             Some(&i) => i,

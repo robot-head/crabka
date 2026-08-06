@@ -17,6 +17,7 @@ use crabka_pgparser::ast::{BinaryOp, Expr, JoinConstraint, JoinKind};
 use crabka_pgtypes::Datum;
 
 use crate::{
+    bind::BoundExpr,
     error::ExecError,
     scope::{ColumnBinding, Scope},
 };
@@ -177,18 +178,21 @@ fn increment_join_count(count: &mut i64) -> Result<(), ExecError> {
     Ok(())
 }
 
-struct JoinCondition<'a> {
+struct JoinCondition {
     combined_scope: Scope,
     join_cols: Vec<String>,
     pairs: Vec<(usize, usize)>,
-    on_predicate: Option<&'a Expr>,
+    /// Bound against `combined_scope` ONCE here rather than resolved by name for
+    /// every candidate pair — a nested loop evaluates this predicate
+    /// `|left| × |right|` times.
+    on_predicate: Option<BoundExpr>,
 }
 
-impl<'a> JoinCondition<'a> {
+impl JoinCondition {
     fn new(
         left: &Relation,
         right: &Relation,
-        constraint: &'a JoinConstraint,
+        constraint: &JoinConstraint,
     ) -> Result<Self, ExecError> {
         for column in &right.scope.columns {
             if let Some(qualifier) = &column.qualifier
@@ -217,14 +221,15 @@ impl<'a> JoinCondition<'a> {
                 right.scope.resolve(None, column)?,
             ));
         }
+        let on_predicate = match constraint {
+            JoinConstraint::On(predicate) => Some(BoundExpr::new(predicate, &combined_scope)),
+            _ => None,
+        };
         Ok(Self {
             combined_scope,
             join_cols,
             pairs,
-            on_predicate: match constraint {
-                JoinConstraint::On(predicate) => Some(predicate),
-                _ => None,
-            },
+            on_predicate,
         })
     }
 
@@ -246,12 +251,12 @@ impl<'a> JoinCondition<'a> {
             }
             return Ok(true);
         }
-        let Some(predicate) = self.on_predicate else {
+        let Some(predicate) = &self.on_predicate else {
             return Ok(true);
         };
         let mut combined = left.to_vec();
         combined.extend_from_slice(right);
-        match crate::eval::eval(predicate, &self.combined_scope, &combined, ctx)? {
+        match crate::eval::eval(predicate.expr(), &self.combined_scope, &combined, ctx)? {
             Datum::Bool(value) => Ok(value),
             Datum::Null => Ok(false),
             _ => Err(ExecError::TypeMismatch(

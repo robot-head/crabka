@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use assert2::assert;
 use crabka_pgexec::SqlEngine;
 use crabka_pgwire::session::SessionConfig;
 use tokio::net::TcpListener;
@@ -381,6 +382,51 @@ async fn unknown_qualifier_is_42p01() {
         .await
         .expect_err("unknown qualifier");
     assert_eq!(err_code(&err), "42P01");
+}
+
+/// Resolving a column reference is a per-STATEMENT cost, but reporting a
+/// resolution failure is a per-ROW event: a `WHERE` or `ON` clause naming a
+/// column that does not resolve is silent over an empty relation, because no row
+/// ever evaluates it.
+///
+/// This is the constraint that keeps the positional-binding optimization honest.
+/// Binding rewrites these references once per statement, and if it reported a
+/// failed resolution at that point every one of these queries would start
+/// erroring on an empty table. So binding is best-effort: an unresolvable
+/// reference is left as written and still fails per row, exactly here.
+#[tokio::test]
+async fn an_unresolvable_reference_is_silent_until_a_row_evaluates_it() {
+    let client = connect(spawn().await).await;
+    client
+        .batch_execute("CREATE TABLE l (x int, y int); CREATE TABLE r (x int, z int)")
+        .await
+        .expect("ddl");
+    // (query, the code it reports once a row exists)
+    let cases = [
+        ("SELECT 1 FROM l JOIN r ON l.x = r.nope", "42703"),
+        ("SELECT 1 FROM l WHERE l.nope = 1", "42703"),
+        // Ambiguity is a resolution failure too, and just as row-triggered.
+        ("SELECT 1 FROM l, r WHERE x = 1", "42702"),
+        ("SELECT 1 FROM l WHERE zzz.x = 1", "42P01"),
+    ];
+    for (sql, _) in cases {
+        let rows = client
+            .query(sql, &[])
+            .await
+            .expect("empty relation is silent");
+        assert!(rows.is_empty(), "{sql}");
+    }
+    client
+        .batch_execute("INSERT INTO l VALUES (1, 1); INSERT INTO r VALUES (1, 1)")
+        .await
+        .expect("dml");
+    for (sql, code) in cases {
+        let err = client
+            .query(sql, &[])
+            .await
+            .expect_err("a row evaluates it");
+        assert!(err_code(&err) == code, "{sql}");
+    }
 }
 
 /// A large equi-join must not degrade to a full inner scan per outer row.

@@ -120,6 +120,24 @@ impl Scope {
                 .filter(|index| *index < self.columns.len())
                 .ok_or_else(|| ExecError::UndefinedColumn(name.to_string()));
         }
+        // ONE pass, testing the name before the qualifier. Both tests are pure,
+        // so the order does not change the outcome, and the name rejects almost
+        // every column without touching the qualifier at all.
+        let mut found: Option<usize> = None;
+        for (i, c) in self.columns.iter().enumerate() {
+            if c.name == name && qualifier.is_none_or(|q| c.qualifier.as_deref() == Some(q)) {
+                if found.is_some() {
+                    return Err(ExecError::AmbiguousColumn(name.to_string()));
+                }
+                found = Some(i);
+            }
+        }
+        if let Some(index) = found {
+            return Ok(index);
+        }
+        // Nothing matched, so the qualifier still has to be checked to tell
+        // 42P01 from 42703. It cannot be reached with a match in hand: a match
+        // required a column carrying that very qualifier.
         if let Some(q) = qualifier
             && !self
                 .columns
@@ -128,17 +146,7 @@ impl Scope {
         {
             return Err(ExecError::MissingFromEntry(q.to_string()));
         }
-        let mut found: Option<usize> = None;
-        for (i, c) in self.columns.iter().enumerate() {
-            let q_ok = qualifier.is_none_or(|q| c.qualifier.as_deref() == Some(q));
-            if q_ok && c.name == name {
-                if found.is_some() {
-                    return Err(ExecError::AmbiguousColumn(name.to_string()));
-                }
-                found = Some(i);
-            }
-        }
-        found.ok_or_else(|| ExecError::UndefinedColumn(name.to_string()))
+        Err(ExecError::UndefinedColumn(name.to_string()))
     }
 }
 
@@ -246,6 +254,14 @@ mod tests {
             (
                 Some("other"),
                 "k",
+                Err(ExecError::MissingFromEntry("other".into())),
+            ),
+            // An absent qualifier is 42P01 even when the name is ambiguous under
+            // the qualifiers that ARE in scope, and even when the name is absent
+            // too: the missing FROM entry outranks both.
+            (
+                Some("other"),
+                "nope",
                 Err(ExecError::MissingFromEntry("other".into())),
             ),
         ];

@@ -1214,12 +1214,16 @@ fn eval_key_rows<'a>(
     rows: &[Vec<Datum>],
     ctx: &EvalCtx,
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
-    let exprs: Vec<&Expr> = exprs.collect();
+    // PARTITION BY / ORDER BY keys are the same expressions for every row, so
+    // their column references are resolved once here.
+    let exprs: Vec<crate::bind::BoundExpr> = exprs
+        .map(|expr| crate::bind::BoundExpr::new(expr, scope))
+        .collect();
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
         let mut key = Vec::with_capacity(exprs.len());
         for expr in &exprs {
-            key.push(crate::eval::eval(expr, scope, row, ctx)?);
+            key.push(crate::eval::eval(expr.expr(), scope, row, ctx)?);
         }
         out.push(key);
     }

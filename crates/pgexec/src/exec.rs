@@ -5621,12 +5621,15 @@ async fn execute_merge(
     let mut returned_rows = Vec::new();
     let mut n: u64 = 0;
 
+    // Every (source, target) pair evaluates the same ON condition, so its
+    // column references are resolved once against the joined scope.
+    let on_bound = crate::bind::BoundExpr::new(on, &scope);
     for source_row in &source_rel.rows {
         let mut any_match = false;
         for (rowid, _xmin, target_row) in &target_rows {
             let mut joined = target_row.clone();
             joined.extend_from_slice(source_row);
-            if !row_matches(Some(on), &scope, &joined, ctx)? {
+            if !row_matches(Some(on_bound.expr()), &scope, &joined, ctx)? {
                 continue;
             }
             any_match = true;
@@ -8334,6 +8337,8 @@ fn execute_timestamp_update(
         )
         .collect::<Result<Vec<_>, ExecError>>()?;
     let rows = scan_ts_live_interval(kv, kv, table, ReadTimestamp::MAX, None, RowInterval::ALL)?;
+    let filter = crate::bind::bind_optional(filter, &scope);
+    let filter = filter.as_ref().map(crate::bind::BoundExpr::expr);
     let mut writes = Vec::new();
     for ScannedRow { rowid, row, .. } in rows {
         if !row_matches(filter, &scope, &row, ctx)? {
@@ -8418,6 +8423,8 @@ fn execute_timestamp_delete(
 ) -> Result<TimestampWritePlan, ExecError> {
     let scope = Scope::single(table, &table.name.name);
     let rows = scan_ts_live_interval(kv, kv, table, ReadTimestamp::MAX, None, RowInterval::ALL)?;
+    let filter = crate::bind::bind_optional(filter, &scope);
+    let filter = filter.as_ref().map(crate::bind::BoundExpr::expr);
     let mut writes = Vec::new();
     for ScannedRow { rowid, row, .. } in rows {
         if !row_matches(filter, &scope, &row, ctx)? {
@@ -9693,8 +9700,9 @@ fn filter_relation(
     ctx: &crate::clock::EvalCtx,
 ) -> Result<(), ExecError> {
     let rows = std::mem::take(&mut relation.rows);
+    let predicate = crate::bind::BoundExpr::new(predicate, &relation.scope);
     for row in rows {
-        if row_matches(Some(predicate), &relation.scope, &row, ctx)? {
+        if row_matches(Some(predicate.expr()), &relation.scope, &row, ctx)? {
             relation.rows.push(row);
         }
     }
@@ -13604,12 +13612,24 @@ pub(crate) fn select_to_relation_with_ctes(
             .with_initplans(initplans)
             .with_scalar_lookups(scalar_lookups)
     });
+    // The uncorrelated filter is the same expression for every row, so its
+    // column references are resolved once here instead of once per row.
+    let bound_filter = if binder.is_none() {
+        crate::bind::bind_optional(s.filter.as_ref(), &relation.scope)
+    } else {
+        None
+    };
     let mut kept = Vec::new();
     for row in &relation.rows {
         let matches = if let Some(binder) = &mut binder {
             row_matches_correlated(read_ctx, s.filter.as_ref(), &relation.scope, row, binder)?
         } else {
-            row_matches(s.filter.as_ref(), &relation.scope, row, ctx)?
+            row_matches(
+                bound_filter.as_ref().map(crate::bind::BoundExpr::expr),
+                &relation.scope,
+                row,
+                ctx,
+            )?
         };
         if matches {
             kept.push(row.clone());
@@ -16931,6 +16951,14 @@ pub(crate) async fn execute_read_locking(
             .with_scalar_lookups(scalar_lookups)
     });
 
+    // The uncorrelated filter is the same expression for every scanned row.
+    let bound_filter = if binder.is_none() {
+        crate::bind::bind_optional(s.filter.as_ref(), &scope)
+    } else {
+        None
+    };
+    let bound_filter = bound_filter.as_ref().map(crate::bind::BoundExpr::expr);
+
     // Scan visible rows, then lock and EvalPlanQual-recheck each one.
     let mut kept: Vec<Vec<Datum>> = Vec::new();
     for ScannedRow {
@@ -16959,7 +16987,7 @@ pub(crate) async fn execute_read_locking(
         let matches = if let Some(binder) = &mut binder {
             row_matches_correlated(read_ctx, s.filter.as_ref(), &scope, &scanned_row, binder)?
         } else {
-            row_matches(s.filter.as_ref(), &scope, &scanned_row, ctx)?
+            row_matches(bound_filter, &scope, &scanned_row, ctx)?
         };
         if !matches {
             continue;
@@ -17016,7 +17044,7 @@ pub(crate) async fn execute_read_locking(
             let matches = if let Some(binder) = &mut binder {
                 row_matches_correlated(read_ctx, s.filter.as_ref(), &scope, &cur_row, binder)?
             } else {
-                row_matches(s.filter.as_ref(), &scope, &cur_row, ctx)?
+                row_matches(bound_filter, &scope, &cur_row, ctx)?
             };
             if !matches {
                 continue; // no longer matches
@@ -17158,15 +17186,19 @@ fn key_source_rows(
     if keys.is_empty() {
         return Ok(rows.into_iter().map(|row| (Vec::new(), row)).collect());
     }
+    let keys: Vec<crate::bind::BoundExpr> = keys
+        .iter()
+        .map(|key| match key {
+            SelectOrderKey::Output(i) => crate::bind::BoundExpr::new(&out_exprs[*i], scope),
+            SelectOrderKey::SourceExpr(expr) => crate::bind::BoundExpr::new(expr, scope),
+        })
+        .collect();
     let mut keyed: KeyedRows = Vec::with_capacity(rows.len());
     let mut keyed_bytes = 0usize;
     for row in rows {
         let mut values = Vec::with_capacity(keys.len());
-        for key in keys {
-            values.push(match key {
-                SelectOrderKey::Output(i) => crate::eval::eval(&out_exprs[*i], scope, &row, ctx)?,
-                SelectOrderKey::SourceExpr(expr) => crate::eval::eval(expr, scope, &row, ctx)?,
-            });
+        for key in &keys {
+            values.push(crate::eval::eval(key.expr(), scope, &row, ctx)?);
         }
         let bytes = crate::scanner::datum_row_bytes(&values)
             .saturating_add(crate::scanner::datum_row_bytes(&row));
@@ -17325,12 +17357,13 @@ fn keep_first_per_distinct_on_group(
     scope: &Scope,
     ctx: &crate::clock::EvalCtx,
 ) -> Result<KeyedRows, ExecError> {
+    let on = crate::bind::bind_all(on, scope);
     let mut out: KeyedRows = Vec::new();
     let mut previous: Option<Vec<Datum>> = None;
     for (keys, row) in keyed {
         let group = on
             .iter()
-            .map(|expr| crate::eval::eval(expr, scope, &row, ctx))
+            .map(|expr| crate::eval::eval(expr.expr(), scope, &row, ctx))
             .collect::<Result<Vec<_>, _>>()?;
         if previous.as_ref() == Some(&group) {
             continue;
@@ -17376,11 +17409,12 @@ pub(crate) fn project_rows(
     rows: &[Vec<Datum>],
     ctx: &crate::clock::EvalCtx,
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let out_exprs = crate::bind::bind_all(out_exprs, scope);
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
         let mut cells = Vec::with_capacity(out_exprs.len());
-        for e in out_exprs {
-            cells.push(crate::eval::eval(e, scope, row, ctx)?);
+        for e in &out_exprs {
+            cells.push(crate::eval::eval(e.expr(), scope, row, ctx)?);
         }
         out.push(cells);
     }

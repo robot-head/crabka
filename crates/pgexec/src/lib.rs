@@ -41,6 +41,7 @@
 
 mod agg;
 mod array_fn;
+mod bind;
 mod builtin_aggregates;
 mod builtin_amop;
 mod builtin_amproc;

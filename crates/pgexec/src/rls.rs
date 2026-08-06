@@ -259,9 +259,10 @@ pub(crate) fn apply_row_security(
             // and inside the recursion guard, since that is where a
             // self-referencing qual re-enters the read path.
             let qual = crate::subquery::resolve_expr(read_ctx, &qual)?;
+            let qual = crate::bind::BoundExpr::new(&qual, &scope);
             let mut kept = Vec::with_capacity(rows.len());
             for row in rows {
-                if crate::exec::row_matches(Some(&qual), &scope, &row, read_ctx.eval_ctx)? {
+                if crate::exec::row_matches(Some(qual.expr()), &scope, &row, read_ctx.eval_ctx)? {
                     kept.push(row);
                 }
             }
@@ -644,9 +645,10 @@ impl RowSecurityUsing {
             RowSecurity::Restricted { relation, qual } => (relation, qual),
         };
         let scope = Scope::single(table, relation);
+        let qual = crate::bind::BoundExpr::new(qual, &scope);
         let mut kept = Vec::with_capacity(rows.len());
         for (rowid, xmin, row) in rows {
-            if crate::exec::row_matches(Some(qual), &scope, &row, ctx)? {
+            if crate::exec::row_matches(Some(qual.expr()), &scope, &row, ctx)? {
                 kept.push((rowid, xmin, row));
             }
         }
