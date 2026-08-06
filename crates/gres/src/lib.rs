@@ -889,6 +889,17 @@ pub struct PgExecRuntimeOptions {
     /// Lag retained behind the timestamp GC floor.
     #[arg(long = "pgexec-ts-gc-floor-lag", env = "CRABKA_GRES_PGEXEC_TS_GC_FLOOR_LAG", value_parser = parse_pgexec_gc_floor_lag)]
     pub ts_gc_floor_lag: Option<Time>,
+    /// How long a statement may run before the watchdog reports it. Diagnostic
+    /// only: the watchdog logs and never cancels, so this is not a timeout.
+    #[arg(long = "pgexec-stuck-statement-threshold", env = "CRABKA_GRES_PGEXEC_STUCK_STATEMENT_THRESHOLD", value_parser = crabka_units::parse::positive_time)]
+    pub stuck_statement_threshold: Option<Time>,
+    /// How often the stuck-statement watchdog scans the in-flight statements.
+    #[arg(long = "pgexec-stuck-statement-poll", env = "CRABKA_GRES_PGEXEC_STUCK_STATEMENT_POLL", value_parser = crabka_units::parse::positive_time)]
+    pub stuck_statement_poll: Option<Time>,
+    /// How long after reporting a stuck statement the watchdog reports it
+    /// again, if it is still running.
+    #[arg(long = "pgexec-stuck-statement-repeat", env = "CRABKA_GRES_PGEXEC_STUCK_STATEMENT_REPEAT", value_parser = crabka_units::parse::positive_time)]
+    pub stuck_statement_repeat: Option<Time>,
 }
 
 fn parse_pgexec_gc_floor_lag(value: &str) -> Result<Time, String> {
@@ -929,6 +940,17 @@ impl PgExecRuntimeOptions {
                 PositiveUsize::into_value,
             ),
             ts_gc_floor_lag: self.ts_gc_floor_lag.unwrap_or(defaults.ts_gc_floor_lag),
+            stuck_statement: crabka_pgexec::watchdog::StuckStatementPolicy {
+                threshold: self
+                    .stuck_statement_threshold
+                    .unwrap_or(defaults.stuck_statement.threshold),
+                poll_interval: self
+                    .stuck_statement_poll
+                    .unwrap_or(defaults.stuck_statement.poll_interval),
+                repeat_interval: self
+                    .stuck_statement_repeat
+                    .unwrap_or(defaults.stuck_statement.repeat_interval),
+            },
         }
     }
 }
@@ -12066,6 +12088,9 @@ mod tests {
             "--pgexec-rowid-reservation=39",
             "--pgexec-ts-prune-versions-per-row=40",
             "--pgexec-ts-gc-floor-lag=41ms",
+            "--pgexec-stuck-statement-threshold=42ms",
+            "--pgexec-stuck-statement-poll=43ms",
+            "--pgexec-stuck-statement-repeat=44ms",
         ])
         .expect("PgExec runtime policy");
         let config = SubstrateRuntimeConfig::from_args(&cli.serve)
@@ -12083,7 +12108,15 @@ mod tests {
                     rowid_reservation: 39,
                     ts_prune_versions_per_row: 40,
                     ts_gc_floor_lag: crabka_units::millis(41),
+                    stuck_statement: crabka_pgexec::watchdog::StuckStatementPolicy {
+                        threshold: crabka_units::millis(42),
+                        poll_interval: crabka_units::millis(43),
+                        repeat_interval: crabka_units::millis(44),
+                    },
                 }
+        );
+        assert!(
+            Cli::try_parse_from(["crabka-gres", "--pgexec-stuck-statement-threshold=0s"]).is_err()
         );
         assert!(Cli::try_parse_from(["crabka-gres", "--pgexec-notify-queue-capacity=0"]).is_err());
         assert!(Cli::try_parse_from(["crabka-gres", "--pgexec-ts-gc-floor-lag=-1ms"]).is_err());

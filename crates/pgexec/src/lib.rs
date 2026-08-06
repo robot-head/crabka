@@ -115,6 +115,7 @@ pub mod ts_gc;
 mod usertype;
 mod values;
 mod viewdef;
+pub mod watchdog;
 mod window;
 
 use std::{
@@ -168,11 +169,30 @@ struct EngineCoordination {
     lockmgr: Arc<RowLockManager>,
     unique_index_gates: Arc<RowLockManager>,
     next_unique_index_owner: AtomicU64,
+    /// Every statement this server currently has in flight. Shared here for the
+    /// same reason the locks above are: it is one server-wide thing that each
+    /// session touches, and a report is only useful if it can name every
+    /// backend at once.
+    pub(crate) statements: Arc<watchdog::StatementRegistry>,
 }
 
 impl EngineCoordination {
-    fn new() -> Self {
+    /// Build the shared coordination state and start this server's
+    /// stuck-statement watchdog.
+    ///
+    /// The watchdog is spawned here because this is where the registry it
+    /// watches is born, and it holds only a [`Weak`] handle to it, so the loop
+    /// retires the moment the last engine over this store goes away. Outside a
+    /// runtime — an embedded caller building an engine synchronously — there is
+    /// nothing to spawn onto and the registry simply goes unwatched; it still
+    /// records, so [`watchdog::StatementRegistry::in_flight`] answers either
+    /// way.
+    fn new(policy: watchdog::StuckStatementPolicy) -> Self {
         let lockmgr = Arc::new(RowLockManager::new());
+        let statements = Arc::new(watchdog::StatementRegistry::default());
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(watchdog::watch(Arc::downgrade(&statements), policy));
+        }
         Self {
             catalog_lock: Arc::new(tokio::sync::Mutex::new(())),
             table_id_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -181,6 +201,7 @@ impl EngineCoordination {
             lockmgr: Arc::clone(&lockmgr),
             unique_index_gates: lockmgr,
             next_unique_index_owner: AtomicU64::new(0),
+            statements,
         }
     }
 }
@@ -289,7 +310,10 @@ fn new_local_sequence() -> Arc<local_sequence::LocalSequence> {
     )
 }
 
-fn coordination_for(kv: &Arc<dyn Kv>) -> Arc<EngineCoordination> {
+fn coordination_for(
+    kv: &Arc<dyn Kv>,
+    policy: watchdog::StuckStatementPolicy,
+) -> Arc<EngineCoordination> {
     static COORDINATORS: OnceLock<Mutex<HashMap<usize, Weak<EngineCoordination>>>> =
         OnceLock::new();
 
@@ -302,7 +326,7 @@ fn coordination_for(kv: &Arc<dyn Kv>) -> Arc<EngineCoordination> {
     if let Some(coordinator) = coordinators.get(&identity).and_then(Weak::upgrade) {
         return coordinator;
     }
-    let coordinator = Arc::new(EngineCoordination::new());
+    let coordinator = Arc::new(EngineCoordination::new(policy));
     coordinators.insert(identity, Arc::downgrade(&coordinator));
     coordinator
 }
@@ -368,6 +392,9 @@ pub struct RuntimePolicy {
     pub rowid_reservation: u64,
     pub ts_prune_versions_per_row: usize,
     pub ts_gc_floor_lag: crabka_units::Time,
+    /// When the stuck-statement watchdog reports an in-flight statement, and how
+    /// often it looks. Diagnostic only — see [`watchdog`].
+    pub stuck_statement: watchdog::StuckStatementPolicy,
 }
 
 impl Default for RuntimePolicy {
@@ -383,6 +410,7 @@ impl Default for RuntimePolicy {
             rowid_reservation: seq::DURABLE_BLOCK,
             ts_prune_versions_per_row: ts_gc::TS_PRUNE_ROW_VERSION_CAP,
             ts_gc_floor_lag: ts_gc::TS_PRUNE_FLOOR_LAG,
+            stuck_statement: watchdog::StuckStatementPolicy::default(),
         }
     }
 }
@@ -415,6 +443,12 @@ impl RuntimePolicy {
         {
             return Err(ExecError::Unsupported(
                 "PgExec byte limits and counts must be positive whole values and GC lag must be finite, nonnegative, and whole milliseconds"
+                    .into(),
+            ));
+        }
+        if !self.stuck_statement.is_valid() {
+            return Err(ExecError::Unsupported(
+                "PgExec stuck-statement threshold, poll interval, and repeat interval must be finite and positive"
                     .into(),
             ));
         }
@@ -861,7 +895,7 @@ impl SqlEngine {
     /// Returns an error when the store cannot be initialized or the policy is invalid.
     pub fn with_kv_and_policy(kv: Arc<dyn Kv>, policy: RuntimePolicy) -> Result<Self, ExecError> {
         let policy = policy.validate()?;
-        let coordination = coordination_for(&kv);
+        let coordination = coordination_for(&kv, policy.stuck_statement);
         let procarray = Arc::new(ProcArray::open(Arc::clone(&kv), PersistMode::Durable)?);
         let sweep_committer = timestamp_txn::HorizonObservingCommitter::wrap(
             Arc::new(crate::commit::LocalCommitter {
@@ -1479,7 +1513,7 @@ impl SqlEngine {
         policy: RuntimePolicy,
     ) -> Result<Self, ExecError> {
         let policy = policy.validate()?;
-        let coordination = coordination_for(&sm_kv);
+        let coordination = coordination_for(&sm_kv, policy.stuck_statement);
         let procarray = Arc::new(ProcArray::open(
             Arc::clone(&sm_kv),
             PersistMode::Replicated,
@@ -1603,6 +1637,16 @@ impl SqlEngine {
             vacuum_demand: Arc::clone(&self.vacuum_demand),
             vacuum_progress: Arc::clone(&self.vacuum_progress),
         }
+    }
+
+    /// Every statement this engine's sessions currently have in flight.
+    ///
+    /// The watchdog reads this on its own schedule; callers that want the same
+    /// picture without waiting for a poll — a test, or an operator asking what
+    /// a wedged server is doing — read it here.
+    #[must_use]
+    pub fn statement_registry(&self) -> &Arc<watchdog::StatementRegistry> {
+        &self.coordination.statements
     }
 
     /// This engine's `LISTEN`/`NOTIFY` bus. Sessions register on it to receive

@@ -955,6 +955,10 @@ impl GresComputeSpec {
             rowid_reservation: pgexec_rowid_reservation,
             ts_prune_versions_per_row: pgexec_ts_prune_versions_per_row,
             ts_gc_floor_lag: pgexec_ts_gc_floor_lag,
+            // The stuck-statement watchdog is a diagnostic that only logs, so
+            // the CRD does not surface it; a pod that needs a different
+            // threshold gets it from `--pgexec-stuck-statement-*`.
+            stuck_statement: pgexec_defaults.stuck_statement,
         }
         .validate()
         .map_err(|error| format!("spec.compute.pgexecTsGcFloorLag: {error:?}"))?;

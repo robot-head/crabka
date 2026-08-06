@@ -2490,7 +2490,7 @@ pub struct SqlSession {
     table_write_gate: Arc<tokio::sync::RwLock<()>>,
     writer_fence: Arc<crate::WriterFence>,
     /// Retains the registry entry while this session can hold a writer lease.
-    _coordination: Arc<crate::EngineCoordination>,
+    coordination: Arc<crate::EngineCoordination>,
     unique_index_gates: Arc<RowLockManager>,
     lock_owner: crate::lockmgr::LockOwner,
     committer: Arc<dyn crate::commit::Committer>,
@@ -2817,6 +2817,11 @@ struct SqlPrepared {
     /// `None` for one prepared over the extended protocol, which is what
     /// `pg_prepared_statements.from_sql` reports.
     sql_source: Option<String>,
+    /// The text this statement was prepared from, however it was prepared.
+    /// Unlike [`Self::sql_source`] this is never absent, because it answers a
+    /// different question: what the stuck-statement watchdog should name when
+    /// an `Execute` over this statement stops finishing.
+    query_text: Arc<str>,
     /// The parameter type oids the client asked for, kept so a later
     /// re-description is the same computation with the same inputs rather than
     /// one that only resembles it. `0` is "infer it", as on the wire.
@@ -2874,6 +2879,9 @@ struct SqlPortal {
     description: PortalDescription,
     formats: Vec<i16>,
     execution: SqlPortalExecution,
+    /// The text of the prepared statement this portal was bound from, carried
+    /// so `Execute` can name what it is running.
+    query_text: Arc<str>,
     /// Carried from the prepared statement this portal was bound from: whether
     /// the result columns it announced may be held against what `Execute`
     /// actually produces.
@@ -3030,7 +3038,7 @@ impl SqlSession {
             on_commit: Vec::new(),
             table_write_gate,
             writer_fence,
-            _coordination: coordination,
+            coordination,
             unique_index_gates,
             lock_owner,
             committer,
@@ -4565,6 +4573,7 @@ impl SqlSession {
                     fields: shape.fields.unwrap_or_default(),
                 },
                 sql_source: Some(source.to_string()),
+                query_text: source.into(),
                 param_type_hints,
                 described_scope: shape.scope,
                 fixed_result,
@@ -5852,12 +5861,27 @@ impl SqlSession {
         )))
     }
 
-    /// Run one parsed statement, under a `db.statement` span.
+    /// Publish `sql` as this backend's in-flight statement for as long as the
+    /// returned guard lives.
     ///
-    /// The verbatim SQL is only ever available on the simple-query protocol,
-    /// where the whole query string arrives with the statements it parsed to;
-    /// the extended protocol's `Execute` carries none, and pgwire records the
-    /// text on its own statement span instead.
+    /// Called once per protocol message that runs SQL, never per statement row
+    /// or per operator: the whole cost is one map insert now and one removal
+    /// when the guard drops. Dropping the guard is the only way the entry
+    /// leaves the registry, which is what keeps an error return — or a dropped
+    /// query future — from stranding a permanent false alarm there.
+    fn track_statement(&self, sql: &str) -> crate::watchdog::StatementGuard {
+        self.coordination.statements.begin(
+            self.backend_pid,
+            sql,
+            match self.state {
+                TxnState::Idle => crate::watchdog::TransactionActivity::Idle,
+                TxnState::InTransaction(_) => crate::watchdog::TransactionActivity::InTransaction,
+                TxnState::Prepared(_) => crate::watchdog::TransactionActivity::Prepared,
+                TxnState::Failed(_) => crate::watchdog::TransactionActivity::Failed,
+            },
+        )
+    }
+
     pub(crate) async fn run_one(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
         self.run_one_with_source(stmt, None).await
     }
@@ -12660,6 +12684,7 @@ impl Session for SqlSession {
         if sql.trim().is_empty() {
             return Ok(vec![QueryResult::Empty]);
         }
+        let _tracked = self.track_statement(sql);
         let statements = self.parse_for_session(sql)?;
         if statements.is_empty() {
             return Ok(vec![QueryResult::Empty]);
@@ -12698,6 +12723,7 @@ impl Session for SqlSession {
         if sql.trim().is_empty() {
             return sink.send(ResultPage::Empty { result_index: 0 }).await;
         }
+        let _tracked = self.track_statement(sql);
         let statements = self.parse_for_session(sql)?;
         if statements.is_empty() {
             return sink.send(ResultPage::Empty { result_index: 0 }).await;
@@ -12792,6 +12818,7 @@ impl Session for SqlSession {
                         statement: None,
                         description: description.clone(),
                         sql_source: None,
+                        query_text: sql.into(),
                         param_type_hints: param_types.to_vec(),
                         described_scope: self.resolution_scope(),
                         fixed_result: true,
@@ -12818,6 +12845,7 @@ impl Session for SqlSession {
                     statement: Some(statement),
                     description: description.clone(),
                     sql_source: None,
+                    query_text: sql.into(),
                     param_type_hints: param_types.to_vec(),
                     described_scope: scope,
                     fixed_result: true,
@@ -12896,6 +12924,7 @@ impl Session for SqlSession {
                     description: description.clone(),
                     formats,
                     execution: SqlPortalExecution::NotStarted,
+                    query_text: Arc::clone(&prepared.query_text),
                     fixed_result: prepared.fixed_result,
                 },
             );
@@ -12933,16 +12962,17 @@ impl Session for SqlSession {
     }
 
     async fn execute(&mut self, portal: &str, max_rows: u32) -> Result<ExecuteOutcome, PgError> {
-        let needs_run = matches!(
-            self.portals
-                .get(portal)
-                .ok_or_else(|| PgError::error(
-                    sqlstate::INVALID_CURSOR_NAME,
-                    format!("portal \"{portal}\" does not exist")
-                ))?
-                .execution,
-            SqlPortalExecution::NotStarted
-        );
+        let open = self.portals.get(portal).ok_or_else(|| {
+            PgError::error(
+                sqlstate::INVALID_CURSOR_NAME,
+                format!("portal \"{portal}\" does not exist"),
+            )
+        })?;
+        let needs_run = matches!(open.execution, SqlPortalExecution::NotStarted);
+        let _tracked = needs_run.then(|| {
+            let query_text = Arc::clone(&open.query_text);
+            self.track_statement(&query_text)
+        });
         if needs_run {
             let statement = self.portals.get(portal).and_then(|p| p.statement.clone());
             if let Some(stmt) = &statement
