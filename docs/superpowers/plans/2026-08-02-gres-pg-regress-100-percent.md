@@ -6,13 +6,13 @@
 test files, not the adopted corpus's statement matches. The checked-in monotone
 floor remains `6/231`; this review is still non-monotone against that floor and
 does not ratchet it. Serial completes all 231 files with zero infrastructure
-failures, leaving 203 semantic failures across 169867 canonical changed lines
+failures, leaving 203 semantic failures across 169864 canonical changed lines
 and 4729 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
 postflight probe succeeds, and the infrastructure report is empty.
 
 The measurement immediately before this wave was `22/231` at 176686 changed
 lines / 4606 hunks, from the same runner and the same pinned corpus. The
-waves below are therefore `+6` exact files and `-6134` changed lines with
+waves below are therefore `+6` exact files and `-6137` changed lines with
 **zero newly failing files**: `int4`, `int2`, `roleattributes`, `lseg`, `line` and `circle` become exact,
 and 4 files gain a combined 22 lines.
 
@@ -490,11 +490,23 @@ and their certified artifact describe current conformance.
       20 MiB policy `can_cache` is never true, so each of 10 000 outer rows
       re-executes a full 10 000-row scan. The cache is there; the memory policy
       defeats it.
-- [ ] Make the lateral cache usable under the 20 MiB policy. Caching the inner
-      relation should not require indexing the outer one -- a cached entry could
-      fall back to an unindexed join and still save the re-execution, which is
-      the expensive part. `memoize` is the single biggest wall-clock item in the
-      suite and this is why every certification takes ~36 minutes.
+- [x] **The suite is twice as fast, and the "hang" is gone.** A full serial run
+      goes 2179 s -> 1211 s, and `memoize` -- which was 892 s, 41% of the whole
+      run -- goes to 2.7 s. Nothing newly failing; the output delta is `-3`.
+      Three fixes, only the last of which mattered:
+      binding column references once instead of per row (`-22%` on `subselect`,
+      flat rather than linear in scope width); memoizing a lateral's inner
+      relation without requiring an index over the outer one (certified at
+      exactly zero -- a real inefficiency in a path `memoize` barely uses); and
+      the one that did it, deferring a subquery the boolean connective cannot
+      need. `WHERE unique1 < 3 AND EXISTS (<10k x 10k join>)` ran the EXISTS for
+      all 10 000 rows instead of 3, because `row_matches_correlated` resolves
+      every subquery eagerly before the connective is evaluated: 1 647 310 ms ->
+      724 ms on that statement.
+      The lesson worth keeping is that two of the three fixes were aimed at the
+      wrong thing and were only found to be wrong by measuring. A standalone
+      reproducer -- `tenk1` loaded from the upstream data file, one statement
+      timed -- settled in minutes what 40-minute certifications could not.
 - [ ] Ratchet or repair the committed serial baseline. The gate in
       `crates/gres-conformance/pg-regress-baseline.json` was seeded once, in
       `179158c39`, and has never been ratcheted; `baseline.py update` correctly
