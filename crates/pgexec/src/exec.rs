@@ -11456,7 +11456,8 @@ fn row_matches_correlated(
 
 /// Fold lazy expressions containing deferred subqueries one selected branch or
 /// argument at a time. Eager subquery rewriting must not execute a dead CASE
-/// branch or an unused COALESCE argument.
+/// branch, an unused COALESCE argument, or the right operand of a boolean
+/// connective the left operand has already settled.
 fn fold_correlated_lazy_expressions(
     read_ctx: &crate::subquery::SubCtx<'_>,
     expr: &Expr,
@@ -11464,6 +11465,59 @@ fn fold_correlated_lazy_expressions(
     row: &[Datum],
     binder: &mut LateralBinder<'_>,
 ) -> Result<Expr, ExecError> {
+    // A boolean connective settles on its left operand alone whenever the
+    // three-valued table has a wildcard row for it: `false AND anything` is
+    // false and `true OR anything` is true, for `anything` including NULL. The
+    // right operand's subqueries are then dead and must not run — the whole
+    // point of a `WHERE cheap_predicate AND EXISTS (expensive)` is that the
+    // expensive half is reached only by the rows the cheap half admits.
+    //
+    // The short-circuit in `eval` cannot do this job. Everything reaching the
+    // evaluator here has already been through `subquery::resolve_expr`, which
+    // executes every subquery in the tree before the connective is looked at,
+    // so by then the work is spent. Laziness has to happen where subqueries
+    // are still unresolved, which is here.
+    if let Expr::Binary {
+        op: op @ (BinaryOp::And | BinaryOp::Or),
+        left,
+        right,
+    } = expr
+        && contains_pending_subquery(right)
+    {
+        let value = eval_correlated_child(read_ctx, left, scope, row, binder)?;
+        let settled = match (op, &value) {
+            (BinaryOp::And, Datum::Bool(false)) => Some(false),
+            (BinaryOp::Or, Datum::Bool(true)) => Some(true),
+            _ => None,
+        };
+        if let Some(settled) = settled {
+            return Ok(Expr::Const {
+                value: Datum::Bool(settled),
+                ty: ColumnType::Bool,
+            });
+        }
+        // Undecided: the right operand still decides the answer, so it is
+        // folded as usual. The left operand is carried across as the constant
+        // it just evaluated to, so its own subqueries run once, not twice.
+        let typed = type_without_evaluating_subqueries(
+            read_ctx,
+            left,
+            &binder.initplans,
+            &binder.scalar_lookups,
+        )?;
+        let left_type = crate::eval::infer_type(&typed, scope)?;
+        return Ok(Expr::Binary {
+            op: *op,
+            left: Box::new(Expr::Const {
+                value,
+                ty: left_type,
+            }),
+            right: Box::new(fold_correlated_lazy_expressions(
+                read_ctx, right, scope, row, binder,
+            )?),
+        });
+    }
+
     if let Expr::Func(call) = expr
         && call.name == "coalesce"
         && contains_pending_subquery(expr)

@@ -168,6 +168,18 @@ fn eval_depth_inner(
                 return Ok(result);
             }
             let l = eval_depth(left, scope, values, ctx, d)?;
+            // The boolean connectives stop once the left operand settles the
+            // answer: the three-valued tables give `false AND anything` = false
+            // and `true OR anything` = true, so the right operand cannot change
+            // it. Evaluating it regardless is not merely wasted work — a
+            // conjunct like `WHERE k < 3 AND EXISTS (…)` runs the correlated
+            // subquery for every row rather than the three that pass, which is
+            // how one upstream test came to take 892 seconds.
+            match (op, &l) {
+                (BinaryOp::And, Datum::Bool(false)) => return Ok(Datum::Bool(false)),
+                (BinaryOp::Or, Datum::Bool(true)) => return Ok(Datum::Bool(true)),
+                _ => {}
+            }
             let r = eval_depth(right, scope, values, ctx, d)?;
             apply_binary_of(*op, left, right, &l, &r, scope, ctx)
         }

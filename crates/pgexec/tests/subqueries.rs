@@ -564,3 +564,89 @@ async fn a_from_subquery_may_omit_its_alias() {
         col0(&client, "SELECT q.x FROM (SELECT 1 AS x) q").await == vec![Some("1".to_string())]
     );
 }
+
+/// A boolean connective settles on its left operand whenever the three-valued
+/// table has a wildcard row for it — `false AND anything`, `true OR anything` —
+/// and the right operand's correlated subquery must then not run at all.
+///
+/// The skip is observable rather than merely faster: the probe predicates below
+/// divide by zero inside the right operand, on exactly the rows whose left
+/// operand settles the answer. They return the same rows as their plain
+/// counterparts only if that division never happens. The plain predicates
+/// meanwhile pin the whole truth table, including the NULL row, where the left
+/// operand settles nothing and the right operand must still run.
+#[tokio::test]
+async fn a_boolean_connective_skips_the_operand_it_cannot_need() {
+    use assert2::assert;
+
+    let client = connect(spawn().await).await;
+    client
+        .simple_query(
+            "CREATE TABLE flags (id int4, flag bool, k int4, da int4, dor int4); \
+             INSERT INTO flags VALUES (1, true, 1, 1, 0), (2, false, 1, 0, 1), \
+                                      (3, null, 1, 1, 1), (4, true, 0, 1, 0), \
+                                      (5, false, 0, 0, 1), (6, null, 0, 1, 1)",
+        )
+        .await
+        .expect("seed flags");
+
+    // `EXISTS (SELECT 1 WHERE o.k = 1)` is correlated, so it is resolved per
+    // outer row rather than once for the statement, and is true exactly on the
+    // rows with k = 1. `da` / `dor` are zero exactly on the rows whose left
+    // operand settles the AND / the OR.
+    let exists = "EXISTS (SELECT 1 WHERE o.k = 1)";
+    let exists_and_probe = "EXISTS (SELECT 1 WHERE 1 / o.da = 1 AND o.k = 1)";
+    let exists_or_probe = "EXISTS (SELECT 1 WHERE 1 / o.dor = 1 AND o.k = 1)";
+
+    for right in [exists, exists_and_probe] {
+        for (wrapper, expected) in [
+            ("{}", vec!["1"]),
+            ("NOT ({})", vec!["2", "4", "5", "6"]),
+            ("({}) IS NULL", vec!["3"]),
+        ] {
+            let predicate = wrapper.replace("{}", &format!("o.flag AND {right}"));
+            let sql = format!("SELECT o.id FROM flags o WHERE {predicate} ORDER BY o.id");
+            let expected = expected
+                .into_iter()
+                .map(|id| Some(id.to_string()))
+                .collect::<Vec<_>>();
+            assert!(col0(&client, &sql).await == expected, "{sql}");
+        }
+    }
+
+    for right in [exists, exists_or_probe] {
+        for (wrapper, expected) in [
+            ("{}", vec!["1", "2", "3", "4"]),
+            ("NOT ({})", vec!["5"]),
+            ("({}) IS NULL", vec!["6"]),
+        ] {
+            let predicate = wrapper.replace("{}", &format!("o.flag OR {right}"));
+            let sql = format!("SELECT o.id FROM flags o WHERE {predicate} ORDER BY o.id");
+            let expected = expected
+                .into_iter()
+                .map(|id| Some(id.to_string()))
+                .collect::<Vec<_>>();
+            assert!(col0(&client, &sql).await == expected, "{sql}");
+        }
+    }
+
+    // An operand that is reached still raises its error, so the probes above
+    // are checking that the subquery was skipped and not that the division was
+    // silently swallowed.
+    assert!(
+        err_code(
+            &client,
+            "SELECT o.id FROM flags o WHERE o.flag AND EXISTS (SELECT 1 WHERE 1 / o.dor = 1)"
+        )
+        .await
+            == "22012"
+    );
+    assert!(
+        err_code(
+            &client,
+            "SELECT o.id FROM flags o WHERE o.flag OR EXISTS (SELECT 1 WHERE 1 / o.da = 1)"
+        )
+        .await
+            == "22012"
+    );
+}
