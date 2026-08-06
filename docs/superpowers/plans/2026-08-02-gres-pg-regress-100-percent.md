@@ -6,13 +6,13 @@
 test files, not the adopted corpus's statement matches. The checked-in monotone
 floor remains `6/231`; this review is still non-monotone against that floor and
 does not ratchet it. Serial completes all 231 files with zero infrastructure
-failures, leaving 203 semantic failures across 169373 canonical changed lines
-and 4719 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
+failures, leaving 203 semantic failures across 169627 canonical changed lines
+and 4732 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
 postflight probe succeeds, and the infrastructure report is empty.
 
 The measurement immediately before this wave was `22/231` at 176686 changed
 lines / 4606 hunks, from the same runner and the same pinned corpus. The
-waves below are therefore `+6` exact files and `-6628` changed lines with
+waves below are therefore `+6` exact files and `-6374` changed lines with
 **zero newly failing files**: `int4`, `int2`, `roleattributes`, `lseg`, `line` and `circle` become exact,
 and 4 files gain a combined 22 lines.
 
@@ -526,6 +526,34 @@ and their certified artifact describe current conformance.
       `missing FROM-clause entry for table "x"`, while the same correlation in
       a `WHERE` works. This is now the **sole** blocker for psql's `\d <table>`,
       and `\d` is the biggest addressable file at 6742 lines.
+- [x] **Bare-literal coercion, `JSON_TABLE` follow-ups, `regnamespace`,
+      `pg_partition_ancestors`, `CASE` type resolution.** Certified together at
+      `+254`: gains of about 579 (`psql` -179, `float8` -118, `float4` -98,
+      `partition_info` -64, `timestamp` -48) against `horology` +732.
+      That +732 is one query, and it is worth understanding before anyone
+      "fixes" it. It used to fail with `cannot compare timestamp without time
+      zone and text`; it now runs, and every value it returns matches
+      PostgreSQL exactly. It counts as 104 changed lines because it returns 102
+      rows where PostgreSQL returns 106 -- four `Mon Feb 10 1997` rows are
+      missing -- and because psql pads a column to its widest value, so a
+      single wider row shifts every line. The correctness gap is four rows, not
+      732 lines.
+- [ ] The correlated select-list feature was reverted (`d535be9be`) for
+      returning one row per source row where an outer-level aggregate must
+      return one. Redoing it needs `PostgreSQL`'s rule first: an aggregate
+      belongs to the query level of the outermost variable it reads, so
+      `(select max((select i.b from t i where i.a = o.a)))` aggregates over the
+      OUTER query. `is_grouping_query` cannot see it, because the aggregate is
+      inside a sublink and there is no `GROUP BY`.
+- [ ] The idle hang did not recur in the run above, and is still unreproduced.
+      What was ruled out: it is not `truncate`'s on-disk state. Fourteen replays
+      from an identical 193-test snapshot ran clean in 6 s each, byte-identical.
+      The snapshot restores the data dir but starts a FRESH server, so whatever
+      accumulates in the process across 193 tests is what matters. `focus.sh`
+      grew a `sched` mode that runs a whole schedule in one process, which is
+      the shape to hunt with -- but that costs as much as a certification, so
+      the cheap next move is a watchdog that captures the in-flight statement
+      and session state when one exceeds a threshold.
 - [ ] Ratchet or repair the committed serial baseline. The gate in
       `crates/gres-conformance/pg-regress-baseline.json` was seeded once, in
       `179158c39`, and has never been ratcheted; `baseline.py update` correctly
