@@ -609,6 +609,175 @@ mod tests {
         );
     }
 
+    /// Every value of column 0, as wire text (`None` for SQL NULL).
+    async fn column0(engine: &crate::SqlEngine, sql: &str) -> Vec<Option<String>> {
+        use crabka_pgwire::engine::{Engine, QueryResult, Session};
+
+        let r = engine
+            .connect()
+            .simple_query(sql)
+            .await
+            .unwrap_or_else(|e| panic!("{sql}: {e:?}"));
+        let QueryResult::Rows { rows, .. } = &r[0] else {
+            panic!("expected rows from {sql}")
+        };
+        rows.iter()
+            .map(|row| {
+                row[0]
+                    .as_ref()
+                    .map(|c| String::from_utf8(c.text.to_vec()).expect("utf8"))
+            })
+            .collect()
+    }
+
+    /// A subquery nested under ANY expression form in a set-operation branch must
+    /// be resolved before the branch is typed.
+    ///
+    /// `resolve_set_columns` types each branch schema-only, through
+    /// `subquery::resolve_types_in_projection_with_ctes`. While that pass matched a
+    /// hand-listed few node kinds and cloned the rest, a subquery under `CASE` (or
+    /// `BETWEEN`, an `IN` list, an array literal, `COLLATE`, …) survived into
+    /// `eval::infer_type`, which refuses one — XX000 "scalar subquery must be
+    /// resolved before type inference". The expectations are `PostgreSQL` 18.4's.
+    #[tokio::test]
+    async fn subquery_under_every_expr_form_in_a_union_branch() {
+        use assert2::assert;
+        use crabka_pgwire::engine::{Engine, Session};
+
+        let engine = crate::SqlEngine::new();
+        let mut s = engine.connect();
+        for sql in [
+            "CREATE TABLE sq (v int4)",
+            "INSERT INTO sq VALUES (10),(20),(30)",
+        ] {
+            s.simple_query(sql).await.expect("setup");
+        }
+
+        // (form, second branch, that branch's expected single value)
+        let cases = [
+            (
+                "CASE result",
+                "SELECT CASE WHEN true THEN (SELECT max(v) FROM sq) ELSE 0 END",
+                "30",
+            ),
+            (
+                "CASE condition",
+                "SELECT CASE WHEN (SELECT count(*) FROM sq) = 3 THEN 7 ELSE 0 END",
+                "7",
+            ),
+            (
+                "CASE else",
+                "SELECT CASE WHEN false THEN 0 ELSE (SELECT min(v) FROM sq) END",
+                "10",
+            ),
+            (
+                "CASE operand",
+                "SELECT CASE (SELECT max(v) FROM sq) WHEN 30 THEN 1 ELSE 2 END",
+                "1",
+            ),
+            (
+                "COALESCE argument",
+                "SELECT COALESCE((SELECT max(v) FROM sq), 0)",
+                "30",
+            ),
+            (
+                "array literal under a subscript",
+                "SELECT (ARRAY[(SELECT max(v) FROM sq), 7])[1]",
+                "30",
+            ),
+            (
+                "ARRAY(subquery)",
+                "SELECT array_length(ARRAY(SELECT v FROM sq), 1)",
+                "3",
+            ),
+        ];
+        for (form, branch, expected) in cases {
+            let sql = format!("SELECT 0 UNION ALL {branch}");
+            let got = column0(&engine, &sql).await;
+            assert!(
+                got == vec![Some("0".to_owned()), Some(expected.to_owned())],
+                "{form}: {sql}"
+            );
+        }
+
+        // The boolean-valued forms, whose left branch must also be boolean.
+        let bool_cases = [
+            (
+                "BETWEEN bounds",
+                "SELECT 20 BETWEEN (SELECT min(v) FROM sq) AND (SELECT max(v) FROM sq)",
+                "t",
+            ),
+            (
+                "IN list element",
+                "SELECT 10 IN ((SELECT min(v) FROM sq), 99)",
+                "t",
+            ),
+            (
+                "IS NULL operand",
+                "SELECT (SELECT max(v) FROM sq) IS NULL",
+                "f",
+            ),
+            (
+                "= ANY over an array literal",
+                "SELECT 30 = ANY(ARRAY[(SELECT max(v) FROM sq)])",
+                "t",
+            ),
+            ("LIKE pattern", "SELECT 'abc' LIKE (SELECT 'a%'::text)", "t"),
+        ];
+        for (form, branch, expected) in bool_cases {
+            let sql = format!("SELECT false UNION ALL {branch}");
+            let got = column0(&engine, &sql).await;
+            assert!(
+                got == vec![Some("f".to_owned()), Some(expected.to_owned())],
+                "{form}: {sql}"
+            );
+        }
+
+        // COLLATE takes a text operand, so it gets its own text-typed left branch.
+        let got = column0(
+            &engine,
+            "SELECT 'z'::text UNION ALL SELECT (SELECT 'a'::text) COLLATE \"C\"",
+        )
+        .await;
+        assert!(got == vec![Some("z".to_owned()), Some("a".to_owned())]);
+    }
+
+    /// The shape psql's `\d` publication lookup has: a three-branch UNION whose
+    /// middle branch wraps a CORRELATED subquery in a `CASE`. Both halves have to
+    /// hold — the branch must type without executing, and the subquery must then
+    /// re-run per outer row rather than being folded once. Matches `PostgreSQL` 18.4.
+    #[tokio::test]
+    async fn correlated_case_subquery_in_a_union_branch() {
+        use assert2::assert;
+        use crabka_pgwire::engine::{Engine, Session};
+
+        let engine = crate::SqlEngine::new();
+        let mut s = engine.connect();
+        for sql in [
+            "CREATE TABLE att (attrelid int4, attname text)",
+            "INSERT INTO att VALUES (10,'id'),(10,'name'),(20,'k')",
+            "CREATE TABLE pr (prrelid int4, prattrs int4[])",
+            "INSERT INTO pr VALUES (10,'{1,2}'),(20,NULL)",
+        ] {
+            s.simple_query(sql).await.expect("setup");
+        }
+        let got = column0(
+            &engine,
+            "SELECT NULL::text AS c \
+             UNION ALL \
+             SELECT CASE WHEN pr.prattrs IS NOT NULL \
+                         THEN (SELECT string_agg(a.attname, ', ') FROM att a \
+                               WHERE a.attrelid = pr.prrelid) \
+                    END \
+               FROM pr \
+             UNION ALL \
+             SELECT NULL::text",
+        )
+        .await;
+        // Row 2 correlates to prrelid=10; row 3 takes the CASE's implicit NULL.
+        assert!(got == vec![None, Some("id, name".to_owned()), None, None]);
+    }
+
     /// A positional ORDER BY past the number of output columns is PG 42P10
     /// (invalid_column_reference), NOT 0A000.
     #[tokio::test]

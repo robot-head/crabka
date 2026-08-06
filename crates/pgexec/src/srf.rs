@@ -82,21 +82,39 @@ enum Srf {
     /// the jsonpath produces.
     JsonbPathQuery,
     PgInputErrorInfo,
+    /// `pg_partition_ancestors(regclass)` → `relid regclass` — the relation
+    /// itself, then every parent up to the root of its partition tree.
+    PgPartitionAncestors,
     EventDdlCommands,
     EventDroppedObjects,
 }
 
-/// Classify a function name. Unquoted identifiers reach here lowercased, but a
-/// quoted `"UNNEST"` does not, and PostgreSQL matches those case-sensitively.
-/// The folding here is deliberate leniency, and it matches the pre-existing
-/// `unnest` handling this registry replaces.
-fn classify(name: &str) -> Option<Srf> {
-    let lowered = if name.bytes().any(|b| b.is_ascii_uppercase()) {
+/// What a call *is*, as opposed to how it was written: the name with its
+/// `pg_catalog` qualifier and its letter case folded away.
+///
+/// `PostgreSQL` resolves `pg_catalog.generate_series(1, 3)` to the same function
+/// the bare spelling names, and calls the output column — and the FROM item's
+/// qualifier — `generate_series` either way; the schema survives only in the
+/// `42883` a name that resolves to nothing raises. psql's `\d` writes every
+/// call this way, so the qualified spelling is the common one, not the exotic
+/// one.
+///
+/// Unquoted identifiers reach here lowercased, but a quoted `"UNNEST"` does not,
+/// and PostgreSQL matches those case-sensitively — the folding here is
+/// deliberate leniency, matching the pre-existing `unnest` handling this
+/// registry replaces.
+fn bare_name(name: &str) -> Cow<'_, str> {
+    let name = name.strip_prefix("pg_catalog.").unwrap_or(name);
+    if name.bytes().any(|b| b.is_ascii_uppercase()) {
         Cow::Owned(name.to_ascii_lowercase())
     } else {
         Cow::Borrowed(name)
-    };
-    Some(match lowered.as_ref() {
+    }
+}
+
+/// Classify a function name.
+fn classify(name: &str) -> Option<Srf> {
+    Some(match bare_name(name).as_ref() {
         "unnest" => Srf::Unnest,
         "generate_series" => Srf::GenerateSeries,
         "generate_subscripts" => Srf::GenerateSubscripts,
@@ -111,6 +129,7 @@ fn classify(name: &str) -> Option<Srf> {
         "jsonb_array_elements_text" | "json_array_elements_text" => Srf::JsonbArrayElementsText,
         "jsonb_path_query" | "jsonb_path_query_tz" => Srf::JsonbPathQuery,
         "pg_input_error_info" => Srf::PgInputErrorInfo,
+        "pg_partition_ancestors" => Srf::PgPartitionAncestors,
         "pg_event_trigger_ddl_commands" => Srf::EventDdlCommands,
         "pg_event_trigger_dropped_objects" => Srf::EventDroppedObjects,
         _ => return None,
@@ -127,6 +146,10 @@ pub(crate) fn is_srf(name: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SrfPlan {
     kind: Srf,
+    /// The call's [`bare_name`] — which alias was written, folded to lowercase
+    /// and stripped of a `pg_catalog` qualifier. Output names and run-time
+    /// diagnostics come from this; a *plan-time* `42883` quotes the call as
+    /// written instead, because there is no function to have a real name.
     name: String,
     columns: Vec<ColumnBinding>,
 }
@@ -139,6 +162,10 @@ pub(crate) fn plan(name: &str, args: &[Expr], scope: &Scope) -> Result<SrfPlan, 
     // the argument types PostgreSQL's 42883 names.
     let given = crate::eval::static_arg_types(args, scope)?;
     let kind = classify(name).ok_or_else(|| undefined_function(name, &given))?;
+    // Diagnostics quote the call as written, so `name` stays whole for
+    // `undefined_function` above; everything the *result* is named after uses
+    // the folded spelling.
+    let bare = bare_name(name);
     let columns = match kind {
         Srf::Unnest => unnest_columns(name, &given)?,
         Srf::GenerateSeries => vec![column("generate_series", series_types(name, &given)?)],
@@ -173,7 +200,7 @@ pub(crate) fn plan(name: &str, args: &[Expr], scope: &Scope) -> Result<SrfPlan, 
             require_arity(name, &given, (1, 1))?;
             // A single-column SRF names its column after the function, so the
             // `json_object_keys` alias must not report `jsonb_object_keys`.
-            vec![column(&name.to_ascii_lowercase(), ColumnType::Text)]
+            vec![column(&bare, ColumnType::Text)]
         }
         Srf::JsonbArrayElements => {
             require_arity(name, &given, (1, 1))?;
@@ -185,7 +212,7 @@ pub(crate) fn plan(name: &str, args: &[Expr], scope: &Scope) -> Result<SrfPlan, 
         }
         Srf::JsonbPathQuery => {
             require_arity(name, &given, (2, 4))?;
-            vec![column(&name.to_ascii_lowercase(), ColumnType::Jsonb)]
+            vec![column(&bare, ColumnType::Jsonb)]
         }
         Srf::PgInputErrorInfo => {
             require_arity(name, &given, (2, 2))?;
@@ -195,6 +222,10 @@ pub(crate) fn plan(name: &str, args: &[Expr], scope: &Scope) -> Result<SrfPlan, 
                 column("hint", ColumnType::Text),
                 column("sql_error_code", ColumnType::Text),
             ]
+        }
+        Srf::PgPartitionAncestors => {
+            require_arity(name, &given, (1, 1))?;
+            vec![column("relid", ColumnType::Regclass)]
         }
         Srf::EventDdlCommands => {
             require_arity(name, &given, (0, 0))?;
@@ -230,7 +261,7 @@ pub(crate) fn plan(name: &str, args: &[Expr], scope: &Scope) -> Result<SrfPlan, 
     };
     Ok(SrfPlan {
         kind,
-        name: name.to_string(),
+        name: bare.into_owned(),
         columns,
     })
 }
@@ -273,6 +304,7 @@ pub(crate) fn rows(
         | Srf::JsonbArrayElementsText => crate::json_fn::jsonb_srf_rows(json_srf(plan.kind), vals)?,
         Srf::JsonbPathQuery => crate::json_fn::jsonb_path_query_rows(&plan.name, vals)?,
         Srf::PgInputErrorInfo => input_error_info_rows(vals, ctx)?,
+        Srf::PgPartitionAncestors => partition_ancestor_rows(&vals[0], ctx)?,
         Srf::EventDdlCommands => event_ddl_command_rows(ctx)?,
         Srf::EventDroppedObjects => event_dropped_object_rows(ctx)?,
     };
@@ -313,6 +345,11 @@ fn param_types(plan: &SrfPlan) -> Vec<Option<ColumnType>> {
             Some(ColumnType::Bool),
         ],
         Srf::PgInputErrorInfo => vec![text, text],
+        // `regclass`, but resolving a *name* to a relation needs the catalog and
+        // the search path, which the pure cast this drives has neither of. The
+        // literal is left `unknown` so the row builder can run the catalog-aware
+        // cast itself.
+        Srf::PgPartitionAncestors => vec![None],
         Srf::EventDdlCommands | Srf::EventDroppedObjects => Vec::new(),
     }
 }
@@ -340,6 +377,64 @@ fn input_error_info_rows(vals: &[Datum], ctx: &EvalCtx) -> Result<Vec<Vec<Datum>
         Datum::Null,
         Datum::Text(error.code),
     ]])
+}
+
+/// `pg_partition_ancestors(regclass)`: the relation itself, then its parent, its
+/// grandparent, and so on to the root of the partition tree.
+///
+/// The gate at the top is `PostgreSQL`'s `check_rel_can_be_partition`: a
+/// relation that is neither a partition nor a partitioned parent belongs to no
+/// partition tree, so it produces **no** rows rather than naming itself. An
+/// unresolvable oid produces none either, while a *name* no relation has is the
+/// `42P01` the `regclass` cast itself raises — the same place `PostgreSQL`
+/// raises it.
+fn partition_ancestor_rows(value: &Datum, ctx: &EvalCtx) -> Result<Vec<Vec<Datum>>, ExecError> {
+    // No catalog — a planning context or a unit test — means no partition tree
+    // to walk.
+    let Some(catalog) = ctx.catalog() else {
+        return Ok(Vec::new());
+    };
+    let Some(Datum::Regclass(start)) =
+        crate::catalog_fn::regclass_cast(catalog, ctx.resolution(), value)?
+    else {
+        return Ok(Vec::new());
+    };
+    // One catalog scan serves both directions: the oid the argument names has to
+    // become a relation name to walk from, and every parent the walk reaches has
+    // to become an oid to report.
+    let mut oids = std::collections::HashMap::new();
+    for table in crabka_pgcatalog::list_tables(catalog)? {
+        oids.insert(
+            table.name,
+            crate::catalog_rel::table_relation_oid(table.id)?,
+        );
+    }
+    let Some(mut current) = oids
+        .iter()
+        .find(|(_, oid)| **oid == start.oid)
+        .map(|(name, _)| name.clone())
+    else {
+        return Ok(Vec::new());
+    };
+    if crate::partition::parent_of(catalog, &current)?.is_none()
+        && !crate::partition::is_partitioned(catalog, &current)?
+    {
+        return Ok(Vec::new());
+    }
+    let mut produced = vec![vec![Datum::Regclass(start)]];
+    // A partition tree is acyclic and every relation in it is a table, so the
+    // table count bounds the walk; stopping there rather than looping keeps
+    // corrupt partition metadata from hanging the query.
+    while produced.len() <= oids.len()
+        && let Some((parent, _)) = crate::partition::parent_of(catalog, &current)?
+        && let Some(&oid) = oids.get(&parent)
+    {
+        produced.push(vec![Datum::Regclass(crate::exec::regclass_by_oid(
+            catalog, oid,
+        )?)]);
+        current = parent;
+    }
+    Ok(produced)
 }
 
 fn type_error(name: &str, value: &Datum) -> ExecError {
@@ -533,7 +628,7 @@ fn qualifier_for(plans: &[SrfPlan], alias: Option<&str>) -> String {
         || {
             plans
                 .first()
-                .map_or_else(String::new, |plan| plan.name.to_ascii_lowercase())
+                .map_or_else(String::new, |plan| plan.name.clone())
         },
         str::to_string,
     )
@@ -2358,5 +2453,181 @@ mod tests {
         )
         .await;
         assert!(shape(&named).0 == vec!["x", "y"]);
+    }
+
+    /// Build `proot ⊃ pmid ⊃ pleaf`, an ordinary table beside it, and an index
+    /// on each — the tree every `pg_partition_ancestors` test below walks.
+    async fn partition_tree(s: &mut crate::SqlSession) {
+        query(
+            s,
+            "CREATE TABLE proot (a int, b int) PARTITION BY RANGE (a)",
+        )
+        .await;
+        query(
+            s,
+            "CREATE TABLE pmid PARTITION OF proot FOR VALUES FROM (0) TO (100) \
+             PARTITION BY RANGE (b)",
+        )
+        .await;
+        query(
+            s,
+            "CREATE TABLE pleaf PARTITION OF pmid FOR VALUES FROM (0) TO (50)",
+        )
+        .await;
+        query(s, "CREATE TABLE plain_t (a int)").await;
+        query(s, "CREATE INDEX plain_idx ON plain_t (a)").await;
+    }
+
+    #[tokio::test]
+    async fn pg_partition_ancestors_names_the_relation_then_every_parent_to_the_root() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        partition_tree(&mut s).await;
+
+        // The relation comes *first*, then each parent in turn — psql orders by
+        // the ordinality of this walk to find a trigger's topmost definer, so
+        // the direction is load-bearing, not incidental.
+        for (argument, expected) in [
+            ("'pleaf'", vec!["pleaf", "pmid", "proot"]),
+            ("'pmid'", vec!["pmid", "proot"]),
+            // A partitioned parent is in a partition tree, so it names itself.
+            ("'proot'", vec!["proot"]),
+            // A relation in no partition tree at all produces NO rows — not
+            // even itself. This is PostgreSQL's `check_rel_can_be_partition`.
+            ("'plain_t'", vec![]),
+            ("'plain_idx'", vec![]),
+            // STRICT: a NULL argument yields nothing.
+            ("NULL::regclass", vec![]),
+            // An oid no relation carries resolves to nothing, which is not an
+            // error — unlike a *name* no relation carries.
+            ("999999::regclass", vec![]),
+        ] {
+            let sql = format!("SELECT relid FROM pg_partition_ancestors({argument})");
+            let r = query(&mut s, &sql).await;
+            assert!(shape(&r).0 == vec!["relid"], "{sql}");
+            assert!(shape(&r).1 == vec![crabka_pgtypes::oids::REGCLASS], "{sql}");
+            let names: Vec<String> = column_of(&r).into_iter().flatten().collect();
+            assert!(names == expected, "{sql} gave {names:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn pg_partition_ancestors_reaches_the_same_walk_from_every_call_position() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        partition_tree(&mut s).await;
+        let expected = vec![
+            Some("pleaf".to_string()),
+            Some("pmid".to_string()),
+            Some("proot".to_string()),
+        ];
+
+        // The select list names the single column after the function, the FROM
+        // item after the column, and `pg_catalog.` qualifies neither.
+        for (sql, column_name) in [
+            (
+                "SELECT pg_partition_ancestors('pleaf')",
+                "pg_partition_ancestors",
+            ),
+            (
+                "SELECT pg_catalog.pg_partition_ancestors('pleaf')",
+                "pg_partition_ancestors",
+            ),
+            ("SELECT relid FROM pg_partition_ancestors('pleaf')", "relid"),
+            (
+                "SELECT relid FROM pg_catalog.pg_partition_ancestors('pleaf')",
+                "relid",
+            ),
+            (
+                "SELECT * FROM pg_partition_ancestors('pleaf'::regclass)",
+                "relid",
+            ),
+        ] {
+            let r = query(&mut s, sql).await;
+            assert!(shape(&r).0 == vec![column_name], "{sql}");
+            assert!(column_of(&r) == expected, "{sql}");
+        }
+
+        // psql's `\d` walks a *correlated* call with ordinality and orders by
+        // the depth it produces, so the ancestors have to arrive in walk order
+        // through the lateral path too.
+        let r = query(
+            &mut s,
+            "SELECT a.relid, a.depth \
+               FROM pg_catalog.pg_class t, \
+                    pg_catalog.pg_partition_ancestors(t.oid) WITH ORDINALITY AS a(relid, depth) \
+              WHERE t.relname = 'pleaf' ORDER BY a.depth",
+        )
+        .await;
+        assert!(shape(&r).0 == vec!["relid", "depth"]);
+        assert!(
+            shape(&r).2
+                == vec![
+                    vec![Some("pleaf".into()), Some("1".into())],
+                    vec![Some("pmid".into()), Some("2".into())],
+                    vec![Some("proot".into()), Some("3".into())],
+                ]
+        );
+    }
+
+    #[tokio::test]
+    async fn pg_partition_ancestors_rejects_a_wrong_arity_and_an_unresolvable_name() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        partition_tree(&mut s).await;
+
+        for (sql, code) in [
+            ("SELECT * FROM pg_partition_ancestors()", "42883"),
+            (
+                "SELECT * FROM pg_partition_ancestors('pleaf', 'pmid')",
+                "42883",
+            ),
+            // A name is resolved by the `regclass` cast, which raises 42P01 —
+            // where PostgreSQL raises it too.
+            (
+                "SELECT * FROM pg_partition_ancestors('no_such_rel')",
+                "42P01",
+            ),
+        ] {
+            let error = s.simple_query(sql).await.expect_err("refused");
+            assert!(error.code == code, "{sql} gave {error:?}");
+        }
+    }
+
+    /// A `pg_catalog.` qualifier resolves to the same function everywhere and
+    /// never reaches the output names, but it *does* survive into the `42883`
+    /// for a name that resolves to nothing — PostgreSQL quotes the call as it
+    /// was written there, because there is no function to have a real name.
+    #[tokio::test]
+    async fn a_pg_catalog_qualifier_resolves_an_srf_without_naming_its_columns() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+
+        let r = query(&mut s, "SELECT * FROM pg_catalog.generate_series(1, 2)").await;
+        assert!(shape(&r).0 == vec!["generate_series"]);
+        assert!(column_of(&r) == vec![Some("1".into()), Some("2".into())]);
+
+        // The item is qualified by the bare name, so the qualified reference
+        // resolves.
+        let r = query(
+            &mut s,
+            "SELECT generate_series.* FROM pg_catalog.generate_series(1, 2)",
+        )
+        .await;
+        assert!(column_of(&r) == vec![Some("1".into()), Some("2".into())]);
+
+        let r = query(
+            &mut s,
+            "SELECT * FROM pg_catalog.json_object_keys('{\"a\": 1}'::jsonb)",
+        )
+        .await;
+        assert!(shape(&r).0 == vec!["json_object_keys"]);
+
+        let error = s
+            .simple_query("SELECT * FROM pg_catalog.nosuch_srf(1)")
+            .await
+            .expect_err("refused");
+        assert!(error.code == "42883", "{error:?}");
+        assert!(error.message.contains("pg_catalog.nosuch_srf"), "{error:?}");
     }
 }

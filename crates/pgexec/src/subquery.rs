@@ -641,72 +641,97 @@ pub(crate) fn resolve_types_in_values_with_ctes(
     })
 }
 
-/// Recursively replace scalar subqueries with `Const { Null, <type> }`. This is
-/// type-only.
+/// Recursively replace scalar subqueries with `Const { Null, <type> }` (type-only).
+///
+/// The walk is [`crate::grouping::rewrite`], the crate's one exhaustive [`Expr`]
+/// fold, rather than a match written out again here. Only the two nodes this pass
+/// actually decides — a scalar subquery, and a routine call whose body it inlines —
+/// are handled in the fold; every other node reaches its children through the
+/// shared walk. That is what fixes the class of bug this replaced: a hand-written
+/// match that ended in a catch-all left a scalar subquery nested under any
+/// unlisted node (`CASE`, `BETWEEN`, `COALESCE`'s arguments, an array literal, …)
+/// unresolved, and `eval::infer_type` refuses a `ScalarSubquery` it is handed.
+///
+/// EXISTS / IN / quantified subqueries stay as they are: they infer as `bool`
+/// without substitution, and the shared walk already leaves their inner queries
+/// (separate scopes) alone while still descending into their outer operands.
 fn resolve_types_in_expr(
     catalog_kv: &dyn crabka_pgkv::Kv,
     resolution: &crate::relname::ResolutionScope,
     e: &Expr,
     ctes: &crate::cte::CteContext,
 ) -> Result<Expr, ExecError> {
-    Ok(match e {
-        Expr::ScalarSubquery(s) => Expr::Const {
-            value: Datum::Null,
-            ty: scalar_subquery_type(catalog_kv, resolution, s, ctes)?,
-        },
-        Expr::Unary { op, expr } => Expr::Unary {
-            op: *op,
-            expr: Box::new(resolve_types_in_expr(catalog_kv, resolution, expr, ctes)?),
-        },
-        Expr::Binary { op, left, right } => Expr::Binary {
-            op: *op,
-            left: Box::new(resolve_types_in_expr(catalog_kv, resolution, left, ctes)?),
-            right: Box::new(resolve_types_in_expr(catalog_kv, resolution, right, ctes)?),
-        },
-        Expr::Cast { expr, ty } => Expr::Cast {
-            expr: Box::new(resolve_types_in_expr(catalog_kv, resolution, expr, ctes)?),
-            ty: *ty,
-        },
-        // P2: the describe path inlines a user-defined SQL function's body the
-        // same way execution does, so a `Describe` reports the type the rows
-        // will carry.
-        Expr::Func(fc) => {
-            let call = FuncCall {
-                name: fc.name.clone(),
-                distinct: fc.distinct,
-                args: match &fc.args {
-                    FuncArgs::Star => FuncArgs::Star,
-                    FuncArgs::Exprs(args) => FuncArgs::Exprs(
-                        args.iter()
-                            .map(|a| resolve_types_in_expr(catalog_kv, resolution, a, ctes))
-                            .collect::<Result<_, _>>()?,
-                    ),
-                },
-                filter: match &fc.filter {
-                    Some(predicate) => Some(Box::new(resolve_types_in_expr(
-                        catalog_kv, resolution, predicate, ctes,
-                    )?)),
-                    None => None,
-                },
-            };
-            if let Some(ty) = crate::routine::plpgsql_declared_call_type(catalog_kv, &call)? {
-                Expr::Const {
+    crate::grouping::rewrite(
+        e,
+        &mut |node| match node {
+            Expr::ScalarSubquery(s) => Ok(Some(Expr::Const {
+                value: Datum::Null,
+                ty: scalar_subquery_type(catalog_kv, resolution, s, ctes)?,
+            })),
+            // `ARRAY(subquery)` types as an array OF the subquery's one column,
+            // matching what execution folds it to in `resolve_expr_skipping`.
+            Expr::ArraySubquery(s) => {
+                let ty = scalar_subquery_type(catalog_kv, resolution, s, ctes)?;
+                let elem = ElemType::from_column_type(ty).ok_or_else(|| {
+                    ExecError::Unsupported(format!("arrays of {} are not supported", ty.name()))
+                })?;
+                Ok(Some(Expr::Const {
                     value: Datum::Null,
-                    ty,
-                }
-            } else {
-                match crate::routine::inline_scalar(catalog_kv, &call)? {
-                    Some(inlined) => {
-                        let _guard = crate::routine::enter_inline()?;
-                        resolve_types_in_expr(catalog_kv, resolution, &inlined, ctes)?
-                    }
-                    None => Expr::Func(call),
-                }
+                    ty: ColumnType::Array(elem),
+                }))
             }
+            Expr::Func(call) => Ok(Some(resolve_types_in_call(
+                catalog_kv, resolution, call, ctes,
+            )?)),
+            _ => Ok(None),
+        },
+        // An aggregate's arguments are ordinary expressions for typing purposes, so
+        // a subquery inside one resolves like any other.
+        true,
+    )
+}
+
+/// The type-only resolution of one function call: arguments and FILTER first, then
+/// the routine catalog.
+///
+/// P2: the describe path inlines a user-defined SQL function's body the same way
+/// execution does, so a `Describe` reports the type the rows will carry.
+fn resolve_types_in_call(
+    catalog_kv: &dyn crabka_pgkv::Kv,
+    resolution: &crate::relname::ResolutionScope,
+    fc: &FuncCall,
+    ctes: &crate::cte::CteContext,
+) -> Result<Expr, ExecError> {
+    let call = FuncCall {
+        name: fc.name.clone(),
+        distinct: fc.distinct,
+        args: match &fc.args {
+            FuncArgs::Star => FuncArgs::Star,
+            FuncArgs::Exprs(args) => FuncArgs::Exprs(
+                args.iter()
+                    .map(|a| resolve_types_in_expr(catalog_kv, resolution, a, ctes))
+                    .collect::<Result<_, _>>()?,
+            ),
+        },
+        filter: match &fc.filter {
+            Some(predicate) => Some(Box::new(resolve_types_in_expr(
+                catalog_kv, resolution, predicate, ctes,
+            )?)),
+            None => None,
+        },
+    };
+    if let Some(ty) = crate::routine::plpgsql_declared_call_type(catalog_kv, &call)? {
+        return Ok(Expr::Const {
+            value: Datum::Null,
+            ty,
+        });
+    }
+    Ok(match crate::routine::inline_scalar(catalog_kv, &call)? {
+        Some(inlined) => {
+            let _guard = crate::routine::enter_inline()?;
+            resolve_types_in_expr(catalog_kv, resolution, &inlined, ctes)?
         }
-        // Everything else (incl. EXISTS / IN / quantified, which infer as bool) is
-        // typed directly by `infer_type` without substitution.
-        other => other.clone(),
+        None => Expr::Func(call),
     })
 }
 
