@@ -2540,29 +2540,10 @@ fn build_insert_row(
         }
         let value = match expr {
             Expr::Default => default_value(&table.columns[*slot], ctx)?,
-            Expr::StringLiteral(value) => {
-                let target = table.columns[*slot].ty;
-                if target == crabka_pgtypes::ColumnType::Bytea {
-                    Datum::Bytea(crate::session::decode_bytea_text(value)?)
-                } else if let Some(base) = jsonpath_assignment_base(target) {
-                    let value =
-                        crate::eval::cast_value(&Datum::Text(value.clone()), base, &ctx.time_zone)?;
-                    coerce(value, target, ctx)?
-                } else {
-                    // An unadorned literal resolves to the column's type, and that
-                    // resolution is an assignment: `INSERT INTO t(v) VALUES ('abcd')`
-                    // into a `varchar(3)` is 22001, where `'abcd'::varchar(3)` would
-                    // have truncated.
-                    crabka_pgtypes::cast::cast_assign(
-                        &Datum::Text(value.clone()),
-                        target,
-                        &ctx.time_zone,
-                    )?
-                }
-            }
             _ => {
-                let value = crate::eval::eval(expr, &Scope::empty(), &[], ctx)?;
-                coerce(value, table.columns[*slot].ty, ctx)?
+                let target = table.columns[*slot].ty;
+                let value = eval_assignment_value(expr, target, &Scope::empty(), &[], ctx)?;
+                coerce(value, target, ctx)?
             }
         };
         row[*slot] = value;
@@ -8992,9 +8973,8 @@ fn find_visible_one_keyed(
     Ok(visible)
 }
 
-/// Evaluate an assignment expression with the target context PostgreSQL gives
-/// an untyped string literal. Typed `text` expressions still flow through
-/// [`coerce`] and are rejected for jsonpath/jsonpath[] assignment.
+/// The jsonpath type an assignment target stores, if it stores one — the two
+/// types whose input function is not reachable as a cast arm.
 fn jsonpath_assignment_base(target: ColumnType) -> Option<ColumnType> {
     let base = target.storage_type();
     matches!(
@@ -9004,6 +8984,48 @@ fn jsonpath_assignment_base(target: ColumnType) -> Option<ColumnType> {
     .then_some(base)
 }
 
+/// Resolve a bare string literal — a value PostgreSQL still types `unknown` —
+/// against the type it is being assigned to.
+///
+/// `unknown` has no storage and no operators of its own: an unadorned `'…'`
+/// takes the assignment target's type, parsed by that type's input function.
+/// That is what makes `SET id = '[11,12)'` an `int4range` and `FOR VALUES IN
+/// ('[1,2)')` an `int4range` bound. It applies to the *literal* only — a
+/// genuine `text` expression keeps its type, so `SET int_col = text_col` is
+/// still 42804.
+///
+/// The resolution is an assignment, not an explicit cast: `'abcd'` into a
+/// `varchar(3)` is 22001, where `'abcd'::varchar(3)` would have truncated.
+fn resolve_unknown_literal(
+    text: &str,
+    target: ColumnType,
+    ctx: &crate::clock::EvalCtx,
+) -> Result<Datum, ExecError> {
+    // A domain literal is parsed by the *base* type's input function; the
+    // domain's own constraints are [`coerce`]'s job, on the parsed value.
+    let base = match target {
+        ColumnType::Domain(domain) => *domain.base,
+        other => other,
+    };
+    let value = Datum::Text(text.to_owned());
+    if let Some(jsonpath) = jsonpath_assignment_base(base) {
+        return crate::eval::cast_value(&value, jsonpath, &ctx.time_zone);
+    }
+    match base {
+        // `bytea_in` is the escape/hex decoder rather than a cast arm.
+        ColumnType::Bytea => Ok(Datum::Bytea(crate::session::decode_bytea_text(text)?)),
+        _ => Ok(crabka_pgtypes::cast::cast_assign(
+            &value,
+            base,
+            &ctx.time_zone,
+        )?),
+    }
+}
+
+/// Evaluate an assignment's right-hand side, giving an unadorned string literal
+/// the `unknown` treatment of [`resolve_unknown_literal`]. Every other
+/// expression evaluates on its own and then faces [`coerce`]'s assignment
+/// rules, which callers apply to this function's result.
 fn eval_assignment_value(
     expr: &Expr,
     target: ColumnType,
@@ -9011,10 +9033,10 @@ fn eval_assignment_value(
     values: &[Datum],
     ctx: &crate::clock::EvalCtx,
 ) -> Result<Datum, ExecError> {
-    if let (Expr::StringLiteral(text), Some(base)) = (expr, jsonpath_assignment_base(target)) {
-        return crate::eval::cast_value(&Datum::Text(text.clone()), base, &ctx.time_zone);
+    match expr {
+        Expr::StringLiteral(text) => resolve_unknown_literal(text, target, ctx),
+        _ => crate::eval::eval(expr, scope, values, ctx),
     }
-    crate::eval::eval(expr, scope, values, ctx)
 }
 
 /// Coerce an evaluated value into a target column type (assignment context). `ctx`
@@ -18582,10 +18604,14 @@ fn resolve_partition_bound(
         })?;
         crate::partition::key_column_type(columns, key)
     };
+    // A bound value is an assignment to the partition-key column it bounds, so
+    // an unadorned `'…'` is resolved by that column's type — `FOR VALUES IN
+    // ('[1,2)')` on an `int4range` key is a range bound, not a `text` one.
     let value = |expr: &Expr, index: usize| -> Result<Datum, ExecError> {
         check_partition_bound_expr(expr)?;
-        let evaluated = crate::eval::eval(expr, &Scope::empty(), &[], ctx)?;
-        coerce(evaluated, key_type(index)?, ctx)
+        let ty = key_type(index)?;
+        let evaluated = eval_assignment_value(expr, ty, &Scope::empty(), &[], ctx)?;
+        coerce(evaluated, ty, ctx)
     };
 
     match bound {
