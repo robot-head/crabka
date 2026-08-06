@@ -6,13 +6,13 @@
 test files, not the adopted corpus's statement matches. The checked-in monotone
 floor remains `6/231`; this review is still non-monotone against that floor and
 does not ratchet it. Serial completes all 231 files with zero infrastructure
-failures, leaving 203 semantic failures across 169864 canonical changed lines
-and 4729 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
+failures, leaving 203 semantic failures across 169373 canonical changed lines
+and 4719 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
 postflight probe succeeds, and the infrastructure report is empty.
 
 The measurement immediately before this wave was `22/231` at 176686 changed
 lines / 4606 hunks, from the same runner and the same pinned corpus. The
-waves below are therefore `+6` exact files and `-6137` changed lines with
+waves below are therefore `+6` exact files and `-6628` changed lines with
 **zero newly failing files**: `int4`, `int2`, `roleattributes`, `lseg`, `line` and `circle` become exact,
 and 4 files gain a combined 22 lines.
 
@@ -507,6 +507,25 @@ and their certified artifact describe current conformance.
       wrong thing and were only found to be wrong by measuring. A standalone
       reproducer -- `tenk1` loaded from the upstream data file, one statement
       timed -- settled in minutes what 40-minute certifications could not.
+- [x] **`JSON_TABLE`.** Certified `-491`: `sqljson_jsontable` 807 -> 316, nothing
+      else touched. `NESTED` was implemented too and proved the tractable third
+      rather than the hard one -- PG18 dropped the explicit `PLAN` clause, so
+      there is one join rule (siblings union, the union outer-joins to its
+      parent) and it falls out of a single recursive scan. What is left is the
+      `pg_get_viewdef` block layout and the `Table Function Scan` node name,
+      both needing a PG-exact jsonpath canonicalizer.
+- [ ] **A quarter of what remains is unreachable by design.** Measured over the
+      current run: 42346 of 169864 lines sit in files gated on declared
+      Non-goals (`publication`, `subscription`, `rules`), deliberate `Mapped`
+      divergences (`CLUSTER`, `VACUUM`, `TABLESAMPLE` are accepted hints),
+      partitioning deferred to wave D7, or the `EXPLAIN` renderer. Any future
+      target list should subtract these first -- `ALTER PUBLICATION` is the
+      single largest parser cluster at 165 and is worth nothing.
+- [ ] Correlated scalar subqueries in a SELECT list cannot see the outer query:
+      `SELECT x.a, (SELECT 1 FROM u2 y WHERE y.b = x.a) FROM u1 x` is
+      `missing FROM-clause entry for table "x"`, while the same correlation in
+      a `WHERE` works. This is now the **sole** blocker for psql's `\d <table>`,
+      and `\d` is the biggest addressable file at 6742 lines.
 - [ ] Ratchet or repair the committed serial baseline. The gate in
       `crates/gres-conformance/pg-regress-baseline.json` was seeded once, in
       `179158c39`, and has never been ratcheted; `baseline.py update` correctly
