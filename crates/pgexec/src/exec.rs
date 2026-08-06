@@ -10354,9 +10354,16 @@ struct LateralBinder<'a> {
     catalog_kv: &'a dyn Kv,
     resolution: &'a crate::relname::ResolutionScope,
     ctes: &'a crate::cte::CteContext,
-    /// The column names each query block's FROM provides, in walk order.
-    /// `None` for a block whose FROM could not be described.
-    described: Vec<Option<Vec<String>>>,
+    /// The column names each query block's FROM provides, in walk order, per
+    /// walked expression. `None` for a block whose FROM could not be described.
+    ///
+    /// The index is only meaningful within one expression: a statement that
+    /// defers several correlated expressions walks a different set of query
+    /// blocks for each, and one shared cache would hand the second expression
+    /// the first one's FROM.
+    described: Vec<Vec<Option<Vec<String>>>>,
+    /// Which walked expression [`described`](Self::described) is caching for.
+    walk: usize,
     /// Uncorrelated subqueries nested in a deferred lazy expression. Each is
     /// initialized on first use and then reused for the rest of the statement.
     initplans: Vec<LazyInitPlan>,
@@ -10521,9 +10528,15 @@ impl<'a> LateralBinder<'a> {
             resolution,
             ctes,
             described: Vec::new(),
+            walk: 0,
             initplans: Vec::new(),
             scalar_lookups: Vec::new(),
         }
+    }
+
+    /// Bind the next expression against its own block-description cache.
+    fn walking(&mut self, walk: usize) {
+        self.walk = walk;
     }
 
     fn with_initplans(mut self, initplans: Vec<LazyInitPlan>) -> Self {
@@ -10739,6 +10752,62 @@ impl Default for Shadow {
     }
 }
 
+impl Shadow {
+    /// Do the FROM clauses this shadow covers supply `name`?
+    ///
+    /// `None` — reachable only for a bare name — is "some covered FROM could not
+    /// be described", so no level can be ruled in or out.
+    fn supplies(&self, qualifier: Option<&str>, name: &str) -> Option<bool> {
+        match qualifier {
+            Some(qualifier) => Some(self.qualifiers.iter().any(|q| q == qualifier)),
+            None => Some(self.columns.as_ref()?.iter().any(|column| column == name)),
+        }
+    }
+
+    /// Widen this shadow by the names `from` introduces.
+    fn extend_by(
+        &mut self,
+        catalog_kv: &dyn Kv,
+        resolution: &crate::relname::ResolutionScope,
+        ctes: &crate::cte::CteContext,
+        from: &[crabka_pgparser::ast::TableExpr],
+    ) {
+        collect_qualifiers(from, &mut self.qualifiers);
+        match from_column_names(catalog_kv, resolution, ctes, from) {
+            Some(names) => {
+                if let Some(columns) = &mut self.columns {
+                    columns.extend(names);
+                }
+            }
+            None => self.columns = None,
+        }
+    }
+}
+
+/// The unqualified column names `from` supplies, or `None` when its schema
+/// cannot be described here — a FROM naming a relation that does not exist is
+/// for the ordinary read path to report, not for a name-shadowing pass.
+fn from_column_names(
+    catalog_kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
+    ctes: &crate::cte::CteContext,
+    from: &[crabka_pgparser::ast::TableExpr],
+) -> Option<Vec<String>> {
+    if from.is_empty() {
+        return Some(Vec::new());
+    }
+    build_from_schema_with_ctes(catalog_kv, resolution, from, ctes)
+        .ok()
+        .map(|relation| {
+            relation
+                .scope
+                .columns
+                .into_iter()
+                .map(|column| column.name)
+                .collect()
+        })
+}
+
 impl BindPass<'_, '_> {
     /// The shadow in force inside a query block whose FROM list is `from`.
     fn extended(&mut self, shadow: &Shadow, from: &[crabka_pgparser::ast::TableExpr]) -> Shadow {
@@ -10759,29 +10828,20 @@ impl BindPass<'_, '_> {
     fn describe(&mut self, from: &[crabka_pgparser::ast::TableExpr]) -> Option<Vec<String>> {
         let index = self.visited;
         self.visited += 1;
-        if index >= self.binder.described.len() {
-            let names = if from.is_empty() {
-                Some(Vec::new())
-            } else {
-                build_from_schema_with_ctes(
-                    self.binder.catalog_kv,
-                    self.binder.resolution,
-                    from,
-                    &self.ctes,
-                )
-                .ok()
-                .map(|relation| {
-                    relation
-                        .scope
-                        .columns
-                        .into_iter()
-                        .map(|column| column.name)
-                        .collect()
-                })
-            };
-            self.binder.described.push(names);
+        let walk = self.binder.walk;
+        if walk >= self.binder.described.len() {
+            self.binder.described.resize_with(walk + 1, Vec::new);
         }
-        self.binder.described[index].clone()
+        if index >= self.binder.described[walk].len() {
+            let names = from_column_names(
+                self.binder.catalog_kv,
+                self.binder.resolution,
+                &self.ctes,
+                from,
+            );
+            self.binder.described[walk].push(names);
+        }
+        self.binder.described[walk][index].clone()
     }
 
     fn table_expr(&mut self, te: &mut crabka_pgparser::ast::TableExpr, shadow: &Shadow) {
@@ -10971,6 +11031,54 @@ fn collect_qualifiers(from: &[crabka_pgparser::ast::TableExpr], out: &mut Vec<St
             }
         }
     }
+}
+
+/// [`select_exprs_mut`]'s shared-reference twin, for the walks that only read.
+fn select_exprs(select: &SelectStmt) -> Vec<&Expr> {
+    let mut out: Vec<&Expr> = Vec::new();
+    for item in &select.projection {
+        if let SelectItem::Expr { expr, .. } = item {
+            out.push(expr);
+        }
+    }
+    out.extend(&select.filter);
+    out.extend(&select.group_by);
+    out.extend(&select.having);
+    out.extend(select.order_by.iter().map(|item| &item.expr));
+    if let crabka_pgparser::ast::DistinctClause::On(on) = &select.distinct {
+        out.extend(on);
+    }
+    for call in &select.window_calls {
+        if let FuncArgs::Exprs(args) = &call.args {
+            out.extend(args);
+        }
+        out.extend(&call.filter);
+        if let crabka_pgparser::ast::WindowRef::Spec(spec) = &call.over {
+            out.extend(window_spec_exprs(spec));
+        }
+    }
+    for window in &select.windows {
+        out.extend(window_spec_exprs(&window.spec));
+    }
+    out
+}
+
+fn window_spec_exprs(spec: &crabka_pgparser::ast::WindowSpec) -> Vec<&Expr> {
+    let mut out = Vec::new();
+    out.extend(&spec.partition_by);
+    out.extend(spec.order_by.iter().map(|item| &item.expr));
+    if let Some(frame) = &spec.frame {
+        for bound in [&frame.start, &frame.end] {
+            match bound {
+                crabka_pgparser::ast::FrameBound::Preceding(expr)
+                | crabka_pgparser::ast::FrameBound::Following(expr) => out.push(expr),
+                crabka_pgparser::ast::FrameBound::UnboundedPreceding
+                | crabka_pgparser::ast::FrameBound::CurrentRow
+                | crabka_pgparser::ast::FrameBound::UnboundedFollowing => {}
+            }
+        }
+    }
+    out
 }
 
 /// Every expression a SELECT evaluates against its own FROM scope.
@@ -11454,39 +11562,666 @@ fn install_lazy_initplans(
     Ok(planned)
 }
 
+/// A `SELECT` with its subqueries planned: the rewritten statement plus the
+/// deferred work executing it needs.
+struct PlannedSubqueries {
+    select: SelectStmt,
+    /// The `WHERE` clause reads the source row, so it is evaluated per row.
+    correlated_filter: bool,
+    initplans: Vec<LazyInitPlan>,
+    scalar_lookups: Vec<CorrelatedScalarLookup>,
+    /// Select-list / `ORDER BY` / `DISTINCT ON` expressions that read the source
+    /// row. `None` — the overwhelmingly common case — leaves projection on
+    /// exactly the path it took before this existed.
+    row_exprs: Option<CorrelatedRowExprs>,
+}
+
+impl PlannedSubqueries {
+    /// A statement whose subqueries all folded once, ahead of the row loop.
+    fn uncorrelated(select: SelectStmt) -> Self {
+        Self {
+            select,
+            correlated_filter: false,
+            initplans: Vec::new(),
+            scalar_lookups: Vec::new(),
+            row_exprs: None,
+        }
+    }
+}
+
 fn resolve_select_subqueries(
     read_ctx: &crate::subquery::SubCtx<'_>,
     select: &SelectStmt,
-) -> Result<
-    (
-        SelectStmt,
-        bool,
-        Vec<LazyInitPlan>,
-        Vec<CorrelatedScalarLookup>,
-    ),
-    ExecError,
-> {
-    if !select.filter.as_ref().is_some_and(contains_subquery) {
-        return Ok((
+) -> Result<PlannedSubqueries, ExecError> {
+    let correlatable_filter = select.filter.as_ref().is_some_and(contains_subquery);
+    // Only a statement that actually contains a subquery in a row-local clause
+    // can have a correlated one there. Everything else — every ordinary select
+    // list in the system — leaves here without describing its FROM.
+    if !correlatable_filter && !row_clauses_contain_subquery(select) {
+        return Ok(PlannedSubqueries::uncorrelated(
             crate::subquery::resolve_in_select(read_ctx, select)?,
-            false,
-            Vec::new(),
-            Vec::new(),
         ));
     }
     let scope = if select.from.is_empty() {
         Scope::empty()
     } else {
-        build_from_schema_with_ctes_and_context(
+        match build_from_schema_with_ctes_and_context(
             read_ctx.catalog_kv,
             read_ctx.fctx.resolution,
             &select.from,
             read_ctx.ctes,
             Some(read_ctx.eval_ctx),
-        )?
-        .scope
+        ) {
+            Ok(described) => described.scope,
+            // A FROM the schema pass cannot describe is not a new failure to
+            // report: without a correlated WHERE this statement reached the
+            // ordinary path before, and it still does. The real read below
+            // raises whatever the FROM is actually wrong about.
+            Err(_) if !correlatable_filter => {
+                return Ok(PlannedSubqueries::uncorrelated(
+                    crate::subquery::resolve_in_select(read_ctx, select)?,
+                ));
+            }
+            Err(error) => return Err(error),
+        }
     };
-    prepare_correlated_subqueries(read_ctx, select, &scope)
+    let (select, row_exprs) = plan_correlated_row_exprs(read_ctx, select, &scope)?;
+    if !correlatable_filter {
+        return Ok(PlannedSubqueries {
+            row_exprs,
+            ..PlannedSubqueries::uncorrelated(crate::subquery::resolve_in_select(
+                read_ctx, &select,
+            )?)
+        });
+    }
+    let (select, correlated_filter, initplans, scalar_lookups) =
+        prepare_correlated_subqueries(read_ctx, &select, &scope)?;
+    Ok(PlannedSubqueries {
+        select,
+        correlated_filter,
+        initplans,
+        scalar_lookups,
+        row_exprs,
+    })
+}
+
+/// Does any clause evaluated once per source row hold a subquery?
+///
+/// The select list, `ORDER BY` and `DISTINCT ON` are the clauses whose
+/// expressions [`plan_correlated_row_exprs`] can defer; a subquery anywhere
+/// else is either folded once or handled by the `WHERE` path.
+fn row_clauses_contain_subquery(select: &SelectStmt) -> bool {
+    select.projection.iter().any(|item| match item {
+        SelectItem::Expr { expr, .. } => contains_subquery(expr),
+        SelectItem::Wildcard | SelectItem::QualifiedWildcard(_) => false,
+    }) || select
+        .order_by
+        .iter()
+        .any(|item| contains_subquery(&item.expr))
+        || select
+            .distinct
+            .on_exprs()
+            .is_some_and(|on| on.iter().any(contains_subquery))
+}
+
+/// Row-local expressions that read the source row, and the hidden relation
+/// columns they are materialized into.
+#[derive(Default)]
+struct CorrelatedRowExprs {
+    /// The original expressions, used to give two clauses that spell the same
+    /// correlated expression the same hidden column — which is what lets
+    /// `DISTINCT ON (expr) … ORDER BY expr` still recognize its own key.
+    sources: Vec<Expr>,
+    /// One planned expression per hidden column, in column order.
+    exprs: Vec<Expr>,
+    /// The hidden scope bindings the markers resolve through, in the same order.
+    bindings: Vec<ColumnBinding>,
+    initplans: Vec<LazyInitPlan>,
+    scalar_lookups: Vec<CorrelatedScalarLookup>,
+}
+
+impl CorrelatedRowExprs {
+    /// Reserve a hidden column for `expr` if it reads `outer`, returning the
+    /// marker that stands in for it. `None` leaves the expression where it is.
+    fn defer(
+        &mut self,
+        read_ctx: &crate::subquery::SubCtx<'_>,
+        expr: &Expr,
+        outer: &Scope,
+    ) -> Result<Option<Expr>, ExecError> {
+        if !contains_subquery(expr) || !validate_correlated_subqueries(read_ctx, expr, outer)? {
+            return Ok(None);
+        }
+        if let Some(index) = self.sources.iter().position(|source| source == expr) {
+            return Ok(Some(correlated_marker(index)));
+        }
+        let planned = install_lazy_initplans(
+            read_ctx,
+            expr,
+            outer,
+            false,
+            &mut self.initplans,
+            &mut self.scalar_lookups,
+        )?;
+        // Resolve the siblings that do not read the source row once, here, so
+        // only the correlated subtrees are left to run per row.
+        let planned = crate::subquery::resolve_expr_skipping(read_ctx, &planned, &mut |node| {
+            let candidate = scalar_lookup_parts(node).is_some()
+                || direct_subquery(node).is_some()
+                || matches!(node, Expr::Func(_) | Expr::Case { .. });
+            scalar_lookup_parts(node).is_some()
+                || candidate && expression_contains_correlated_subquery(read_ctx, node, outer)
+        })?;
+        let ty = correlated_expr_type(
+            read_ctx,
+            &planned,
+            outer,
+            &self.initplans,
+            &self.scalar_lookups,
+        )?;
+        let index = self.exprs.len();
+        self.sources.push(expr.clone());
+        self.exprs.push(planned);
+        self.bindings.push(ColumnBinding {
+            qualifier: Some(crate::scope::CORRELATED_QUALIFIER.to_string()),
+            name: index.to_string(),
+            ty,
+        });
+        Ok(Some(correlated_marker(index)))
+    }
+}
+
+/// Replace every source-row reference inside a select-list sub-select with a
+/// NULL of the referenced column's type, so the sub-select can be *described*
+/// without the row it would need to be *run*.
+///
+/// A sub-select's FROM can read the source row — `generate_series(1,
+/// array_upper(p.attrs, 1))` — and describing that FROM needs the reference's
+/// type, not its value. Only the sub-selects are rewritten: the references
+/// outside them already resolve against `scope`, and turning one into a constant
+/// would rename the output column it labels.
+pub(crate) fn describable_projection(
+    catalog_kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
+    ctes: &crate::cte::CteContext,
+    projection: &[SelectItem],
+    scope: &Scope,
+) -> Result<Vec<SelectItem>, ExecError> {
+    let nulls = vec![Datum::Null; scope.width()];
+    let mut binder = LateralBinder::new(catalog_kv, resolution, ctes);
+    projection
+        .iter()
+        .enumerate()
+        .map(|(walk, item)| {
+            let SelectItem::Expr { expr, alias } = item else {
+                return Ok(item.clone());
+            };
+            binder.walking(walk);
+            let mut expr = expr.clone();
+            bind_subqueries_to_row(&mut binder, &mut expr, scope, &nulls)?;
+            Ok(SelectItem::Expr {
+                expr,
+                alias: alias.clone(),
+            })
+        })
+        .collect()
+}
+
+fn bind_subqueries_to_row(
+    binder: &mut LateralBinder<'_>,
+    expr: &mut Expr,
+    scope: &Scope,
+    row: &[Datum],
+) -> Result<(), ExecError> {
+    for query in query_children_mut(expr) {
+        *query = binder.bind_query(query, scope, row)?.0;
+    }
+    for child in expr_children_mut(expr) {
+        bind_subqueries_to_row(binder, child, scope, row)?;
+    }
+    Ok(())
+}
+
+/// The static type of a deferred expression: the type it infers to once every
+/// outer reference is a NULL of its column's type and every subquery a NULL of
+/// the type its projection describes to.
+fn correlated_expr_type(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    planned: &Expr,
+    outer: &Scope,
+    initplans: &[LazyInitPlan],
+    scalar_lookups: &[CorrelatedScalarLookup],
+) -> Result<ColumnType, ExecError> {
+    let nulls = vec![Datum::Null; outer.width()];
+    let mut binder =
+        LateralBinder::new(read_ctx.catalog_kv, read_ctx.fctx.resolution, read_ctx.ctes);
+    let (bound, _) = binder.bind_expr(planned, outer, &nulls)?;
+    let typed = type_without_evaluating_subqueries(read_ctx, &bound, initplans, scalar_lookups)?;
+    crate::eval::infer_type(&typed, outer)
+}
+
+/// Does any clause [`plan_correlated_row_exprs`] would defer call an aggregate
+/// belonging to `select`'s own query level?
+fn defers_statement_level_aggregate(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    select: &SelectStmt,
+    outer: &Scope,
+) -> bool {
+    let pass = OuterAggregatePass { read_ctx, outer };
+    select.projection.iter().any(|item| match item {
+        SelectItem::Expr { expr, .. } => pass.expr(expr, &[]),
+        SelectItem::Wildcard | SelectItem::QualifiedWildcard(_) => false,
+    }) || select
+        .order_by
+        .iter()
+        .any(|item| pass.expr(&item.expr, &[]))
+        || select
+            .distinct
+            .on_exprs()
+            .is_some_and(|on| on.iter().any(|expr| pass.expr(expr, &[])))
+}
+
+/// Finds an aggregate that `PostgreSQL` would assign to the *enclosing* query
+/// level rather than to the sub-select it is written in.
+///
+/// `check_agg_arguments` gives an aggregate the level of the innermost variable
+/// its arguments read, ignoring variables local to sub-selects *inside* those
+/// arguments. So in
+///
+/// ```sql
+/// SELECT (SELECT max((SELECT i.b FROM inner i WHERE i.a = o.a))) FROM outer o
+/// ```
+///
+/// the only variable `max` reads is `o.a`, one level further out than the
+/// sub-select `max` is written in, so the aggregate belongs to the OUTER query —
+/// which becomes a grouping query and folds to a single row. Materializing that
+/// select-list expression into a per-row hidden column would answer one row per
+/// `outer` row instead, which is why the shape has to be recognized before
+/// deferral rather than after.
+///
+/// A name the pass cannot attribute to a level answers "yes" too: declining to
+/// defer keeps the missing-FROM-clause error the statement already gets, and an
+/// old error beats a new wrong answer.
+struct OuterAggregatePass<'a, 'b> {
+    read_ctx: &'a crate::subquery::SubCtx<'b>,
+    /// Level zero — the statement's own FROM, the level no aggregate below it
+    /// may belong to.
+    outer: &'a Scope,
+}
+
+/// Which levels an aggregate's arguments read, to the one resolution
+/// [`OuterAggregatePass`] needs.
+#[derive(Default)]
+struct AggregateReach {
+    /// A variable resolving to the statement's own FROM.
+    statement: bool,
+    /// A variable resolving to one of the sub-selects in between.
+    enclosing: bool,
+    /// A variable belonging to no level this pass could describe.
+    unknown: bool,
+}
+
+impl OuterAggregatePass<'_, '_> {
+    /// Walk `expr`, written inside the sub-selects whose FROM clauses are
+    /// `enclosing` (outermost first). An empty `enclosing` puts `expr` at the
+    /// statement's own level, where an aggregate is already
+    /// [`crate::grouping::is_grouping_query`]'s business.
+    fn expr(&self, expr: &Expr, enclosing: &[&[crabka_pgparser::ast::TableExpr]]) -> bool {
+        if !enclosing.is_empty()
+            && let Expr::Func(call) = expr
+            && crate::agg::is_aggregate_name(&call.name)
+            && self.belongs_to_statement(call, enclosing)
+        {
+            return true;
+        }
+        expr_children(expr)
+            .into_iter()
+            .any(|child| self.expr(child, enclosing))
+            || direct_subquery(expr).is_some_and(|query| self.query(query, enclosing))
+    }
+
+    fn query(
+        &self,
+        query: &crabka_pgparser::ast::QueryExpr,
+        enclosing: &[&[crabka_pgparser::ast::TableExpr]],
+    ) -> bool {
+        // A tail ORDER BY / LIMIT is evaluated at the query's own level, so it
+        // walks under whatever FROM its body introduces. A set operation has no
+        // single such FROM; its branches each describe their own.
+        let body_from = match &query.body {
+            crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Select(
+                select,
+            )) => select.from.as_slice(),
+            _ => &[],
+        };
+        let inner = [enclosing, &[body_from]].concat();
+        self.set_expr(&query.body, enclosing)
+            || query
+                .order_by
+                .iter()
+                .map(|item| &item.expr)
+                .chain(&query.limit)
+                .chain(&query.offset)
+                .any(|expr| self.expr(expr, &inner))
+            || query
+                .with
+                .iter()
+                .flat_map(|with| &with.ctes)
+                .any(|cte| match &cte.body {
+                    crabka_pgparser::ast::CteBody::Query(body) => self.query(body, enclosing),
+                    // A data-modifying CTE is not a read path this rewrite ever
+                    // reaches; whatever it references is resolved elsewhere.
+                    crabka_pgparser::ast::CteBody::Dml(_) => false,
+                })
+    }
+
+    fn set_expr(
+        &self,
+        body: &crabka_pgparser::ast::SetExpr,
+        enclosing: &[&[crabka_pgparser::ast::TableExpr]],
+    ) -> bool {
+        use crabka_pgparser::ast::{QueryBody, SetExpr};
+        match body {
+            SetExpr::Query(QueryBody::Select(select)) => {
+                let inner = [enclosing, &[select.from.as_slice()]].concat();
+                select_exprs(select)
+                    .into_iter()
+                    .any(|expr| self.expr(expr, &inner))
+                    || select
+                        .from
+                        .iter()
+                        .any(|item| self.table_expr(item, enclosing))
+            }
+            SetExpr::Query(QueryBody::Values(values)) => values
+                .rows
+                .iter()
+                .flatten()
+                .any(|expr| self.expr(expr, enclosing)),
+            SetExpr::Query(QueryBody::Nested(nested)) => self.query(nested, enclosing),
+            SetExpr::SetOp { left, right, .. } => {
+                self.set_expr(left, enclosing) || self.set_expr(right, enclosing)
+            }
+        }
+    }
+
+    /// A FROM item is described by its own level, so a sub-select inside one
+    /// sits one level down from the query the item belongs to — not inside it.
+    fn table_expr(
+        &self,
+        te: &crabka_pgparser::ast::TableExpr,
+        enclosing: &[&[crabka_pgparser::ast::TableExpr]],
+    ) -> bool {
+        use crabka_pgparser::ast::TableExpr;
+        match te {
+            TableExpr::Table { .. } => false,
+            TableExpr::Derived { subquery, .. } => self.query(subquery, enclosing),
+            TableExpr::Function { functions, .. } => functions
+                .iter()
+                .flat_map(|call| &call.args)
+                .any(|arg| self.expr(arg, enclosing)),
+            TableExpr::JsonTable(table) => table
+                .exprs()
+                .into_iter()
+                .any(|expr| self.expr(expr, enclosing)),
+            TableExpr::Join {
+                left,
+                right,
+                constraint,
+                ..
+            } => {
+                let inner = [
+                    enclosing,
+                    &[std::slice::from_ref(left.as_ref())],
+                    &[std::slice::from_ref(right.as_ref())],
+                ]
+                .concat();
+                self.table_expr(left, enclosing)
+                    || self.table_expr(right, enclosing)
+                    || matches!(constraint, crabka_pgparser::ast::JoinConstraint::On(on)
+                        if self.expr(on, &inner))
+            }
+        }
+    }
+
+    /// Does this aggregate call, written under the `enclosing` sub-selects,
+    /// belong to the statement's own level?
+    fn belongs_to_statement(
+        &self,
+        call: &FuncCall,
+        enclosing: &[&[crabka_pgparser::ast::TableExpr]],
+    ) -> bool {
+        let mut covered = Shadow::default();
+        for from in enclosing {
+            covered.extend_by(
+                self.read_ctx.catalog_kv,
+                self.read_ctx.fctx.resolution,
+                self.read_ctx.ctes,
+                from,
+            );
+        }
+        let mut reach = AggregateReach::default();
+        // `count(*)` reads nothing, so it belongs where it is written.
+        if let FuncArgs::Exprs(args) = &call.args {
+            for arg in args {
+                self.reach(arg, &covered, &Shadow::default(), &mut reach);
+            }
+        }
+        // `FILTER (WHERE …)` is levelled with the arguments it filters.
+        if let Some(filter) = &call.filter {
+            self.reach(filter, &covered, &Shadow::default(), &mut reach);
+        }
+        reach.unknown || (reach.statement && !reach.enclosing)
+    }
+
+    /// Record which levels `expr` — an aggregate argument — reads.
+    ///
+    /// `covered` holds the names the enclosing sub-selects supply; `local` those
+    /// supplied by sub-selects *within* the argument, whose variables
+    /// `check_agg_arguments` ignores outright.
+    fn reach(&self, expr: &Expr, covered: &Shadow, local: &Shadow, reach: &mut AggregateReach) {
+        if let Expr::Column { table, name } = expr {
+            let qualifier = table.as_deref();
+            let local = local.supplies(qualifier, name);
+            let covered = covered.supplies(qualifier, name);
+            // Local to a sub-select of the argument, which is exactly what
+            // `check_agg_arguments` ignores.
+            if local == Some(true) {
+                return;
+            }
+            if covered == Some(true) {
+                reach.enclosing = true;
+                return;
+            }
+            // Past every level in between. A name the statement's own FROM does
+            // not supply is read at no level this decision turns on, so leaving
+            // a FROM in between undescribed costs nothing for it.
+            if self.outer.resolve(qualifier, name).is_err() {
+                return;
+            }
+            // It resolves here — unless a FROM in between that could not be
+            // described supplies it too, which is what cannot be settled.
+            if local.is_none() || covered.is_none() {
+                reach.unknown = true;
+            } else {
+                reach.statement = true;
+            }
+            return;
+        }
+        for child in expr_children(expr) {
+            self.reach(child, covered, local, reach);
+        }
+        if let Some(query) = direct_subquery(expr) {
+            self.reach_query(query, covered, local, reach);
+        }
+    }
+
+    fn reach_query(
+        &self,
+        query: &crabka_pgparser::ast::QueryExpr,
+        covered: &Shadow,
+        local: &Shadow,
+        reach: &mut AggregateReach,
+    ) {
+        let crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Select(select)) =
+            &query.body
+        else {
+            // A set operation or nested body reads names this pass does not lay
+            // out; leave the aggregate unattributed rather than guess.
+            reach.unknown = true;
+            return;
+        };
+        let mut inner = local.clone();
+        inner.extend_by(
+            self.read_ctx.catalog_kv,
+            self.read_ctx.fctx.resolution,
+            self.read_ctx.ctes,
+            &select.from,
+        );
+        for expr in select_exprs(select) {
+            self.reach(expr, covered, &inner, reach);
+        }
+        for expr in query.order_by.iter().map(|item| &item.expr) {
+            self.reach(expr, covered, &inner, reach);
+        }
+    }
+}
+
+/// Rewrite every select-list, `ORDER BY` and `DISTINCT ON` expression that reads
+/// the source row into a reference to a hidden column, and return the plan that
+/// fills those columns in.
+///
+/// Doing it as a rewrite rather than by threading a subquery context down into
+/// the projection is what keeps an ordinary select list on its existing path:
+/// once the statement carries no correlated expression, nothing downstream can
+/// tell this pass ran.
+fn plan_correlated_row_exprs(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    select: &SelectStmt,
+    outer: &Scope,
+) -> Result<(SelectStmt, Option<CorrelatedRowExprs>), ExecError> {
+    // With no source row there is nothing to correlate to. Grouping is excluded
+    // for a different reason: its output row is a fold of many source rows, and
+    // a hidden column carrying one source row's value would not survive it.
+    // `PostgreSQL` allows the shape when the correlation only reads grouped
+    // columns; here it keeps reporting the missing FROM entry it reports today.
+    if outer.width() == 0 || crate::grouping::is_grouping_query(select) {
+        return Ok((select.clone(), None));
+    }
+    // An aggregate written inside a sub-select can belong to THIS query level,
+    // which makes the statement a grouping query that [`is_grouping_query`]
+    // cannot see because no aggregate is written at this level. Deferring then
+    // answers one row per source row where `PostgreSQL` folds them to one, so
+    // such a statement stays on the ordinary path with the rest of them.
+    if defers_statement_level_aggregate(read_ctx, select, outer) {
+        return Ok((select.clone(), None));
+    }
+    let mut plan = CorrelatedRowExprs::default();
+    let mut rewritten = select.clone();
+    for item in &mut rewritten.projection {
+        let SelectItem::Expr { expr, alias } = item else {
+            continue;
+        };
+        let Some(marker) = plan.defer(read_ctx, expr, outer)? else {
+            continue;
+        };
+        // The marker is a column reference, and an unaliased item is labelled
+        // after its expression — so the label has to be pinned before the
+        // expression it was derived from is gone.
+        if alias.is_none() {
+            *alias = Some(derived_name(expr));
+        }
+        *expr = marker;
+    }
+    for item in &mut rewritten.order_by {
+        if let Some(marker) = plan.defer(read_ctx, &item.expr, outer)? {
+            item.expr = marker;
+        }
+    }
+    if let crabka_pgparser::ast::DistinctClause::On(on) = &mut rewritten.distinct {
+        for expr in on {
+            if let Some(marker) = plan.defer(read_ctx, expr, outer)? {
+                *expr = marker;
+            }
+        }
+    }
+    if plan.exprs.is_empty() {
+        return Ok((select.clone(), None));
+    }
+    Ok((rewritten, Some(plan)))
+}
+
+/// The reference standing in for the deferred expression at `index`.
+fn correlated_marker(index: usize) -> Expr {
+    Expr::Column {
+        table: Some(crate::scope::CORRELATED_QUALIFIER.to_string()),
+        name: index.to_string(),
+    }
+}
+
+/// Is this binding one of the hidden columns [`plan_correlated_row_exprs`] adds?
+/// `SELECT *` must not expand to them.
+fn is_correlated_binding(c: &ColumnBinding) -> bool {
+    c.qualifier.as_deref() == Some(crate::scope::CORRELATED_QUALIFIER)
+}
+
+/// Does a select list or `ORDER BY` refer to a hidden correlated column?
+fn select_mentions_correlated_marker(s: &SelectStmt) -> bool {
+    s.projection.iter().any(|item| match item {
+        SelectItem::Expr { expr, .. } => expr_mentions_correlated_marker(expr),
+        SelectItem::Wildcard | SelectItem::QualifiedWildcard(_) => false,
+    }) || s
+        .order_by
+        .iter()
+        .any(|item| expr_mentions_correlated_marker(&item.expr))
+}
+
+fn expr_mentions_correlated_marker(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Column { table: Some(table), .. } if table == crate::scope::CORRELATED_QUALIFIER
+    ) || expr_children(expr)
+        .into_iter()
+        .any(expr_mentions_correlated_marker)
+}
+
+/// Evaluate the deferred expressions for every source row, appending their
+/// values as the hidden columns the rewritten statement refers to.
+///
+/// Each row is bound and folded exactly the way a correlated `WHERE` is, so a
+/// dead CASE branch or an unselected COALESCE argument still does not run its
+/// subquery, and an uncorrelated subquery nested under one runs once.
+fn materialize_correlated_row_exprs(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    plan: CorrelatedRowExprs,
+    scope: &mut Scope,
+    rows: &mut [Vec<Datum>],
+) -> Result<(), ExecError> {
+    let CorrelatedRowExprs {
+        sources: _,
+        exprs,
+        bindings,
+        initplans,
+        scalar_lookups,
+    } = plan;
+    let mut binder =
+        LateralBinder::new(read_ctx.catalog_kv, read_ctx.fctx.resolution, read_ctx.ctes)
+            .with_initplans(initplans)
+            .with_scalar_lookups(scalar_lookups);
+    for row in rows.iter_mut() {
+        let mut values = Vec::with_capacity(exprs.len());
+        for (walk, expr) in exprs.iter().enumerate() {
+            binder.walking(walk);
+            let (bound, _) = binder.bind_expr(expr, scope, row)?;
+            let folded =
+                fold_correlated_lazy_expressions(read_ctx, &bound, scope, row, &mut binder)?;
+            let initialized = resolve_lazy_initplans(read_ctx, &folded, &mut binder)?;
+            let resolved = crate::subquery::resolve_expr(read_ctx, &initialized)?;
+            values.push(crate::eval::eval(&resolved, scope, row, read_ctx.eval_ctx)?);
+        }
+        row.extend(values);
+    }
+    scope.columns.extend(bindings);
+    Ok(())
 }
 
 /// Resolve a SELECT while deferring only WHERE subtrees that read the SELECT's
@@ -13660,6 +14395,12 @@ fn top_k_pushdown_for_select(
     if crate::plan_dist::strict_predicate_for_filter(table, s.filter.as_ref()).is_err() {
         return Ok(None);
     }
+    // A correlated select-list or ORDER BY expression lives in a hidden column
+    // materialized ABOVE the scan, which the base-table scope this pushdown
+    // resolves against does not carry. Such a query keeps the full scan.
+    if select_mentions_correlated_marker(s) {
+        return Ok(None);
+    }
     let scope = Scope::single(table, qualifier);
     let (fields, out_exprs, _tys) = resolve_projection(&s.projection, &scope)?;
     let mut order_by = Vec::with_capacity(s.order_by.len());
@@ -13834,7 +14575,13 @@ pub(crate) fn select_to_relation_with_ctes(
     // uncorrelated ones must retain SP34's once-only folding. Only queries whose
     // WHERE contains a subquery pay for the schema description used to tell the
     // two apart.
-    let (resolved, correlated, initplans, scalar_lookups) = resolve_select_subqueries(read_ctx, s)?;
+    let PlannedSubqueries {
+        select: resolved,
+        correlated_filter: correlated,
+        initplans,
+        scalar_lookups,
+        row_exprs,
+    } = resolve_select_subqueries(read_ctx, s)?;
     let s = &resolved;
     crate::window::reject_misplaced_calls(s)?;
     crate::grouping::reject_misplaced_calls(s)?;
@@ -13900,24 +14647,31 @@ pub(crate) fn select_to_relation_with_ctes(
             kept.push(row.clone());
         }
     }
+    // A correlated select-list / ORDER BY / DISTINCT ON expression is evaluated
+    // here, once per surviving source row, and parked in a hidden column. The
+    // clauses below then see plain column references and run unchanged.
+    let mut scope = relation.scope;
+    if let Some(row_exprs) = row_exprs {
+        materialize_correlated_row_exprs(read_ctx, row_exprs, &mut scope, &mut kept)?;
+    }
     // Window functions run above WHERE/GROUP BY/HAVING and below DISTINCT/ORDER
     // BY/LIMIT, so they own the whole projection shape for the queries that use
     // them (including the grouped ones).
     let (fields, out_exprs, tys) = if crate::window::has_window_calls(s) {
-        let (fields, tys, rows) = crate::window::execute(s, &relation.scope, kept, ctx)?;
+        let (fields, tys, rows) = crate::window::execute(s, &scope, kept, ctx)?;
         return Ok(Relation {
             scope: projected_scope(&fields, &tys),
             rows,
         });
     } else {
-        resolve_projection(&s.projection, &relation.scope)?
+        resolve_projection(&s.projection, &scope)?
     };
     let out_scope = projected_scope(&fields, &tys);
     let rows = if crate::grouping::is_grouping_query(s) {
         crate::srf::reject_in_aggregate(&out_exprs)?;
-        crate::grouping::aggregate_rows(s, &relation.scope, kept, ctx)?
+        crate::grouping::aggregate_rows(s, &scope, kept, ctx)?
     } else {
-        project_rows_ordered(s, &relation.scope, &fields, &out_exprs, kept, ctx)?
+        project_rows_ordered(s, &scope, &fields, &out_exprs, kept, ctx)?
     };
     Ok(Relation {
         scope: out_scope,
@@ -14347,6 +15101,10 @@ fn virtual_catalog_columns(name: &str) -> Vec<Column> {
             ("typelem", Int4),
             ("typarray", Int4),
             ("typbasetype", Int4),
+            // `\d`'s collation column is `attcollation <> typcollation`, so the
+            // two have to be derived the same way or every text column would
+            // report a collation it does not have.
+            ("typcollation", Int4),
         ]),
         "pg_ts_config" => cols(&[
             ("oid", Int4),
@@ -15476,6 +16234,23 @@ fn text_collation_oid(ty: ColumnType) -> i32 {
     }
 }
 
+/// `pg_type.typcollation` for a built-in type oid: the same database default
+/// collation [`text_collation_oid`] gives a column of that type, so `\d`'s
+/// `attcollation <> typcollation` test answers false for an uncustomized column.
+fn builtin_type_collation_oid(oid: i32) -> i32 {
+    let collatable = matches!(
+        u32::try_from(oid),
+        Ok(crabka_pgtypes::oids::TEXT
+            | crabka_pgtypes::oids::VARCHAR
+            | crabka_pgtypes::oids::BPCHAR)
+    );
+    if collatable {
+        crate::catalog_rel::DEFAULT_COLLATION_OID
+    } else {
+        0
+    }
+}
+
 fn pg_type_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut rows: Vec<Vec<Datum>> = builtin_type_rows()
         .iter()
@@ -15502,6 +16277,7 @@ fn pg_type_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 int(ty.elem),
                 int(ty.array),
                 int(0),
+                int(builtin_type_collation_oid(ty.oid)),
             ]
         })
         .collect();
@@ -15583,6 +16359,7 @@ fn user_type_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             int(0),
             int(0),
             int(typbasetype),
+            int(text_collation_oid(column_type)),
         ]);
         if let (Some((schema, name)), Some(multirange)) =
             (ty.multirange_identity(), ty.multirange_type())
@@ -15596,6 +16373,7 @@ fn user_type_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 int(0),
                 text("m"),
                 text(","),
+                int(0),
                 int(0),
                 int(0),
                 int(0),
@@ -17286,9 +18064,15 @@ pub(crate) async fn execute_read_locking(
     // execute through the ordinary read path, which owns their single subquery
     // resolution; doing it before the shape decision would run volatile
     // uncorrelated subqueries twice.
-    let (resolved, correlated, initplans, scalar_lookups) = resolve_select_subqueries(read_ctx, s)?;
+    let PlannedSubqueries {
+        select: resolved,
+        correlated_filter: correlated,
+        initplans,
+        scalar_lookups,
+        row_exprs,
+    } = resolve_select_subqueries(read_ctx, s)?;
     let s = &resolved;
-    let scope = Scope::single(&t, &qualifier);
+    let mut scope = Scope::single(&t, &qualifier);
     let mut binder = correlated.then(|| {
         LateralBinder::new(catalog_kv, read_ctx.fctx.resolution, read_ctx.ctes)
             .with_initplans(initplans)
@@ -17398,6 +18182,9 @@ pub(crate) async fn execute_read_locking(
     }
 
     resolve_scanned_regclass(read_ctx.catalog_kv, &t, &mut kept)?;
+    if let Some(row_exprs) = row_exprs {
+        materialize_correlated_row_exprs(read_ctx, row_exprs, &mut scope, &mut kept)?;
+    }
     project_order_limit(s, &scope, kept, ctx)
 }
 
@@ -18098,10 +18885,13 @@ pub(crate) fn resolve_projection(
                 // `*` legitimately expands to nothing. A query with no FROM at
                 // all is rejected before it gets this far.
                 //
-                // The synthetic window-result and grouping-set bindings are not
-                // part of the relation, so `*` never expands to them.
+                // The synthetic window-result, grouping-set and correlated
+                // select-list bindings are not part of the relation, so `*`
+                // never expands to them.
                 for (index, c) in scope.columns.iter().enumerate().filter(|(_, c)| {
-                    !is_window_binding(c) && !crate::grouping::is_hidden_binding(c)
+                    !is_window_binding(c)
+                        && !crate::grouping::is_hidden_binding(c)
+                        && !is_correlated_binding(c)
                 }) {
                     fields.push(field(&c.name, c.ty));
                     exprs.push(wildcard_reference(scope, index, c));
@@ -26803,6 +27593,7 @@ mod tests {
                     "typelem",
                     "typarray",
                     "typbasetype",
+                    "typcollation",
                 ]
         );
         let rows = super::pg_type_rows(&crabka_pgkv::MemKv::default()).expect("pg_type rows");
@@ -26828,7 +27619,19 @@ mod tests {
                     super::int(23),
                     super::int(0),
                     super::int(0),
+                    super::int(0),
                 ]
+        );
+        // `text` is the collatable case: its `typcollation` has to be the same
+        // database default `attcollation` gives a text column, or `\d` reports a
+        // collation on every text column.
+        let text_row = rows
+            .iter()
+            .find(|row| row[0] == super::int(25))
+            .expect("text row");
+        assert!(
+            *text_row.last().expect("typcollation")
+                == super::int(crate::catalog_rel::DEFAULT_COLLATION_OID)
         );
     }
 

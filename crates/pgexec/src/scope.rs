@@ -32,6 +32,19 @@ pub(crate) struct ColumnBinding {
 /// collide with this qualifier.
 pub(crate) const POSITION_QUALIFIER: &str = "$pos";
 
+/// The qualifier of the hidden columns a correlated select-list, `ORDER BY` or
+/// `DISTINCT ON` expression is materialized into: `$corr.0` is "the value the
+/// first such expression took for this source row".
+///
+/// A correlated subquery reads the source row, so it cannot be folded once
+/// before the row loop the way an uncorrelated one is. Evaluating it per row
+/// and parking the value in a hidden column lets the ordinary projection,
+/// sort, and dedup machinery keep treating the select list as a set of
+/// row-local expressions. As with [`POSITION_QUALIFIER`], a `$` cannot begin an
+/// unquoted identifier, so no user relation can collide with this qualifier,
+/// and `*` skips the columns carrying it.
+pub(crate) const CORRELATED_QUALIFIER: &str = "$corr";
+
 /// The ordered schema of a relation. Flat indices line up with the combined row.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Scope {

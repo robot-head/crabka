@@ -100,10 +100,20 @@ fn resolve_set_columns(
             };
             // Run the SP34 scalar-subquery type pass (so a subquery column's OID is
             // known without executing), then resolve names + types + unknown-ness.
+            // The type pass has no outer scope of its own, so a sub-select whose
+            // FROM reads this branch's row is given that row as NULLs first —
+            // enough to describe it, which is all this pass needs.
+            let describable = crate::exec::describable_projection(
+                catalog_kv,
+                resolution,
+                ctes,
+                &s.projection,
+                &scope,
+            )?;
             let projection = crate::subquery::resolve_types_in_projection_with_ctes(
                 catalog_kv,
                 resolution,
-                &s.projection,
+                &describable,
                 ctes,
             )?;
             // A branch's window results are synthetic columns of its own row, so
@@ -761,27 +771,41 @@ mod tests {
         ] {
             s.simple_query(sql).await.expect("setup");
         }
-        let err = s
-            .simple_query(
-                "SELECT NULL::text AS c \
-                 UNION ALL \
-                 SELECT CASE WHEN pr.prattrs IS NOT NULL \
-                             THEN (SELECT string_agg(a.attname, ', ') FROM att a \
-                                   WHERE a.attrelid = pr.prrelid) \
-                        END \
-                   FROM pr \
-                 UNION ALL \
-                 SELECT NULL::text",
-            )
-            .await
-            .expect_err("the correlated branch cannot resolve its outer reference");
-        // The half this pins is type resolution: the branch is typed WITHOUT
-        // executing its subquery, so `infer_type` never sees an unresolved one
-        // and the internal error is gone. What remains is the missing feature --
-        // correlating a select-list subquery to the outer row, reverted because
-        // it returned one row per source row where an outer-level aggregate
-        // must return one -- so the reference itself is what goes unresolved.
-        assert!(format!("{err:?}").contains("missing FROM-clause entry"));
+        let got = column0(
+            &engine,
+            "SELECT NULL::text AS c \
+             UNION ALL \
+             SELECT CASE WHEN pr.prattrs IS NOT NULL \
+                         THEN (SELECT string_agg(a.attname, ', ') FROM att a \
+                               WHERE a.attrelid = pr.prrelid) \
+                    END \
+               FROM pr \
+             UNION ALL \
+             SELECT NULL::text",
+        )
+        .await;
+        // Row 2 correlates to prrelid=10; row 3 takes the CASE's implicit NULL.
+        assert!(got == vec![None, Some("id, name".to_owned()), None, None]);
+
+        // The same lookup as psql actually spells it: the sub-select's FROM
+        // itself reads the branch's row, through a set-returning function's
+        // argument. Describing that FROM needs the reference's TYPE, which is
+        // why the branch is described against a NULL row rather than not at all.
+        let got = column0(
+            &engine,
+            "SELECT NULL::text AS c \
+             UNION ALL \
+             SELECT CASE WHEN pr.prattrs IS NOT NULL \
+                         THEN (SELECT string_agg(attname, ', ') \
+                                 FROM generate_series(1, array_upper(pr.prattrs, 1)) s, att \
+                                WHERE attrelid = pr.prrelid AND attname IS NOT NULL) \
+                    END \
+               FROM pr",
+        )
+        .await;
+        // prrelid=10 has two attributes, and the two generate_series values
+        // repeat them; prattrs IS NULL for 20, so that row takes the CASE's NULL.
+        assert!(got == vec![None, Some("id, name, id, name".to_owned()), None]);
     }
 
     /// A positional ORDER BY past the number of output columns is PG 42P10
