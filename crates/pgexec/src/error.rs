@@ -297,6 +297,12 @@ pub enum ExecError {
         sqlstate: &'static str,
         message: String,
     },
+    /// A SQL/JSON diagnostic that carries `PostgreSQL`'s `DETAIL`/`HINT` lines
+    /// alongside its SQLSTATE — `JSON_TABLE`'s coercion failures name the
+    /// underlying type error in `DETAIL`, and its no-wrapper error hints at
+    /// `WITH WRAPPER`. Boxed so the payload's three strings do not widen every
+    /// other variant.
+    SqlJson(Box<SqlJsonError>),
     /// A write supplied a value of its own for a `GENERATED ALWAYS` column
     /// (428C9). `PostgreSQL` words `INSERT` and `UPDATE` differently but gives
     /// both the same `DETAIL`, so only the message varies here.
@@ -621,6 +627,15 @@ impl ForeignKeyViolationSide {
     }
 }
 
+/// A SQL/JSON diagnostic with `PostgreSQL`'s optional `DETAIL` and `HINT` lines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlJsonError {
+    pub sqlstate: &'static str,
+    pub message: String,
+    pub detail: Option<String>,
+    pub hint: Option<String>,
+}
+
 /// The 23503 message both child-side violations share.
 fn referencing_row_message(table: &str, constraint: &str) -> PgError {
     PgError::error(
@@ -919,6 +934,16 @@ impl ExecError {
                 format!("infinite recursion detected in policy for relation \"{relation}\""),
             ),
             ExecError::FunctionError { sqlstate, message } => PgError::error(sqlstate, message),
+            ExecError::SqlJson(error) => {
+                let mut rendered = PgError::error(error.sqlstate, error.message);
+                if let Some(detail) = error.detail {
+                    rendered = rendered.with_detail(detail);
+                }
+                match error.hint {
+                    Some(hint) => rendered.with_hint(hint),
+                    None => rendered,
+                }
+            }
             ExecError::GeneratedColumnWrite { message, column } => PgError::error("428C9", message)
                 .with_detail(format!("Column \"{column}\" is a generated column.")),
             ExecError::NotAGeneratedColumn { column, table } => PgError::error(

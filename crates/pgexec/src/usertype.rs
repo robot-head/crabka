@@ -875,6 +875,18 @@ fn command(tag: &str) -> QueryResult {
 ///
 /// 23502 when a `NOT NULL` domain is given NULL, and 23514 when a `CHECK` is
 /// false.
+/// Does the domain with this oid carry any `CHECK` constraint?
+///
+/// `PostgreSQL` routes SQL/JSON output coercion through the JSON populate path
+/// rather than the type's input function precisely for constrained domains, so
+/// this distinction is observable.
+#[must_use]
+pub fn domain_has_checks(oid: u32) -> bool {
+    usertype::lookup_oid(oid)
+        .and_then(|registered| registered.domain().map(|d| !d.checks.is_empty()))
+        .unwrap_or(false)
+}
+
 pub fn check_domain(
     ty: ColumnType,
     value: &Datum,

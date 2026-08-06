@@ -3900,6 +3900,14 @@ impl SqlBinder<'_, '_> {
                     self.rewrite_query(subquery, ctes)?
                 };
             }
+            // A `JSON_TABLE` item is implicitly lateral, so its context and
+            // `PASSING` expressions are rewritten against the outer scope
+            // exactly as a function item's arguments are.
+            TableExpr::JsonTable(table) => {
+                for expr in table.exprs_mut() {
+                    *expr = self.rewrite_expr_outer(expr, outer, query_outers, ctes)?;
+                }
+            }
             TableExpr::Join {
                 left,
                 right,

@@ -910,7 +910,7 @@ pub(crate) fn is_json_operand_type(ty: ColumnType) -> Result<(), ExecError> {
 }
 
 /// The jsonb document an argument denotes: a `jsonb` value as-is, `text` parsed.
-fn json_document(value: &Datum) -> Result<Cow<'_, JsonbValue>, ExecError> {
+pub(crate) fn json_document(value: &Datum) -> Result<Cow<'_, JsonbValue>, ExecError> {
     match value {
         Datum::Jsonb(j) => Ok(Cow::Borrowed(j)),
         Datum::Text(text) => jsonb::parse(text).map(Cow::Owned).map_err(ExecError::Type),
@@ -1630,12 +1630,11 @@ fn object_key_text(d: &Datum, ctx: &EvalCtx) -> Result<String, ExecError> {
 
 /// `to_jsonb(anyelement)`: the value's JSON rendering.
 ///
-/// Numbers stay numbers and keep their scale, because `jsonb` is
-/// numeric-backed. Strings and every stringly type become JSON strings, `jsonb`
-/// is the identity, and an array becomes a JSON array. Date/time values use
-/// PostgreSQL's JSON spelling, that is ISO 8601 with a `T` separator and an
-/// `hh:mm` offset, not their SQL output.
-fn to_jsonb(d: &Datum, ctx: &EvalCtx) -> Result<JsonbValue, ExecError> {
+/// Numbers stay numbers (scale preserved, as `jsonb` is numeric-backed), strings
+/// and every stringly type become JSON strings, `jsonb` is the identity, and an
+/// array becomes a JSON array. Date/time values use PostgreSQL's JSON spelling —
+/// ISO 8601 with a `T` separator and an `hh:mm` offset — not their SQL output.
+pub(crate) fn to_jsonb(d: &Datum, ctx: &EvalCtx) -> Result<JsonbValue, ExecError> {
     Ok(match d {
         Datum::Null => JsonbValue::Null,
         Datum::Bool(b) => JsonbValue::Bool(*b),

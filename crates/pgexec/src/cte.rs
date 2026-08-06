@@ -659,6 +659,11 @@ fn scan_table_expr(
                 }
             }
         }
+        TableExpr::JsonTable(table) => {
+            for expr in table.exprs() {
+                scan_expr(expr, name, refs);
+            }
+        }
         TableExpr::Join {
             left,
             right,

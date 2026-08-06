@@ -2720,6 +2720,189 @@ pub enum TableExpr {
         alias: Option<String>,
         column_aliases: Option<Vec<String>>,
     },
+    /// `JSON_TABLE(context, path COLUMNS (…))` — a FROM item that turns one
+    /// JSON document into rows. Boxed because its payload dwarfs every other
+    /// variant's.
+    JsonTable(Box<JsonTable>),
+}
+
+/// A `JSON_TABLE(…)` FROM item.
+///
+/// The row pattern is applied to `context`; each item it matches produces one
+/// row, whose columns are each an independent `JSON_VALUE`/`JSON_QUERY`/
+/// `JSON_EXISTS` over that item. `NESTED PATH` columns expand further, joining
+/// to their parent row with `PostgreSQL`'s default plan: siblings are unioned
+/// and each nested set is OUTER-joined to its parent.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JsonTable {
+    /// The document expression. Implicitly `LATERAL`, like a function item's
+    /// arguments, so it may reference FROM items to its left.
+    pub context: Expr,
+    /// The row-pattern jsonpath. `PostgreSQL`'s grammar restricts this to a
+    /// string constant, so it is stored already-extracted.
+    pub path: String,
+    /// `AS name` on the row pattern, which shares one namespace with the column
+    /// names.
+    pub path_name: Option<String>,
+    /// `PASSING v AS name, …` — jsonpath variables, visible to the row pattern
+    /// and to every column and nested path below it.
+    pub passing: Vec<(String, Expr)>,
+    pub columns: Vec<JsonTableColumn>,
+    /// The `ON ERROR` clause as written. Only `ERROR` and `EMPTY [ARRAY]` are
+    /// meaningful here — the default, `EMPTY`, swallows a row-pattern error into
+    /// zero rows — but the grammar accepts every behavior word and leaves the
+    /// rejection to parse analysis.
+    pub on_error: Option<JsonBehavior>,
+    pub alias: Option<String>,
+    pub column_aliases: Option<Vec<String>>,
+    /// Explicit `LATERAL`. Like a function item, the executor also treats an
+    /// unmarked `JSON_TABLE` whose context or `PASSING` expressions reference an
+    /// earlier FROM item as lateral; this records only what was written.
+    pub lateral: bool,
+}
+
+/// One entry of a `COLUMNS (…)` list.
+#[derive(Debug, Clone, PartialEq)]
+pub enum JsonTableColumn {
+    /// `name FOR ORDINALITY` — an `integer` counting the rows of the scan level
+    /// it is declared in, from 1.
+    Ordinality { name: String },
+    /// A value column: `JSON_VALUE` semantics normally, `JSON_QUERY` semantics
+    /// when `FORMAT JSON`, a wrapper, a quotes clause or a composite-ish return
+    /// type asks for them.
+    Value(Box<JsonTableValueColumn>),
+    /// `name type EXISTS [PATH 'p'] [behavior ON ERROR]` — `JSON_EXISTS`.
+    Exists(Box<JsonTableExistsColumn>),
+    /// `NESTED [PATH] 'p' [AS name] COLUMNS (…)`.
+    Nested(Box<JsonTableNestedColumns>),
+}
+
+/// A `JSON_TABLE` value column.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JsonTableValueColumn {
+    pub name: String,
+    pub ty: ColumnType,
+    /// `FORMAT JSON` was written, which forces `JSON_QUERY` semantics.
+    pub format_json: bool,
+    /// `PATH 'p'`. Absent, the column's path is `$."name"`.
+    pub path: Option<String>,
+    /// `WITH [CONDITIONAL|UNCONDITIONAL] WRAPPER` / `WITHOUT WRAPPER`, or `None`
+    /// when unwritten — which is what distinguishes a plain scalar column from a
+    /// formatted one.
+    pub wrapper: Option<JsonWrapper>,
+    /// `OMIT QUOTES` (`Some(true)`) / `KEEP QUOTES` (`Some(false)`), or `None`
+    /// when unwritten.
+    pub omit_quotes: Option<bool>,
+    pub on_empty: Option<JsonBehavior>,
+    pub on_error: Option<JsonBehavior>,
+}
+
+impl JsonTableValueColumn {
+    /// Does this column run as `JSON_QUERY` rather than `JSON_VALUE`?
+    ///
+    /// `PostgreSQL` promotes a column to the formatted form when `FORMAT JSON`
+    /// is written, when a wrapper or quotes clause is, or when the return type
+    /// is one a single SQL scalar cannot carry.
+    #[must_use]
+    pub fn is_formatted(&self) -> bool {
+        self.format_json
+            || self.wrapper.is_some()
+            || self.omit_quotes.is_some()
+            || json_table_composite_type(self.ty)
+    }
+}
+
+/// `PostgreSQL`'s `isCompositeType` test, which decides whether a `JSON_TABLE`
+/// column is better served by `JSON_QUERY`: `json`/`jsonb`, `record`, any array,
+/// any named composite, or a domain over one of those.
+#[must_use]
+pub fn json_table_composite_type(ty: ColumnType) -> bool {
+    match ty {
+        ColumnType::Jsonb | ColumnType::Record(_) | ColumnType::Array(_) => true,
+        ColumnType::Domain(domain) => json_table_composite_type(*domain.base),
+        _ => false,
+    }
+}
+
+/// A `JSON_TABLE` `EXISTS` column.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JsonTableExistsColumn {
+    pub name: String,
+    pub ty: ColumnType,
+    pub path: Option<String>,
+    pub on_error: Option<JsonBehavior>,
+}
+
+/// A `NESTED PATH … COLUMNS (…)` entry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JsonTableNestedColumns {
+    pub path: String,
+    pub name: Option<String>,
+    pub columns: Vec<JsonTableColumn>,
+}
+
+impl JsonTable {
+    /// Does the `ON ERROR` clause say `ERROR`? Every other spelling this item
+    /// accepts leaves a failing row pattern producing no rows.
+    #[must_use]
+    pub fn error_on_error(&self) -> bool {
+        matches!(self.on_error, Some(JsonBehavior::Error))
+    }
+
+    /// Every expression this item evaluates, in evaluation order. Column paths
+    /// are string constants, so only the context item, the `PASSING` values and
+    /// the `DEFAULT` behavior expressions appear.
+    #[must_use]
+    pub fn exprs(&self) -> Vec<&Expr> {
+        let mut out = vec![&self.context];
+        out.extend(self.passing.iter().map(|(_, e)| e));
+        collect_column_exprs(&self.columns, &mut out);
+        out
+    }
+
+    /// The mutable counterpart of [`JsonTable::exprs`], in the same order.
+    #[must_use]
+    pub fn exprs_mut(&mut self) -> Vec<&mut Expr> {
+        let mut out = vec![&mut self.context];
+        out.extend(self.passing.iter_mut().map(|(_, e)| e));
+        collect_column_exprs_mut(&mut self.columns, &mut out);
+        out
+    }
+}
+
+fn collect_column_exprs<'a>(columns: &'a [JsonTableColumn], out: &mut Vec<&'a Expr>) {
+    for column in columns {
+        match column {
+            JsonTableColumn::Ordinality { .. } | JsonTableColumn::Exists(_) => {}
+            JsonTableColumn::Value(value) => {
+                for behavior in [&value.on_empty, &value.on_error].into_iter().flatten() {
+                    if let JsonBehavior::Default(expr) = behavior {
+                        out.push(expr);
+                    }
+                }
+            }
+            JsonTableColumn::Nested(nested) => collect_column_exprs(&nested.columns, out),
+        }
+    }
+}
+
+fn collect_column_exprs_mut<'a>(columns: &'a mut [JsonTableColumn], out: &mut Vec<&'a mut Expr>) {
+    for column in columns {
+        match column {
+            JsonTableColumn::Ordinality { .. } | JsonTableColumn::Exists(_) => {}
+            JsonTableColumn::Value(value) => {
+                for behavior in [&mut value.on_empty, &mut value.on_error]
+                    .into_iter()
+                    .flatten()
+                {
+                    if let JsonBehavior::Default(expr) = behavior {
+                        out.push(expr);
+                    }
+                }
+            }
+            JsonTableColumn::Nested(nested) => collect_column_exprs_mut(&mut nested.columns, out),
+        }
+    }
 }
 
 /// One function call inside a FROM-position function item.

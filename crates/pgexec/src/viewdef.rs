@@ -409,7 +409,149 @@ fn from_text(item: &TableExpr, ctx: Ctx<'_>) -> String {
             })
             .collect::<Vec<_>>()
             .join(", "),
+        TableExpr::JsonTable(table) => json_table_text(table, ctx),
     }
+}
+
+/// A `JSON_TABLE(…)` FROM item.
+///
+/// `PostgreSQL` lays this out over many lines; crabka prints one, which
+/// round-trips through the parser — the property a stored rule actually needs —
+/// without claiming byte-identical rule text.
+fn json_table_text(table: &crabka_pgparser::ast::JsonTable, ctx: Ctx<'_>) -> String {
+    let mut out = String::from("JSON_TABLE(");
+    let _ = write!(out, "{}, ", expr_text(&table.context, ctx));
+    out.push_str(&quote_json_path(&table.path));
+    if let Some(name) = &table.path_name {
+        let _ = write!(out, " AS {}", quote_identifier(name));
+    }
+    if !table.passing.is_empty() {
+        let passing = table
+            .passing
+            .iter()
+            .map(|(name, value)| format!("{} AS {}", expr_text(value, ctx), quote_identifier(name)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = write!(out, " PASSING {passing}");
+    }
+    let _ = write!(
+        out,
+        " COLUMNS ({})",
+        json_table_columns_text(&table.columns, ctx)
+    );
+    if table.error_on_error() {
+        out.push_str(" ERROR ON ERROR");
+    }
+    out.push(')');
+    if let Some(alias) = &table.alias {
+        let _ = write!(out, " {}", quote_identifier(alias));
+        if let Some(columns) = &table.column_aliases {
+            let names = columns
+                .iter()
+                .map(|name| quote_identifier(name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = write!(out, "({names})");
+        }
+    }
+    out
+}
+
+fn json_table_columns_text(
+    columns: &[crabka_pgparser::ast::JsonTableColumn],
+    ctx: Ctx<'_>,
+) -> String {
+    use crabka_pgparser::ast::JsonTableColumn;
+
+    columns
+        .iter()
+        .map(|column| match column {
+            JsonTableColumn::Ordinality { name } => {
+                format!("{} FOR ORDINALITY", quote_identifier(name))
+            }
+            JsonTableColumn::Value(value) => json_table_value_column_text(value, ctx),
+            JsonTableColumn::Exists(exists) => {
+                let mut text = format!(
+                    "{} {} EXISTS",
+                    quote_identifier(&exists.name),
+                    exists.ty.name()
+                );
+                if let Some(path) = &exists.path {
+                    let _ = write!(text, " PATH {}", quote_json_path(path));
+                }
+                if let Some(behavior) = &exists.on_error {
+                    let _ = write!(text, " {} ON ERROR", json_behavior_text(behavior, ctx));
+                }
+                text
+            }
+            JsonTableColumn::Nested(nested) => {
+                let mut text = format!("NESTED PATH {}", quote_json_path(&nested.path));
+                if let Some(name) = &nested.name {
+                    let _ = write!(text, " AS {}", quote_identifier(name));
+                }
+                let _ = write!(
+                    text,
+                    " COLUMNS ({})",
+                    json_table_columns_text(&nested.columns, ctx)
+                );
+                text
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn json_table_value_column_text(
+    column: &crabka_pgparser::ast::JsonTableValueColumn,
+    ctx: Ctx<'_>,
+) -> String {
+    use crabka_pgparser::ast::JsonWrapper;
+
+    let mut text = format!("{} {}", quote_identifier(&column.name), column.ty.name());
+    if column.format_json {
+        text.push_str(" FORMAT JSON");
+    }
+    if let Some(path) = &column.path {
+        let _ = write!(text, " PATH {}", quote_json_path(path));
+    }
+    match column.wrapper {
+        None => {}
+        Some(JsonWrapper::Without) => text.push_str(" WITHOUT WRAPPER"),
+        Some(JsonWrapper::Conditional) => text.push_str(" WITH CONDITIONAL WRAPPER"),
+        Some(JsonWrapper::Unconditional) => text.push_str(" WITH UNCONDITIONAL WRAPPER"),
+    }
+    match column.omit_quotes {
+        None => {}
+        Some(true) => text.push_str(" OMIT QUOTES"),
+        Some(false) => text.push_str(" KEEP QUOTES"),
+    }
+    if let Some(behavior) = &column.on_empty {
+        let _ = write!(text, " {} ON EMPTY", json_behavior_text(behavior, ctx));
+    }
+    if let Some(behavior) = &column.on_error {
+        let _ = write!(text, " {} ON ERROR", json_behavior_text(behavior, ctx));
+    }
+    text
+}
+
+fn json_behavior_text(behavior: &crabka_pgparser::ast::JsonBehavior, ctx: Ctx<'_>) -> String {
+    use crabka_pgparser::ast::JsonBehavior;
+
+    match behavior {
+        JsonBehavior::Error => "ERROR".into(),
+        JsonBehavior::Null => "NULL".into(),
+        JsonBehavior::True => "TRUE".into(),
+        JsonBehavior::False => "FALSE".into(),
+        JsonBehavior::Unknown => "UNKNOWN".into(),
+        JsonBehavior::EmptyArray => "EMPTY ARRAY".into(),
+        JsonBehavior::EmptyObject => "EMPTY OBJECT".into(),
+        JsonBehavior::Default(expr) => format!("DEFAULT {}", expr_text(expr, ctx)),
+    }
+}
+
+/// A jsonpath as the string literal it was written as.
+fn quote_json_path(path: &str) -> String {
+    format!("'{}'", path.replace('\'', "''"))
 }
 
 /// A join tree: the left side on the FROM line, each join on its own line at

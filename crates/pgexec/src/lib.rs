@@ -76,6 +76,7 @@ mod inheritance;
 mod join;
 mod json_fn;
 mod jsonpath;
+mod jsontable;
 mod local_sequence;
 mod lockmgr;
 mod math_fn;

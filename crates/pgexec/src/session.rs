@@ -10048,6 +10048,17 @@ impl ParamBinder<'_> {
                 }
                 Ok(())
             }
+            TableExpr::JsonTable(table) => {
+                for expr in table.exprs_mut() {
+                    self.bind_expr_with_scope_and_ctes(
+                        expr,
+                        None,
+                        &crate::scope::Scope::empty(),
+                        ctes,
+                    )?;
+                }
+                Ok(())
+            }
             TableExpr::Join {
                 left,
                 right,
@@ -10722,6 +10733,11 @@ fn collect_table_param(table: &TableExpr, max: &mut usize) {
         TableExpr::Function { functions, .. } => {
             for arg in functions.iter().flat_map(|call| call.args.iter()) {
                 collect_expr_param(arg, max);
+            }
+        }
+        TableExpr::JsonTable(table) => {
+            for expr in table.exprs() {
+                collect_expr_param(expr, max);
             }
         }
         TableExpr::Join {

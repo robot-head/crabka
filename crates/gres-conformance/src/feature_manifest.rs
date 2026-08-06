@@ -320,7 +320,7 @@ pub const FEATURE_PROBES: &[FeatureProbe] = &[
     FeatureProbe {
         item: "JSON_TABLE and SQL/JSON expressions",
         sql: "SELECT * FROM JSON_TABLE('{}', '$' COLUMNS (v int4 PATH '$.v')) AS jt",
-        behavior: FeatureBehavior::ParserRejectPending,
+        behavior: FeatureBehavior::SessionExecute,
         setup: NONE,
         sqlstate: None,
         message_fragment: None,

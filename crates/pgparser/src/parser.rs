@@ -2065,13 +2065,10 @@ impl Parser {
             "json_value" => JsonQueryOp::Value,
             "json_query" => JsonQueryOp::Query,
             "json_table" => {
-                // `JSON_TABLE` is a FROM item, never an expression; the message
-                // names it so the refusal is not a bare syntax error.
-                return Err(ParseError::new_sqlstate(
-                    "0A000",
-                    "JSON_TABLE is not supported",
-                    self.peek_pos(),
-                ));
+                // `JSON_TABLE` is a FROM item, never an expression. PostgreSQL's
+                // grammar has no production for it here, so the token after the
+                // name is what its syntax error names.
+                return Err(self.syntax_error_at_token());
             }
             _ => return Ok(None),
         };
@@ -2269,14 +2266,12 @@ impl Parser {
         }))))
     }
 
-    /// One `<behavior> ON {EMPTY | ERROR}` clause, if the next tokens are one.
-    fn opt_json_behavior(
-        &mut self,
-    ) -> Result<Option<(crate::ast::JsonBehavior, JsonOnClause)>, ParseError> {
+    /// The behavior word that opens an `ON EMPTY` / `ON ERROR` clause, consumed
+    /// without the `ON …` that follows it.
+    fn json_behavior_word(&mut self) -> Result<Option<crate::ast::JsonBehavior>, ParseError> {
         use crate::ast::JsonBehavior;
 
-        let start = self.pos;
-        let behavior = if self.eat_word_eq("null") {
+        Ok(Some(if self.eat_word_eq("null") {
             JsonBehavior::Null
         } else if self.eat_word_eq("error") {
             JsonBehavior::Error
@@ -2296,6 +2291,16 @@ impl Parser {
                 JsonBehavior::EmptyArray
             }
         } else {
+            return Ok(None);
+        }))
+    }
+
+    /// One `<behavior> ON {EMPTY | ERROR}` clause, if the next tokens are one.
+    fn opt_json_behavior(
+        &mut self,
+    ) -> Result<Option<(crate::ast::JsonBehavior, JsonOnClause)>, ParseError> {
+        let start = self.pos;
+        let Some(behavior) = self.json_behavior_word()? else {
             return Ok(None);
         };
         if !self.eat_word_eq("on") {
@@ -2359,14 +2364,16 @@ impl Parser {
 
     /// `FORMAT JSON [ENCODING name]`, accepted and ignored. Crabka has one JSON
     /// representation and one server encoding.
-    fn opt_format_json(&mut self) {
+    fn opt_format_json(&mut self) -> bool {
         if self.peek_word_eq("format") && self.peek2_word_eq("json") {
             self.bump();
             self.bump();
             if self.eat_word_eq("encoding") {
                 let _ = self.eat_word_eq("utf8") || self.eat_word_eq("utf-8");
             }
+            return true;
         }
+        false
     }
 
     /// `RETURNING <type> [FORMAT JSON]`.
@@ -10818,6 +10825,12 @@ impl Parser {
         if self.peek_ident_eq("rows") && *self.peek2() == Token::Keyword(Keyword::From) {
             return self.rows_from(lateral);
         }
+        // `JSON_TABLE(…)` is a FROM item of its own, not a function call: its
+        // argument list is a grammar, not a list of expressions.
+        if self.peek_ident_eq("json_table") && *self.peek2() == Token::LParen {
+            self.bump();
+            return self.json_table_item(lateral);
+        }
         let only = self.eat_only();
         let name = self.relation_ref()?;
         // `ident (` in FROM position is a set-returning function call
@@ -10993,6 +11006,378 @@ impl Parser {
             alias,
             column_aliases,
         })
+    }
+
+    /// `JSON_TABLE( context [FORMAT JSON] , 'path' [AS name] [PASSING …]
+    /// COLUMNS ( … ) [ {EMPTY [ARRAY] | ERROR} ON ERROR ] ) [alias [(cols)]]`,
+    /// positioned at the `(`.
+    fn json_table_item(&mut self, lateral: bool) -> Result<crate::ast::TableExpr, ParseError> {
+        use crate::ast::{JsonTable, TableExpr};
+
+        self.expect(&Token::LParen)?;
+        let context = self.expr(0)?;
+        self.opt_format_json();
+        self.expect(&Token::Comma)?;
+        let path = self.json_table_path("JSON_TABLE path specification")?;
+        let path_name = if self.eat_keyword(Keyword::As) {
+            Some(self.expect_col_id()?)
+        } else {
+            None
+        };
+        let passing = self.json_passing_clause()?;
+        let columns_pos = self.peek_pos();
+        if !self.eat_ident_eq("columns") {
+            return Err(self.syntax_error_at_token());
+        }
+        let columns = self.json_table_column_list()?;
+        let on_error = self.json_table_on_error()?;
+        self.expect(&Token::RParen)?;
+        let mut alias = None;
+        let mut column_aliases = None;
+        if self.eat_keyword(Keyword::As) {
+            alias = Some(self.expect_col_id()?);
+        } else if let Some(name) = self.peek_col_id() {
+            self.bump();
+            alias = Some(name);
+        }
+        if alias.is_some() {
+            column_aliases = self.opt_column_aliases()?;
+        }
+        let table = JsonTable {
+            context,
+            path,
+            path_name,
+            passing,
+            columns,
+            on_error,
+            alias,
+            column_aliases,
+            lateral,
+        };
+        Self::check_json_table_names(&table, columns_pos)?;
+        Self::check_json_table_columns(&table.columns, columns_pos)?;
+        Ok(TableExpr::JsonTable(Box::new(table)))
+    }
+
+    /// A jsonpath in `JSON_TABLE` position. `PostgreSQL`'s grammar takes only a
+    /// string constant here, and says so rather than reporting a bare syntax
+    /// error for `'$' || '.a'`.
+    fn json_table_path(&mut self, what: &str) -> Result<String, ParseError> {
+        let pos = self.peek_pos();
+        let expr = self.expr(0)?;
+        match expr {
+            crate::ast::Expr::StringLiteral(text) => Ok(text),
+            _ => Err(ParseError::new_sqlstate(
+                "0A000",
+                format!("only string constants are supported in {what}"),
+                pos,
+            )),
+        }
+    }
+
+    /// `PASSING v AS name, …`, or an empty list when the clause is absent.
+    fn json_passing_clause(&mut self) -> Result<Vec<(String, Expr)>, ParseError> {
+        let mut passing = Vec::new();
+        if self.eat_word_eq("passing") {
+            loop {
+                let value = self.expr(0)?;
+                self.expect(&Token::Keyword(Keyword::As))?;
+                passing.push((self.expect_col_id()?, value));
+                if !self.eat_comma() {
+                    break;
+                }
+            }
+        }
+        Ok(passing)
+    }
+
+    /// `COLUMNS ( column [, …] )`, positioned just after the `COLUMNS` word.
+    /// An empty list is a syntax error in `PostgreSQL`'s grammar.
+    fn json_table_column_list(&mut self) -> Result<Vec<crate::ast::JsonTableColumn>, ParseError> {
+        self.expect(&Token::LParen)?;
+        if *self.peek() == Token::RParen {
+            return Err(self.syntax_error_at_token());
+        }
+        let mut columns = Vec::new();
+        loop {
+            columns.push(self.json_table_column()?);
+            if !self.eat_comma() {
+                break;
+            }
+        }
+        self.expect(&Token::RParen)?;
+        Ok(columns)
+    }
+
+    /// One `COLUMNS (…)` entry.
+    fn json_table_column(&mut self) -> Result<crate::ast::JsonTableColumn, ParseError> {
+        use crate::ast::{
+            JsonTableColumn, JsonTableExistsColumn, JsonTableNestedColumns, JsonTableValueColumn,
+        };
+
+        if self.eat_word_eq("nested") {
+            // `PATH` is optional in `NESTED [PATH] 'p'`.
+            self.eat_word_eq("path");
+            let path = self.json_table_path("JSON_TABLE path specification")?;
+            let name = if self.eat_keyword(Keyword::As) {
+                Some(self.expect_col_id()?)
+            } else {
+                None
+            };
+            if !self.eat_ident_eq("columns") {
+                return Err(self.syntax_error_at_token());
+            }
+            let columns = self.json_table_column_list()?;
+            return Ok(JsonTableColumn::Nested(Box::new(JsonTableNestedColumns {
+                path,
+                name,
+                columns,
+            })));
+        }
+        let name = self.expect_col_id()?;
+        if self.eat_keyword(Keyword::For) {
+            self.expect_ident_eq("ordinality")?;
+            return Ok(JsonTableColumn::Ordinality { name });
+        }
+        let ty = self.parse_type_name()?;
+        if self.eat_word_eq("exists") {
+            let path = self.opt_json_table_column_path()?;
+            let on_error = self.json_table_column_exists_on_error()?;
+            return Ok(JsonTableColumn::Exists(Box::new(JsonTableExistsColumn {
+                name,
+                ty,
+                path,
+                on_error,
+            })));
+        }
+        let format_json = self.opt_format_json();
+        let path = self.opt_json_table_column_path()?;
+        let wrapper = self.opt_json_wrapper()?;
+        let omit_quotes = self.opt_json_quotes()?;
+        let mut on_empty = None;
+        let mut on_error = None;
+        while let Some((behavior, which)) = self.opt_json_behavior()? {
+            match which {
+                JsonOnClause::Empty => on_empty = Some(behavior),
+                JsonOnClause::Error => on_error = Some(behavior),
+            }
+        }
+        Ok(JsonTableColumn::Value(Box::new(JsonTableValueColumn {
+            name,
+            ty,
+            format_json,
+            path,
+            wrapper,
+            omit_quotes,
+            on_empty,
+            on_error,
+        })))
+    }
+
+    /// `PATH 'p'` on a column, or `None` for the implicit `$."name"`.
+    fn opt_json_table_column_path(&mut self) -> Result<Option<String>, ParseError> {
+        if self.eat_word_eq("path") {
+            Ok(Some(self.json_table_path("JSON_TABLE path specification")?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// The `behavior ON ERROR` tail of an `EXISTS` column. `PostgreSQL` accepts
+    /// any behavior word here and only then rejects the ones `JSON_EXISTS`
+    /// cannot use, so `ON EMPTY` after one is a plain syntax error.
+    fn json_table_column_exists_on_error(
+        &mut self,
+    ) -> Result<Option<crate::ast::JsonBehavior>, ParseError> {
+        let start = self.pos;
+        let Some(behavior) = self.json_behavior_word()? else {
+            return Ok(None);
+        };
+        if !self.eat_word_eq("on") {
+            self.pos = start;
+            return Ok(None);
+        }
+        if !self.eat_word_eq("error") {
+            return Err(self.syntax_error_at_token());
+        }
+        Ok(Some(behavior))
+    }
+
+    /// `{WITHOUT | WITH [CONDITIONAL | UNCONDITIONAL]} [ARRAY] WRAPPER`, or
+    /// `None` when unwritten — which is what makes a column "scalar".
+    fn opt_json_wrapper(&mut self) -> Result<Option<crate::ast::JsonWrapper>, ParseError> {
+        use crate::ast::JsonWrapper;
+
+        if !(self.peek_word_eq("without") || self.peek_word_eq("with")) {
+            return Ok(None);
+        }
+        let with = self.peek_word_eq("with");
+        if !["wrapper", "array", "conditional", "unconditional"]
+            .iter()
+            .any(|w| self.peek2_word_eq(w))
+        {
+            return Ok(None);
+        }
+        self.bump();
+        let conditional = self.eat_word_eq("conditional");
+        if !conditional {
+            self.eat_word_eq("unconditional");
+        }
+        self.eat_word_eq("array");
+        if !self.eat_word_eq("wrapper") {
+            return Err(ParseError::new("expected WRAPPER", self.peek_pos()));
+        }
+        Ok(Some(match (with, conditional) {
+            (false, _) => JsonWrapper::Without,
+            (true, true) => JsonWrapper::Conditional,
+            (true, false) => JsonWrapper::Unconditional,
+        }))
+    }
+
+    /// `{KEEP | OMIT} QUOTES [ON SCALAR STRING]`, or `None` when unwritten.
+    fn opt_json_quotes(&mut self) -> Result<Option<bool>, ParseError> {
+        if !(self.peek_word_eq("omit") || self.peek_word_eq("keep")) {
+            return Ok(None);
+        }
+        let omit = self.peek_word_eq("omit");
+        self.bump();
+        if !self.eat_word_eq("quotes") {
+            return Err(ParseError::new("expected QUOTES", self.peek_pos()));
+        }
+        if self.eat_word_eq("on") {
+            self.eat_word_eq("scalar");
+            self.eat_word_eq("string");
+        }
+        Ok(Some(omit))
+    }
+
+    /// The `JSON_TABLE(…)`-level `ON ERROR` clause. Every behavior word parses
+    /// here; which of them are *meaningful* is parse-analysis's decision, made
+    /// by the executor alongside the per-column behavior checks.
+    fn json_table_on_error(&mut self) -> Result<Option<crate::ast::JsonBehavior>, ParseError> {
+        let start = self.pos;
+        let Some(behavior) = self.json_behavior_word()? else {
+            return Ok(None);
+        };
+        if !(self.eat_word_eq("on") && self.eat_word_eq("error")) {
+            self.pos = start;
+            return Ok(None);
+        }
+        Ok(Some(behavior))
+    }
+
+    /// `PostgreSQL`'s "duplicate `JSON_TABLE` column or path name" check: the row
+    /// pattern's name, every column name and every nested path name share one
+    /// namespace, checked depth-first in declaration order.
+    fn check_json_table_names(
+        table: &crate::ast::JsonTable,
+        position: usize,
+    ) -> Result<(), ParseError> {
+        let mut seen: Vec<&str> = Vec::new();
+        if let Some(name) = &table.path_name {
+            seen.push(name);
+        }
+        Self::check_json_table_names_in(&table.columns, &mut seen, position)
+    }
+
+    fn check_json_table_names_in<'a>(
+        columns: &'a [crate::ast::JsonTableColumn],
+        seen: &mut Vec<&'a str>,
+        position: usize,
+    ) -> Result<(), ParseError> {
+        use crate::ast::JsonTableColumn;
+
+        for column in columns {
+            match column {
+                JsonTableColumn::Nested(nested) => {
+                    if let Some(name) = &nested.name {
+                        Self::register_json_table_name(name, seen, position)?;
+                    }
+                    Self::check_json_table_names_in(&nested.columns, seen, position)?;
+                }
+                JsonTableColumn::Ordinality { name } => {
+                    Self::register_json_table_name(name, seen, position)?;
+                }
+                JsonTableColumn::Value(value) => {
+                    Self::register_json_table_name(&value.name, seen, position)?;
+                }
+                JsonTableColumn::Exists(exists) => {
+                    Self::register_json_table_name(&exists.name, seen, position)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn register_json_table_name<'a>(
+        name: &'a str,
+        seen: &mut Vec<&'a str>,
+        position: usize,
+    ) -> Result<(), ParseError> {
+        if seen.contains(&name) {
+            return Err(ParseError::new_sqlstate(
+                "42712",
+                format!("duplicate JSON_TABLE column or path name: {name}"),
+                position,
+            ));
+        }
+        seen.push(name);
+        Ok(())
+    }
+
+    /// The per-scan-level column checks the *grammar* owns: at most one `FOR
+    /// ORDINALITY`, and a quotes clause only without a wrapper. Which behaviors
+    /// each column kind admits is parse-analysis's job and lives in the
+    /// executor, where the diagnostic can carry `PostgreSQL`'s `DETAIL` line.
+    fn check_json_table_columns(
+        columns: &[crate::ast::JsonTableColumn],
+        position: usize,
+    ) -> Result<(), ParseError> {
+        use crate::ast::JsonTableColumn;
+
+        let mut ordinality_found = false;
+        for column in columns {
+            match column {
+                JsonTableColumn::Ordinality { .. } => {
+                    if ordinality_found {
+                        return Err(ParseError::new_sqlstate(
+                            "42601",
+                            "only one FOR ORDINALITY column is allowed",
+                            position,
+                        ));
+                    }
+                    ordinality_found = true;
+                }
+                JsonTableColumn::Value(value) => {
+                    check_json_table_quotes(value, position)?;
+                }
+                JsonTableColumn::Exists(_) | JsonTableColumn::Nested(_) => {}
+            }
+        }
+        for column in columns {
+            if let JsonTableColumn::Nested(nested) = column {
+                Self::check_json_table_columns(&nested.columns, position)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The `syntax error at or near "…"` `PostgreSQL` reports for the token at
+    /// the cursor.
+    fn syntax_error_at_token(&self) -> ParseError {
+        let word = match self.peek() {
+            Token::Ident(word) | Token::StringLit(word) => word.clone(),
+            Token::Keyword(_) => self.keyword_label(),
+            Token::LParen => "(".into(),
+            Token::RParen => ")".into(),
+            Token::Comma => ",".into(),
+            other => format!("{other:?}"),
+        };
+        ParseError::new_sqlstate(
+            "42601",
+            format!("syntax error at or near \"{word}\""),
+            self.peek_pos(),
+        )
     }
 
     /// Hang a top-level column-definition list on the item's single function.
@@ -19792,6 +20177,31 @@ fn sql_json(expr: crate::ast::SqlJsonExpr) -> Expr {
     Expr::SqlJson(Box::new(expr))
 }
 
+/// A quotes clause is meaningless when a wrapper is asked for, and `PostgreSQL`
+/// rejects it in parse analysis rather than at run time. Only `OMIT QUOTES`
+/// conflicts: `KEEP QUOTES` is the default a wrapper already implies, so writing
+/// it out is accepted.
+fn check_json_table_quotes(
+    column: &crate::ast::JsonTableValueColumn,
+    position: usize,
+) -> Result<(), ParseError> {
+    use crate::ast::JsonWrapper;
+
+    if column.omit_quotes == Some(true)
+        && matches!(
+            column.wrapper,
+            Some(JsonWrapper::Conditional | JsonWrapper::Unconditional)
+        )
+    {
+        return Err(ParseError::new_sqlstate(
+            "42601",
+            "SQL/JSON QUOTES behavior must not be specified when WITH WRAPPER is used",
+            position,
+        ));
+    }
+    Ok(())
+}
+
 /// The lowercase spelling of the reserved keywords the SQL/JSON grammar also
 /// uses as ordinary option words. `None` for every other keyword, so a word
 /// match never accepts an unrelated reserved word.
@@ -19806,6 +20216,7 @@ fn keyword_word(kw: Keyword) -> Option<&'static str> {
         Keyword::False => "false",
         Keyword::Wrapper => "wrapper",
         Keyword::Returning => "returning",
+        Keyword::Exists => "exists",
         _ => return None,
     })
 }

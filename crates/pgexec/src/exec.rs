@@ -1676,6 +1676,15 @@ fn validate_view_definition(
     }
     let mut sources = Vec::with_capacity(select.from.len());
     for table in &select.from {
+        // A `JSON_TABLE` item reads no relation, so it constrains neither where
+        // the view lands nor what it depends on — only its own expressions have
+        // to pass the same checks the select list does.
+        if let crabka_pgparser::ast::TableExpr::JsonTable(json_table) = table {
+            for expr in json_table.exprs() {
+                validate_view_expr(expr)?;
+            }
+            continue;
+        }
         let crabka_pgparser::ast::TableExpr::Table { name, .. } = table else {
             return Err(ExecError::Unsupported(
                 "CREATE VIEW does not support joins or derived tables".into(),
@@ -9728,6 +9737,10 @@ fn is_lateral_item(te: &crabka_pgparser::ast::TableExpr, outer: &Scope) -> bool 
                     .flat_map(|call| call.args.iter())
                     .any(|arg| expr_references_scope(arg, outer))
         }
+        // `JSON_TABLE` is implicitly lateral in PostgreSQL exactly as a function
+        // item is, so a context or PASSING expression that reads an earlier item
+        // makes it correlated whether or not the keyword was written.
+        TableExpr::JsonTable(table) => crate::jsontable::references_scope(table, outer),
         TableExpr::Table { .. } | TableExpr::Join { .. } => false,
     }
 }
@@ -9991,7 +10004,7 @@ fn lateral_cacheable_expr(expr: &Expr) -> bool {
 ///
 /// Only a reference that actually binds counts, so an unqualified name that is
 /// ambiguous or missing is left for ordinary resolution to report.
-fn expr_references_scope(expr: &Expr, scope: &Scope) -> bool {
+pub(crate) fn expr_references_scope(expr: &Expr, scope: &Scope) -> bool {
     if let Expr::Column { table, name } = expr {
         return scope.resolve(table.as_deref(), name).is_ok();
     }
@@ -10604,6 +10617,11 @@ impl BindPass<'_, '_> {
                     }
                 }
             }
+            TableExpr::JsonTable(table) => {
+                for expr in table.exprs_mut() {
+                    self.expr(expr, shadow);
+                }
+            }
             TableExpr::Join {
                 left,
                 right,
@@ -10762,6 +10780,12 @@ fn collect_qualifiers(from: &[crabka_pgparser::ast::TableExpr], out: &mut Vec<St
                     .map(|call| call.name.to_ascii_lowercase())
                     .unwrap_or_default()
             })),
+            TableExpr::JsonTable(table) => out.push(
+                table
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| "json_table".to_string()),
+            ),
             TableExpr::Join { left, right, .. } => {
                 collect_qualifiers(std::slice::from_ref(left), out);
                 collect_qualifiers(std::slice::from_ref(right), out);
@@ -12276,6 +12300,7 @@ fn build_table_expr(
             column_aliases,
             ctx,
         ),
+        TableExpr::JsonTable(table) => crate::jsontable::from_item(table, ctx),
     }
 }
 
@@ -13950,6 +13975,7 @@ fn build_table_expr_schema_with_ctes(
                 column_aliases,
             )
         }
+        TableExpr::JsonTable(table) => crate::jsontable::from_item_schema(table),
     }
 }
 
