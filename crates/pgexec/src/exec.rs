@@ -9837,15 +9837,22 @@ fn lateral_join(
             };
             let retained_bytes = right_bytes
                 .saturating_add(index.as_ref().map_or(0, PreparedJoinIndex::estimated_bytes));
-            let can_cache = index.is_some()
+            // Memoizing the inner relation deliberately does NOT require the
+            // index over the outer one. Re-running `build_table_expr` is the
+            // expensive half — for a lateral over `tenk1` it is a full scan per
+            // outer row — while an index-less entry still skips that and probes
+            // by scanning a relation that is usually a row or two. Requiring
+            // the index meant that under the 20 MiB policy the certification
+            // runs with, nothing was ever cached and `memoize` took 41% of the
+            // suite's wall clock.
+            let can_cache = lateral_cacheable(te)
+                && cache.len() < 64
                 && !crate::scanner::exceeds_query_memory(
                     cache_bytes.saturating_add(retained_bytes),
                     read_ctx.blocking_query_memory,
                 );
             if can_cache {
-                let index = index
-                    .take()
-                    .expect("a cacheable lateral item prepared its index");
+                let index = index.take().unwrap_or_else(PreparedJoinIndex::none);
                 cache.push(CachedRight {
                     specialized,
                     relation: right,

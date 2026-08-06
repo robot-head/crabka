@@ -75,6 +75,17 @@ pub(crate) fn prepare_join_index(
 }
 
 impl PreparedJoinIndex {
+    /// A prepared join that carries no index, so probing falls back to scanning
+    /// the right relation. Costs nothing to hold, which is what lets a lateral
+    /// item memoize its inner relation under a memory budget too small for the
+    /// index over the outer one.
+    pub(crate) fn none() -> Self {
+        Self {
+            index: None,
+            estimated_bytes: 0,
+        }
+    }
+
     pub(crate) fn estimated_bytes(&self) -> usize {
         self.estimated_bytes
     }
