@@ -1208,7 +1208,9 @@ fn eval_grouped_depth(
                 return Ok(result);
             }
             let x = eval_grouped_depth(expr, grouped, d)?;
-            crate::eval::eval_in_list(&x, list, *negated, |e| eval_grouped_depth(e, grouped, d))
+            crate::eval::eval_in_list(expr, &x, list, *negated, ctx, |e| {
+                eval_grouped_depth(e, grouped, d)
+            })
         }
         Expr::Between {
             expr,
@@ -1219,7 +1221,7 @@ fn eval_grouped_depth(
             let x = eval_grouped_depth(expr, grouped, d)?;
             let lo = eval_grouped_depth(low, grouped, d)?;
             let hi = eval_grouped_depth(high, grouped, d)?;
-            crate::eval::eval_between(&x, &lo, &hi, *negated, ctx)
+            crate::eval::eval_between((expr, &x), (low, &lo), (high, &hi), *negated, ctx)
         }
         Expr::Like {
             expr,

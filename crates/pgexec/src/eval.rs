@@ -256,7 +256,9 @@ fn eval_depth_inner(
                 return Ok(result);
             }
             let x = eval_depth(expr, scope, values, ctx, d)?;
-            eval_in_list(&x, list, *negated, |e| eval_depth(e, scope, values, ctx, d))
+            eval_in_list(expr, &x, list, *negated, ctx, |e| {
+                eval_depth(e, scope, values, ctx, d)
+            })
         }
         Expr::Between {
             expr,
@@ -269,7 +271,7 @@ fn eval_depth_inner(
             let x = eval_depth(expr, scope, values, ctx, d)?;
             let lo = eval_depth(low, scope, values, ctx, d)?;
             let hi = eval_depth(high, scope, values, ctx, d)?;
-            eval_between(&x, &lo, &hi, *negated, ctx)
+            eval_between((expr, &x), (low, &lo), (high, &hi), *negated, ctx)
         }
         Expr::Like {
             expr,
@@ -462,9 +464,11 @@ fn eval_depth_inner(
 ///
 /// `NOT IN` is the boolean negation. NULL stays NULL.
 pub(crate) fn eval_in_list(
+    operand: &Expr,
     x: &Datum,
     list: &[Expr],
     negated: bool,
+    ctx: &EvalCtx,
     mut eval_child: impl FnMut(&Expr) -> Result<Datum, ExecError>,
 ) -> Result<Datum, ExecError> {
     // An empty list is decided before the operand is even considered: `x IN ()`
@@ -479,11 +483,16 @@ pub(crate) fn eval_in_list(
     let mut saw_null = false;
     for item in list {
         let v = eval_child(item)?;
-        if runtime_equality_short_circuit(x, &v) == Some(false) {
+        // `x IN (a, b)` is `x = a OR x = b`, and each of those equalities
+        // resolves its own `unknown` literal — so `c.oid IN ('1','2')` compares
+        // as oids while `'10' IN ('9', 20)` still compares '10' to '9' as text.
+        let (xc, vc) = coerce_untyped_literal_operands(BinaryOp::Eq, operand, item, x, &v, ctx)?;
+        let (x, v) = (xc.as_ref().unwrap_or(x), vc.as_ref().unwrap_or(&v));
+        if runtime_equality_short_circuit(x, v) == Some(false) {
             continue;
         }
-        require_runtime_equality(x, &v)?;
-        match ops::compare(x, &v)? {
+        require_runtime_equality(x, v)?;
+        match ops::compare(x, v)? {
             Some(Ordering::Equal) => return Ok(Datum::Bool(!negated)),
             Some(_) => {}
             None => saw_null = true,
@@ -496,19 +505,19 @@ pub(crate) fn eval_in_list(
     }
 }
 
-/// `x BETWEEN lo AND hi` ≡ `x >= lo AND x <= hi`.
-///
-/// `NOT BETWEEN` negates it. NULL propagates exactly as three-valued AND/NOT
-/// define.
+/// `x BETWEEN lo AND hi` ≡ `x >= lo AND x <= hi`; `NOT BETWEEN` negates it. NULL
+/// propagates exactly as three-valued AND/NOT define. Each operand is paired
+/// with the expression it came from because the two comparisons resolve their
+/// `unknown` literals independently, exactly as PostgreSQL's expansion does.
 pub(crate) fn eval_between(
-    x: &Datum,
-    lo: &Datum,
-    hi: &Datum,
+    x: (&Expr, &Datum),
+    lo: (&Expr, &Datum),
+    hi: (&Expr, &Datum),
     negated: bool,
     ctx: &EvalCtx,
 ) -> Result<Datum, ExecError> {
-    let ge = apply_binary(BinaryOp::Ge, x, lo, ctx)?;
-    let le = apply_binary(BinaryOp::Le, x, hi, ctx)?;
+    let ge = apply_comparison_of(BinaryOp::Ge, x, lo, ctx)?;
+    let le = apply_comparison_of(BinaryOp::Le, x, hi, ctx)?;
     let res = ops::and(&ge, &le)?;
     Ok(if negated { ops::not(&res)? } else { res })
 }
@@ -671,11 +680,17 @@ pub(crate) fn eval_case(
             let ov = eval_child(op)?;
             for (val, result) in whens {
                 let vv = eval_child(val)?;
-                if runtime_equality_short_circuit(&ov, &vv) == Some(false) {
+                // A simple `CASE` is a chain of equalities, so `CASE oid WHEN
+                // '1' …` resolves the bare literal from the operand just as
+                // `oid = '1'` would.
+                let (oc, vc) =
+                    coerce_untyped_literal_operands(BinaryOp::Eq, op, val, &ov, &vv, ctx)?;
+                let (ov, vv) = (oc.as_ref().unwrap_or(&ov), vc.as_ref().unwrap_or(&vv));
+                if runtime_equality_short_circuit(ov, vv) == Some(false) {
                     continue;
                 }
-                require_runtime_equality(&ov, &vv)?;
-                if matches!(ops::compare(&ov, &vv)?, Some(Ordering::Equal)) {
+                require_runtime_equality(ov, vv)?;
+                if matches!(ops::compare(ov, vv)?, Some(Ordering::Equal)) {
                     let value = eval_child(result)?;
                     return cast_value(&value, result_type, &ctx.time_zone);
                 }
@@ -1122,6 +1137,21 @@ pub(crate) fn apply_binary_of(
     apply_binary(op, l, r, ctx)
 }
 
+/// Apply a comparison to two already-evaluated operands, resolving a bare
+/// `unknown` literal from the other side first. `BETWEEN` and `IN` expand into
+/// comparisons that PostgreSQL resolves one at a time, and neither has a
+/// [`BinaryOp`] expression of its own to hand to [`apply_binary_of`], so each
+/// operand arrives here paired with the expression that produced it.
+pub(crate) fn apply_comparison_of(
+    op: BinaryOp,
+    (le, l): (&Expr, &Datum),
+    (re, r): (&Expr, &Datum),
+    ctx: &EvalCtx,
+) -> Result<Datum, ExecError> {
+    let (lc, rc) = coerce_untyped_literal_operands(op, le, re, l, r, ctx)?;
+    apply_binary(op, lc.as_ref().unwrap_or(l), rc.as_ref().unwrap_or(r), ctx)
+}
+
 /// Convert an `unknown` string-literal operand's *value* to the type the
 /// operator resolved it to.
 ///
@@ -1259,6 +1289,65 @@ fn coerce_untyped_literal_operands(
                 | BinaryOp::Ge => Some(geometric_type),
                 _ => None,
             };
+        }
+        // A scalar counterpart resolves the literal to its own type, which is how
+        // psql's `c.oid = '20001'` finds an `oid` comparison and `1 + '1'` stays
+        // integer arithmetic. `regclass` is deliberately absent: PostgreSQL's
+        // `regclass =` is `oideq`, so its bare literal is read as an *oid* and
+        // `'pg_class'::regclass = 'pg_class'` is an oid syntax error, not a name
+        // lookup.
+        let scalar_type = match other {
+            Datum::Bool(_)
+            | Datum::Int2(_)
+            | Datum::Int4(_)
+            | Datum::Int8(_)
+            | Datum::Float4(_)
+            | Datum::Float8(_)
+            | Datum::Numeric(_)
+            | Datum::Bytea(_) => other.column_type(),
+            _ => None,
+        };
+        if let Some(scalar_type) = scalar_type {
+            let comparison = matches!(
+                op,
+                BinaryOp::Eq
+                    | BinaryOp::Ne
+                    | BinaryOp::Lt
+                    | BinaryOp::Le
+                    | BinaryOp::Gt
+                    | BinaryOp::Ge
+                    | BinaryOp::IsDistinctFrom
+                    | BinaryOp::IsNotDistinctFrom
+            );
+            let resolves = comparison
+                || match other {
+                    Datum::Bool(_) => matches!(op, BinaryOp::And | BinaryOp::Or),
+                    Datum::Int2(_) | Datum::Int4(_) | Datum::Int8(_) => matches!(
+                        op,
+                        BinaryOp::Add
+                            | BinaryOp::Sub
+                            | BinaryOp::Mul
+                            | BinaryOp::Div
+                            | BinaryOp::Mod
+                            | BinaryOp::Pow
+                            | BinaryOp::BitAnd
+                            | BinaryOp::BitOr
+                            | BinaryOp::BitXor
+                            | BinaryOp::Shl
+                            | BinaryOp::Shr
+                    ),
+                    Datum::Float4(_) | Datum::Float8(_) | Datum::Numeric(_) => matches!(
+                        op,
+                        BinaryOp::Add
+                            | BinaryOp::Sub
+                            | BinaryOp::Mul
+                            | BinaryOp::Div
+                            | BinaryOp::Mod
+                            | BinaryOp::Pow
+                    ),
+                    _ => false,
+                };
+            return resolves.then_some(scalar_type);
         }
         if !matches!(other, Datum::Jsonb(_)) {
             return match (op, other) {
@@ -2040,11 +2129,27 @@ pub(crate) fn is_unknown_literal(e: &Expr) -> bool {
     matches!(e, Expr::StringLiteral(_) | Expr::NullLiteral)
 }
 
-/// PostgreSQL's 42804 for a polymorphic parameter, `anyarray` or `anyelement`,
-/// that nothing in the call resolves.
-///
-/// Every argument that could resolve it is an `unknown` literal, as in
-/// `cardinality('{1,2}')` and `to_jsonb('a')`.
+/// The operand types an operator resolves against, with a bare `unknown`
+/// literal's placeholder `text` replaced by its sibling's type. This is what
+/// keeps `1 + '1'` an `integer` sum rather than widening through an unresolved
+/// `text` operand. Two bare literals resolve each other to nothing, so the pair
+/// is returned unchanged and the caller's own `unknown`/`text` rule applies.
+fn adopt_unknown_literal_types(
+    left: &Expr,
+    right: &Expr,
+    lt: ColumnType,
+    rt: ColumnType,
+) -> (ColumnType, ColumnType) {
+    match (is_unknown_literal(left), is_unknown_literal(right)) {
+        (true, false) => (rt, rt),
+        (false, true) => (lt, lt),
+        _ => (lt, rt),
+    }
+}
+
+/// PostgreSQL's 42804 for a polymorphic parameter (`anyarray`, `anyelement`)
+/// that nothing in the call resolves, because every argument that could have is
+/// an `unknown` literal — `cardinality('{1,2}')`, `to_jsonb('a')`.
 pub(crate) fn undetermined_polymorphic_type() -> ExecError {
     ExecError::TypeMismatch(
         "could not determine polymorphic type because input has type unknown".into(),
@@ -2867,6 +2972,7 @@ fn infer_binary_type(
             if !usable(left, lt) || !usable(right, rt) {
                 return Err(undefined_operator(op_spelling(op), lt, rt));
             }
+            let (lt, rt) = adopt_unknown_literal_types(left, right, lt, rt);
             Ok(numeric_result_type(lt, rt))
         }
         // `||` is text, jsonb, or one of the three array concatenations, resolved
@@ -2987,6 +3093,7 @@ fn infer_binary_type(
             }
             let is_int =
                 |t: ColumnType| matches!(t, ColumnType::Int2 | ColumnType::Int4 | ColumnType::Int8);
+            let (lt, rt) = adopt_unknown_literal_types(left, right, lt, rt);
             if !is_int(lt) || !is_int(rt) {
                 return Err(undefined_operator(op_spelling(op), lt, rt));
             }
@@ -3007,6 +3114,7 @@ fn infer_binary_type(
         // selects the exact `numeric` operator.
         BinaryOp::Pow => {
             let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
+            let (lt, rt) = adopt_unknown_literal_types(left, right, lt, rt);
             if lt == ColumnType::Float8 || rt == ColumnType::Float8 {
                 Ok(ColumnType::Float8)
             } else if lt.is_numeric() || rt.is_numeric() {
@@ -3020,6 +3128,7 @@ fn infer_binary_type(
         // runtime type error.
         BinaryOp::Mod => {
             let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
+            let (lt, rt) = adopt_unknown_literal_types(left, right, lt, rt);
             let modulo_able = |t: ColumnType| {
                 matches!(t, ColumnType::Int2 | ColumnType::Int4 | ColumnType::Int8)
                     || t.is_numeric()
@@ -3561,25 +3670,31 @@ mod tests {
         let no_children = |_: &Expr| -> Result<Datum, ExecError> {
             panic!("an empty list must not evaluate any child")
         };
+        let ctx = crate::clock::EvalCtx::test_default();
+        let operand = Expr::IntLiteral("1".into());
 
         assert!(
-            eval_in_list(&Datum::Null, &[], false, no_children).expect("empty IN")
+            eval_in_list(&operand, &Datum::Null, &[], false, &ctx, no_children).expect("empty IN")
                 == Datum::Bool(false)
         );
         assert!(
-            eval_in_list(&Datum::Null, &[], true, no_children).expect("empty NOT IN")
+            eval_in_list(&operand, &Datum::Null, &[], true, &ctx, no_children)
+                .expect("empty NOT IN")
                 == Datum::Bool(true)
         );
         assert!(
-            eval_in_list(&Datum::Int4(1), &[], false, no_children).expect("empty IN")
+            eval_in_list(&operand, &Datum::Int4(1), &[], false, &ctx, no_children)
+                .expect("empty IN")
                 == Datum::Bool(false)
         );
         // A NULL operand against a NON-empty list is still unknown.
         assert!(
             eval_in_list(
+                &operand,
                 &Datum::Null,
                 &[Expr::IntLiteral("1".into())],
                 false,
+                &ctx,
                 |_| Ok(Datum::Int4(1))
             )
             .expect("NULL IN (1)")
@@ -3665,6 +3780,159 @@ mod tests {
                 .message
                 .contains("invalid input syntax for type circle")
         );
+    }
+
+    /// A quoted literal with no cast is type `unknown` and adopts the type of
+    /// the operand it is compared against — the rule psql's `\d` leans on when
+    /// it writes `WHERE c.oid = '20001'`. Every cell was verified against
+    /// PostgreSQL 18.4.
+    #[test]
+    fn a_bare_literal_adopts_its_scalar_siblings_type() {
+        // (expression, result)
+        let cases: &[(&str, Datum)] = &[
+            // The integer family, in both operand orders.
+            ("1 = '1'", Datum::Bool(true)),
+            ("'1' = 1", Datum::Bool(true)),
+            ("1::int2 = '1'", Datum::Bool(true)),
+            ("1::int8 = '1'", Datum::Bool(true)),
+            ("1::oid = '1'", Datum::Bool(true)),
+            ("1 = '01'", Datum::Bool(true)),
+            ("1 = '+1'", Datum::Bool(true)),
+            ("5 = ' 5'", Datum::Bool(true)),
+            ("-1 = '-1'", Datum::Bool(true)),
+            // Every comparison, not just equality.
+            ("1 < '2'", Datum::Bool(true)),
+            ("1 >= '2'", Datum::Bool(false)),
+            ("1 <> '2'", Datum::Bool(true)),
+            // numeric and the floats.
+            ("1.5 = '1.5'", Datum::Bool(true)),
+            ("1.5 = '1.50'", Datum::Bool(true)),
+            ("1.5::float8 = '1.5'", Datum::Bool(true)),
+            ("1.5::float4 = '1.5'", Datum::Bool(true)),
+            ("'NaN'::float8 = 'NaN'", Datum::Bool(true)),
+            // boolean, whose input syntax accepts far more than `t`/`f`.
+            ("true = 't'", Datum::Bool(true)),
+            ("'t' = true", Datum::Bool(true)),
+            ("true = 'yes'", Datum::Bool(true)),
+            ("true > 'f'", Datum::Bool(true)),
+            ("true AND 't'", Datum::Bool(true)),
+            // bytea and the date/time family.
+            ("'\\x0102'::bytea > '\\x01'", Datum::Bool(true)),
+            ("'2020-01-01'::date = '2020-01-01'", Datum::Bool(true)),
+            ("'01:02:03'::time = '01:02:03'", Datum::Bool(true)),
+            ("'1 day'::interval = '1 day'", Datum::Bool(true)),
+            // `BETWEEN`, `IN` and a simple `CASE` expand into comparisons that
+            // each resolve their own literal — so a pair of bare literals still
+            // compares as text ('10' < '9') even with a typed sibling nearby.
+            ("2 BETWEEN '1' AND '3'", Datum::Bool(true)),
+            ("'2' BETWEEN 1 AND 3", Datum::Bool(true)),
+            ("'10' BETWEEN '9' AND 20", Datum::Bool(false)),
+            ("1 IN ('1','2')", Datum::Bool(true)),
+            ("'1' IN (1,2)", Datum::Bool(true)),
+            ("1 NOT IN ('2')", Datum::Bool(true)),
+            ("'10' IN ('9', 20)", Datum::Bool(false)),
+            ("'2020-01-01'::date IN ('2020-01-01')", Datum::Bool(true)),
+            (
+                "CASE 1 WHEN '1' THEN 'y' ELSE 'n' END",
+                Datum::Text("y".into()),
+            ),
+            (
+                "CASE 1 WHEN '2' THEN 'y' ELSE 'n' END",
+                Datum::Text("n".into()),
+            ),
+            ("1 IS DISTINCT FROM '1'", Datum::Bool(false)),
+            ("1 IS NOT DISTINCT FROM '1'", Datum::Bool(true)),
+            // Arithmetic and the bitwise operators resolve the same way.
+            ("1 + '1'", Datum::Int4(2)),
+            ("'1' + 1", Datum::Int4(2)),
+            ("1 - '1'", Datum::Int4(0)),
+            ("6 / '2'", Datum::Int4(3)),
+            ("7 % '3'", Datum::Int4(1)),
+            ("2 ^ '3'", Datum::Float8(8.0)),
+            ("1::int8 * '3'", Datum::Int8(3)),
+            ("1.5 * '2' = 3.0", Datum::Bool(true)),
+            ("1 & '3'", Datum::Int4(1)),
+            ("1 | '2'", Datum::Int4(3)),
+            ("1 # '3'", Datum::Int4(2)),
+            ("1 << '2'", Datum::Int4(4)),
+            ("8 >> '2'", Datum::Int4(2)),
+        ];
+        for (sql, expected) in cases {
+            assert2::assert!(ev(sql, None, &[]) == *expected, "{sql}");
+        }
+    }
+
+    /// Resolving the literal fixes the operator's *result* type too: `1 + '1'`
+    /// is an `integer` sum in PostgreSQL, not a pair widened through an
+    /// unresolved operand.
+    #[test]
+    fn an_adopted_literal_sets_the_operators_result_type() {
+        // (expression, inferred type)
+        let cases: &[(&str, ColumnType)] = &[
+            ("1 + '1'", ColumnType::Int4),
+            ("'1' + 1", ColumnType::Int4),
+            ("1::int2 + '1'", ColumnType::Int2),
+            ("1::int8 + '1'", ColumnType::Int8),
+            ("1.5 + '1'", ColumnType::Numeric(None)),
+            ("1::float8 / '4'", ColumnType::Float8),
+            ("7 % '3'", ColumnType::Int4),
+            ("2 ^ '3'", ColumnType::Float8),
+            ("1 & '3'", ColumnType::Int4),
+            ("1 << '2'", ColumnType::Int4),
+        ];
+        for (sql, expected) in cases {
+            let got = infer_type(&pexpr(sql).expect("parse"), &Scope::empty()).expect("infer");
+            assert2::assert!(got == *expected, "{sql}");
+        }
+    }
+
+    /// Adopting a type is not the same as accepting anything. A literal that is
+    /// not valid input for the type it adopted fails with that type's own input
+    /// error, and a value that is *genuinely* `text` never adopts at all —
+    /// PostgreSQL has no `integer = text` operator and neither does crabka.
+    #[test]
+    fn only_an_unknown_literal_adopts_and_only_when_it_parses() {
+        // (expression, message fragment)
+        let cases: &[(&str, &str)] = &[
+            (
+                "1 = 'abc'",
+                "invalid input syntax for type integer: \"abc\"",
+            ),
+            ("1 = ''", "invalid input syntax for type integer: \"\""),
+            ("1 > ''", "invalid input syntax for type integer: \"\""),
+            (
+                "true = 'xyz'",
+                "invalid input syntax for type boolean: \"xyz\"",
+            ),
+            (
+                "1.5 = 'abc'",
+                "invalid input syntax for type numeric: \"abc\"",
+            ),
+            (
+                "1::int2 = '99999'",
+                "value \"99999\" is out of range for type smallint",
+            ),
+            (
+                "1 IN ('abc')",
+                "invalid input syntax for type integer: \"abc\"",
+            ),
+            (
+                "2 BETWEEN '1' AND 'abc'",
+                "invalid input syntax for type integer: \"abc\"",
+            ),
+            (
+                "CASE 1 WHEN 'abc' THEN 'y' END",
+                "invalid input syntax for type integer: \"abc\"",
+            ),
+            // Genuinely `text`: an explicit cast, and a text-returning function.
+            ("1 = '1'::text", "cannot compare integer and text"),
+            ("1 = upper('1')", "cannot compare integer and text"),
+            ("1 + '1'::text", "operator does not exist: integer + text"),
+        ];
+        for (sql, fragment) in cases {
+            let message = ev_err(sql).into_pg().message;
+            assert2::assert!(message.contains(fragment), "{sql} produced {message}");
+        }
     }
 
     #[test]
