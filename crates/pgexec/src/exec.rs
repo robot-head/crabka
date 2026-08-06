@@ -11275,320 +11275,39 @@ fn install_lazy_initplans(
     Ok(planned)
 }
 
-/// A `SELECT` with its subqueries planned: the rewritten statement plus the
-/// deferred work executing it needs.
-struct PlannedSubqueries {
-    select: SelectStmt,
-    /// The `WHERE` clause reads the source row, so it is evaluated per row.
-    correlated_filter: bool,
-    initplans: Vec<LazyInitPlan>,
-    scalar_lookups: Vec<CorrelatedScalarLookup>,
-    /// Select-list / `ORDER BY` / `DISTINCT ON` expressions that read the source
-    /// row. `None` — the overwhelmingly common case — leaves projection on
-    /// exactly the path it took before this existed.
-    row_exprs: Option<CorrelatedRowExprs>,
-}
-
-impl PlannedSubqueries {
-    /// A statement whose subqueries all folded once, ahead of the row loop.
-    fn uncorrelated(select: SelectStmt) -> Self {
-        Self {
-            select,
-            correlated_filter: false,
-            initplans: Vec::new(),
-            scalar_lookups: Vec::new(),
-            row_exprs: None,
-        }
-    }
-}
-
 fn resolve_select_subqueries(
     read_ctx: &crate::subquery::SubCtx<'_>,
     select: &SelectStmt,
-) -> Result<PlannedSubqueries, ExecError> {
-    let correlatable_filter = select.filter.as_ref().is_some_and(contains_subquery);
-    // Only a statement that actually contains a subquery in a row-local clause
-    // can have a correlated one there. Everything else — every ordinary select
-    // list in the system — leaves here without describing its FROM.
-    if !correlatable_filter && !row_clauses_contain_subquery(select) {
-        return Ok(PlannedSubqueries::uncorrelated(
+) -> Result<
+    (
+        SelectStmt,
+        bool,
+        Vec<LazyInitPlan>,
+        Vec<CorrelatedScalarLookup>,
+    ),
+    ExecError,
+> {
+    if !select.filter.as_ref().is_some_and(contains_subquery) {
+        return Ok((
             crate::subquery::resolve_in_select(read_ctx, select)?,
+            false,
+            Vec::new(),
+            Vec::new(),
         ));
     }
     let scope = if select.from.is_empty() {
         Scope::empty()
     } else {
-        match build_from_schema_with_ctes_and_context(
+        build_from_schema_with_ctes_and_context(
             read_ctx.catalog_kv,
             read_ctx.fctx.resolution,
             &select.from,
             read_ctx.ctes,
             Some(read_ctx.eval_ctx),
-        ) {
-            Ok(described) => described.scope,
-            // A FROM the schema pass cannot describe is not a new failure to
-            // report: without a correlated WHERE this statement reached the
-            // ordinary path before, and it still does. The real read below
-            // raises whatever the FROM is actually wrong about.
-            Err(_) if !correlatable_filter => {
-                return Ok(PlannedSubqueries::uncorrelated(
-                    crate::subquery::resolve_in_select(read_ctx, select)?,
-                ));
-            }
-            Err(error) => return Err(error),
-        }
+        )?
+        .scope
     };
-    let (select, row_exprs) = plan_correlated_row_exprs(read_ctx, select, &scope)?;
-    if !correlatable_filter {
-        return Ok(PlannedSubqueries {
-            row_exprs,
-            ..PlannedSubqueries::uncorrelated(crate::subquery::resolve_in_select(
-                read_ctx, &select,
-            )?)
-        });
-    }
-    let (select, correlated_filter, initplans, scalar_lookups) =
-        prepare_correlated_subqueries(read_ctx, &select, &scope)?;
-    Ok(PlannedSubqueries {
-        select,
-        correlated_filter,
-        initplans,
-        scalar_lookups,
-        row_exprs,
-    })
-}
-
-/// Does any clause evaluated once per source row hold a subquery?
-///
-/// The select list, `ORDER BY` and `DISTINCT ON` are the clauses whose
-/// expressions [`plan_correlated_row_exprs`] can defer; a subquery anywhere
-/// else is either folded once or handled by the `WHERE` path.
-fn row_clauses_contain_subquery(select: &SelectStmt) -> bool {
-    select.projection.iter().any(|item| match item {
-        SelectItem::Expr { expr, .. } => contains_subquery(expr),
-        SelectItem::Wildcard | SelectItem::QualifiedWildcard(_) => false,
-    }) || select
-        .order_by
-        .iter()
-        .any(|item| contains_subquery(&item.expr))
-        || select
-            .distinct
-            .on_exprs()
-            .is_some_and(|on| on.iter().any(contains_subquery))
-}
-
-/// Row-local expressions that read the source row, and the hidden relation
-/// columns they are materialized into.
-#[derive(Default)]
-struct CorrelatedRowExprs {
-    /// The original expressions, used to give two clauses that spell the same
-    /// correlated expression the same hidden column — which is what lets
-    /// `DISTINCT ON (expr) … ORDER BY expr` still recognize its own key.
-    sources: Vec<Expr>,
-    /// One planned expression per hidden column, in column order.
-    exprs: Vec<Expr>,
-    /// The hidden scope bindings the markers resolve through, in the same order.
-    bindings: Vec<ColumnBinding>,
-    initplans: Vec<LazyInitPlan>,
-    scalar_lookups: Vec<CorrelatedScalarLookup>,
-}
-
-impl CorrelatedRowExprs {
-    /// Reserve a hidden column for `expr` if it reads `outer`, returning the
-    /// marker that stands in for it. `None` leaves the expression where it is.
-    fn defer(
-        &mut self,
-        read_ctx: &crate::subquery::SubCtx<'_>,
-        expr: &Expr,
-        outer: &Scope,
-    ) -> Result<Option<Expr>, ExecError> {
-        if !contains_subquery(expr) || !validate_correlated_subqueries(read_ctx, expr, outer)? {
-            return Ok(None);
-        }
-        if let Some(index) = self.sources.iter().position(|source| source == expr) {
-            return Ok(Some(correlated_marker(index)));
-        }
-        let planned = install_lazy_initplans(
-            read_ctx,
-            expr,
-            outer,
-            false,
-            &mut self.initplans,
-            &mut self.scalar_lookups,
-        )?;
-        // Resolve the siblings that do not read the source row once, here, so
-        // only the correlated subtrees are left to run per row.
-        let planned = crate::subquery::resolve_expr_skipping(read_ctx, &planned, &mut |node| {
-            let candidate = scalar_lookup_parts(node).is_some()
-                || direct_subquery(node).is_some()
-                || matches!(node, Expr::Func(_) | Expr::Case { .. });
-            scalar_lookup_parts(node).is_some()
-                || candidate && expression_contains_correlated_subquery(read_ctx, node, outer)
-        })?;
-        let ty = correlated_expr_type(
-            read_ctx,
-            &planned,
-            outer,
-            &self.initplans,
-            &self.scalar_lookups,
-        )?;
-        let index = self.exprs.len();
-        self.sources.push(expr.clone());
-        self.exprs.push(planned);
-        self.bindings.push(ColumnBinding {
-            qualifier: Some(crate::scope::CORRELATED_QUALIFIER.to_string()),
-            name: index.to_string(),
-            ty,
-        });
-        Ok(Some(correlated_marker(index)))
-    }
-}
-
-/// The static type of a deferred expression: the type it infers to once every
-/// outer reference is a NULL of its column's type and every subquery a NULL of
-/// the type its projection describes to.
-fn correlated_expr_type(
-    read_ctx: &crate::subquery::SubCtx<'_>,
-    planned: &Expr,
-    outer: &Scope,
-    initplans: &[LazyInitPlan],
-    scalar_lookups: &[CorrelatedScalarLookup],
-) -> Result<ColumnType, ExecError> {
-    let nulls = vec![Datum::Null; outer.width()];
-    let mut binder =
-        LateralBinder::new(read_ctx.catalog_kv, read_ctx.fctx.resolution, read_ctx.ctes);
-    let (bound, _) = binder.bind_expr(planned, outer, &nulls)?;
-    let typed = type_without_evaluating_subqueries(read_ctx, &bound, initplans, scalar_lookups)?;
-    crate::eval::infer_type(&typed, outer)
-}
-
-/// Rewrite every select-list, `ORDER BY` and `DISTINCT ON` expression that reads
-/// the source row into a reference to a hidden column, and return the plan that
-/// fills those columns in.
-///
-/// Doing it as a rewrite rather than by threading a subquery context down into
-/// the projection is what keeps an ordinary select list on its existing path:
-/// once the statement carries no correlated expression, nothing downstream can
-/// tell this pass ran.
-fn plan_correlated_row_exprs(
-    read_ctx: &crate::subquery::SubCtx<'_>,
-    select: &SelectStmt,
-    outer: &Scope,
-) -> Result<(SelectStmt, Option<CorrelatedRowExprs>), ExecError> {
-    // With no source row there is nothing to correlate to. Grouping is excluded
-    // for a different reason: its output row is a fold of many source rows, and
-    // a hidden column carrying one source row's value would not survive it.
-    // `PostgreSQL` allows the shape when the correlation only reads grouped
-    // columns; here it keeps reporting the missing FROM entry it reports today.
-    if outer.width() == 0 || crate::grouping::is_grouping_query(select) {
-        return Ok((select.clone(), None));
-    }
-    let mut plan = CorrelatedRowExprs::default();
-    let mut rewritten = select.clone();
-    for item in &mut rewritten.projection {
-        let SelectItem::Expr { expr, alias } = item else {
-            continue;
-        };
-        let Some(marker) = plan.defer(read_ctx, expr, outer)? else {
-            continue;
-        };
-        // The marker is a column reference, and an unaliased item is labelled
-        // after its expression — so the label has to be pinned before the
-        // expression it was derived from is gone.
-        if alias.is_none() {
-            *alias = Some(derived_name(expr));
-        }
-        *expr = marker;
-    }
-    for item in &mut rewritten.order_by {
-        if let Some(marker) = plan.defer(read_ctx, &item.expr, outer)? {
-            item.expr = marker;
-        }
-    }
-    if let crabka_pgparser::ast::DistinctClause::On(on) = &mut rewritten.distinct {
-        for expr in on {
-            if let Some(marker) = plan.defer(read_ctx, expr, outer)? {
-                *expr = marker;
-            }
-        }
-    }
-    if plan.exprs.is_empty() {
-        return Ok((select.clone(), None));
-    }
-    Ok((rewritten, Some(plan)))
-}
-
-/// The reference standing in for the deferred expression at `index`.
-fn correlated_marker(index: usize) -> Expr {
-    Expr::Column {
-        table: Some(crate::scope::CORRELATED_QUALIFIER.to_string()),
-        name: index.to_string(),
-    }
-}
-
-/// Is this binding one of the hidden columns [`plan_correlated_row_exprs`] adds?
-/// `SELECT *` must not expand to them.
-fn is_correlated_binding(c: &ColumnBinding) -> bool {
-    c.qualifier.as_deref() == Some(crate::scope::CORRELATED_QUALIFIER)
-}
-
-/// Does a select list or `ORDER BY` refer to a hidden correlated column?
-fn select_mentions_correlated_marker(s: &SelectStmt) -> bool {
-    s.projection.iter().any(|item| match item {
-        SelectItem::Expr { expr, .. } => expr_mentions_correlated_marker(expr),
-        SelectItem::Wildcard | SelectItem::QualifiedWildcard(_) => false,
-    }) || s
-        .order_by
-        .iter()
-        .any(|item| expr_mentions_correlated_marker(&item.expr))
-}
-
-fn expr_mentions_correlated_marker(expr: &Expr) -> bool {
-    matches!(
-        expr,
-        Expr::Column { table: Some(table), .. } if table == crate::scope::CORRELATED_QUALIFIER
-    ) || expr_children(expr)
-        .into_iter()
-        .any(expr_mentions_correlated_marker)
-}
-
-/// Evaluate the deferred expressions for every source row, appending their
-/// values as the hidden columns the rewritten statement refers to.
-///
-/// Each row is bound and folded exactly the way a correlated `WHERE` is, so a
-/// dead CASE branch or an unselected COALESCE argument still does not run its
-/// subquery, and an uncorrelated subquery nested under one runs once.
-fn materialize_correlated_row_exprs(
-    read_ctx: &crate::subquery::SubCtx<'_>,
-    plan: CorrelatedRowExprs,
-    scope: &mut Scope,
-    rows: &mut [Vec<Datum>],
-) -> Result<(), ExecError> {
-    let CorrelatedRowExprs {
-        sources: _,
-        exprs,
-        bindings,
-        initplans,
-        scalar_lookups,
-    } = plan;
-    let mut binder =
-        LateralBinder::new(read_ctx.catalog_kv, read_ctx.fctx.resolution, read_ctx.ctes)
-            .with_initplans(initplans)
-            .with_scalar_lookups(scalar_lookups);
-    for row in rows.iter_mut() {
-        let mut values = Vec::with_capacity(exprs.len());
-        for expr in &exprs {
-            let (bound, _) = binder.bind_expr(expr, scope, row)?;
-            let folded =
-                fold_correlated_lazy_expressions(read_ctx, &bound, scope, row, &mut binder)?;
-            let initialized = resolve_lazy_initplans(read_ctx, &folded, &mut binder)?;
-            let resolved = crate::subquery::resolve_expr(read_ctx, &initialized)?;
-            values.push(crate::eval::eval(&resolved, scope, row, read_ctx.eval_ctx)?);
-        }
-        row.extend(values);
-    }
-    scope.columns.extend(bindings);
-    Ok(())
+    prepare_correlated_subqueries(read_ctx, select, &scope)
 }
 
 /// Resolve a SELECT while deferring only WHERE subtrees that read the SELECT's
@@ -13762,12 +13481,6 @@ fn top_k_pushdown_for_select(
     if crate::plan_dist::strict_predicate_for_filter(table, s.filter.as_ref()).is_err() {
         return Ok(None);
     }
-    // A correlated select-list or ORDER BY expression lives in a hidden column
-    // materialized ABOVE the scan, which the base-table scope this pushdown
-    // resolves against does not carry. Such a query keeps the full scan.
-    if select_mentions_correlated_marker(s) {
-        return Ok(None);
-    }
     let scope = Scope::single(table, qualifier);
     let (fields, out_exprs, _tys) = resolve_projection(&s.projection, &scope)?;
     let mut order_by = Vec::with_capacity(s.order_by.len());
@@ -13942,13 +13655,7 @@ pub(crate) fn select_to_relation_with_ctes(
     // uncorrelated ones must retain SP34's once-only folding. Only queries whose
     // WHERE contains a subquery pay for the schema description used to tell the
     // two apart.
-    let PlannedSubqueries {
-        select: resolved,
-        correlated_filter: correlated,
-        initplans,
-        scalar_lookups,
-        row_exprs,
-    } = resolve_select_subqueries(read_ctx, s)?;
+    let (resolved, correlated, initplans, scalar_lookups) = resolve_select_subqueries(read_ctx, s)?;
     let s = &resolved;
     crate::window::reject_misplaced_calls(s)?;
     crate::grouping::reject_misplaced_calls(s)?;
@@ -14014,31 +13721,24 @@ pub(crate) fn select_to_relation_with_ctes(
             kept.push(row.clone());
         }
     }
-    // A correlated select-list / ORDER BY / DISTINCT ON expression is evaluated
-    // here, once per surviving source row, and parked in a hidden column. The
-    // clauses below then see plain column references and run unchanged.
-    let mut scope = relation.scope;
-    if let Some(row_exprs) = row_exprs {
-        materialize_correlated_row_exprs(read_ctx, row_exprs, &mut scope, &mut kept)?;
-    }
     // Window functions run above WHERE/GROUP BY/HAVING and below DISTINCT/ORDER
     // BY/LIMIT, so they own the whole projection shape for the queries that use
     // them (including the grouped ones).
     let (fields, out_exprs, tys) = if crate::window::has_window_calls(s) {
-        let (fields, tys, rows) = crate::window::execute(s, &scope, kept, ctx)?;
+        let (fields, tys, rows) = crate::window::execute(s, &relation.scope, kept, ctx)?;
         return Ok(Relation {
             scope: projected_scope(&fields, &tys),
             rows,
         });
     } else {
-        resolve_projection(&s.projection, &scope)?
+        resolve_projection(&s.projection, &relation.scope)?
     };
     let out_scope = projected_scope(&fields, &tys);
     let rows = if crate::grouping::is_grouping_query(s) {
         crate::srf::reject_in_aggregate(&out_exprs)?;
-        crate::grouping::aggregate_rows(s, &scope, kept, ctx)?
+        crate::grouping::aggregate_rows(s, &relation.scope, kept, ctx)?
     } else {
-        project_rows_ordered(s, &scope, &fields, &out_exprs, kept, ctx)?
+        project_rows_ordered(s, &relation.scope, &fields, &out_exprs, kept, ctx)?
     };
     Ok(Relation {
         scope: out_scope,
@@ -14468,10 +14168,6 @@ fn virtual_catalog_columns(name: &str) -> Vec<Column> {
             ("typelem", Int4),
             ("typarray", Int4),
             ("typbasetype", Int4),
-            // `\d`'s collation column is `attcollation <> typcollation`, so the
-            // two have to be derived the same way or every text column would
-            // report a collation it does not have.
-            ("typcollation", Int4),
         ]),
         "pg_ts_config" => cols(&[
             ("oid", Int4),
@@ -15601,23 +15297,6 @@ fn text_collation_oid(ty: ColumnType) -> i32 {
     }
 }
 
-/// `pg_type.typcollation` for a built-in type oid: the same database default
-/// collation [`text_collation_oid`] gives a column of that type, so `\d`'s
-/// `attcollation <> typcollation` test answers false for an uncustomized column.
-fn builtin_type_collation_oid(oid: i32) -> i32 {
-    let collatable = matches!(
-        u32::try_from(oid),
-        Ok(crabka_pgtypes::oids::TEXT
-            | crabka_pgtypes::oids::VARCHAR
-            | crabka_pgtypes::oids::BPCHAR)
-    );
-    if collatable {
-        crate::catalog_rel::DEFAULT_COLLATION_OID
-    } else {
-        0
-    }
-}
-
 fn pg_type_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut rows: Vec<Vec<Datum>> = builtin_type_rows()
         .iter()
@@ -15644,7 +15323,6 @@ fn pg_type_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 int(ty.elem),
                 int(ty.array),
                 int(0),
-                int(builtin_type_collation_oid(ty.oid)),
             ]
         })
         .collect();
@@ -15726,7 +15404,6 @@ fn user_type_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             int(0),
             int(0),
             int(typbasetype),
-            int(text_collation_oid(column_type)),
         ]);
         if let (Some((schema, name)), Some(multirange)) =
             (ty.multirange_identity(), ty.multirange_type())
@@ -15740,7 +15417,6 @@ fn user_type_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 int(0),
                 text("m"),
                 text(","),
-                int(0),
                 int(0),
                 int(0),
                 int(0),
@@ -17428,15 +17104,9 @@ pub(crate) async fn execute_read_locking(
     // execute through the ordinary read path, which owns their single subquery
     // resolution; doing it before the shape decision would run volatile
     // uncorrelated subqueries twice.
-    let PlannedSubqueries {
-        select: resolved,
-        correlated_filter: correlated,
-        initplans,
-        scalar_lookups,
-        row_exprs,
-    } = resolve_select_subqueries(read_ctx, s)?;
+    let (resolved, correlated, initplans, scalar_lookups) = resolve_select_subqueries(read_ctx, s)?;
     let s = &resolved;
-    let mut scope = Scope::single(&t, &qualifier);
+    let scope = Scope::single(&t, &qualifier);
     let mut binder = correlated.then(|| {
         LateralBinder::new(catalog_kv, read_ctx.fctx.resolution, read_ctx.ctes)
             .with_initplans(initplans)
@@ -17546,9 +17216,6 @@ pub(crate) async fn execute_read_locking(
     }
 
     resolve_scanned_regclass(read_ctx.catalog_kv, &t, &mut kept)?;
-    if let Some(row_exprs) = row_exprs {
-        materialize_correlated_row_exprs(read_ctx, row_exprs, &mut scope, &mut kept)?;
-    }
     project_order_limit(s, &scope, kept, ctx)
 }
 
@@ -18249,13 +17916,10 @@ pub(crate) fn resolve_projection(
                 // `*` legitimately expands to nothing. A query with no FROM at
                 // all is rejected before it gets this far.
                 //
-                // The synthetic window-result, grouping-set and correlated
-                // select-list bindings are not part of the relation, so `*`
-                // never expands to them.
+                // The synthetic window-result and grouping-set bindings are not
+                // part of the relation, so `*` never expands to them.
                 for (index, c) in scope.columns.iter().enumerate().filter(|(_, c)| {
-                    !is_window_binding(c)
-                        && !crate::grouping::is_hidden_binding(c)
-                        && !is_correlated_binding(c)
+                    !is_window_binding(c) && !crate::grouping::is_hidden_binding(c)
                 }) {
                     fields.push(field(&c.name, c.ty));
                     exprs.push(wildcard_reference(scope, index, c));
@@ -26808,7 +26472,6 @@ mod tests {
                     "typelem",
                     "typarray",
                     "typbasetype",
-                    "typcollation",
                 ]
         );
         let rows = super::pg_type_rows(&crabka_pgkv::MemKv::default()).expect("pg_type rows");
@@ -26834,19 +26497,7 @@ mod tests {
                     super::int(23),
                     super::int(0),
                     super::int(0),
-                    super::int(0),
                 ]
-        );
-        // `text` is the collatable case: its `typcollation` has to be the same
-        // database default `attcollation` gives a text column, or `\d` reports a
-        // collation on every text column.
-        let text_row = rows
-            .iter()
-            .find(|row| row[0] == super::int(25))
-            .expect("text row");
-        assert!(
-            *text_row.last().expect("typcollation")
-                == super::int(crate::catalog_rel::DEFAULT_COLLATION_OID)
         );
     }
 

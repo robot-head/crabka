@@ -761,21 +761,27 @@ mod tests {
         ] {
             s.simple_query(sql).await.expect("setup");
         }
-        let got = column0(
-            &engine,
-            "SELECT NULL::text AS c \
-             UNION ALL \
-             SELECT CASE WHEN pr.prattrs IS NOT NULL \
-                         THEN (SELECT string_agg(a.attname, ', ') FROM att a \
-                               WHERE a.attrelid = pr.prrelid) \
-                    END \
-               FROM pr \
-             UNION ALL \
-             SELECT NULL::text",
-        )
-        .await;
-        // Row 2 correlates to prrelid=10; row 3 takes the CASE's implicit NULL.
-        assert!(got == vec![None, Some("id, name".to_owned()), None, None]);
+        let err = s
+            .simple_query(
+                "SELECT NULL::text AS c \
+                 UNION ALL \
+                 SELECT CASE WHEN pr.prattrs IS NOT NULL \
+                             THEN (SELECT string_agg(a.attname, ', ') FROM att a \
+                                   WHERE a.attrelid = pr.prrelid) \
+                        END \
+                   FROM pr \
+                 UNION ALL \
+                 SELECT NULL::text",
+            )
+            .await
+            .expect_err("the correlated branch cannot resolve its outer reference");
+        // The half this pins is type resolution: the branch is typed WITHOUT
+        // executing its subquery, so `infer_type` never sees an unresolved one
+        // and the internal error is gone. What remains is the missing feature --
+        // correlating a select-list subquery to the outer row, reverted because
+        // it returned one row per source row where an outer-level aggregate
+        // must return one -- so the reference itself is what goes unresolved.
+        assert!(format!("{err:?}").contains("missing FROM-clause entry"));
     }
 
     /// A positional ORDER BY past the number of output columns is PG 42P10
