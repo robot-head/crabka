@@ -1825,6 +1825,18 @@ pub enum AlterTableAction {
         expr: Expr,
     },
     DropDefault(String),
+    /// `ALTER [COLUMN] c SET EXPRESSION AS (<expr>)` — replace a generated
+    /// column's generation expression.
+    SetExpression {
+        column: String,
+        predicate: CheckPredicate,
+    },
+    /// `ALTER [COLUMN] c DROP EXPRESSION [IF EXISTS]` — turn a generated column
+    /// back into an ordinary one.
+    DropExpression {
+        column: String,
+        if_exists: bool,
+    },
     /// `ALTER [COLUMN] c TYPE t [USING expr]`.
     SetType {
         column: String,
@@ -2277,6 +2289,22 @@ pub struct IdentitySpec {
     pub options: SequenceOptions,
 }
 
+/// Whether a generated column's value is kept in the row (`STORED`) or
+/// recomputed on every read (`VIRTUAL`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GeneratedKind {
+    Stored,
+    /// `PostgreSQL` 18's default when neither keyword is written.
+    Virtual,
+}
+
+/// `GENERATED ALWAYS AS (<expr>) [STORED | VIRTUAL]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GeneratedSpec {
+    pub predicate: CheckPredicate,
+    pub kind: GeneratedKind,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ColumnConstraint {
     /// Explicit `CONSTRAINT <name>` label, when one was written.
@@ -2302,8 +2330,8 @@ pub enum ColumnConstraintKind {
     Check(CheckPredicate),
     References(ForeignKeyRef),
     Identity(IdentitySpec),
-    /// `GENERATED ALWAYS AS (<expr>) STORED`.
-    Generated(CheckPredicate),
+    /// `GENERATED ALWAYS AS (<expr>) [STORED | VIRTUAL]`.
+    Generated(GeneratedSpec),
 }
 
 #[derive(Debug, Clone, PartialEq)]

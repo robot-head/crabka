@@ -126,14 +126,36 @@ pub enum IdentityKind {
     ByDefault,
 }
 
+/// Whether a generated column's value is kept in the row or recomputed on
+/// every read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GeneratedKind {
+    /// `STORED`: computed on write and kept in the row.
+    Stored,
+    /// `VIRTUAL`: never stored. The row holds a NULL placeholder at the
+    /// column's position and every reader recomputes the value, which is why
+    /// changing the expression changes what rows written earlier report.
+    /// `PostgreSQL` 18 makes this the default when neither keyword is written.
+    Virtual,
+}
+
+/// A column's `GENERATED ALWAYS AS (…)` clause.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratedColumn {
+    /// Source text of the generation expression, without the enclosing parens.
+    pub expr: String,
+    /// Whether the value is written into the row or recomputed on every read.
+    pub kind: GeneratedKind,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Column {
     pub name: String,
     pub ty: ColumnType,
     pub not_null: bool,
     pub default: Option<ColumnDefault>,
-    /// `GENERATED ALWAYS AS (<expr>) STORED` source text, without the parens.
-    pub generated: Option<String>,
+    /// The column's `GENERATED ALWAYS AS (<expr>)` clause, stored or virtual.
+    pub generated: Option<GeneratedColumn>,
     /// Set when the column is an identity column; the sequence itself lives in
     /// `default` as a [`ColumnDefault::NextVal`].
     pub identity: Option<IdentityKind>,
@@ -149,6 +171,50 @@ impl Column {
             default: None,
             generated: None,
             identity: None,
+        }
+    }
+
+    /// The generation expression's source text, whatever its kind.
+    #[must_use]
+    pub fn generation_expr(&self) -> Option<&str> {
+        self.generated.as_ref().map(|g| g.expr.as_str())
+    }
+
+    /// True for `GENERATED ALWAYS AS (…) VIRTUAL`, whose value is never stored:
+    /// the row carries a NULL placeholder and each reader recomputes it.
+    #[must_use]
+    pub fn is_virtual_generated(&self) -> bool {
+        matches!(
+            self.generated,
+            Some(GeneratedColumn {
+                kind: GeneratedKind::Virtual,
+                ..
+            })
+        )
+    }
+
+    /// True for `GENERATED ALWAYS AS (…) STORED`, whose value is computed on
+    /// write and written into the row.
+    #[must_use]
+    pub fn is_stored_generated(&self) -> bool {
+        matches!(
+            self.generated,
+            Some(GeneratedColumn {
+                kind: GeneratedKind::Stored,
+                ..
+            })
+        )
+    }
+
+    /// `pg_attribute.attgenerated`: `"s"` for a stored generated column, `"v"`
+    /// for a virtual one, and the empty string for a column that is not
+    /// generated.
+    #[must_use]
+    pub fn attgenerated(&self) -> &'static str {
+        match self.generated.as_ref().map(|g| g.kind) {
+            Some(GeneratedKind::Stored) => "s",
+            Some(GeneratedKind::Virtual) => "v",
+            None => "",
         }
     }
 }
@@ -5572,7 +5638,10 @@ mod tests {
                 ty: ColumnType::Int4,
                 not_null: false,
                 default: None,
-                generated: Some("id * 2".into()),
+                generated: Some(GeneratedColumn {
+                    expr: "id * 2".into(),
+                    kind: GeneratedKind::Stored,
+                }),
                 identity: None,
             },
         ];
@@ -5604,8 +5673,47 @@ mod tests {
         assert!(table.checks == checks);
     }
 
-    /// `replace_table_schema_ops` swaps the column list and CHECK list and
-    /// keeps the table id and storage options. That is the contract every
+    /// The generated-column accessors report the kind a column was built with:
+    /// only a `VIRTUAL` column is virtual, only a `STORED` one is stored, and
+    /// `attgenerated` spells each the way `pg_attribute` does.
+    #[test]
+    fn generated_column_accessors_follow_the_kind() {
+        use assert2::assert;
+
+        for (generated, expr, stored, virt, attgenerated) in [
+            (None, None, false, false, ""),
+            (
+                Some(GeneratedKind::Stored),
+                Some("id * 2"),
+                true,
+                false,
+                "s",
+            ),
+            (
+                Some(GeneratedKind::Virtual),
+                Some("id * 2"),
+                false,
+                true,
+                "v",
+            ),
+        ] {
+            let column = Column {
+                generated: generated.map(|kind| GeneratedColumn {
+                    expr: "id * 2".into(),
+                    kind,
+                }),
+                ..Column::new("doubled", ColumnType::Int4)
+            };
+
+            assert!(column.generation_expr() == expr);
+            assert!(column.is_stored_generated() == stored);
+            assert!(column.is_virtual_generated() == virt);
+            assert!(column.attgenerated() == attgenerated);
+        }
+    }
+
+    /// `replace_table_schema_ops` swaps the column list and CHECK list while
+    /// preserving the table id and storage options — the contract every
     /// `ALTER TABLE` subcommand relies on.
     #[test]
     fn replacing_a_table_schema_preserves_its_identity() {

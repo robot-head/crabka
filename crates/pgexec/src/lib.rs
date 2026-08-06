@@ -130,7 +130,7 @@ use crabka_pgwire::engine::Engine;
 use crabka_units::convert::{ByteSizeExt as _, TimeExt as _};
 pub use error::{
     DependentForeignKey, DroppedObject, ExecError, ForeignKeyDependents, ForeignKeyTypeMismatch,
-    ForeignKeyViolation, ForeignKeyViolationSide, GucRangeViolation,
+    ForeignKeyViolation, ForeignKeyViolationSide, GucRangeViolation, VirtualGeneratedSubcommand,
 };
 pub use gtm::GlobalXidLease;
 pub use hlc::{Hlc, HybridLogicalClock};

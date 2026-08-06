@@ -297,6 +297,9 @@ struct MutationContext<'a> {
     snapshot: &'a crabka_pgmvcc::visibility::Snapshot,
     xid: u64,
     repeatable_read: bool,
+    /// Carried so that [`eval_plan_qual`] can fill in the virtual generated
+    /// columns of the version it re-reads from storage.
+    eval_ctx: &'a crate::clock::EvalCtx,
 }
 
 impl WriteContext<'_> {
@@ -308,6 +311,7 @@ impl WriteContext<'_> {
             snapshot: self.snapshot,
             xid: self.xid,
             repeatable_read: self.repeatable_read,
+            eval_ctx: self.eval_ctx,
         }
     }
 
@@ -1069,6 +1073,7 @@ pub(crate) fn execute_ddl(
                 ));
             }
             let table_meta = crabka_pgcatalog::get_table(kv, table)?;
+            reject_index_over_virtual_generated(&table_meta, columns, None)?;
             validate_index_opclasses(kv, resolution, &table_meta, keys, index_method)?;
             validate_index_expressions(&table_meta, keys, *unique, placement, index_method)?;
             validate_index_method(&table_meta, columns, *unique, placement, index_method)?;
@@ -1933,13 +1938,49 @@ fn column_from_ast(
                 catalog_column.default = Some(ColumnDefault::NextVal(sequence_name.to_string()));
                 serial_sequences.push((sequence_name, sequence_from_options(&spec.options)));
             }
-            crabka_pgparser::ast::ColumnConstraintKind::Generated(predicate) => {
-                catalog_column.generated = Some(predicate.text.clone());
+            crabka_pgparser::ast::ColumnConstraintKind::Generated(spec) => {
+                if catalog_column.generated.is_some() {
+                    return Err(ExecError::Syntax(format!(
+                        "multiple generation clauses specified for column \"{}\" of table \"{}\"",
+                        column.name, table_name.name
+                    )));
+                }
+                catalog_column.generated = Some(crabka_pgcatalog::GeneratedColumn {
+                    expr: spec.predicate.text.clone(),
+                    kind: match spec.kind {
+                        crabka_pgparser::ast::GeneratedKind::Stored => {
+                            crabka_pgcatalog::GeneratedKind::Stored
+                        }
+                        crabka_pgparser::ast::GeneratedKind::Virtual => {
+                            crabka_pgcatalog::GeneratedKind::Virtual
+                        }
+                    },
+                });
             }
             // A column-level CHECK or REFERENCES contributes a constraint, not a
             // column property; `create_table_definition` collects both.
             crabka_pgparser::ast::ColumnConstraintKind::Check(_)
             | crabka_pgparser::ast::ColumnConstraintKind::References(_) => {}
+        }
+    }
+    // A generated column's value comes from its expression and from nowhere
+    // else, so a second source for it is a contradiction rather than a
+    // precedence question. Identity is tested first because it plants a
+    // `nextval` default of its own.
+    if catalog_column.generated.is_some() {
+        if catalog_column.identity.is_some() {
+            return Err(ExecError::Syntax(format!(
+                "both identity and generation expression specified for column \"{}\" of table \
+                 \"{}\"",
+                column.name, table_name.name
+            )));
+        }
+        if catalog_column.default.is_some() {
+            return Err(ExecError::Syntax(format!(
+                "both default and generation expression specified for column \"{}\" of table \
+                 \"{}\"",
+                column.name, table_name.name
+            )));
         }
     }
     Ok(catalog_column)
@@ -2433,6 +2474,17 @@ fn build_insert_row(
 ) -> Result<Vec<Datum>, ExecError> {
     let mut row = unsupplied_defaults(table, target_idx, ctx)?;
     for (slot, expr) in target_idx.iter().zip(row_exprs.iter()) {
+        // A `GENERATED ALWAYS` column takes its value from its expression, so
+        // the only value a statement may name for it is `DEFAULT`.
+        if table.columns[*slot].generated.is_some() && !matches!(expr, Expr::Default) {
+            return Err(ExecError::GeneratedColumnWrite {
+                message: format!(
+                    "cannot insert a non-DEFAULT value into column \"{}\"",
+                    table.columns[*slot].name
+                ),
+                column: table.columns[*slot].name.clone(),
+            });
+        }
         let value = match expr {
             Expr::Default => default_value(&table.columns[*slot], ctx)?,
             Expr::StringLiteral(value) => {
@@ -2565,15 +2617,25 @@ pub(crate) fn finish_written_row(
     ctx: &crate::clock::EvalCtx,
 ) -> Result<(), ExecError> {
     apply_generated_columns(table, row, ctx)?;
-    for (column, value) in table.columns.iter().zip(row.iter()) {
+    // The constraints are checked against a *logically* complete row: `row`
+    // itself keeps the NULL placeholder a virtual column stores, and the
+    // expansion happens on a copy only when a constraint could read it.
+    let checked = if virtual_generated_needed_for_constraints(table) {
+        let mut expanded = row.to_vec();
+        expand_virtual_generated_row(table, &mut expanded, ctx)?;
+        std::borrow::Cow::Owned(expanded)
+    } else {
+        std::borrow::Cow::Borrowed(&*row)
+    };
+    for (column, value) in table.columns.iter().zip(checked.iter()) {
         crate::usertype::check_domain(column.ty, value, ctx)?;
     }
-    enforce_not_null(table, row)?;
+    enforce_not_null(table, &checked)?;
     if table.checks.is_empty() {
         return Ok(());
     }
     let checks = compile_check_constraints(table)?;
-    enforce_check_constraints(table, &checks, row, ctx)
+    enforce_check_constraints(table, &checks, &checked, ctx)
 }
 
 fn enforce_not_null(table: &Table, row: &[Datum]) -> Result<(), ExecError> {
@@ -3953,7 +4015,8 @@ async fn partitioned_insert(
         }
         ops.push(crabka_pgkv::WriteOp::Put {
             key: crabka_pgmvcc::version::version_key_xid(leaf.id, rowid, write_ctx.xid),
-            value: crabka_pgmvcc::version::encode_tuple(
+            value: encode_table_tuple(
+                &leaf,
                 write_ctx.xid,
                 crabka_pgmvcc::xid::INVALID_XID,
                 &leaf_row,
@@ -4410,11 +4473,7 @@ async fn execute_write_body(
                 }
                 ops.push(crabka_pgkv::WriteOp::Put {
                     key: crabka_pgmvcc::version::version_key_xid(t.id, rowid, xid),
-                    value: crabka_pgmvcc::version::encode_tuple(
-                        xid,
-                        crabka_pgmvcc::xid::INVALID_XID,
-                        &full,
-                    ),
+                    value: encode_table_tuple(&t, xid, crabka_pgmvcc::xid::INVALID_XID, &full),
                 });
                 ops.extend(local_index_entry_ops(&t, &local_indexes, rowid, &full)?);
                 crate::trigger::fire_after_row(
@@ -4997,6 +5056,19 @@ fn apply_assignments(
 ) -> Result<Vec<Datum>, ExecError> {
     let mut next = joined_row[..table.columns.len()].to_vec();
     for (idx, value) in targets {
+        // As on the INSERT side, `DEFAULT` is the only value an `UPDATE` may
+        // name for a generated column.
+        if table.columns[*idx].generated.is_some()
+            && !matches!(value, AssignedValue::Expr(Expr::Default))
+        {
+            return Err(ExecError::GeneratedColumnWrite {
+                message: format!(
+                    "column \"{}\" can only be updated to DEFAULT",
+                    table.columns[*idx].name
+                ),
+                column: table.columns[*idx].name.clone(),
+            });
+        }
         let raw = match value {
             AssignedValue::Value(value) => value.clone(),
             AssignedValue::Expr(Expr::Default) => default_value(&table.columns[*idx], ctx)?,
@@ -5079,6 +5151,11 @@ struct ReturningSpec {
     new_offset: usize,
     /// `MERGE` appends one `merge_action()` column after the image blocks.
     merge: bool,
+    /// The target relation, kept only when it has a `VIRTUAL` generated column.
+    /// The post-image a write hands back carries the NULL placeholder that goes
+    /// to storage, so `RETURNING` has to produce the value the next reader would
+    /// see rather than print the placeholder.
+    target: Option<Box<Table>>,
     active: bool,
 }
 
@@ -5104,6 +5181,7 @@ impl ReturningSpec {
                 old_offset: 0,
                 new_offset: 0,
                 merge,
+                target: None,
                 active: false,
             });
         };
@@ -5227,6 +5305,7 @@ impl ReturningSpec {
             old_offset,
             new_offset,
             merge,
+            target: has_virtual_generated(table).then(|| Box::new(table.clone())),
             active: true,
         })
     }
@@ -5243,7 +5322,12 @@ impl ReturningSpec {
         let width = self.new_offset - self.old_offset;
         let combined: Vec<Vec<Datum>> = rows
             .into_iter()
-            .map(|row| {
+            .map(|mut row| {
+                if let Some(target) = &self.target {
+                    for image in [&mut row.old, &mut row.new].into_iter().flatten() {
+                        expand_virtual_generated_row(target, image, ctx)?;
+                    }
+                }
                 let nulls = vec![Datum::Null; width];
                 // The visible target columns show the post-image, or the
                 // pre-image for a DELETE, which is what PostgreSQL projects.
@@ -5258,9 +5342,9 @@ impl ReturningSpec {
                 if self.merge {
                     out.push(row.action.map_or(Datum::Null, |a| Datum::Text(a.into())));
                 }
-                out
+                Ok(out)
             })
-            .collect();
+            .collect::<Result<_, ExecError>>()?;
         let (fields, out_exprs, tys) = resolve_projection(&self.items, &self.scope)?;
         let projected = project_rows(&out_exprs, &self.scope, &combined, ctx)?;
         let scope = Scope {
@@ -5657,11 +5741,7 @@ async fn execute_merge(
         }
         ops.push(crabka_pgkv::WriteOp::Put {
             key: crabka_pgmvcc::version::version_key_xid(t.id, rowid, write_ctx.xid),
-            value: crabka_pgmvcc::version::encode_tuple(
-                write_ctx.xid,
-                crabka_pgmvcc::xid::INVALID_XID,
-                &full,
-            ),
+            value: encode_table_tuple(&t, write_ctx.xid, crabka_pgmvcc::xid::INVALID_XID, &full),
         });
         ops.extend(local_index_entry_ops(&t, &local_indexes, rowid, &full)?);
         crate::trigger::fire_after_row(
@@ -5884,16 +5964,12 @@ async fn apply_merge_row_action(
                         request.rowid,
                         write_ctx.xid,
                     ),
-                    value: crabka_pgmvcc::version::encode_tuple(
-                        write_ctx.xid,
-                        write_ctx.xid,
-                        &cur_row,
-                    ),
+                    value: encode_table_tuple(t, write_ctx.xid, write_ctx.xid, &cur_row),
                 });
             } else {
                 ops.push(crabka_pgkv::WriteOp::Put {
                     key: crabka_pgmvcc::version::version_key_xid(t.id, request.rowid, cur_key_xid),
-                    value: crabka_pgmvcc::version::encode_tuple(cur_xmin, write_ctx.xid, &cur_row),
+                    value: encode_table_tuple(t, cur_xmin, write_ctx.xid, &cur_row),
                 });
             }
             crate::trigger::fire_after_row(
@@ -6089,11 +6165,7 @@ pub(crate) async fn execute_copy_write(
         }
         ops.push(crabka_pgkv::WriteOp::Put {
             key: crabka_pgmvcc::version::version_key_xid(table.id, rowid, snapshot_xid),
-            value: crabka_pgmvcc::version::encode_tuple(
-                snapshot_xid,
-                crabka_pgmvcc::xid::INVALID_XID,
-                &full,
-            ),
+            value: encode_table_tuple(&table, snapshot_xid, crabka_pgmvcc::xid::INVALID_XID, &full),
         });
         ops.extend(local_index_entry_ops(&table, local_indexes, rowid, &full)?);
         crate::trigger::fire_after_row(
@@ -7189,7 +7261,7 @@ async fn apply_locked_row_update(
         // ids, so in-place replacement is the faithful observable result.
         ops.push(crabka_pgkv::WriteOp::Put {
             key: crabka_pgmvcc::version::version_key_xid(table.id, rowid, xid),
-            value: crabka_pgmvcc::version::encode_tuple(xid, crabka_pgmvcc::xid::INVALID_XID, next),
+            value: encode_table_tuple(table, xid, crabka_pgmvcc::xid::INVALID_XID, next),
         });
     } else {
         // Supersede a committed version: stamp its xmax, write a new
@@ -7198,11 +7270,11 @@ async fn apply_locked_row_update(
         // (`FROZEN_XID`) no longer names its key.
         ops.push(crabka_pgkv::WriteOp::Put {
             key: crabka_pgmvcc::version::version_key_xid(table.id, rowid, cur_key_xid),
-            value: crabka_pgmvcc::version::encode_tuple(cur_xmin, xid, cur_row),
+            value: encode_table_tuple(table, cur_xmin, xid, cur_row),
         });
         ops.push(crabka_pgkv::WriteOp::Put {
             key: crabka_pgmvcc::version::version_key_xid(table.id, rowid, xid),
-            value: crabka_pgmvcc::version::encode_tuple(xid, crabka_pgmvcc::xid::INVALID_XID, next),
+            value: encode_table_tuple(table, xid, crabka_pgmvcc::xid::INVALID_XID, next),
         });
     }
     ops.extend(local_index_entry_ops(table, local_indexes, rowid, next)?);
@@ -7274,14 +7346,14 @@ fn apply_locked_row_delete(
         // xmax set.
         ops.push(crabka_pgkv::WriteOp::Put {
             key: crabka_pgmvcc::version::version_key_xid(table.id, rowid, xid),
-            value: crabka_pgmvcc::version::encode_tuple(xid, xid, cur_row),
+            value: encode_table_tuple(table, xid, xid, cur_row),
         });
     } else {
         // Set xmax = my xid on the matched version (keep its row bytes),
         // targeting its PHYSICAL key — see `apply_locked_row_update`.
         ops.push(crabka_pgkv::WriteOp::Put {
             key: crabka_pgmvcc::version::version_key_xid(table.id, rowid, cur_key_xid),
-            value: crabka_pgmvcc::version::encode_tuple(cur_xmin, xid, cur_row),
+            value: encode_table_tuple(table, cur_xmin, xid, cur_row),
         });
     }
     // Opportunistic per-rowid chain pruning (local engines only). The tombstoned
@@ -7899,7 +7971,7 @@ fn write_candidate_rows(
     crate::privilege::require_write(&write_ctx.privileges(), table, action, reads_target_columns)?;
     let using =
         crate::rls::RowSecurityUsing::compile(&write_ctx.rls(), table, action.policy_command())?;
-    let rows = if let Some((index, value)) =
+    let mut rows: Vec<(u64, u64, Vec<Datum>)> = if let Some((index, value)) =
         choose_write_index_probe(write_ctx.catalog_kv, table, filter)?
     {
         lookup_local_index_equal(&write_ctx.mvcc_read(), table, &index, &[value])?
@@ -7916,6 +7988,12 @@ fn write_candidate_rows(
             table,
         )?
     };
+    // The `USING` qual, the statement's own WHERE, and any `RETURNING old.*`
+    // all read these rows, so a virtual generated column has to hold its value
+    // before any of them run.
+    for (_, _, row) in &mut rows {
+        expand_virtual_generated_row(table, row, write_ctx.eval_ctx)?;
+    }
     using.retain_visible(table, rows, write_ctx.eval_ctx)
 }
 
@@ -8680,16 +8758,25 @@ fn eval_plan_qual(
             )
             && !snapshot_can_see(snapshot, version.xmax)
     });
-    if changed_since_snapshot {
+    let mut found = if changed_since_snapshot {
         if repeatable_read {
             return Err(ExecError::SerializationFailure);
         }
         // READ COMMITTED: re-find the latest live version under a FRESH snapshot.
         let fresh = procarray.snapshot();
-        return find_visible_one_keyed(kv, global, &settled_global, &fresh, Some(xid), &versions);
+        find_visible_one_keyed(kv, global, &settled_global, &fresh, Some(xid), &versions)?
+    } else {
+        // No concurrent committed change: find the version visible to our snapshot.
+        find_visible_one_keyed(kv, global, &settled_global, snapshot, Some(xid), &versions)?
+    };
+    // This version came straight off the disk, where a virtual generated column
+    // is a NULL placeholder. Callers re-check the statement's qual against it
+    // and may hand it to `RETURNING old.*`, so it is completed here rather than
+    // at each of them.
+    if let Some((_, _, row)) = &mut found {
+        expand_virtual_generated_row(table, row, mutation.eval_ctx)?;
     }
-    // No concurrent committed change: find the version visible to our snapshot.
-    find_visible_one_keyed(kv, global, &settled_global, snapshot, Some(xid), &versions)
+    Ok(found)
 }
 
 /// [`find_visible_one`] over [`ChainVersion`]s, additionally returning the
@@ -10095,6 +10182,11 @@ fn build_correlated_scalar_lookup(
     read_ctx: &crate::subquery::SubCtx<'_>,
     plan: &CorrelatedScalarLookup,
 ) -> Result<CorrelatedScalarLookupState, ExecError> {
+    // The lookup projects columns straight out of storage, where a virtual
+    // generated column is a NULL placeholder; the ordinary scan materializes it.
+    if has_virtual_generated(&plan.table) {
+        return Ok(CorrelatedScalarLookupState::Fallback);
+    }
     let projected_columns = if plan.key_column == plan.result_column {
         vec![plan.key_column]
     } else {
@@ -11724,10 +11816,19 @@ fn scan_stored_relation(
         let mut rows =
             scanner.scan(t, &server, mapping.as_ref(), scan_bounds, read_ctx.eval_ctx)?;
         resolve_scanned_regclass(catalog_kv, t, &mut rows)?;
+        expand_virtual_generated(t, &mut rows, read_ctx.eval_ctx)?;
         return Ok(crate::rls::RawScan::of_relation(t, scope, rows));
     }
     let default_scan_plan = crate::plan_dist::DistributedScanPlan::default();
-    let requested = scan_plan.unwrap_or(&default_scan_plan);
+    // A pushed-down predicate, projection, aggregate or top-K reads the row as
+    // it sits in storage, where a `VIRTUAL` generated column is a NULL
+    // placeholder. Such a relation is scanned whole and filtered above the
+    // scan, after `expand_virtual_generated` has produced the real values.
+    let requested = if has_virtual_generated(t) {
+        &default_scan_plan
+    } else {
+        scan_plan.unwrap_or(&default_scan_plan)
+    };
     let decision = crate::rls::decide(
         &read_ctx.rls(),
         t,
@@ -11743,6 +11844,7 @@ fn scan_stored_relation(
     {
         let mut rows: Vec<Vec<Datum>> = rows.into_iter().map(|scanned| scanned.row).collect();
         resolve_scanned_regclass(catalog_kv, t, &mut rows)?;
+        expand_virtual_generated(t, &mut rows, read_ctx.eval_ctx)?;
         return Ok(crate::rls::RawScan::of_relation(t, scope, rows));
     }
     let scan_request = ScanRequest {
@@ -11794,6 +11896,7 @@ fn scan_stored_relation(
     .collect();
     let mut rows: Vec<Vec<Datum>> = rows;
     resolve_scanned_regclass(catalog_kv, t, &mut rows)?;
+    expand_virtual_generated(t, &mut rows, read_ctx.eval_ctx)?;
     Ok(crate::rls::RawScan::of_relation(t, scope, rows))
 }
 
@@ -12273,6 +12376,11 @@ fn try_distributed_inner_equi_join(
         || !right_table.sharded
         || left_table.foreign.is_some()
         || right_table.foreign.is_some()
+        // The scanner joins remotely on the rows as they sit in storage, where
+        // a virtual generated column is a NULL placeholder. Such a relation
+        // falls back to the ordinary scan, which materializes it first.
+        || has_virtual_generated(&left_table)
+        || has_virtual_generated(&right_table)
     {
         return Ok(None);
     }
@@ -12585,6 +12693,11 @@ fn try_execute_partial_aggregate_pushdown(
         return Ok(None);
     };
     let table = table.get();
+    // As in `local_streaming_aggregate_plan`: the range owners fold over stored
+    // bytes, which hold nothing for a virtual generated column.
+    if has_virtual_generated(table) {
+        return Ok(None);
+    }
     let spec = if s.group_by.is_empty() {
         crate::plan_dist::plan_scan(table, s.filter.as_ref(), &s.projection).partial_aggregate
     } else {
@@ -12959,6 +13072,12 @@ impl StreamingAggregatePlan {
 /// evaluate over the finalized values. `None` when any part falls outside the
 /// model, and the caller then keeps the materializing scan.
 fn local_streaming_aggregate_plan(table: &Table, s: &SelectStmt) -> Option<StreamingAggregatePlan> {
+    // The fold runs inside the scanner, over the rows as they sit in storage,
+    // where a virtual generated column is a NULL placeholder. Such a relation
+    // takes the ordinary path, which materializes the value first.
+    if has_virtual_generated(table) {
+        return None;
+    }
     if !s.group_by.is_empty() {
         return crate::plan_dist::grouped_partial_aggregate_for_select(
             table,
@@ -15030,7 +15149,7 @@ fn attribute_rows_for_table(relid: i32, table: &Table) -> Result<Vec<Vec<Datum>>
                 Datum::Bool(column.default.is_some()),
                 Datum::Bool(false),
                 text(identity),
-                text(if column.generated.is_some() { "s" } else { "" }),
+                text(column.attgenerated()),
                 Datum::Bool(false),
                 Datum::Bool(true),
                 Datum::Int2(0),
@@ -16817,7 +16936,7 @@ pub(crate) async fn execute_read_locking(
     for ScannedRow {
         rowid,
         xmin: scanned_xmin,
-        row: scanned_row,
+        row: mut scanned_row,
     } in read_ctx.range_scanner.scan(ScanRequest {
         local: kv,
         global,
@@ -16833,6 +16952,7 @@ pub(crate) async fn execute_read_locking(
         partial_aggregate: None,
         top_k: None,
     })? {
+        expand_virtual_generated_row(&t, &mut scanned_row, ctx)?;
         // 1. Filter on the snapshot-visible row FIRST — only lock rows that
         //    match the WHERE clause (a FOR UPDATE/SHARE with no WHERE still
         //    locks all rows because row_matches(None, ..) returns true).
@@ -16880,6 +17000,7 @@ pub(crate) async fn execute_read_locking(
                 snapshot,
                 xid,
                 repeatable_read,
+                eval_ctx: ctx,
             },
             &t,
             rowid,
@@ -18379,6 +18500,13 @@ fn create_table_definition(
         validate_check_predicate(&table_for_validation, &check.expr)?;
     }
     validate_generation_expressions(&table_for_validation)?;
+    for index in &indexes {
+        reject_index_over_virtual_generated(
+            &table_for_validation,
+            &index.columns,
+            index.constraint.as_ref(),
+        )?;
+    }
     // PostgreSQL keeps one constraint namespace per relation, so a name shared
     // by constraints of *different* kinds is 42710. Two index-backed
     // constraints collide on the index name first, which the catalog reports as
@@ -18506,17 +18634,56 @@ fn push_table_check(
     Ok(())
 }
 
-/// Reject a `GENERATED ALWAYS AS (…) STORED` expression `PostgreSQL` refuses at
-/// DDL time. A generation expression may read only plain stored columns of the
-/// same row: another generated column is 42P17 (`PostgreSQL` has no ordering
-/// guarantee that would make it well-defined), and a subquery or aggregate is
-/// 0A000 / 42803.
+/// Reject an index — plain, `UNIQUE`, `PRIMARY KEY` or `EXCLUDE` — over a
+/// `VIRTUAL` generated column.
+///
+/// `PostgreSQL` 18 has no way to keep such an index in step: the value it would
+/// key on is computed at read time from an expression the catalog can change
+/// under it, and no row write announces that change. So it refuses the index,
+/// wording the refusal after the constraint the index backs.
+fn reject_index_over_virtual_generated(
+    table: &Table,
+    keys: &[String],
+    constraint: Option<&crabka_pgcatalog::IndexConstraint>,
+) -> Result<(), ExecError> {
+    let over_virtual = keys.iter().any(|key| {
+        table
+            .column_index(key)
+            .is_some_and(|index| table.columns[index].is_virtual_generated())
+    });
+    if !over_virtual {
+        return Ok(());
+    }
+    Err(ExecError::Unsupported(
+        match constraint {
+            Some(crabka_pgcatalog::IndexConstraint::PrimaryKey) => {
+                "primary keys on virtual generated columns are not supported"
+            }
+            Some(crabka_pgcatalog::IndexConstraint::Unique) => {
+                "unique constraints on virtual generated columns are not supported"
+            }
+            Some(crabka_pgcatalog::IndexConstraint::Exclusion(_)) => {
+                "exclusion constraints on virtual generated columns are not supported"
+            }
+            None => "indexes on virtual generated columns are not supported",
+        }
+        .into(),
+    ))
+}
+
+/// Reject a `GENERATED ALWAYS AS (…)` expression `PostgreSQL` refuses at DDL
+/// time, for either kind of generated column.
+///
+/// A generation expression may read only plain stored columns of the same row:
+/// another generated column is 42P17 (`PostgreSQL` has no ordering guarantee
+/// that would make it well-defined), a system column other than `tableoid` is
+/// 42P17, and a subquery or aggregate is 0A000 / 42803.
 fn validate_generation_expressions(table: &Table) -> Result<(), ExecError> {
     use crabka_pgparser::ast::Expr;
 
     let scope = Scope::single(table, &table.name.name);
     for column in &table.columns {
-        let Some(source) = &column.generated else {
+        let Some(source) = column.generation_expr() else {
             continue;
         };
         let expr = crabka_pgparser::parser::parse_expression(source)?;
@@ -18532,6 +18699,18 @@ fn validate_generation_expressions(table: &Table) -> Result<(), ExecError> {
                 | Expr::Quantified { .. } => Some(ExecError::Unsupported(
                     "cannot use subquery in column generation expression".into(),
                 )),
+                // Every system column but `tableoid` is off limits: the
+                // expression is evaluated where the row's own MVCC header is
+                // not yet decided (STORED) or no longer authoritative
+                // (VIRTUAL), so reading one would be reading a value that has
+                // not settled.
+                Expr::Column { name, .. }
+                    if crate::partition::is_generation_forbidden_system_column(name) =>
+                {
+                    Some(ExecError::InvalidObjectDefinition(format!(
+                        "cannot use system column \"{name}\" in column generation expression"
+                    )))
+                }
                 Expr::Column {
                     table: qualifier,
                     name,
@@ -18544,11 +18723,10 @@ fn validate_generation_expressions(table: &Table) -> Result<(), ExecError> {
                     }
                     Ok(_) => None,
                 },
-                // PostgreSQL stores a generated column's value, so the
-                // expression has to be IMMUTABLE: anything reading the clock,
-                // the session, a sequence, or a random source would make the
-                // stored value disagree with its own expression on the next
-                // write.
+                // The expression has to be IMMUTABLE for either kind. A STORED
+                // column would otherwise hold a value its own expression no
+                // longer produces; a VIRTUAL one would report a different value
+                // on every read of the same unchanged row.
                 Expr::Func(call) if !is_immutable_function(&call.name) => {
                     Some(ExecError::InvalidObjectDefinition(
                         "generation expression is not immutable".into(),
@@ -18634,7 +18812,16 @@ fn backfill_generated_column(
     index: usize,
     ctx: &crate::clock::EvalCtx,
 ) -> Result<(), ExecError> {
-    let Some(source) = state.table.columns[index].generated.clone() else {
+    // A virtual column stores nothing, so there is nothing to fill in. Leaving
+    // the rows alone is what makes a later `SET EXPRESSION` observable on rows
+    // written before it.
+    if state.table.columns[index].is_virtual_generated() {
+        return Ok(());
+    }
+    let Some(source) = state.table.columns[index]
+        .generation_expr()
+        .map(str::to_owned)
+    else {
         return Ok(());
     };
     let ty = state.table.columns[index].ty;
@@ -18878,8 +19065,12 @@ pub(crate) fn enforce_check_constraints(
     Ok(())
 }
 
-/// Compute the stored values of every `GENERATED ALWAYS AS (…) STORED` column
-/// for one candidate row, in place.
+/// Settle every `GENERATED ALWAYS AS (…)` column of one candidate row, in place.
+///
+/// A `STORED` column is computed here, because its value is what gets written.
+/// A `VIRTUAL` column is *blanked* here, whatever the row arrived carrying — a
+/// `BEFORE` trigger that assigned to it does not get to have that value — and
+/// is computed later only where something actually reads it.
 pub(crate) fn apply_generated_columns(
     table: &Table,
     row: &mut [Datum],
@@ -18895,12 +19086,124 @@ pub(crate) fn apply_generated_columns(
     let scope = Scope::single(table, &table.name.name);
     let snapshot = row.to_vec();
     for (index, column) in table.columns.iter().enumerate() {
-        let Some(source) = &column.generated else {
+        if column.is_virtual_generated() {
+            row[index] = Datum::Null;
+            continue;
+        }
+        let Some(source) = column.generation_expr() else {
             continue;
         };
         let expr = crabka_pgparser::parser::parse_expression(source)?;
         let value = eval_assignment_value(&expr, column.ty, &scope, &snapshot, ctx)?;
         row[index] = coerce(value, column.ty, ctx)?;
+    }
+    Ok(())
+}
+
+/// Whether a write has to evaluate `table`'s virtual generated columns in order
+/// to check the row it is about to store.
+///
+/// Only a `NOT NULL` on the column itself or a `CHECK` on the relation can
+/// depend on one. When neither exists, the expression is never evaluated on the
+/// write path at all — which is why `PostgreSQL` reports an expression that
+/// overflows on the next *read* of the row rather than on the insert.
+fn virtual_generated_needed_for_constraints(table: &Table) -> bool {
+    has_virtual_generated(table)
+        && (!table.checks.is_empty()
+            || table
+                .columns
+                .iter()
+                .any(|column| column.is_virtual_generated() && column.not_null))
+}
+
+/// Whether `table` has a column whose value is never written down.
+pub(crate) fn has_virtual_generated(table: &Table) -> bool {
+    table.columns.iter().any(Column::is_virtual_generated)
+}
+
+/// `row` as it is written to storage: every `VIRTUAL` generated column blanked
+/// back to NULL.
+///
+/// A virtual generated column occupies no storage. The physical row keeps a
+/// NULL placeholder at the column's position — the row stays full width, so
+/// every positional consumer of a decoded row is unaffected — and readers
+/// recompute the value from the expression the catalog holds *at read time*.
+/// That is the whole observable difference from `STORED`: changing the
+/// expression changes what rows written before the change report.
+fn stored_row<'a>(table: &Table, row: &'a [Datum]) -> std::borrow::Cow<'a, [Datum]> {
+    if !has_virtual_generated(table) {
+        return std::borrow::Cow::Borrowed(row);
+    }
+    let mut stored = row.to_vec();
+    for (index, _) in table
+        .columns
+        .iter()
+        .enumerate()
+        .filter(|(_, column)| column.is_virtual_generated())
+    {
+        if let Some(slot) = stored.get_mut(index) {
+            *slot = Datum::Null;
+        }
+    }
+    std::borrow::Cow::Owned(stored)
+}
+
+/// Encode one MVCC row version of `table` for storage.
+///
+/// Every write path in the executor goes through here rather than calling
+/// [`crabka_pgmvcc::version::encode_tuple`] directly, so that "a `VIRTUAL`
+/// generated column is not stored" holds by construction instead of by each
+/// write path remembering to blank it. See [`stored_row`].
+pub(crate) fn encode_table_tuple(table: &Table, xmin: u64, xmax: u64, row: &[Datum]) -> Vec<u8> {
+    crabka_pgmvcc::version::encode_tuple(xmin, xmax, &stored_row(table, row))
+}
+
+/// Fill in every `VIRTUAL` generated column of one row read back from storage,
+/// where it sits as a NULL placeholder.
+///
+/// This is the read-side counterpart of [`encode_table_tuple`]: the value a
+/// reader sees is produced here, from the catalog's *current* expression, and
+/// never read off the disk.
+pub(crate) fn expand_virtual_generated_row(
+    table: &Table,
+    row: &mut [Datum],
+    ctx: &crate::clock::EvalCtx,
+) -> Result<(), ExecError> {
+    if !has_virtual_generated(table) {
+        return Ok(());
+    }
+    let scope = Scope::single(table, &table.name.name);
+    let snapshot = row.to_vec();
+    for (index, column) in table.columns.iter().enumerate() {
+        if !column.is_virtual_generated() {
+            continue;
+        }
+        let Some(source) = column.generation_expr() else {
+            continue;
+        };
+        // A row narrower than the catalog belongs to an in-flight DDL working
+        // set, which fills the new column itself.
+        if index >= row.len() {
+            continue;
+        }
+        let expr = crabka_pgparser::parser::parse_expression(source)?;
+        let value = eval_assignment_value(&expr, column.ty, &scope, &snapshot, ctx)?;
+        row[index] = coerce(value, column.ty, ctx)?;
+    }
+    Ok(())
+}
+
+/// [`expand_virtual_generated_row`] over a batch of scanned rows.
+pub(crate) fn expand_virtual_generated(
+    table: &Table,
+    rows: &mut [Vec<Datum>],
+    ctx: &crate::clock::EvalCtx,
+) -> Result<(), ExecError> {
+    if !has_virtual_generated(table) {
+        return Ok(());
+    }
+    for row in rows {
+        expand_virtual_generated_row(table, row, ctx)?;
     }
     Ok(())
 }
@@ -19180,10 +19483,27 @@ impl AlterTableState {
     /// retyped a column, so the stored versions no longer have the shape the
     /// working `table` describes. Reading them under the working column list
     /// mismatches row width against scope width.
-    fn live_rows(&mut self, kv: &dyn Kv) -> Result<Vec<(u64, u64, Vec<Datum>)>, ExecError> {
+    /// The relation's live rows as this statement has reshaped them so far,
+    /// *logically* complete: every virtual generated column is filled in from
+    /// the expression the statement leaves behind.
+    ///
+    /// Every caller is validating something — a `NOT NULL`, a `CHECK`, a unique
+    /// key — against the values the relation will report once the statement
+    /// commits, and for a virtual column those values exist nowhere else. The
+    /// expansion is done here rather than at each caller so no validation can
+    /// silently test the NULL placeholder instead.
+    fn live_rows(
+        &mut self,
+        kv: &dyn Kv,
+        ctx: &crate::clock::EvalCtx,
+    ) -> Result<Vec<(u64, u64, Vec<Datum>)>, ExecError> {
         self.rows_mut(kv)?;
         let versions = self.rows.as_ref().expect("row versions were just loaded");
-        live_row_versions(kv, &self.table, versions, self.own_xid)
+        let mut live = live_row_versions(kv, &self.table, versions)?;
+        for (_, _, row) in &mut live {
+            expand_virtual_generated_row(&self.table, row, ctx)?;
+        }
+        Ok(live)
     }
 
     fn column_index(&self, column: &str) -> Result<usize, ExecError> {
@@ -19450,7 +19770,7 @@ fn alter_table_state_ops(
         for (key, xmin, xmax, row) in rows {
             ops.push(crabka_pgkv::WriteOp::Put {
                 key,
-                value: crabka_pgmvcc::version::encode_tuple(xmin, xmax, &row),
+                value: encode_table_tuple(&state.table, xmin, xmax, &row),
             });
         }
     }
@@ -19477,6 +19797,8 @@ fn action_recurses_to_descendants(action: &crabka_pgparser::ast::AlterTableActio
             | Action::DropNotNull(_)
             | Action::SetDefault { .. }
             | Action::DropDefault(_)
+            | Action::SetExpression { .. }
+            | Action::DropExpression { .. }
     )
 }
 
@@ -19658,7 +19980,9 @@ fn alter_descendant_action_ops(
         | Action::SetDefault { column, .. }
         | Action::SetNotNull(column)
         | Action::DropNotNull(column)
-        | Action::DropDefault(column) => Some(column.as_str()),
+        | Action::DropDefault(column)
+        | Action::SetExpression { column, .. }
+        | Action::DropExpression { column, .. } => Some(column.as_str()),
         _ => None,
     };
     match action {
@@ -19716,13 +20040,13 @@ fn inherit_column_ops(
         row.push(fill.clone());
     }
     state.table.columns.push(inherited);
+    let ddl_ctx = crate::clock::EvalCtx::for_ddl(fctx.resolution, fctx.catalog);
     if generated {
-        let ddl_ctx = crate::clock::EvalCtx::for_ddl(fctx.resolution, fctx.catalog);
         validate_generation_expressions(&state.table)?;
         backfill_generated_column(kv, state, added, &ddl_ctx)?;
     }
     if not_null {
-        for (_rowid, _xmin, row) in &state.live_rows(kv)? {
+        for (_rowid, _xmin, row) in &state.live_rows(kv, &ddl_ctx)? {
             if row.get(added).is_none_or(Datum::is_null) {
                 return Err(ExecError::ColumnContainsNullValues {
                     column: column.to_string(),
@@ -19743,6 +20067,7 @@ fn alter_table_action_pass(action: &crabka_pgparser::ast::AlterTableAction) -> u
         Action::DropColumn { .. }
         | Action::DropNotNull(_)
         | Action::DropDefault(_)
+        | Action::DropExpression { .. }
         | Action::DropConstraint { .. } => 0,
         Action::SetType { .. } => 1,
         Action::AddColumn { .. } => 2,
@@ -19760,7 +20085,10 @@ fn alter_table_action_pass(action: &crabka_pgparser::ast::AlterTableAction) -> u
         {
             4
         }
-        Action::AddConstraint(_) | Action::SetDefault { .. } => 5,
+        // `SET EXPRESSION` lands with the other column-attribute writes, after
+        // `ADD COLUMN`: one statement may add a generated column and reword its
+        // expression in the same breath.
+        Action::AddConstraint(_) | Action::SetDefault { .. } | Action::SetExpression { .. } => 5,
         Action::RenameTable { .. }
         | Action::RenameColumn { .. }
         | Action::RenameConstraint { .. }
@@ -19793,6 +20121,8 @@ fn alter_action_label(action: &crabka_pgparser::ast::AlterTableAction) -> &'stat
         Action::DropNotNull(_) => "ALTER COLUMN ... DROP NOT NULL",
         Action::SetDefault { .. } => "ALTER COLUMN ... SET DEFAULT",
         Action::DropDefault(_) => "ALTER COLUMN ... DROP DEFAULT",
+        Action::SetExpression { .. } => "ALTER COLUMN ... SET EXPRESSION",
+        Action::DropExpression { .. } => "ALTER COLUMN ... DROP EXPRESSION",
         Action::AddConstraint(_) => "ADD CONSTRAINT",
         Action::DropConstraint { .. } => "DROP CONSTRAINT",
         Action::ValidateConstraint(_) => "VALIDATE CONSTRAINT",
@@ -19925,7 +20255,7 @@ fn alter_table_action_ops(
             // hold, so a generated column whose expression is non-NULL for
             // every existing row satisfies it.
             if not_null {
-                for (_rowid, _xmin, row) in &state.live_rows(kv)? {
+                for (_rowid, _xmin, row) in &state.live_rows(kv, &ddl_ctx)? {
                     if row.get(added).is_none_or(Datum::is_null) {
                         return Err(ExecError::ColumnContainsNullValues {
                             column: column.name.clone(),
@@ -19965,6 +20295,7 @@ fn alter_table_action_ops(
                             constraint.name.as_deref(),
                             std::slice::from_ref(&column.name),
                             primary_key,
+                            &ddl_ctx,
                         )?;
                     }
                     // `ADD COLUMN a int REFERENCES p (id)` is a one-column
@@ -20024,7 +20355,7 @@ fn alter_table_action_ops(
         }
         Action::SetNotNull(column) => {
             let index = state.column_index(column)?;
-            let live = state.live_rows(kv)?;
+            let live = state.live_rows(kv, &ddl_ctx)?;
             for (_rowid, _xmin, row) in &live {
                 if row.get(index).is_none_or(Datum::is_null) {
                     return Err(ExecError::ColumnContainsNullValues {
@@ -20056,6 +20387,82 @@ fn alter_table_action_ops(
         Action::DropDefault(column) => {
             let index = state.column_index(column)?;
             state.table.columns[index].default = None;
+            Ok(())
+        }
+        Action::SetExpression { column, predicate } => {
+            let index = state.column_index(column)?;
+            let Some(kind) = state.table.columns[index]
+                .generated
+                .as_ref()
+                .map(|g| g.kind)
+            else {
+                return Err(ExecError::NotAGeneratedColumn {
+                    column: column.clone(),
+                    table: table_name.to_string(),
+                });
+            };
+            // A `CHECK` over a virtual column would have to be revalidated
+            // against values that exist nowhere yet, so `PostgreSQL` refuses
+            // the subcommand outright rather than half-checking it.
+            if kind == crabka_pgcatalog::GeneratedKind::Virtual && !state.table.checks.is_empty() {
+                return Err(ExecError::UnsupportedOnVirtualGenerated {
+                    subcommand: crate::error::VirtualGeneratedSubcommand::SetExpressionWithChecks,
+                    column: column.clone(),
+                    table: table_name.to_string(),
+                });
+            }
+            state.table.columns[index].generated = Some(crabka_pgcatalog::GeneratedColumn {
+                expr: predicate.text.clone(),
+                kind,
+            });
+            validate_generation_expressions(&state.table)?;
+            // For a STORED column this rewrites the value every row holds. For
+            // a VIRTUAL one it only fills the working set, which
+            // `encode_table_tuple` blanks again on the way out — the rows are
+            // untouched, and the next read is what produces the new value.
+            backfill_generated_column(kv, state, index, &ddl_ctx)?;
+            if state.table.columns[index].not_null {
+                for (_rowid, _xmin, row) in &state.live_rows(kv, &ddl_ctx)? {
+                    if row.get(index).is_none_or(Datum::is_null) {
+                        return Err(ExecError::ColumnContainsNullValues {
+                            column: column.clone(),
+                            table: table_name.to_string(),
+                        });
+                    }
+                }
+            }
+            Ok(())
+        }
+        Action::DropExpression { column, if_exists } => {
+            let index = state.column_index(column)?;
+            let Some(kind) = state.table.columns[index]
+                .generated
+                .as_ref()
+                .map(|g| g.kind)
+            else {
+                // `IF EXISTS` is about the expression, not the column: a column
+                // that carries none leaves the subcommand a no-op.
+                if *if_exists {
+                    return Ok(());
+                }
+                return Err(ExecError::NotAGeneratedColumn {
+                    column: column.clone(),
+                    table: table_name.to_string(),
+                });
+            };
+            // Dropping the expression would have to leave the column holding
+            // its last computed values, and a virtual column has never written
+            // any down. `PostgreSQL` 18 refuses rather than materializing them.
+            if kind == crabka_pgcatalog::GeneratedKind::Virtual {
+                return Err(ExecError::UnsupportedOnVirtualGenerated {
+                    subcommand: crate::error::VirtualGeneratedSubcommand::DropExpression,
+                    column: column.clone(),
+                    table: table_name.to_string(),
+                });
+            }
+            // A stored column keeps every value it already computed and simply
+            // stops being generated.
+            state.table.columns[index].generated = None;
             Ok(())
         }
         Action::SetTablespace(tablespace) => {
@@ -20141,7 +20548,7 @@ fn alter_table_action_ops(
                 .try_for_each(|check| validate_check_predicate(&state.table, &check.expr));
             state.table.checks = checks;
             revalidated?;
-            rebuild_indexes_on_column(kv, state, column)?;
+            rebuild_indexes_on_column(kv, state, column, &ddl_ctx)?;
             state.retyped_columns.push(column.clone());
             Ok(())
         }
@@ -20156,11 +20563,25 @@ fn alter_table_action_ops(
             ),
             crabka_pgparser::ast::TableConstraintKind::PrimaryKey(columns) => {
                 reject_not_valid(constraint.attributes.not_valid, "PRIMARY KEY")?;
-                add_constraint_index(kv, state, constraint.name.as_deref(), columns, true)
+                add_constraint_index(
+                    kv,
+                    state,
+                    constraint.name.as_deref(),
+                    columns,
+                    true,
+                    &ddl_ctx,
+                )
             }
             crabka_pgparser::ast::TableConstraintKind::Unique { columns, .. } => {
                 reject_not_valid(constraint.attributes.not_valid, "UNIQUE")?;
-                add_constraint_index(kv, state, constraint.name.as_deref(), columns, false)
+                add_constraint_index(
+                    kv,
+                    state,
+                    constraint.name.as_deref(),
+                    columns,
+                    false,
+                    &ddl_ctx,
+                )
             }
             // `reject_not_valid` is deliberately NOT called here: `NOT VALID`
             // applies to CHECK *and* FOREIGN KEY, the two kinds PostgreSQL can
@@ -20189,7 +20610,7 @@ fn alter_table_action_ops(
                     method,
                     elements,
                 )?;
-                add_exclusion_constraint(kv, state, new_index)
+                add_exclusion_constraint(kv, state, new_index, &ddl_ctx)
             }
         },
         Action::DropConstraint {
@@ -20294,7 +20715,7 @@ fn alter_table_action_ops(
                 let mut probe = state.table.clone();
                 probe.checks = vec![state.table.checks[position].clone()];
                 let compiled = compile_check_constraints(&probe)?;
-                for (_, _, row) in &state.live_rows(kv)? {
+                for (_, _, row) in &state.live_rows(kv, &ddl_ctx)? {
                     if let Err(ExecError::CheckViolation { constraint, .. }) =
                         enforce_check_constraints(&probe, &compiled, row, &ddl_ctx)
                     {
@@ -20623,7 +21044,7 @@ fn validate_foreign_key_against_state(
     ctx: &crate::clock::EvalCtx,
 ) -> Result<(), ExecError> {
     let rows: Vec<Vec<Datum>> = state
-        .live_rows(kv)?
+        .live_rows(kv, ctx)?
         .into_iter()
         .map(|(_, _, row)| row)
         .collect();
@@ -20788,7 +21209,7 @@ fn add_check_constraint(
         state.table.checks.push(check);
         return Ok(());
     }
-    let live = state.live_rows(kv)?;
+    let live = state.live_rows(kv, ctx)?;
     for (_, _, row) in &live {
         if let Err(ExecError::CheckViolation { constraint, .. }) =
             enforce_check_constraints(&probe, &compiled, row, ctx)
@@ -20826,6 +21247,7 @@ fn add_constraint_index(
     name: Option<&str>,
     columns: &[String],
     primary_key: bool,
+    ctx: &crate::clock::EvalCtx,
 ) -> Result<(), ExecError> {
     // One constraint namespace per relation: an explicit name a CHECK on this
     // table already holds is 42710, whatever kind the new constraint is.
@@ -20844,6 +21266,15 @@ fn add_constraint_index(
                 .into(),
         ));
     }
+    reject_index_over_virtual_generated(
+        &state.table,
+        columns,
+        Some(if primary_key {
+            &crabka_pgcatalog::IndexConstraint::PrimaryKey
+        } else {
+            &crabka_pgcatalog::IndexConstraint::Unique
+        }),
+    )?;
     if primary_key
         && crabka_pgcatalog::list_table_indexes(kv, &state.table.name)?
             .iter()
@@ -20867,7 +21298,7 @@ fn add_constraint_index(
             crabka_pgcatalog::IndexMethod::Btree,
         )?;
     }
-    let rows = state.live_rows(kv)?;
+    let rows = state.live_rows(kv, ctx)?;
     let new_index = crabka_pgcatalog::NewIndex {
         name: name.map_or_else(
             || constraint_index_name(&state.table.name, columns, primary_key),
@@ -20913,13 +21344,14 @@ fn add_exclusion_constraint(
     kv: &dyn Kv,
     state: &mut AlterTableState,
     new_index: crabka_pgcatalog::NewIndex,
+    ctx: &crate::clock::EvalCtx,
 ) -> Result<(), ExecError> {
     if state.table.sharded {
         return Err(ExecError::Unsupported(
             "exclusion constraints on sharded tables are not supported".into(),
         ));
     }
-    let rows = state.live_rows(kv)?;
+    let rows = state.live_rows(kv, ctx)?;
     let (index, index_ops) =
         crabka_pgcatalog::create_constraint_index_ops(kv, &state.table, &new_index)?;
     let Some(crabka_pgcatalog::IndexConstraint::Exclusion(operators)) = &index.constraint else {
@@ -20971,6 +21403,7 @@ fn rebuild_indexes_on_column(
     kv: &dyn Kv,
     state: &mut AlterTableState,
     column: &str,
+    ctx: &crate::clock::EvalCtx,
 ) -> Result<(), ExecError> {
     let mut affected = crabka_pgcatalog::list_table_indexes(kv, &state.table.name)?;
     // An index created earlier in this same statement is not in the catalog
@@ -20991,7 +21424,7 @@ fn rebuild_indexes_on_column(
     if affected.is_empty() {
         return Ok(());
     }
-    let rows = state.live_rows(kv)?;
+    let rows = state.live_rows(kv, ctx)?;
     for index in &affected {
         for column in &index.columns {
             if let Some(column) = state.table.column_index(column) {
@@ -21305,7 +21738,7 @@ fn generated_columns_reading(table: &Table, column: &str) -> Vec<String> {
         .columns
         .iter()
         .filter(|candidate| {
-            let Some(source) = &candidate.generated else {
+            let Some(source) = candidate.generation_expr() else {
                 return false;
             };
             let Ok(expr) = crabka_pgparser::parser::parse_expression(source) else {
@@ -25041,6 +25474,7 @@ mod tests {
                 snapshot: &writer_snapshot,
                 xid: writer,
                 repeatable_read: false,
+                eval_ctx: &crate::clock::EvalCtx::test_default(),
             },
             &table,
             rowid,

@@ -297,6 +297,28 @@ pub enum ExecError {
         sqlstate: &'static str,
         message: String,
     },
+    /// A write supplied a value of its own for a `GENERATED ALWAYS` column
+    /// (428C9). `PostgreSQL` words `INSERT` and `UPDATE` differently but gives
+    /// both the same `DETAIL`, so only the message varies here.
+    GeneratedColumnWrite {
+        message: String,
+        column: String,
+    },
+    /// `ALTER TABLE … ALTER COLUMN … SET/DROP EXPRESSION` named a column that
+    /// carries no generation expression (42611).
+    NotAGeneratedColumn {
+        column: String,
+        table: String,
+    },
+    /// One of the restrictions `PostgreSQL` 18 places on a `VIRTUAL` generated
+    /// column, whose value is recomputed on every read and therefore cannot be
+    /// rewritten in place (0A000). Both the message and the `DETAIL` are fixed
+    /// by the subcommand, so only the subcommand and the column travel here.
+    UnsupportedOnVirtualGenerated {
+        subcommand: VirtualGeneratedSubcommand,
+        column: String,
+        table: String,
+    },
     /// A `PARTITION BY` key names a column the relation does not have (42703).
     /// `PostgreSQL`'s message names the partition key, unlike the bare
     /// [`ExecError::UndefinedColumn`].
@@ -402,6 +424,39 @@ pub enum ExecError {
     /// hints at `CASCADE`. Boxed: the payload holds a [`DroppedObject`] and a
     /// `Vec` of dependents.
     DependentForeignKeys(Box<ForeignKeyDependents>),
+}
+
+/// The `ALTER TABLE` subcommand a `VIRTUAL` generated column refuses, and the
+/// message `PostgreSQL` 18 words the refusal with.
+///
+/// Kept as a code rather than a string so [`ExecError`] stays narrow: the enum
+/// is returned by every function in the executor, and the recursion depth an
+/// engine can reach is measured in its size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VirtualGeneratedSubcommand {
+    /// `SET EXPRESSION` on a relation that carries `CHECK` constraints: the
+    /// constraints would have to be revalidated against values that are stored
+    /// nowhere.
+    SetExpressionWithChecks,
+    /// `DROP EXPRESSION`: the column would have to keep the values it computed,
+    /// and a virtual column has never written any down.
+    DropExpression,
+}
+
+impl VirtualGeneratedSubcommand {
+    /// The `ERROR` line `PostgreSQL` 18 prints for this refusal.
+    #[must_use]
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::SetExpressionWithChecks => {
+                "ALTER TABLE / SET EXPRESSION is not supported for virtual generated columns in \
+                 tables with check constraints"
+            }
+            Self::DropExpression => {
+                "ALTER TABLE / DROP EXPRESSION is not supported for virtual generated columns"
+            }
+        }
+    }
 }
 
 /// The payload of [`ExecError::GucValueOutOfRange`], boxed to keep the error
@@ -864,6 +919,19 @@ impl ExecError {
                 format!("infinite recursion detected in policy for relation \"{relation}\""),
             ),
             ExecError::FunctionError { sqlstate, message } => PgError::error(sqlstate, message),
+            ExecError::GeneratedColumnWrite { message, column } => PgError::error("428C9", message)
+                .with_detail(format!("Column \"{column}\" is a generated column.")),
+            ExecError::NotAGeneratedColumn { column, table } => PgError::error(
+                "42611",
+                format!("column \"{column}\" of relation \"{table}\" is not a generated column"),
+            ),
+            ExecError::UnsupportedOnVirtualGenerated {
+                subcommand,
+                column,
+                table,
+            } => PgError::error("0A000", subcommand.message()).with_detail(format!(
+                "Column \"{column}\" of relation \"{table}\" is a virtual generated column."
+            )),
             ExecError::UndefinedPartitionKeyColumn(column) => PgError::error(
                 "42703",
                 format!("column \"{column}\" named in partition key does not exist"),

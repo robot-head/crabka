@@ -906,6 +906,14 @@ fn is_system_column(name: &str) -> bool {
     )
 }
 
+/// The system columns a generation expression may not read.
+///
+/// `tableoid` is the one exception `PostgreSQL` makes: it is fixed for the life
+/// of the row, so a generated column may depend on it.
+pub(crate) fn is_generation_forbidden_system_column(name: &str) -> bool {
+    is_system_column(name) && name != "tableoid"
+}
+
 /// The refusal for an expression partition key.
 ///
 /// A constant expression is `PostgreSQL`'s own 42P17. Every other expression is

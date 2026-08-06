@@ -19,9 +19,9 @@ use crabka_pgtypes::{
 
 use crate::{
     CheckConstraint, Column, ColumnDefault, ExclusionOperator, ForeignDataWrapper, ForeignKey,
-    ForeignServer, ForeignTableMeta, HashSharding, IdentityKind, Index, IndexConstraint,
-    IndexMethod, IndexPlacement, MatchType, ReferentialAction, Sequence, ShardingStrategy,
-    TableOptions, UserMapping, View, ViewOptions,
+    ForeignServer, ForeignTableMeta, GeneratedColumn, GeneratedKind, HashSharding, IdentityKind,
+    Index, IndexConstraint, IndexMethod, IndexPlacement, MatchType, ReferentialAction, Sequence,
+    ShardingStrategy, TableOptions, UserMapping, View, ViewOptions,
 };
 
 /// Everything [`deserialize_schema`] recovers from a stored table schema:
@@ -40,7 +40,7 @@ pub type DecodedSchema = (
 /// are written with this version byte; a flag byte after the column list
 /// distinguishes ordinary (`0`) from foreign (`1`), and a `CHECK` constraint
 /// list closes the record.
-pub const SCHEMA_VERSION: u8 = 9;
+pub const SCHEMA_VERSION: u8 = 10;
 
 const TABLE_OPTION_SHARDED: u8 = 0b0000_0001;
 const TABLE_OPTION_ROW_SECURITY: u8 = 0b0000_0010;
@@ -786,7 +786,7 @@ pub fn serialize_schema(
         write_type(&mut out, c.ty);
         out.push(u8::from(c.not_null));
         write_default(&mut out, c.default.as_ref());
-        write_generated(&mut out, c.generated.as_deref());
+        write_generated(&mut out, c.generated.as_ref());
         out.push(identity_flag(c.identity));
     }
     out.push(table_option_flags(options));
@@ -803,26 +803,44 @@ pub fn serialize_schema(
     out
 }
 
-/// `GENERATED ALWAYS AS (expr) STORED`: a present/absent flag byte, then the
-/// expression source when present.
-fn write_generated(out: &mut Vec<u8>, generated: Option<&str>) {
+const GENERATED_NONE: u8 = 0;
+const GENERATED_STORED: u8 = 1;
+const GENERATED_VIRTUAL: u8 = 2;
+
+/// `GENERATED ALWAYS AS (expr)`: a kind byte — [`GENERATED_NONE`] for a column
+/// that is not generated, [`GENERATED_STORED`] for `STORED`, and
+/// [`GENERATED_VIRTUAL`] for `VIRTUAL` — followed by the expression source for
+/// the two generated kinds.
+fn write_generated(out: &mut Vec<u8>, generated: Option<&GeneratedColumn>) {
     match generated {
-        None => out.push(0),
-        Some(expr) => {
-            out.push(1);
-            write_str(out, expr);
+        None => out.push(GENERATED_NONE),
+        Some(g) => {
+            out.push(match g.kind {
+                GeneratedKind::Stored => GENERATED_STORED,
+                GeneratedKind::Virtual => GENERATED_VIRTUAL,
+            });
+            write_str(out, &g.expr);
         }
     }
 }
 
-fn read_generated(cur: &mut &[u8]) -> Result<Option<String>, KvError> {
-    match take_u8(cur)? {
-        0 => Ok(None),
-        1 => Ok(Some(read_string(cur)?)),
-        flag => Err(KvError::CorruptRow(format!(
-            "unknown generated-column flag {flag}"
-        ))),
-    }
+/// Reads back what [`write_generated`] wrote, refusing any kind byte outside
+/// the three it defines.
+fn read_generated(cur: &mut &[u8]) -> Result<Option<GeneratedColumn>, KvError> {
+    let kind = match take_u8(cur)? {
+        GENERATED_NONE => return Ok(None),
+        GENERATED_STORED => GeneratedKind::Stored,
+        GENERATED_VIRTUAL => GeneratedKind::Virtual,
+        flag => {
+            return Err(KvError::CorruptRow(format!(
+                "unknown generated-column flag {flag}"
+            )));
+        }
+    };
+    Ok(Some(GeneratedColumn {
+        expr: read_string(cur)?,
+        kind,
+    }))
 }
 
 const IDENTITY_NONE: u8 = 0;
@@ -2088,10 +2106,87 @@ mod tests {
         assert_eq!(decoded, columns);
     }
 
-    /// `jsonb` and array DEFAULT values survive the catalog round trip, the
-    /// awkward shapes included. Those shapes are a nested object or array
-    /// document, an array that holds NULL elements, an empty array whose
-    /// element type lives only in the tag, and an array of `jsonb`.
+    /// A generated column's kind travels with its expression: `STORED` and
+    /// `VIRTUAL` each come back as written, as does a column that is not
+    /// generated at all.
+    #[test]
+    fn roundtrip_generated_column_kinds() {
+        use assert2::assert;
+
+        for generated in [
+            None,
+            Some(GeneratedColumn {
+                expr: "id * 2".into(),
+                kind: GeneratedKind::Stored,
+            }),
+            Some(GeneratedColumn {
+                expr: "id + 1".into(),
+                kind: GeneratedKind::Virtual,
+            }),
+        ] {
+            let columns = vec![Column {
+                name: "derived".into(),
+                ty: ColumnType::Int4,
+                not_null: false,
+                default: None,
+                generated,
+                identity: None,
+            }];
+
+            let bytes =
+                serialize_schema(7, &columns, TableOptions::default(), "postgres", None, &[]);
+            let (_id, decoded, _options, _owner, _foreign, _) =
+                deserialize_schema(&bytes).expect("decode");
+
+            assert!(decoded == columns);
+        }
+    }
+
+    /// A generated-column kind byte outside the three the encoder writes comes
+    /// from a build this one does not understand. The reader must refuse it
+    /// rather than guess a kind — reading a `VIRTUAL` column as stored would
+    /// hand back the NULL placeholder as the column's value.
+    #[test]
+    fn unknown_generated_flag_byte_errors() {
+        use assert2::assert;
+
+        let encode = |generated| {
+            serialize_schema(
+                1,
+                &[Column {
+                    name: "x".into(),
+                    ty: ColumnType::Int4,
+                    not_null: false,
+                    default: None,
+                    generated,
+                    identity: None,
+                }],
+                TableOptions::default(),
+                "postgres",
+                None,
+                &[],
+            )
+        };
+        let mut bytes = encode(None);
+        // A generated column changes exactly one byte before it appends its
+        // expression, which locates the kind byte without restating the layout.
+        let kind_offset = bytes
+            .iter()
+            .zip(encode(Some(GeneratedColumn {
+                expr: String::new(),
+                kind: GeneratedKind::Stored,
+            })))
+            .position(|(absent, stored)| *absent != stored)
+            .expect("a generated column changes the record");
+        bytes[kind_offset] = 3;
+
+        assert!(deserialize_schema(&bytes).is_err());
+    }
+
+    /// `jsonb` and array DEFAULT values survive the catalog round trip, including
+    /// the awkward shapes: a nested object/array document, an array holding NULL
+    /// elements, an empty array (whose element type lives only in the tag), and
+    /// an array of `jsonb`.
     #[test]
     fn roundtrip_jsonb_and_array_column_defaults() {
         use assert2::assert;

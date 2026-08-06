@@ -3555,45 +3555,7 @@ impl Parser {
             });
         }
         if self.eat_ident_eq("alter") {
-            self.eat_ident_eq("column");
-            let column = self.expect_ident()?;
-            if self.eat_keyword(Keyword::Set) || self.eat_ident_eq("set") {
-                if self.eat_keyword(Keyword::Not) {
-                    self.expect(&Token::Keyword(Keyword::Null))?;
-                    return Ok(AlterTableAction::SetNotNull(column));
-                }
-                if self.eat_ident_eq("default") {
-                    return Ok(AlterTableAction::SetDefault {
-                        column,
-                        expr: self.expr(0)?,
-                    });
-                }
-                // `DATA` is a keyword token (FDW DDL), so both spellings must
-                // be accepted here for `SET DATA TYPE`.
-                if self.eat_keyword(Keyword::Data) || self.eat_ident_eq("data") {
-                    return self.alter_column_type(column);
-                }
-                // SET STATISTICS / STORAGE / COMPRESSION / (attoptions) tune
-                // planner and TOAST knobs Crabka has no counterpart for.
-                let label = self.consume_unsupported_subcommand("ALTER COLUMN … SET");
-                return Ok(AlterTableAction::Unsupported(label));
-            }
-            if self.eat_keyword(Keyword::Drop) {
-                if self.eat_keyword(Keyword::Not) {
-                    self.expect(&Token::Keyword(Keyword::Null))?;
-                    return Ok(AlterTableAction::DropNotNull(column));
-                }
-                if self.eat_ident_eq("default") {
-                    return Ok(AlterTableAction::DropDefault(column));
-                }
-                let label = self.consume_unsupported_subcommand("ALTER COLUMN … DROP");
-                return Ok(AlterTableAction::Unsupported(label));
-            }
-            if matches!(self.peek(), Token::Ident(word) if word.eq_ignore_ascii_case("type")) {
-                return self.alter_column_type(column);
-            }
-            let label = self.consume_unsupported_subcommand("ALTER COLUMN");
-            return Ok(AlterTableAction::Unsupported(label));
+            return self.alter_column_action();
         }
         if self.eat_keyword(Keyword::Set) || self.eat_ident_eq("set") {
             if *self.peek() == Token::LParen {
@@ -3632,6 +3594,70 @@ impl Parser {
                 self.peek_pos(),
             ));
         }
+        Ok(AlterTableAction::Unsupported(label))
+    }
+
+    /// `ALTER [COLUMN] <name> <action>` — the leading `ALTER` is already
+    /// consumed. The knobs Crabka has no counterpart for (`SET STATISTICS`,
+    /// `SET STORAGE`, `SET COMPRESSION`, the per-attribute option list) parse
+    /// and become [`AlterTableAction::Unsupported`], so the refusal names the
+    /// subcommand rather than a token.
+    fn alter_column_action(&mut self) -> Result<crate::ast::AlterTableAction, ParseError> {
+        use crate::ast::AlterTableAction;
+
+        self.eat_ident_eq("column");
+        let column = self.expect_ident()?;
+        if self.eat_keyword(Keyword::Set) || self.eat_ident_eq("set") {
+            if self.eat_keyword(Keyword::Not) {
+                self.expect(&Token::Keyword(Keyword::Null))?;
+                return Ok(AlterTableAction::SetNotNull(column));
+            }
+            if self.eat_ident_eq("default") {
+                return Ok(AlterTableAction::SetDefault {
+                    column,
+                    expr: self.expr(0)?,
+                });
+            }
+            // `SET EXPRESSION AS ( … )` — the parenthesized expression is
+            // captured the same way a `GENERATED ALWAYS AS` one is.
+            if self.eat_ident_eq("expression") {
+                self.expect(&Token::Keyword(Keyword::As))?;
+                return Ok(AlterTableAction::SetExpression {
+                    column,
+                    predicate: self.check_predicate()?,
+                });
+            }
+            // `DATA` is a keyword token (FDW DDL), so both spellings must
+            // be accepted here for `SET DATA TYPE`.
+            if self.eat_keyword(Keyword::Data) || self.eat_ident_eq("data") {
+                return self.alter_column_type(column);
+            }
+            // SET STATISTICS / STORAGE / COMPRESSION / (attoptions) tune
+            // planner and TOAST knobs Crabka has no counterpart for.
+            let label = self.consume_unsupported_subcommand("ALTER COLUMN … SET");
+            return Ok(AlterTableAction::Unsupported(label));
+        }
+        if self.eat_keyword(Keyword::Drop) {
+            if self.eat_keyword(Keyword::Not) {
+                self.expect(&Token::Keyword(Keyword::Null))?;
+                return Ok(AlterTableAction::DropNotNull(column));
+            }
+            if self.eat_ident_eq("default") {
+                return Ok(AlterTableAction::DropDefault(column));
+            }
+            if self.eat_ident_eq("expression") {
+                return Ok(AlterTableAction::DropExpression {
+                    column,
+                    if_exists: self.eat_if_exists()?,
+                });
+            }
+            let label = self.consume_unsupported_subcommand("ALTER COLUMN … DROP");
+            return Ok(AlterTableAction::Unsupported(label));
+        }
+        if matches!(self.peek(), Token::Ident(word) if word.eq_ignore_ascii_case("type")) {
+            return self.alter_column_type(column);
+        }
+        let label = self.consume_unsupported_subcommand("ALTER COLUMN");
         Ok(AlterTableAction::Unsupported(label))
     }
 
@@ -6909,12 +6935,19 @@ impl Parser {
         Ok(constraints)
     }
 
-    /// `GENERATED { ALWAYS | BY DEFAULT } AS { IDENTITY [(opts)] | (expr) STORED }`
-    /// The `GENERATED` keyword is already consumed.
+    /// `GENERATED { ALWAYS | BY DEFAULT } AS
+    /// { IDENTITY [(opts)] | (expr) [STORED | VIRTUAL] }` — the `GENERATED`
+    /// keyword is already consumed.
+    ///
+    /// A generation expression may only be `GENERATED ALWAYS`; `BY DEFAULT`
+    /// belongs to identity columns alone, and `PostgreSQL` says so with its own
+    /// 42601 message rather than a bare syntax error. Neither `STORED` nor
+    /// `VIRTUAL` need be written: `PostgreSQL` 18 defaults to `VIRTUAL`.
     fn generated_column_constraint(
         &mut self,
     ) -> Result<crate::ast::ColumnConstraintKind, ParseError> {
-        use crate::ast::{ColumnConstraintKind, IdentitySpec};
+        use crate::ast::{ColumnConstraintKind, GeneratedKind, GeneratedSpec, IdentitySpec};
+        let when_pos = self.peek_pos();
         let always = if self.eat_ident_eq("always") {
             true
         } else if self.eat_keyword(Keyword::By) {
@@ -6942,8 +6975,29 @@ impl Parser {
             }));
         }
         let predicate = self.check_predicate()?;
-        self.expect_ident_eq("stored")?;
-        Ok(ColumnConstraintKind::Generated(predicate))
+        let kind = if self.eat_ident_eq("stored") {
+            GeneratedKind::Stored
+        } else {
+            // `VIRTUAL` is optional — it is what an unqualified generation
+            // expression means — but it is still the only other word the
+            // grammar accepts here, so anything else falls through to whatever
+            // follows a column constraint and is rejected there.
+            self.eat_ident_eq("virtual");
+            GeneratedKind::Virtual
+        };
+        // Reported after the whole clause, at the `ALWAYS`/`BY DEFAULT` word,
+        // the way `PostgreSQL`'s grammar action does.
+        if !always {
+            return Err(ParseError::new_sqlstate(
+                "42601",
+                "for a generated column, GENERATED ALWAYS must be specified",
+                when_pos,
+            ));
+        }
+        Ok(ColumnConstraintKind::Generated(GeneratedSpec {
+            predicate,
+            kind,
+        }))
     }
 
     fn create_index(&mut self) -> Result<crate::ast::Statement, ParseError> {
@@ -13671,6 +13725,144 @@ mod tests {
             panic!("expected a VALUES source");
         };
         assert!(matches!(rows[0][1], Expr::Default));
+    }
+
+    /// The generation expression `a * 2` every generated-column case below is
+    /// written with, and the text `CheckPredicate` keeps for the catalog.
+    fn a_times(literal: &str) -> crate::ast::CheckPredicate {
+        crate::ast::CheckPredicate {
+            expr: Expr::Binary {
+                op: BinaryOp::Mul,
+                left: Box::new(Expr::Column {
+                    table: None,
+                    name: "a".into(),
+                }),
+                right: Box::new(Expr::IntLiteral(literal.into())),
+            },
+            text: format!("a * {literal}"),
+        }
+    }
+
+    /// `PostgreSQL` 18 added `VIRTUAL` generated columns and made them the
+    /// default: `STORED` has to be written to get a stored column, `VIRTUAL`
+    /// may be written for the default, and omitting both means `VIRTUAL`.
+    #[test]
+    fn a_generation_expression_defaults_to_virtual() {
+        use assert2::assert;
+
+        use crate::ast::{ColumnConstraint, ConstraintAttributes, GeneratedKind, GeneratedSpec};
+
+        fn constraints(tail: &str) -> Vec<ColumnConstraint> {
+            let sql = format!("CREATE TABLE t (a int4, b int4 GENERATED ALWAYS AS (a * 2){tail})");
+            let Statement::CreateTable { mut columns, .. } = one(&sql) else {
+                panic!("expected create table: {sql}");
+            };
+            columns.pop().expect("two columns").constraints
+        }
+
+        let expected = |kind| {
+            vec![ColumnConstraint {
+                name: None,
+                kind: ColumnConstraintKind::Generated(GeneratedSpec {
+                    predicate: a_times("2"),
+                    kind,
+                }),
+                attributes: ConstraintAttributes::default(),
+            }]
+        };
+
+        // (the text after the generation expression, the kind it means)
+        for (tail, kind) in [
+            (" STORED", GeneratedKind::Stored),
+            (" stored", GeneratedKind::Stored),
+            (" Stored", GeneratedKind::Stored),
+            (" VIRTUAL", GeneratedKind::Virtual),
+            (" virtual", GeneratedKind::Virtual),
+            (" Virtual", GeneratedKind::Virtual),
+            ("", GeneratedKind::Virtual),
+        ] {
+            assert!(constraints(tail) == expected(kind), "tail: {tail:?}");
+        }
+
+        // Dropping the requirement does not make the slot accept any word.
+        assert!(
+            crate::parse("CREATE TABLE t (a int4, b int4 GENERATED ALWAYS AS (a * 2) frobnicate)")
+                .is_err()
+        );
+    }
+
+    /// `BY DEFAULT` belongs to identity columns alone. With a generation
+    /// expression `PostgreSQL` refuses with a message of its own rather than a
+    /// bare "syntax error at or near", still under 42601.
+    #[test]
+    fn a_generation_expression_requires_generated_always() {
+        use assert2::assert;
+
+        use crate::ast::{IdentitySpec, SequenceOptions};
+
+        let err = crate::parse("CREATE TABLE t (a int4, b int4 GENERATED BY DEFAULT AS (a * 2))")
+            .expect_err("BY DEFAULT with a generation expression");
+        assert!(err.message == "for a generated column, GENERATED ALWAYS must be specified");
+        assert!(err.sqlstate() == "42601");
+
+        // The identity spelling of `BY DEFAULT` is untouched.
+        let Statement::CreateTable { columns, .. } =
+            one("CREATE TABLE t (b int4 GENERATED BY DEFAULT AS IDENTITY)")
+        else {
+            panic!("expected create table");
+        };
+        assert!(
+            columns[0].constraints[0].kind
+                == ColumnConstraintKind::Identity(IdentitySpec {
+                    always: false,
+                    options: SequenceOptions::default(),
+                })
+        );
+    }
+
+    /// `SET EXPRESSION AS (…)` retargets a generated column and `DROP
+    /// EXPRESSION` demotes it to an ordinary one; `COLUMN` is optional on both,
+    /// as it is for every other `ALTER … ALTER` subcommand.
+    #[test]
+    fn alter_column_sets_and_drops_a_generation_expression() {
+        use assert2::assert;
+
+        // (the statement, the single action it produces)
+        for (sql, expected) in [
+            (
+                "ALTER TABLE t ALTER COLUMN b SET EXPRESSION AS (a * 3)",
+                AlterTableAction::SetExpression {
+                    column: "b".into(),
+                    predicate: a_times("3"),
+                },
+            ),
+            (
+                "ALTER TABLE t ALTER b SET EXPRESSION AS (a * 3)",
+                AlterTableAction::SetExpression {
+                    column: "b".into(),
+                    predicate: a_times("3"),
+                },
+            ),
+            (
+                "ALTER TABLE t ALTER b DROP EXPRESSION",
+                AlterTableAction::DropExpression {
+                    column: "b".into(),
+                    if_exists: false,
+                },
+            ),
+            (
+                "ALTER TABLE t ALTER COLUMN b DROP EXPRESSION IF EXISTS",
+                AlterTableAction::DropExpression {
+                    column: "b".into(),
+                    if_exists: true,
+                },
+            ),
+        ] {
+            let Statement::AlterTable { actions, .. } = one(sql) else {
+                panic!("expected alter table: {sql}");
+            };
+            assert!(actions == vec![expected], "{sql}");
+        }
     }
 
     #[test]
