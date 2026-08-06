@@ -18074,19 +18074,29 @@ fn scan_all_row_versions(kv: &dyn Kv, table: &Table) -> Result<Vec<RowVersion>, 
         .collect()
 }
 
-/// The live rows among already-decoded row versions, as `(rowid, xmin, row)`,
-/// the shape [`scan_live`] returns. This one is derived from an in-flight
-/// `ALTER TABLE`'s working set instead of from storage.
+/// The live rows among already-decoded row versions, as `(rowid, xmin, row)` —
+/// the shape [`scan_live`] returns, but derived from an in-flight `ALTER
+/// TABLE`'s working set instead of from storage.
+///
+/// `own_xid` is the open transaction's xid when the DDL runs inside one, and it
+/// carries the same weight here as it does for a unique-index backfill: every
+/// caller is back-validating a constraint against the rows the relation will
+/// hold once the statement commits, and inside `BEGIN; INSERT …; ALTER TABLE …
+/// ADD CONSTRAINT …` those rows include the ones this very transaction wrote
+/// and has not committed. Without them the validation passes over a relation it
+/// has only half seen, and the transaction commits rows its own constraint
+/// forbids.
 fn live_row_versions(
     kv: &dyn Kv,
     table: &Table,
     versions: &[RowVersion],
+    own_xid: Option<u64>,
 ) -> Result<Vec<(u64, u64, Vec<Datum>)>, ExecError> {
     let snapshot = all_committed_snapshot();
     let status = global_status(kv, kv, &snapshot);
     let mut live: HashMap<u64, (u64, Vec<Datum>)> = HashMap::new();
     for (key, xmin, xmax, row) in versions {
-        if !crabka_pgmvcc::visibility::satisfies_mvcc(*xmin, *xmax, &snapshot, None, &status)? {
+        if !crabka_pgmvcc::visibility::satisfies_mvcc(*xmin, *xmax, &snapshot, own_xid, &status)? {
             continue;
         }
         let rowid = physical_rowid(table, crabka_pgmvcc::version::row_prefix_of(key)?)?;
@@ -18131,6 +18141,13 @@ fn version_is_settled_dead(kv: &dyn Kv, xmin: u64, xmax: u64) -> Result<bool, Ex
 /// the effect of earlier ones, and everything is emitted as one atomic batch.
 struct AlterTableState {
     table: Table,
+    /// The open transaction's xid, when this `ALTER TABLE` runs inside one.
+    ///
+    /// Held on the state rather than passed to each validation because every
+    /// subcommand that back-validates needs it and a statement has exactly one:
+    /// a parameter would be eight chances to forget, and forgetting reads as a
+    /// constraint that passed.
+    own_xid: Option<u64>,
     /// Row versions, rewritten in place by column add/drop/type changes.
     rows: Option<Vec<RowVersion>>,
     ops: Vec<crabka_pgkv::WriteOp>,
@@ -18305,7 +18322,7 @@ impl AlterTableState {
     fn live_rows(&mut self, kv: &dyn Kv) -> Result<Vec<(u64, u64, Vec<Datum>)>, ExecError> {
         self.rows_mut(kv)?;
         let versions = self.rows.as_ref().expect("row versions were just loaded");
-        live_row_versions(kv, &self.table, versions)
+        live_row_versions(kv, &self.table, versions, self.own_xid)
     }
 
     fn column_index(&self, column: &str) -> Result<usize, ExecError> {
@@ -18512,6 +18529,7 @@ fn alter_table_ops(
     validate_alter_constraint_columns(kv, resolution, &table, actions)?;
     let mut state = AlterTableState {
         table,
+        own_xid,
         rows: None,
         ops: Vec::new(),
         dropped_indexes: Vec::new(),
@@ -19133,7 +19151,8 @@ fn alter_table_action_ops(
         Action::AttachPartition { partition, bound } => {
             let partition =
                 &resolve_relation(kv, resolution, partition, SchemaDisposition::Utility)?;
-            let ops = attach_partition_ops(kv, &state.table, partition, bound, &ddl_ctx)?;
+            let ops =
+                attach_partition_ops(kv, &state.table, partition, bound, state.own_xid, &ddl_ctx)?;
             state.ops.extend(ops);
             Ok(())
         }
@@ -19191,6 +19210,7 @@ fn attach_partition_ops(
     parent: &Table,
     child: &crabka_pgcatalog::RelationName,
     bound: &crabka_pgparser::ast::PartitionBound,
+    own_xid: Option<u64>,
     ctx: &crate::clock::EvalCtx,
 ) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
     let scheme = crate::partition::scheme_of(kv, &parent.name)?
@@ -19235,7 +19255,7 @@ fn attach_partition_ops(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let versions = scan_all_row_versions(kv, &candidate)?;
-    for (_, _, stored) in live_row_versions(kv, &candidate, &versions)? {
+    for (_, _, stored) in live_row_versions(kv, &candidate, &versions, own_xid)? {
         let row = ordinals
             .iter()
             .map(|ordinal| stored.get(*ordinal).cloned().unwrap_or(Datum::Null))

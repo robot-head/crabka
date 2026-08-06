@@ -816,3 +816,111 @@ async fn comment_on_missing_relation_kinds_report_42p01() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Back-validation inside an open transaction.
+
+/// One `BEGIN; INSERT …; <back-validating DDL>` case: the setup that seeds the
+/// relation, the row the open transaction adds, the statement that must refuse
+/// it, and the `(SQLSTATE, message)` `PostgreSQL` 18.4 reports.
+struct UncommittedCase {
+    setup: &'static [&'static str],
+    insert: &'static str,
+    ddl: &'static str,
+    code: &'static str,
+    message: &'static str,
+}
+
+/// `ALTER TABLE` back-validation scans the relation as the *open transaction*
+/// sees it, not as the last commit left it.
+///
+/// A row this transaction inserted and has not committed is part of what the
+/// relation will hold the moment the constraint takes effect, so validating
+/// without it lets `BEGIN; INSERT …; ALTER TABLE … ADD CONSTRAINT …` commit
+/// rows the new constraint forbids — a relation that violates its own
+/// constraint from the instant it exists. Every back-validating subcommand
+/// shares the one scan, so every one of them is checked here.
+#[tokio::test]
+async fn back_validation_sees_the_transactions_own_uncommitted_rows() {
+    let cases = [
+        UncommittedCase {
+            setup: &["CREATE TABLE c (a int)"],
+            insert: "INSERT INTO c VALUES (-1)",
+            ddl: "ALTER TABLE c ADD CONSTRAINT c_ck CHECK (a > 0)",
+            code: "23514",
+            message: "check constraint \"c_ck\" of relation \"c\" is violated by some row",
+        },
+        UncommittedCase {
+            setup: &["CREATE TABLE p (a int)"],
+            insert: "INSERT INTO p VALUES (1), (1)",
+            ddl: "ALTER TABLE p ADD PRIMARY KEY (a)",
+            code: "23505",
+            message: "could not create unique index \"p_pkey\"",
+        },
+        UncommittedCase {
+            setup: &["CREATE TABLE n (a int)"],
+            insert: "INSERT INTO n VALUES (NULL)",
+            ddl: "ALTER TABLE n ALTER COLUMN a SET NOT NULL",
+            code: "23502",
+            message: "column \"a\" of relation \"n\" contains null values",
+        },
+        UncommittedCase {
+            setup: &["CREATE TABLE u (a int)"],
+            insert: "INSERT INTO u VALUES (2), (2)",
+            ddl: "ALTER TABLE u ADD CONSTRAINT u_uq UNIQUE (a)",
+            code: "23505",
+            message: "could not create unique index \"u_uq\"",
+        },
+        UncommittedCase {
+            setup: &[
+                "CREATE TABLE e (room int4range, during tstzrange)",
+                "INSERT INTO e VALUES ('[1,2)', tstzrange('2018-01-01','2018-02-01'))",
+            ],
+            insert: "INSERT INTO e VALUES ('[1,2)', tstzrange('2018-01-15','2018-03-01'))",
+            ddl: "ALTER TABLE e ADD CONSTRAINT e_ex \
+                  EXCLUDE USING gist (room WITH =, during WITH &&)",
+            code: "23P01",
+            message: "could not create exclusion constraint \"e_ex\"",
+        },
+        UncommittedCase {
+            setup: &[
+                "CREATE TABLE par (a int) PARTITION BY RANGE (a)",
+                "CREATE TABLE ch (a int)",
+            ],
+            insert: "INSERT INTO ch VALUES (99)",
+            ddl: "ALTER TABLE par ATTACH PARTITION ch FOR VALUES FROM (0) TO (10)",
+            code: "23514",
+            message: "partition constraint of relation \"ch\" is violated by some row",
+        },
+    ];
+    for case in cases {
+        let (_engine, mut s) = engine_with(case.setup).await;
+        run(&mut s, "BEGIN").await;
+        run(&mut s, case.insert).await;
+        let error = s
+            .simple_query(case.ddl)
+            .await
+            .expect_err("the uncommitted row must fail back-validation");
+        assert!(error.code == case.code, "{}: {error:?}", case.ddl);
+        assert!(error.message == case.message, "{}: {error:?}", case.ddl);
+        run(&mut s, "ROLLBACK").await;
+    }
+}
+
+/// The same scan must not over-reach: a row the transaction has *deleted* is
+/// gone from what the constraint has to hold, and rows only the transaction can
+/// see still validate normally when they conform.
+#[tokio::test]
+async fn back_validation_respects_the_transactions_own_deletes() {
+    let (_engine, mut s) = engine_with(&["CREATE TABLE t (a int)"]).await;
+    run(&mut s, "INSERT INTO t VALUES (-1)").await;
+    run(&mut s, "BEGIN").await;
+    run(&mut s, "DELETE FROM t WHERE a = -1").await;
+    run(&mut s, "INSERT INTO t VALUES (7)").await;
+    // The only offending row is deleted, and the only surviving one is this
+    // transaction's own — the constraint holds.
+    run(&mut s, "ALTER TABLE t ADD CONSTRAINT t_ck CHECK (a > 0)").await;
+    run(&mut s, "COMMIT").await;
+    assert!(query(&mut s, "SELECT a FROM t").await == vec![text_row(&["7"])]);
+    assert!(err_code(&mut s, "INSERT INTO t VALUES (-2)").await == "23514");
+}
