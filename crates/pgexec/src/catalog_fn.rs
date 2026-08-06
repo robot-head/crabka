@@ -413,7 +413,15 @@ fn eval_catalog_reading(f: CatalogFunc, vals: &[Datum], ctx: &EvalCtx) -> Result
     let scope = ctx.resolution();
     match f {
         ViewDef => view_def(kv, scope, vals),
-        IndexDef => index_def(kv, scope, &vals[0]),
+        // `pg_get_indexdef(oid, colno, pretty)` — the column number selects one
+        // key expression and is not supported, but `pretty` changes the
+        // relation's spelling and psql's `\d` passes it.
+        IndexDef => index_def(
+            kv,
+            scope,
+            &vals[0],
+            matches!(vals.get(2), Some(Datum::Bool(true))),
+        ),
         ConstraintDef => constraint_def(kv, &vals[0]),
         CatalogFunc::TriggerDef => trigger_def(kv, &vals[0]),
         // Every catalog column this reaches already holds the text that column
@@ -1712,9 +1720,13 @@ fn view_definition(view: &View, pretty: bool, wrap: Option<usize>) -> String {
     out
 }
 
-/// `pg_get_indexdef(oid)`, the `CREATE INDEX` statement that rebuilds an
-/// index.
-fn index_def(kv: &dyn Kv, scope: &ResolutionScope, object: &Datum) -> Result<Datum, ExecError> {
+/// `pg_get_indexdef(oid)` — the `CREATE INDEX` statement that rebuilds an index.
+fn index_def(
+    kv: &dyn Kv,
+    scope: &ResolutionScope,
+    object: &Datum,
+    pretty: bool,
+) -> Result<Datum, ExecError> {
     if matches!(object, Datum::Null) {
         return Ok(Datum::Null);
     }
@@ -1724,7 +1736,8 @@ fn index_def(kv: &dyn Kv, scope: &ResolutionScope, object: &Datum) -> Result<Dat
             continue;
         }
         let table = crabka_pgcatalog::get_table(kv, &index.table)?;
-        return Ok(Datum::Text(index_definition(&index, &table)));
+        let qualify = !pretty || !scope.visible_schemas(kv)?.contains(&table.name.schema);
+        return Ok(Datum::Text(index_definition_as(&index, &table, qualify)));
     }
     Ok(Datum::Null)
 }
@@ -1736,12 +1749,28 @@ fn index_def(kv: &dyn Kv, scope: &ResolutionScope, object: &Datum) -> Result<Dat
 /// [`foreign_key_definition`] deliberately leaves its referent unqualified when
 /// it is visible. Read the note there before you make the two agree.
 pub(crate) fn index_definition(index: &Index, table: &Table) -> String {
+    index_definition_as(index, table, true)
+}
+
+/// The same text, with the choice of qualification made by the caller.
+///
+/// `pg_get_indexdef`'s three-argument `pretty` form drops the schema when the
+/// table is on the search path — psql's `\d` calls it that way, and so does
+/// the `without_overlaps` regression test.
+fn index_definition_as(index: &Index, table: &Table, qualify: bool) -> String {
+    let relation = if qualify {
+        format!(
+            "{}.{}",
+            quote_identifier(&table.name.schema),
+            quote_identifier(&table.name.name)
+        )
+    } else {
+        quote_identifier(&table.name.name)
+    };
     format!(
-        "CREATE {}INDEX {} ON {}.{} USING {} ({})",
+        "CREATE {}INDEX {} ON {relation} USING {} ({})",
         if index.unique { "UNIQUE " } else { "" },
         quote_identifier(&index.name),
-        quote_identifier(&table.name.schema),
-        quote_identifier(&table.name.name),
         match index.method {
             crabka_pgcatalog::IndexMethod::Btree => "btree",
             crabka_pgcatalog::IndexMethod::Hash => "hash",
@@ -1773,8 +1802,16 @@ fn constraint_def(kv: &dyn Kv, object: &Datum) -> Result<Datum, ExecError> {
             crabka_pgcatalog::IndexConstraint::Unique => "UNIQUE",
             crabka_pgcatalog::IndexConstraint::Exclusion(_) => "EXCLUDE",
         };
+        // `WITHOUT OVERLAPS` rides on the last key column, and this rendering
+        // is what psql echoes verbatim for such a constraint instead of the
+        // `PRIMARY KEY, btree (…)` line it synthesizes for an ordinary one.
+        let temporal = if index.without_overlaps {
+            " WITHOUT OVERLAPS"
+        } else {
+            ""
+        };
         return Ok(Datum::Text(format!(
-            "{keyword} ({})",
+            "{keyword} ({}{temporal})",
             quoted_column_list(&index.columns)
         )));
     }

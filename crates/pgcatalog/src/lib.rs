@@ -326,6 +326,12 @@ pub struct Index {
     pub placement: IndexPlacement,
     pub method: IndexMethod,
     pub constraint: Option<IndexConstraint>,
+    /// `PostgreSQL` 18's `PRIMARY KEY`/`UNIQUE (…, c WITHOUT OVERLAPS)`: the
+    /// last key column is a range or multirange held apart by `&&` rather than
+    /// `=`, so the key is enforced like an exclusion constraint even though it
+    /// is catalogued as a primary key or unique constraint
+    /// (`pg_constraint.conperiod`).
+    pub without_overlaps: bool,
 }
 
 impl Index {
@@ -334,6 +340,28 @@ impl Index {
     #[must_use]
     pub fn qualified_name(&self) -> RelationName {
         self.table.sibling(&self.name)
+    }
+
+    /// The per-column operators this index holds rows apart with, when it is
+    /// enforced by exclusion rather than by equality.
+    ///
+    /// An explicit `EXCLUDE` constraint carries its own list. A `WITHOUT
+    /// OVERLAPS` key implies one: `=` on every leading column and `&&` on the
+    /// trailing range, which is precisely the `EXCLUDE USING gist (a WITH =, b
+    /// WITH &&)` that `PostgreSQL` builds for it. Everything else — a plain
+    /// unique index, a primary key — returns `None` and is enforced by the
+    /// equality path.
+    #[must_use]
+    pub fn exclusion_operators(&self) -> Option<Vec<ExclusionOperator>> {
+        if let Some(IndexConstraint::Exclusion(operators)) = &self.constraint {
+            return Some(operators.clone());
+        }
+        if !self.without_overlaps || self.columns.is_empty() {
+            return None;
+        }
+        let mut operators = vec![ExclusionOperator::Equal; self.columns.len() - 1];
+        operators.push(ExclusionOperator::Overlaps);
+        Some(operators)
     }
 }
 
@@ -346,6 +374,8 @@ pub struct NewIndex {
     pub placement: IndexPlacement,
     pub method: IndexMethod,
     pub constraint: Option<IndexConstraint>,
+    /// See [`Index::without_overlaps`].
+    pub without_overlaps: bool,
 }
 
 const INDEX_EXPRESSION_PREFIX: &str = "\0expr:";
@@ -3035,6 +3065,7 @@ pub fn create_index_with_method_ops(
         placement,
         method,
         constraint: None,
+        without_overlaps: false,
     };
     let value = serialize_index(&index);
     let ops = vec![
@@ -3087,6 +3118,7 @@ pub fn create_index_on_table_ops(
         placement,
         method: IndexMethod::Btree,
         constraint: None,
+        without_overlaps: false,
     };
     let value = serialize_index(&index);
     let ops = vec![
@@ -3143,6 +3175,7 @@ pub fn create_constraint_index_ops(
         placement: new_index.placement,
         method: new_index.method,
         constraint: new_index.constraint.clone(),
+        without_overlaps: new_index.without_overlaps,
     };
     let value = serialize_index(&index);
     let ops = vec![
@@ -3240,6 +3273,7 @@ pub fn create_indexes_on_table_ops(
             placement: new_index.placement,
             method: new_index.method,
             constraint: new_index.constraint.clone(),
+            without_overlaps: new_index.without_overlaps,
         };
         let value = serialize_index(&index);
         ops.push(WriteOp::Put {
@@ -5839,6 +5873,7 @@ mod tests {
                 placement: IndexPlacement::Local,
                 method: IndexMethod::Btree,
                 constraint: Some(IndexConstraint::PrimaryKey),
+                without_overlaps: false,
             },
         )
         .expect("index ops");
@@ -6555,6 +6590,7 @@ mod tests {
             placement: IndexPlacement::Global,
             method: IndexMethod::Btree,
             constraint: None,
+            without_overlaps: false,
         };
         assert_eq!(
             get_index(&kv, &rel("users_name_idx")).expect("index"),

@@ -69,6 +69,31 @@ pub enum ExecError {
     /// An index-backed constraint names a column that does not exist (42703).
     /// PostgreSQL's index-analysis message calls this a column "named in key".
     UndefinedIndexColumn(String),
+    /// `PRIMARY KEY`/`UNIQUE (c WITHOUT OVERLAPS)` with nothing but the
+    /// temporal column (42601). The clause holds rows apart *within* a scalar
+    /// key, so a key made only of it would forbid every overlap in the table.
+    WithoutOverlapsNeedsTwoColumns,
+    /// The column a `WITHOUT OVERLAPS` clause names is neither a range nor a
+    /// multirange, so there is no `&&` to compare it with (42804).
+    WithoutOverlapsNotRange(String),
+    /// A row reached a `WITHOUT OVERLAPS` key with an empty range in the
+    /// temporal column (23514). An empty range overlaps nothing, so it would
+    /// silently escape the constraint; `PostgreSQL` refuses it outright.
+    EmptyWithoutOverlapsValue {
+        column: String,
+        relation: String,
+    },
+    /// Only one side of a `FOREIGN KEY (…, PERIOD c) REFERENCES t (…, PERIOD
+    /// c)` wrote `PERIOD` (42830). A temporal foreign key is temporal on both
+    /// sides or on neither.
+    ForeignKeyPeriodMismatch {
+        /// True when `PERIOD` was written on the referencing side only.
+        on_referencing: bool,
+    },
+    /// A plain foreign key named the columns of a `WITHOUT OVERLAPS` key
+    /// (42830). Those columns are held apart by `&&`, not `=`, so an equality
+    /// probe against them would not prove the parent row unique.
+    ForeignKeyNeedsPeriod,
     /// `ALTER TABLE … ADD COLUMN` / `RENAME COLUMN` collided with an existing
     /// column (42701).
     DuplicateColumn {
@@ -776,6 +801,38 @@ impl ExecError {
             ExecError::UndefinedIndexColumn(column) => PgError::error(
                 "42703",
                 format!("column \"{column}\" named in key does not exist"),
+            ),
+            ExecError::WithoutOverlapsNeedsTwoColumns => PgError::error(
+                "42601",
+                "constraint using WITHOUT OVERLAPS needs at least two columns",
+            ),
+            ExecError::WithoutOverlapsNotRange(column) => PgError::error(
+                "42804",
+                format!(
+                    "column \"{column}\" in WITHOUT OVERLAPS is not a range or multirange type"
+                ),
+            ),
+            ExecError::EmptyWithoutOverlapsValue { column, relation } => PgError::error(
+                "23514",
+                format!(
+                    "empty WITHOUT OVERLAPS value found in column \"{column}\" in relation \
+                     \"{relation}\""
+                ),
+            ),
+            ExecError::ForeignKeyPeriodMismatch { on_referencing } => {
+                let (with, without) = if on_referencing {
+                    ("referencing", "referenced")
+                } else {
+                    ("referenced", "referencing")
+                };
+                PgError::error(
+                    "42830",
+                    format!("foreign key uses PERIOD on the {with} table but not the {without} table"),
+                )
+            }
+            ExecError::ForeignKeyNeedsPeriod => PgError::error(
+                "42830",
+                "foreign key must use PERIOD when referencing a primary key using WITHOUT OVERLAPS",
             ),
             ExecError::DuplicateColumn { column, table } => PgError::error(
                 "42701",

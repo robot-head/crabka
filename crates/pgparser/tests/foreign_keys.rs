@@ -56,6 +56,7 @@ fn table_level_ref(tail: &str) -> ForeignKeyRef {
     match table_constraint(&sql).kind {
         TableConstraintKind::ForeignKey {
             columns,
+            period: false,
             references,
         } => {
             assert!(columns == vec!["a".to_string()], "{sql}");
@@ -85,6 +86,7 @@ fn fk(
     ForeignKeyRef {
         table: "p".into(),
         columns: vec!["id".into()],
+        period: false,
         match_type,
         on_delete,
         on_update,
@@ -213,9 +215,11 @@ fn composite_column_lists_keep_their_written_order() {
                 name: None,
                 kind: TableConstraintKind::ForeignKey {
                     columns: vec!["b".into(), "a".into()],
+                    period: false,
                     references: ForeignKeyRef {
                         table: "p".into(),
                         columns: vec!["y".into(), "x".into()],
+                        period: false,
                         match_type: MatchType::Full,
                         on_delete: ReferentialAction::NoAction,
                         on_update: ReferentialAction::NoAction,
@@ -236,6 +240,7 @@ fn an_omitted_referenced_column_list_stays_empty() {
         constraint.kind
             == TableConstraintKind::ForeignKey {
                 columns: vec!["a".into()],
+                period: false,
                 references: ForeignKeyRef {
                     table: "p".into(),
                     columns: Vec::new(),
@@ -476,9 +481,11 @@ fn a_named_foreign_key_carries_its_name_and_its_whole_tail() {
                 name: Some("c_fk".into()),
                 kind: TableConstraintKind::ForeignKey {
                     columns: vec!["a".into(), "b".into()],
+                    period: false,
                     references: ForeignKeyRef {
                         table: "p".into(),
                         columns: vec!["x".into(), "y".into()],
+                        period: false,
                         match_type: MatchType::Full,
                         on_delete: ReferentialAction::SetNull,
                         on_update: ReferentialAction::Cascade,
@@ -512,9 +519,11 @@ fn alter_table_add_foreign_key_carries_the_whole_clause() {
                 name: Some("c_fk".into()),
                 kind: TableConstraintKind::ForeignKey {
                     columns: vec!["a".into()],
+                    period: false,
                     references: ForeignKeyRef {
                         table: "p".into(),
                         columns: vec!["id".into()],
+                        period: false,
                         match_type: MatchType::Simple,
                         on_delete: ReferentialAction::Cascade,
                         on_update: ReferentialAction::NoAction,

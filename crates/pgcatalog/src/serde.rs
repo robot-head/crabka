@@ -53,7 +53,7 @@ const TABLE_OPTION_KNOWN: u8 =
 const SHARDING_VERSION: u8 = 1;
 const SHARDING_NONE: u8 = 0;
 const SHARDING_HASH: u8 = 1;
-const INDEX_VERSION: u8 = 4;
+const INDEX_VERSION: u8 = 5;
 const SEQUENCE_VERSION: u8 = 1;
 const INDEX_PLACEMENT_LOCAL: u8 = 0;
 const INDEX_PLACEMENT_GLOBAL: u8 = 1;
@@ -1084,6 +1084,7 @@ pub fn serialize_index(index: &Index) -> Vec<u8> {
         IndexMethod::Gist => INDEX_METHOD_GIST,
         IndexMethod::Spgist => INDEX_METHOD_SPGIST,
     });
+    out.push(u8::from(index.without_overlaps));
     out.push(match &index.constraint {
         None => INDEX_CONSTRAINT_NONE,
         Some(IndexConstraint::PrimaryKey) => INDEX_CONSTRAINT_PRIMARY_KEY,
@@ -1170,6 +1171,19 @@ pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
     } else {
         IndexMethod::Btree
     };
+    let without_overlaps = if version >= 5 {
+        match take_u8(&mut cur)? {
+            0 => false,
+            1 => true,
+            flag => {
+                return Err(KvError::CorruptRow(format!(
+                    "unknown index WITHOUT OVERLAPS flag {flag}"
+                )));
+            }
+        }
+    } else {
+        false
+    };
     let constraint = match take_u8(&mut cur)? {
         INDEX_CONSTRAINT_NONE => None,
         INDEX_CONSTRAINT_PRIMARY_KEY => Some(IndexConstraint::PrimaryKey),
@@ -1229,6 +1243,7 @@ pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
         placement,
         method,
         constraint,
+        without_overlaps,
     })
 }
 
@@ -2698,6 +2713,7 @@ mod tests {
                 placement: IndexPlacement::Global,
                 method,
                 constraint: None,
+                without_overlaps: false,
             };
             assert_eq!(
                 deserialize_index(&serialize_index(&index)).expect("index decode"),
@@ -2718,10 +2734,32 @@ mod tests {
                 ExclusionOperator::Equal,
                 ExclusionOperator::Overlaps,
             ])),
+            without_overlaps: false,
         };
         assert_eq!(
             deserialize_index(&serialize_index(&exclusion)).expect("exclusion index decode"),
             exclusion
+        );
+
+        // A `PRIMARY KEY (id, valid_at WITHOUT OVERLAPS)` is catalogued as a
+        // primary key, not an exclusion constraint, so the temporal flag is the
+        // only thing that survives to tell the enforcement path which
+        // comparison to use.
+        let temporal = Index {
+            id: 9,
+            name: "temporal_rng_pk".into(),
+            table: RelationName::public("temporal_rng"),
+            table_id: 5,
+            columns: vec!["id".into(), "valid_at".into()],
+            unique: true,
+            placement: IndexPlacement::Local,
+            method: IndexMethod::Gist,
+            constraint: Some(IndexConstraint::PrimaryKey),
+            without_overlaps: true,
+        };
+        assert_eq!(
+            deserialize_index(&serialize_index(&temporal)).expect("temporal index decode"),
+            temporal
         );
     }
 

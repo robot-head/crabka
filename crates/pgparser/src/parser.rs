@@ -6480,20 +6480,27 @@ impl Parser {
         let pos = self.peek_pos();
         let kind = if self.eat_ident_eq("primary") {
             self.expect_ident_eq("key")?;
-            TableConstraintKind::PrimaryKey(self.parse_ident_list()?)
+            let (columns, without_overlaps) = self.parse_key_column_list()?;
+            TableConstraintKind::PrimaryKey {
+                columns,
+                without_overlaps,
+            }
         } else if self.eat_keyword(Keyword::Unique) {
             let nulls_not_distinct = self.eat_nulls_not_distinct()?;
+            let (columns, without_overlaps) = self.parse_key_column_list()?;
             TableConstraintKind::Unique {
-                columns: self.parse_ident_list()?,
+                columns,
                 nulls_not_distinct,
+                without_overlaps,
             }
         } else if self.eat_ident_eq("check") {
             TableConstraintKind::Check(self.check_predicate()?)
         } else if self.eat_keyword(Keyword::Foreign) {
             self.expect_ident_eq("key")?;
-            let columns = self.parse_ident_list()?;
+            let (columns, period) = self.parse_period_column_list()?;
             TableConstraintKind::ForeignKey {
                 columns,
+                period,
                 references: self.foreign_key_reference()?,
             }
         } else if self.eat_ident_eq("exclude") {
@@ -6572,10 +6579,10 @@ impl Parser {
     fn foreign_key_reference(&mut self) -> Result<crate::ast::ForeignKeyRef, ParseError> {
         self.expect_ident_eq("references")?;
         let table = self.relation_ref()?;
-        let columns = if *self.peek() == Token::LParen {
-            self.parse_ident_list()?
+        let (columns, period) = if *self.peek() == Token::LParen {
+            self.parse_period_column_list()?
         } else {
-            Vec::new()
+            (Vec::new(), false)
         };
         let match_type = self.foreign_key_match()?;
         let mut on_delete = None;
@@ -6621,6 +6628,7 @@ impl Parser {
         Ok(crate::ast::ForeignKeyRef {
             table,
             columns,
+            period,
             match_type,
             on_delete: on_delete.unwrap_or_default(),
             on_update: on_update.unwrap_or_default(),
@@ -11800,7 +11808,86 @@ impl Parser {
         Ok(names)
     }
 
-    /// Parse `( relation, relation, … )`: the `INHERITS` parent list.
+    /// `( col, …, col [WITHOUT OVERLAPS] )` — the key list of a `PRIMARY KEY`
+    /// or `UNIQUE` table constraint.
+    ///
+    /// `PostgreSQL`'s grammar admits `WITHOUT OVERLAPS` only on the *last*
+    /// element, so the clause ends the list: anything but `)` after it is a
+    /// syntax error, exactly as upstream reports for `PRIMARY KEY (b WITHOUT
+    /// OVERLAPS, a)`.
+    fn parse_key_column_list(&mut self) -> Result<(Vec<String>, bool), ParseError> {
+        self.expect(&Token::LParen)?;
+        let mut names = Vec::new();
+        let without_overlaps = loop {
+            names.push(self.expect_ident()?);
+            if self.eat_without_overlaps() {
+                break true;
+            }
+            if !self.eat_comma() {
+                break false;
+            }
+        };
+        self.expect(&Token::RParen)?;
+        Ok((names, without_overlaps))
+    }
+
+    /// `WITHOUT OVERLAPS`, absent leaving the cursor untouched.
+    ///
+    /// `WITHOUT` is an ordinary identifier, so a lone `WITHOUT` that is not
+    /// followed by `OVERLAPS` must not be consumed — it could be a column of
+    /// that name in some other list. Only the pair commits.
+    fn eat_without_overlaps(&mut self) -> bool {
+        if !matches!(self.peek(), Token::Ident(word) if word.eq_ignore_ascii_case("without")) {
+            return false;
+        }
+        if !matches!(self.peek2(), Token::Ident(word) if word.eq_ignore_ascii_case("overlaps")) {
+            return false;
+        }
+        self.bump();
+        self.bump();
+        true
+    }
+
+    /// `( col, …, [PERIOD] col )` — the column list of a `FOREIGN KEY` clause
+    /// or its `REFERENCES` target, where `PERIOD` marks the last column as the
+    /// temporal one.
+    ///
+    /// `PostgreSQL` admits `PERIOD` only on the final element; a `PERIOD` on
+    /// any earlier column is a syntax error, which falls out of requiring `)`
+    /// once the marker is seen.
+    fn parse_period_column_list(&mut self) -> Result<(Vec<String>, bool), ParseError> {
+        self.expect(&Token::LParen)?;
+        let mut names = Vec::new();
+        let period = loop {
+            let marked = self.eat_period_marker();
+            names.push(self.expect_ident()?);
+            if marked {
+                break true;
+            }
+            if !self.eat_comma() {
+                break false;
+            }
+        };
+        self.expect(&Token::RParen)?;
+        Ok((names, period))
+    }
+
+    /// The `PERIOD` marker introducing a temporal foreign-key column.
+    ///
+    /// `PERIOD` is an ordinary identifier, so it is only a marker when another
+    /// identifier follows it; `FOREIGN KEY (period)` still names a column.
+    fn eat_period_marker(&mut self) -> bool {
+        if !matches!(self.peek(), Token::Ident(word) if word.eq_ignore_ascii_case("period")) {
+            return false;
+        }
+        if !matches!(self.peek2(), Token::Ident(_)) {
+            return false;
+        }
+        self.bump();
+        true
+    }
+
+    /// Parse `( relation, relation, … )` — the `INHERITS` parent list.
     fn parse_relation_ref_list(&mut self) -> Result<Vec<crate::ast::RelationRef>, ParseError> {
         self.expect(&Token::LParen)?;
         let mut names = vec![self.relation_ref()?];
@@ -17989,9 +18076,10 @@ mod tests {
     fn primary_key_action(name: Option<&str>, columns: &[&str]) -> AlterTableAction {
         AlterTableAction::AddConstraint(TableConstraint {
             name: name.map(Into::into),
-            kind: TableConstraintKind::PrimaryKey(
-                columns.iter().map(|column| (*column).to_string()).collect(),
-            ),
+            kind: TableConstraintKind::PrimaryKey {
+                columns: columns.iter().map(|column| (*column).to_string()).collect(),
+                without_overlaps: false,
+            },
             attributes: crate::ast::ConstraintAttributes::default(),
         })
     }

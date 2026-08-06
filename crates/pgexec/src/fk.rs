@@ -435,17 +435,32 @@ fn select_referenced_index<'a>(
     referenced_columns: &[String],
 ) -> Result<&'a Index, ExecError> {
     let wanted: BTreeSet<&str> = referenced_columns.iter().map(String::as_str).collect();
+    let covers_wanted = |index: &Index| {
+        index.columns.len() == referenced_columns.len()
+            && index
+                .columns
+                .iter()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>()
+                == wanted
+    };
+    // A `WITHOUT OVERLAPS` key holds its rows apart with `&&`, not `=`, so an
+    // equality probe against it proves nothing: several parent rows can share
+    // the scalar part of the key. PostgreSQL names that case rather than
+    // reporting a missing constraint, and the only remedy is a `PERIOD`
+    // foreign key.
+    if parent
+        .indexes
+        .iter()
+        .any(|index| index.without_overlaps && covers_wanted(index))
+    {
+        return Err(ExecError::ForeignKeyNeedsPeriod);
+    }
     let matches = || {
-        parent.indexes.iter().filter(|index| {
-            index.unique
-                && index.columns.len() == referenced_columns.len()
-                && index
-                    .columns
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<BTreeSet<_>>()
-                    == wanted
-        })
+        parent
+            .indexes
+            .iter()
+            .filter(|index| index.unique && !index.without_overlaps && covers_wanted(index))
     };
     let rank = |index: &Index| match &index.constraint {
         Some(IndexConstraint::PrimaryKey) => 0,
@@ -2230,6 +2245,7 @@ mod tests {
             method: IndexMethod::Btree,
             placement: IndexPlacement::Local,
             constraint,
+            without_overlaps: false,
         }
     }
 
@@ -2268,6 +2284,7 @@ mod tests {
         ForeignKeyRef {
             table: crabka_pgparser::ast::RelationRef::bare(table),
             columns: cols.iter().map(|c| (*c).to_string()).collect(),
+            period: false,
             match_type: AstMatchType::Simple,
             on_delete: AstAction::NoAction,
             on_update: AstAction::NoAction,
@@ -2517,6 +2534,7 @@ mod tests {
             method: IndexMethod::Btree,
             placement: IndexPlacement::Local,
             constraint: Some(IndexConstraint::PrimaryKey),
+            without_overlaps: false,
         }];
         let relation = FkRelation {
             id: 9,

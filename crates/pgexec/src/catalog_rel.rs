@@ -2096,8 +2096,8 @@ fn pg_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             conkey: Some(conkey),
             conbin: Datum::Null,
             validated: true,
-            condeferrable: false,
-            condeferred: false,
+            deferral: Deferral::Immediate,
+            conperiod: index.without_overlaps,
             referent: Referent::default(),
         }));
     }
@@ -2140,8 +2140,12 @@ fn foreign_key_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError
             conkey: Some(attnums(&child, &foreign_key.columns)?),
             conbin: Datum::Null,
             validated: foreign_key.validated,
-            condeferrable: foreign_key.deferrable,
-            condeferred: foreign_key.initially_deferred,
+            deferral: match (foreign_key.deferrable, foreign_key.initially_deferred) {
+                (_, true) => Deferral::Deferred,
+                (true, false) => Deferral::Deferrable,
+                (false, false) => Deferral::Immediate,
+            },
+            conperiod: false,
             referent: Referent {
                 confrelid: table_relation_oid(foreign_key.referenced_table_id)?,
                 confupdtype: referential_action_code(foreign_key.on_update),
@@ -2218,8 +2222,8 @@ fn check_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 conkey: None,
                 conbin: text(&check.expr),
                 validated: check.validated,
-                condeferrable: false,
-                condeferred: false,
+                deferral: Deferral::Immediate,
+                conperiod: false,
                 referent: Referent::default(),
             }));
         }
@@ -2240,8 +2244,8 @@ fn check_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 conkey: Some(vec![Datum::Int2(attnum)]),
                 conbin: Datum::Null,
                 validated: true,
-                condeferrable: false,
-                condeferred: false,
+                deferral: Deferral::Immediate,
+                conperiod: false,
                 referent: Referent::default(),
             }));
         }
@@ -2274,15 +2278,44 @@ struct ConstraintRow<'a> {
     conkey: Option<Vec<Datum>>,
     conbin: Datum,
     validated: bool,
-    condeferrable: bool,
-    condeferred: bool,
+    /// When the constraint is checked, which fills `condeferrable` and
+    /// `condeferred` together — the pair has only three meaningful shapes.
+    deferral: Deferral,
+    /// `conperiod` — the key's last column is a `WITHOUT OVERLAPS` range.
+    /// psql's `\d` keys off this to echo the constraint definition verbatim
+    /// instead of synthesizing a `PRIMARY KEY, btree (…)` line.
+    conperiod: bool,
     referent: Referent,
 }
 
-/// The `conf*` columns, which only a `FOREIGN KEY` fills in.
-///
-/// [`Default`] is PostgreSQL's "references nothing" spelling: `confrelid` 0, a
-/// single space in each of the three `"char"` codes, and NULL attnum arrays.
+/// When a constraint is checked, as the `condeferrable`/`condeferred` pair
+/// spells it. `condeferred` without `condeferrable` is not a state
+/// `PostgreSQL` can be in, so the two are one value here.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Deferral {
+    /// `NOT DEFERRABLE` — checked at the end of every statement.
+    Immediate,
+    /// `DEFERRABLE INITIALLY IMMEDIATE` — per-statement, but `SET CONSTRAINTS`
+    /// may move it.
+    Deferrable,
+    /// `DEFERRABLE INITIALLY DEFERRED` — checked at `COMMIT`.
+    Deferred,
+}
+
+impl Deferral {
+    /// The `(condeferrable, condeferred)` pair, in catalog column order.
+    fn columns(self) -> (bool, bool) {
+        match self {
+            Self::Immediate => (false, false),
+            Self::Deferrable => (true, false),
+            Self::Deferred => (true, true),
+        }
+    }
+}
+
+/// The `conf*` columns, which only a `FOREIGN KEY` fills in. [`Default`] is
+/// PostgreSQL's "references nothing" spelling: `confrelid` 0, a single space in
+/// each of the three `"char"` codes, and NULL attnum arrays.
 struct Referent {
     confrelid: i32,
     confupdtype: &'static str,
@@ -2319,13 +2352,14 @@ fn attnum_array(attnums: Option<Vec<Datum>>) -> Datum {
 /// One `pg_constraint` tuple, in PostgreSQL 18.4's 28-column order.
 fn constraint_row(row: ConstraintRow<'_>) -> Vec<Datum> {
     let referent = row.referent;
+    let (deferrable, deferred) = row.deferral.columns();
     vec![
         int(row.oid),
         text(row.name),
         int(namespace_oid(row.schema)),
         text(row.contype),
-        Datum::Bool(row.condeferrable),
-        Datum::Bool(row.condeferred),
+        Datum::Bool(deferrable),
+        Datum::Bool(deferred),
         Datum::Bool(true),
         Datum::Bool(row.validated),
         int(row.conrelid),
@@ -2339,7 +2373,7 @@ fn constraint_row(row: ConstraintRow<'_>) -> Vec<Datum> {
         Datum::Bool(true),
         small(0),
         Datum::Bool(false),
-        Datum::Bool(false),
+        Datum::Bool(row.conperiod),
         attnum_array(row.conkey),
         attnum_array(referent.confkey),
         Datum::Null,
@@ -3230,6 +3264,7 @@ mod tests {
                 method: IndexMethod::Btree,
                 placement: IndexPlacement::Local,
                 constraint,
+                without_overlaps: false,
             },
         )
         .expect("index ops");

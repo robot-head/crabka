@@ -2250,6 +2250,9 @@ pub struct ForeignKeyRef {
     /// The referenced columns as written, or empty when the list was omitted
     /// and the referenced table's primary key is meant.
     pub columns: Vec<String>,
+    /// `PERIOD` was written on the last referenced column — the temporal
+    /// spelling `REFERENCES t (id, PERIOD valid_at)`.
+    pub period: bool,
     pub match_type: MatchType,
     pub on_delete: ReferentialAction,
     pub on_update: ReferentialAction,
@@ -2345,14 +2348,25 @@ pub struct TableConstraint {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TableConstraintKind {
-    PrimaryKey(Vec<String>),
+    PrimaryKey {
+        columns: Vec<String>,
+        /// `PostgreSQL` 18's `WITHOUT OVERLAPS`, written on the last key
+        /// column: that column is compared with `&&` instead of `=`, turning
+        /// the key into a temporal one.
+        without_overlaps: bool,
+    },
     Unique {
         columns: Vec<String>,
         nulls_not_distinct: bool,
+        /// See [`TableConstraintKind::PrimaryKey::without_overlaps`].
+        without_overlaps: bool,
     },
     Check(CheckPredicate),
     ForeignKey {
         columns: Vec<String>,
+        /// `PERIOD` was written on the last referencing column — the temporal
+        /// spelling `FOREIGN KEY (id, PERIOD valid_at)`.
+        period: bool,
         references: ForeignKeyRef,
     },
     Exclude {

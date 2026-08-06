@@ -1102,6 +1102,7 @@ pub(crate) fn execute_ddl(
                     placement,
                     method: index_method,
                     constraint: None,
+                    without_overlaps: false,
                 };
                 ops.extend(local_index_backfill_ops(
                     kv,
@@ -1844,6 +1845,7 @@ fn create_table_constraint_index(
     table_name: &crabka_pgcatalog::RelationName,
     columns: &[String],
     primary_key: bool,
+    without_overlaps: bool,
 ) -> crabka_pgcatalog::NewIndex {
     let suffix = if primary_key { "pkey" } else { "key" };
     // The relation's own name, never its qualified spelling: `PostgreSQL` names
@@ -1859,13 +1861,53 @@ fn create_table_constraint_index(
         columns: columns.to_vec(),
         unique: true,
         placement: crabka_pgcatalog::IndexPlacement::Local,
-        method: crabka_pgcatalog::IndexMethod::Btree,
+        // A temporal key is compared with `&&` on its last column, which only
+        // GiST offers — `PostgreSQL` builds it as a unique GiST index, and the
+        // access method is what `pg_get_indexdef` and `\d` echo back.
+        method: if without_overlaps {
+            crabka_pgcatalog::IndexMethod::Gist
+        } else {
+            crabka_pgcatalog::IndexMethod::Btree
+        },
         constraint: Some(if primary_key {
             crabka_pgcatalog::IndexConstraint::PrimaryKey
         } else {
             crabka_pgcatalog::IndexConstraint::Unique
         }),
+        without_overlaps,
     }
+}
+
+/// Check the key of a `PRIMARY KEY`/`UNIQUE (…, c WITHOUT OVERLAPS)` against
+/// the table's columns.
+///
+/// `PostgreSQL` refuses, in this order: a key that is nothing but the temporal
+/// column (42601 — such a key would forbid every overlap in the table rather
+/// than every overlap *within* a scalar key), a temporal column the relation
+/// does not have (42703), and one whose type has no `&&` to compare it with
+/// (42804). A domain over a range passes: the domain's base type is what the
+/// operator resolves against.
+fn validate_without_overlaps_key(
+    columns: &[String],
+    table_columns: &[Column],
+) -> Result<(), ExecError> {
+    let Some((temporal, leading)) = columns.split_last() else {
+        return Err(ExecError::WithoutOverlapsNeedsTwoColumns);
+    };
+    if leading.is_empty() {
+        return Err(ExecError::WithoutOverlapsNeedsTwoColumns);
+    }
+    let column = table_columns
+        .iter()
+        .find(|column| column.name == *temporal)
+        .ok_or_else(|| ExecError::UndefinedIndexColumn(temporal.clone()))?;
+    if !matches!(
+        column.ty.storage_type(),
+        crabka_pgtypes::ColumnType::Range(_) | crabka_pgtypes::ColumnType::Multirange(_)
+    ) {
+        return Err(ExecError::WithoutOverlapsNotRange(temporal.clone()));
+    }
+    Ok(())
 }
 
 /// The columns a `CREATE TABLE` marks NOT NULL because they are part of its
@@ -1886,7 +1928,9 @@ fn create_table_primary_key_columns<'a>(
         }
     }
     for constraint in constraints {
-        if let crabka_pgparser::ast::TableConstraintKind::PrimaryKey(columns) = &constraint.kind {
+        if let crabka_pgparser::ast::TableConstraintKind::PrimaryKey { columns, .. } =
+            &constraint.kind
+        {
             primary_key_columns.extend(columns.iter().map(String::as_str));
         }
     }
@@ -6574,7 +6618,7 @@ pub(crate) fn ddl_unique_local_relation(
                 action,
                 crabka_pgparser::ast::AlterTableAction::AddConstraint(
                     crabka_pgparser::ast::TableConstraint {
-                        kind: crabka_pgparser::ast::TableConstraintKind::PrimaryKey(_)
+                        kind: crabka_pgparser::ast::TableConstraintKind::PrimaryKey { .. }
                             | crabka_pgparser::ast::TableConstraintKind::Unique { .. },
                         ..
                     }
@@ -6701,7 +6745,10 @@ async fn enforce_unique_local_index_updates(
     new_row: &[Datum],
     writes: &mut StatementWrites,
 ) -> Result<(), ExecError> {
-    for index in indexes.iter().filter(|index| index.unique) {
+    for index in indexes
+        .iter()
+        .filter(|index| index.unique && index.exclusion_operators().is_none())
+    {
         let old_values = indexed_values(table, index, old_row)?;
         let new_values = indexed_values(table, index, new_row)?;
         if old_values == new_values {
@@ -6712,12 +6759,10 @@ async fn enforce_unique_local_index_updates(
         }
         enforce_unique_local_index(write_ctx, table, index, rowid, new_values, writes).await?;
     }
-    for index in indexes.iter().filter(|index| {
-        matches!(
-            index.constraint,
-            Some(crabka_pgcatalog::IndexConstraint::Exclusion(_))
-        )
-    }) {
+    for index in indexes
+        .iter()
+        .filter(|index| index.exclusion_operators().is_some())
+    {
         let old_values = indexed_values(table, index, old_row)?;
         let new_values = indexed_values(table, index, new_row)?;
         if old_values != new_values {
@@ -6736,18 +6781,51 @@ async fn enforce_unique_local_indexes(
     row: &[Datum],
     writes: &mut StatementWrites,
 ) -> Result<(), ExecError> {
-    for index in indexes.iter().filter(|index| index.unique) {
+    for index in indexes
+        .iter()
+        .filter(|index| index.unique && index.exclusion_operators().is_none())
+    {
         let values = indexed_values(table, index, row)?;
         enforce_unique_local_index(write_ctx, table, index, rowid, values, writes).await?;
     }
-    for index in indexes.iter().filter(|index| {
-        matches!(
-            index.constraint,
-            Some(crabka_pgcatalog::IndexConstraint::Exclusion(_))
-        )
-    }) {
+    for index in indexes
+        .iter()
+        .filter(|index| index.exclusion_operators().is_some())
+    {
         let values = indexed_values(table, index, row)?;
         enforce_exclusion_constraint(write_ctx, table, index, rowid, values, writes).await?;
+    }
+    Ok(())
+}
+
+/// Refuse an empty range in the `WITHOUT OVERLAPS` column of a temporal key
+/// (23514).
+///
+/// An empty range overlaps nothing, so every such row would pass the constraint
+/// and the key would silently stop being a key. `PostgreSQL` checks this at
+/// write time rather than as a `CHECK`, and only for `WITHOUT OVERLAPS` — a
+/// hand-written `EXCLUDE … WITH &&` happily stores empty ranges.
+fn reject_empty_without_overlaps(
+    table: &Table,
+    index: &crabka_pgcatalog::Index,
+    values: &[Datum],
+) -> Result<(), ExecError> {
+    if !index.without_overlaps {
+        return Ok(());
+    }
+    let (Some(column), Some(value)) = (index.columns.last(), values.last()) else {
+        return Ok(());
+    };
+    let empty = match value {
+        Datum::Range(range) => range.empty,
+        Datum::Multirange(multirange) => multirange.ranges.is_empty(),
+        _ => false,
+    };
+    if empty {
+        return Err(ExecError::EmptyWithoutOverlapsValue {
+            column: column.clone(),
+            relation: table.name.name.clone(),
+        });
     }
     Ok(())
 }
@@ -6760,11 +6838,58 @@ async fn enforce_exclusion_constraint(
     values: Vec<Datum>,
     writes: &mut StatementWrites,
 ) -> Result<(), ExecError> {
-    let Some(crabka_pgcatalog::IndexConstraint::Exclusion(operators)) = &index.constraint else {
+    reject_empty_without_overlaps(table, index, &values)?;
+    // Boxed: this scan's future is large, and the enclosing write path is
+    // itself reached recursively (a set-returning function calling a query
+    // calling a write), so inlining it here would grow every frame of that
+    // recursion.
+    let Some(holder) = Box::pin(exclusion_conflict(
+        write_ctx,
+        table,
+        index,
+        Some(rowid),
+        &values,
+        writes,
+    ))
+    .await?
+    else {
+        if index.exclusion_operators().is_some() && !values.iter().any(Datum::is_null) {
+            writes
+                .pending_exclusion_keys
+                .entry(index.id)
+                .or_default()
+                .push((rowid, values));
+        }
         return Ok(());
     };
+    Err(exclusion_violation(
+        write_ctx, table, index, &values, &holder,
+    ))
+}
+
+/// The key of a live row this one cannot coexist with under `index`, or `None`
+/// when it is free to be stored.
+///
+/// Shared by enforcement and by `ON CONFLICT` arbitration, which need the same
+/// answer and differ only in what they do with it: a violation, or a skipped
+/// row. `self_rowid` is the row being written, excluded from its own check;
+/// arbitration passes `None` because the proposed row has no version yet.
+///
+/// A NULL anywhere in the key cannot conflict — `PostgreSQL`'s exclusion
+/// operators are strict, so a NULL comparison is unknown, not true.
+async fn exclusion_conflict(
+    write_ctx: &WriteContext<'_>,
+    table: &Table,
+    index: &crabka_pgcatalog::Index,
+    self_rowid: Option<u64>,
+    values: &[Datum],
+    writes: &StatementWrites,
+) -> Result<Option<Vec<Datum>>, ExecError> {
+    let Some(operators) = index.exclusion_operators() else {
+        return Ok(None);
+    };
     if values.iter().any(Datum::is_null) {
-        return Ok(());
+        return Ok(None);
     }
     // ponytail: This deliberately serializes per constraint. A spatial lock
     // structure can replace it when GiST indexes become physical rather than
@@ -6794,31 +6919,24 @@ async fn enforce_exclusion_constraint(
         table,
     )?;
     for (holder_rowid, _xmin, holder_row) in rows {
-        if holder_rowid == rowid || !writes.holder_still_holds(index.id, holder_rowid) {
+        if Some(holder_rowid) == self_rowid || !writes.holder_still_holds(index.id, holder_rowid) {
             continue;
         }
         let holder = indexed_values(table, index, &holder_row)?;
-        if exclusion_keys_conflict(operators, &values, &holder)? {
-            return Err(exclusion_violation(
-                write_ctx, table, index, &values, &holder,
-            ));
+        if exclusion_keys_conflict(&operators, values, &holder)? {
+            return Ok(Some(holder));
         }
     }
     if let Some(pending) = writes.pending_exclusion_keys.get(&index.id) {
         for (holder_rowid, holder) in pending {
-            if *holder_rowid != rowid && exclusion_keys_conflict(operators, &values, holder)? {
-                return Err(exclusion_violation(
-                    write_ctx, table, index, &values, holder,
-                ));
+            if Some(*holder_rowid) != self_rowid
+                && exclusion_keys_conflict(&operators, values, holder)?
+            {
+                return Ok(Some(holder.clone()));
             }
         }
     }
-    writes
-        .pending_exclusion_keys
-        .entry(index.id)
-        .or_default()
-        .push((rowid, values));
-    Ok(())
+    Ok(None)
 }
 
 fn exclusion_keys_conflict(
@@ -7008,9 +7126,22 @@ fn resolve_arbiter_indexes(
 ) -> Result<Vec<crabka_pgcatalog::Index>, ExecError> {
     use crabka_pgparser::ast::OnConflictTarget;
 
-    let unique = || local_indexes.iter().filter(|index| index.unique);
+    // Inference by column list arbitrates on equality alone, so an
+    // exclusion-enforced index can never satisfy it — `ON CONFLICT (id,
+    // valid_at)` against a `WITHOUT OVERLAPS` key is 42P10 in PostgreSQL, not a
+    // match. A bare `DO NOTHING` names no columns and does catch them.
+    let equality = || {
+        local_indexes
+            .iter()
+            .filter(|index| index.unique && index.exclusion_operators().is_none())
+    };
+    let arbitrable = || {
+        local_indexes
+            .iter()
+            .filter(|index| index.unique || index.exclusion_operators().is_some())
+    };
     match target {
-        OnConflictTarget::None => Ok(unique().cloned().collect()),
+        OnConflictTarget::None => Ok(arbitrable().cloned().collect()),
         OnConflictTarget::Columns {
             index_predicate: Some(_),
             ..
@@ -7027,7 +7158,7 @@ fn resolve_arbiter_indexes(
                 }
             }
             let wanted: BTreeSet<&str> = columns.iter().map(String::as_str).collect();
-            let arbiters: Vec<_> = unique()
+            let arbiters: Vec<_> = equality()
                 .filter(|index| {
                     index
                         .columns
@@ -7102,11 +7233,37 @@ async fn arbitrate_insert_row(
     use crabka_pgparser::ast::OnConflictAction;
 
     let do_update = matches!(on_conflict.action, OnConflictAction::DoUpdate { .. });
+    // An exclusion-enforced arbiter has no single conflicting row to update:
+    // the proposed row may overlap several at once. PostgreSQL refuses the
+    // combination outright, before it looks at any data.
+    if do_update
+        && arbiters
+            .iter()
+            .any(|index| index.exclusion_operators().is_some())
+    {
+        return Err(ExecError::Unsupported(
+            "ON CONFLICT DO UPDATE not supported with exclusion constraints".into(),
+        ));
+    }
     let mut discarded: HashSet<u64> = HashSet::new();
     'arbitration: loop {
         for index in arbiters {
             let values = indexed_values(table, index, proposed)?;
             if values.iter().any(Datum::is_null) {
+                continue;
+            }
+            // An overlap conflict is not a key collision, so it is found by the
+            // same scan enforcement uses rather than by a key probe. Only
+            // `DO NOTHING` reaches here — `DO UPDATE` was refused above.
+            if index.exclusion_operators().is_some() {
+                if Box::pin(exclusion_conflict(
+                    write_ctx, table, index, None, &values, writes,
+                ))
+                .await?
+                .is_some()
+                {
+                    return Ok(InsertRowPlan::Skip);
+                }
                 continue;
             }
             if writes
@@ -15677,7 +15834,10 @@ fn pg_index_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 Datum::Bool(
                     index.constraint == Some(crabka_pgcatalog::IndexConstraint::PrimaryKey),
                 ),
-                Datum::Bool(false),
+                // `indisexclusion` covers a `WITHOUT OVERLAPS` key too: it is
+                // an exclusion constraint that also happens to be catalogued as
+                // a primary key or a unique constraint.
+                Datum::Bool(index.exclusion_operators().is_some()),
                 Datum::Bool(true),
                 Datum::Bool(false),
                 // Every crabka index is valid, ready and live the moment it is
@@ -18554,8 +18714,9 @@ fn create_table_definition(
                     columns: index.columns.clone(),
                     unique: true,
                     placement: crabka_pgcatalog::IndexPlacement::Local,
-                    method: crabka_pgcatalog::IndexMethod::Btree,
+                    method: index.method,
                     constraint: Some(constraint),
+                    without_overlaps: index.without_overlaps,
                 });
             }
         }
@@ -18592,6 +18753,7 @@ fn create_table_definition(
                         name,
                         std::slice::from_ref(&column.name),
                         true,
+                        false,
                     ));
                 }
                 crabka_pgparser::ast::ColumnConstraintKind::Unique { .. } => {
@@ -18599,6 +18761,7 @@ fn create_table_definition(
                         constraint.name.as_deref(),
                         name,
                         std::slice::from_ref(&column.name),
+                        false,
                         false,
                     ));
                 }
@@ -18635,26 +18798,43 @@ fn create_table_definition(
                     &taken,
                 )?;
             }
-            crabka_pgparser::ast::TableConstraintKind::PrimaryKey(key) => {
+            crabka_pgparser::ast::TableConstraintKind::PrimaryKey {
+                columns: key,
+                without_overlaps,
+            } => {
+                if *without_overlaps {
+                    validate_without_overlaps_key(key, &cols)?;
+                }
                 indexes.push(named_constraint_index(
                     constraint.name.as_deref(),
                     name,
                     key,
                     true,
+                    *without_overlaps,
                 ));
             }
-            crabka_pgparser::ast::TableConstraintKind::Unique { columns: key, .. } => {
+            crabka_pgparser::ast::TableConstraintKind::Unique {
+                columns: key,
+                without_overlaps,
+                ..
+            } => {
+                if *without_overlaps {
+                    validate_without_overlaps_key(key, &cols)?;
+                }
                 indexes.push(named_constraint_index(
                     constraint.name.as_deref(),
                     name,
                     key,
                     false,
+                    *without_overlaps,
                 ));
             }
             crabka_pgparser::ast::TableConstraintKind::ForeignKey {
                 columns: key,
+                period,
                 references,
             } => {
+                reject_temporal_foreign_key(*period, references.period)?;
                 push_pending_foreign_key(
                     &mut foreign_keys,
                     &checks,
@@ -19063,6 +19243,30 @@ fn reject_partitioned_foreign_key(constraint: &str) -> ExecError {
     ))
 }
 
+/// Check the two `PERIOD` markers of a `FOREIGN KEY (…, PERIOD c) REFERENCES t
+/// (…, PERIOD c)`, and refuse the temporal foreign key itself.
+///
+/// `PostgreSQL` insists the two sides agree before it looks at anything else,
+/// and both of those 42830s are reproducible without the feature. The agreeing
+/// case is what is not implemented: a temporal foreign key holds if the child's
+/// range is *covered* by the union of the parent rows sharing its scalar key,
+/// which is a containment test over an aggregate rather than the single key
+/// probe every other foreign key resolves to.
+fn reject_temporal_foreign_key(referencing: bool, referenced: bool) -> Result<(), ExecError> {
+    match (referencing, referenced) {
+        (false, false) => Ok(()),
+        (true, false) => Err(ExecError::ForeignKeyPeriodMismatch {
+            on_referencing: true,
+        }),
+        (false, true) => Err(ExecError::ForeignKeyPeriodMismatch {
+            on_referencing: false,
+        }),
+        (true, true) => Err(ExecError::Unsupported(
+            "foreign keys using PERIOD are not supported".into(),
+        )),
+    }
+}
+
 /// The [`crabka_pgcatalog::Index`] records an index batch allocated, read back
 /// out of the batch itself.
 ///
@@ -19099,8 +19303,10 @@ fn named_constraint_index(
     table_name: &crabka_pgcatalog::RelationName,
     columns: &[String],
     primary_key: bool,
+    without_overlaps: bool,
 ) -> crabka_pgcatalog::NewIndex {
-    let mut index = create_table_constraint_index(table_name, columns, primary_key);
+    let mut index =
+        create_table_constraint_index(table_name, columns, primary_key, without_overlaps);
     if let Some(name) = explicit {
         index.name = name.to_string();
     }
@@ -19148,6 +19354,7 @@ fn exclusion_constraint_index(
         placement: crabka_pgcatalog::IndexPlacement::Local,
         method: crabka_pgcatalog::IndexMethod::Gist,
         constraint: Some(crabka_pgcatalog::IndexConstraint::Exclusion(operators)),
+        without_overlaps: false,
     })
 }
 
@@ -19807,7 +20014,8 @@ fn validate_alter_constraint_columns(
             continue;
         };
         match &constraint.kind {
-            Constraint::PrimaryKey(keys) | Constraint::Unique { columns: keys, .. } => {
+            Constraint::PrimaryKey { columns: keys, .. }
+            | Constraint::Unique { columns: keys, .. } => {
                 if let Some(missing) = keys.iter().find(|column| !columns.contains(*column)) {
                     return Err(ExecError::UndefinedIndexColumn(missing.clone()));
                 }
@@ -19815,6 +20023,7 @@ fn validate_alter_constraint_columns(
             Constraint::ForeignKey {
                 columns: referencing,
                 references,
+                ..
             } => {
                 if let Some(missing) = referencing.iter().find(|column| !columns.contains(*column))
                 {
@@ -20275,7 +20484,7 @@ fn alter_table_action_pass(action: &crabka_pgparser::ast::AlterTableAction) -> u
         Action::AddConstraint(constraint)
             if matches!(
                 constraint.kind,
-                crabka_pgparser::ast::TableConstraintKind::PrimaryKey(_)
+                crabka_pgparser::ast::TableConstraintKind::PrimaryKey { .. }
                     | crabka_pgparser::ast::TableConstraintKind::Unique { .. }
                     | crabka_pgparser::ast::TableConstraintKind::Exclude { .. }
             ) =>
@@ -20489,9 +20698,12 @@ fn alter_table_action_ops(
                         add_constraint_index(
                             kv,
                             state,
-                            constraint.name.as_deref(),
-                            std::slice::from_ref(&column.name),
-                            primary_key,
+                            &AddConstraintIndex {
+                                name: constraint.name.as_deref(),
+                                columns: std::slice::from_ref(&column.name),
+                                primary_key,
+                                without_overlaps: false,
+                            },
                             &ddl_ctx,
                         )?;
                     }
@@ -20758,25 +20970,38 @@ fn alter_table_action_ops(
                 kv,
                 &ddl_ctx,
             ),
-            crabka_pgparser::ast::TableConstraintKind::PrimaryKey(columns) => {
+            crabka_pgparser::ast::TableConstraintKind::PrimaryKey {
+                columns,
+                without_overlaps,
+            } => {
                 reject_not_valid(constraint.attributes.not_valid, "PRIMARY KEY")?;
                 add_constraint_index(
                     kv,
                     state,
-                    constraint.name.as_deref(),
-                    columns,
-                    true,
+                    &AddConstraintIndex {
+                        name: constraint.name.as_deref(),
+                        columns,
+                        primary_key: true,
+                        without_overlaps: *without_overlaps,
+                    },
                     &ddl_ctx,
                 )
             }
-            crabka_pgparser::ast::TableConstraintKind::Unique { columns, .. } => {
+            crabka_pgparser::ast::TableConstraintKind::Unique {
+                columns,
+                without_overlaps,
+                ..
+            } => {
                 reject_not_valid(constraint.attributes.not_valid, "UNIQUE")?;
                 add_constraint_index(
                     kv,
                     state,
-                    constraint.name.as_deref(),
-                    columns,
-                    false,
+                    &AddConstraintIndex {
+                        name: constraint.name.as_deref(),
+                        columns,
+                        primary_key: false,
+                        without_overlaps: *without_overlaps,
+                    },
                     &ddl_ctx,
                 )
             }
@@ -20785,19 +21010,23 @@ fn alter_table_action_ops(
             // validate lazily.
             crabka_pgparser::ast::TableConstraintKind::ForeignKey {
                 columns,
+                period,
                 references,
-            } => add_foreign_key_constraint(
-                kv,
-                state,
-                &AddForeignKey {
-                    name: constraint.name.as_deref(),
-                    columns,
-                    reference: references,
-                    attributes: constraint.attributes,
-                },
-                own_xid,
-                &ddl_ctx,
-            ),
+            } => {
+                reject_temporal_foreign_key(*period, references.period)?;
+                add_foreign_key_constraint(
+                    kv,
+                    state,
+                    &AddForeignKey {
+                        name: constraint.name.as_deref(),
+                        columns,
+                        reference: references,
+                        attributes: constraint.attributes,
+                    },
+                    own_xid,
+                    &ddl_ctx,
+                )
+            }
             crabka_pgparser::ast::TableConstraintKind::Exclude { method, elements } => {
                 reject_not_valid(constraint.attributes.not_valid, "EXCLUDE")?;
                 let new_index = exclusion_constraint_index(
@@ -21438,14 +21667,29 @@ fn check_references_column(predicate: &str, column: &str, columns: &[String]) ->
     referenced
 }
 
+/// One `ALTER TABLE … ADD [CONSTRAINT c] { PRIMARY KEY | UNIQUE } (…)` clause.
+struct AddConstraintIndex<'a> {
+    /// The explicit `CONSTRAINT <name>` label, when one was written.
+    name: Option<&'a str>,
+    columns: &'a [String],
+    /// True for `PRIMARY KEY`, false for `UNIQUE`.
+    primary_key: bool,
+    /// `WITHOUT OVERLAPS` was written on the last key column.
+    without_overlaps: bool,
+}
+
 fn add_constraint_index(
     kv: &dyn Kv,
     state: &mut AlterTableState,
-    name: Option<&str>,
-    columns: &[String],
-    primary_key: bool,
+    request: &AddConstraintIndex<'_>,
     ctx: &crate::clock::EvalCtx,
 ) -> Result<(), ExecError> {
+    let AddConstraintIndex {
+        name,
+        columns,
+        primary_key,
+        without_overlaps,
+    } = *request;
     // One constraint namespace per relation: an explicit name a CHECK on this
     // table already holds is 42710, whatever kind the new constraint is.
     if let Some(name) = name
@@ -21485,37 +21729,40 @@ fn add_constraint_index(
             state.table.name
         )));
     }
+    if without_overlaps {
+        validate_without_overlaps_key(columns, &state.table.columns)?;
+    }
     let key_column_indices = columns
         .iter()
         .map(|column| state.column_index(column))
         .collect::<Result<Vec<_>, _>>()?;
-    for index in &key_column_indices {
-        validate_default_index_opclass(
-            state.table.columns[*index].ty,
-            crabka_pgcatalog::IndexMethod::Btree,
-        )?;
+    if !without_overlaps {
+        for index in &key_column_indices {
+            validate_default_index_opclass(
+                state.table.columns[*index].ty,
+                crabka_pgcatalog::IndexMethod::Btree,
+            )?;
+        }
     }
     let rows = state.live_rows(kv, ctx)?;
-    let new_index = crabka_pgcatalog::NewIndex {
-        name: name.map_or_else(
-            || constraint_index_name(&state.table.name, columns, primary_key),
-            str::to_string,
-        ),
-        columns: columns.to_vec(),
-        unique: true,
-        placement: crabka_pgcatalog::IndexPlacement::Local,
-        method: crabka_pgcatalog::IndexMethod::Btree,
-        constraint: Some(if primary_key {
-            crabka_pgcatalog::IndexConstraint::PrimaryKey
-        } else {
-            crabka_pgcatalog::IndexConstraint::Unique
-        }),
-    };
+    let mut new_index =
+        create_table_constraint_index(&state.table.name, columns, primary_key, without_overlaps);
+    if let Some(name) = name {
+        new_index.name = name.to_string();
+    }
     let (index, index_ops) =
         crabka_pgcatalog::create_constraint_index_ops(kv, &state.table, &new_index)?;
     // PostgreSQL builds the unique index before it attaches NOT NULL, so
-    // duplicate data is 23505 even when the key column also holds NULLs.
-    let backfill = local_index_backfill_ops_for_rows(&rows, &state.table, &index)?;
+    // duplicate data is 23505 even when the key column also holds NULLs. A
+    // temporal key is held apart by `&&` instead, which no key probe can
+    // answer, so it back-validates pairwise like the exclusion constraint it
+    // is — and reports the same 23P01 when a stored pair already overlaps.
+    let backfill = if without_overlaps {
+        validate_no_exclusion_conflicts(&state.table, &index, &rows, ctx)?;
+        Vec::new()
+    } else {
+        local_index_backfill_ops_for_rows(&rows, &state.table, &index)?
+    };
     if primary_key {
         for (_rowid, _xmin, row) in &rows {
             for (column, column_index) in columns.iter().zip(&key_column_indices) {
@@ -21551,24 +21798,82 @@ fn add_exclusion_constraint(
     let rows = state.live_rows(kv, ctx)?;
     let (index, index_ops) =
         crabka_pgcatalog::create_constraint_index_ops(kv, &state.table, &new_index)?;
-    let Some(crabka_pgcatalog::IndexConstraint::Exclusion(operators)) = &index.constraint else {
-        unreachable!("exclusion helper creates an exclusion index")
-    };
-    for (offset, (_rowid, _xmin, row)) in rows.iter().enumerate() {
-        let left = indexed_values(&state.table, &index, row)?;
-        for (_rowid, _xmin, other) in &rows[..offset] {
-            let right = indexed_values(&state.table, &index, other)?;
-            if exclusion_keys_conflict(operators, &left, &right)? {
-                return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
-                    "23P01",
-                    format!("could not create exclusion constraint \"{}\"", index.name),
-                )));
-            }
-        }
-    }
+    validate_no_exclusion_conflicts(&state.table, &index, &rows, ctx)?;
     state.ops.extend(index_ops);
     state.created_indexes.push(index);
     Ok(())
+}
+
+/// Back-validate the rows a table already holds against an exclusion-enforced
+/// index — an explicit `EXCLUDE`, or a `WITHOUT OVERLAPS` key.
+///
+/// `PostgreSQL` reports the failure as `could not create exclusion constraint`
+/// with no DETAIL, unlike the runtime violation, and the same message covers a
+/// temporal primary key: to the index build there is no difference.
+fn validate_no_exclusion_conflicts(
+    table: &Table,
+    index: &crabka_pgcatalog::Index,
+    rows: &[(u64, u64, Vec<Datum>)],
+    ctx: &crate::clock::EvalCtx,
+) -> Result<(), ExecError> {
+    let Some(operators) = index.exclusion_operators() else {
+        return Ok(());
+    };
+    for (offset, (_rowid, _xmin, row)) in rows.iter().enumerate() {
+        let left = indexed_values(table, index, row)?;
+        // An empty range would slip through every overlap test, so a stored
+        // one blocks the constraint before any pair is compared.
+        reject_empty_without_overlaps(table, index, &left)?;
+        for (_rowid, _xmin, other) in &rows[..offset] {
+            let right = indexed_values(table, index, other)?;
+            if exclusion_keys_conflict(&operators, &left, &right)? {
+                // The pair is named in stored order — the row the build reached
+                // first, then the one that could not join it — which is how
+                // PostgreSQL words the same failure.
+                return Err(exclusion_build_violation(index, &right, &left, ctx));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The 23P01 an index build raises when two stored rows cannot coexist.
+///
+/// The primary message names the constraint being built rather than a row
+/// insertion, which is what tells `ALTER TABLE … ADD CONSTRAINT` apart from the
+/// runtime [`exclusion_violation`]; the DETAIL is the same shape minus the word
+/// "existing", because neither row is more established than the other.
+fn exclusion_build_violation(
+    index: &crabka_pgcatalog::Index,
+    first: &[Datum],
+    second: &[Datum],
+    ctx: &crate::clock::EvalCtx,
+) -> ExecError {
+    let columns = index.columns.join(", ");
+    let render = |values: &[Datum]| {
+        values
+            .iter()
+            .map(|value| {
+                String::from_utf8_lossy(&crabka_pgtypes::encoding::encode_text_in(
+                    value,
+                    ctx.output_style(),
+                ))
+                .into_owned()
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    ExecError::Remote(
+        crabka_pgwire::error::PgError::error(
+            "23P01",
+            format!("could not create exclusion constraint \"{}\"", index.name),
+        )
+        .with_detail(format!(
+            "Key ({columns})=({}) conflicts with key ({columns})=({}).",
+            render(first),
+            render(second)
+        )),
+    )
 }
 
 /// Whether `ALTER TABLE … ALTER COLUMN … TYPE` may rewrite `from` to `to`
@@ -26954,6 +27259,7 @@ mod tests {
                     placement: crabka_pgcatalog::IndexPlacement::Local,
                     method: crabka_pgcatalog::IndexMethod::Btree,
                     constraint: constraint.then_some(crabka_pgcatalog::IndexConstraint::Unique),
+                    without_overlaps: false,
                 },
             )
             .collect();
