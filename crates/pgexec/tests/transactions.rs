@@ -1969,3 +1969,202 @@ async fn a_read_only_transaction_refuses_writes_and_reports_its_mode() {
     s.simple_query("COMMIT").await.expect("commit");
     assert!(rows(&mut s, "SELECT id FROM t").await.len() == 1);
 }
+
+// ---------------------------------------------------------------------------
+// Transactional DDL.
+
+mod transactional_ddl {
+    use assert2::assert;
+    use crabka_pgexec::{SqlEngine, SqlSession};
+    use crabka_pgwire::engine::{Engine, Session};
+
+    use super::{rows, text};
+
+    async fn run(s: &mut SqlSession, sql: &str) {
+        s.simple_query(sql).await.expect(sql);
+    }
+
+    async fn count(s: &mut SqlSession, sql: &str) -> i64 {
+        let rows = rows(s, sql).await;
+        let cell = rows.first().and_then(|row| row.first().cloned()).flatten();
+        text(cell.as_ref())
+            .expect("a count row")
+            .parse()
+            .expect("a count")
+    }
+
+    /// One DDL statement that must not survive the `ROLLBACK` of the block it
+    /// ran in: how to set up for it, and a `count(*)` over the catalog that
+    /// reports 1 while its effect stands and 0 once it is undone.
+    struct RolledBackDdl {
+        setup: &'static [&'static str],
+        ddl: &'static str,
+        catalogued: &'static str,
+    }
+
+    /// DDL inside a transaction block is undone by `ROLLBACK`, exactly as the
+    /// block's row writes are.
+    ///
+    /// Rows come back on their own — a version carries the xid that wrote it,
+    /// and aborting the xid is what hides them. Catalog records are plain keys
+    /// with no xid, so unless the block records what they looked like before,
+    /// `ROLLBACK` leaves every schema change the block made standing.
+    #[tokio::test]
+    async fn rollback_undoes_the_blocks_ddl() {
+        let cases = [
+            RolledBackDdl {
+                setup: &[],
+                ddl: "CREATE TABLE made (a int)",
+                catalogued: "SELECT count(*) FROM pg_class WHERE relname = 'made'",
+            },
+            RolledBackDdl {
+                setup: &["CREATE TABLE t (a int)"],
+                ddl: "ALTER TABLE t ADD COLUMN b int",
+                catalogued: "SELECT count(*) FROM pg_attribute a JOIN pg_class c \
+                             ON c.oid = a.attrelid WHERE c.relname = 't' AND a.attname = 'b'",
+            },
+            RolledBackDdl {
+                setup: &["CREATE TABLE t (a int)"],
+                ddl: "ALTER TABLE t ADD CONSTRAINT t_uq UNIQUE (a)",
+                catalogued: "SELECT count(*) FROM pg_constraint WHERE conname = 't_uq'",
+            },
+            RolledBackDdl {
+                setup: &["CREATE TABLE t (a int)"],
+                ddl: "CREATE INDEX t_idx ON t (a)",
+                catalogued: "SELECT count(*) FROM pg_class WHERE relname = 't_idx'",
+            },
+            RolledBackDdl {
+                setup: &["CREATE TABLE t (a int)"],
+                ddl: "CREATE VIEW v AS SELECT a FROM t",
+                catalogued: "SELECT count(*) FROM pg_class WHERE relname = 'v'",
+            },
+            RolledBackDdl {
+                setup: &[],
+                ddl: "CREATE SCHEMA s",
+                catalogued: "SELECT count(*) FROM pg_namespace WHERE nspname = 's'",
+            },
+        ];
+        for case in cases {
+            let engine = SqlEngine::new();
+            let mut s = engine.connect();
+            for sql in case.setup {
+                run(&mut s, sql).await;
+            }
+            run(&mut s, "BEGIN").await;
+            run(&mut s, case.ddl).await;
+            assert!(count(&mut s, case.catalogued).await == 1, "{}", case.ddl);
+            run(&mut s, "ROLLBACK").await;
+            assert!(count(&mut s, case.catalogued).await == 0, "{}", case.ddl);
+            // The name is free again, which is the difference a client feels:
+            // a rolled-back CREATE that lingers makes the retry fail 42P07.
+            run(&mut s, case.ddl).await;
+            assert!(count(&mut s, case.catalogued).await == 1, "{}", case.ddl);
+        }
+    }
+
+    /// A `DROP` rolled back gives the relation *and its rows* back.
+    ///
+    /// The drop deletes every row key alongside the catalog record, so undoing
+    /// it has to restore the rows too — a table that comes back empty is the
+    /// same data loss as one that does not come back at all.
+    #[tokio::test]
+    async fn rollback_restores_a_dropped_relation_with_its_rows() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        run(&mut s, "CREATE TABLE t (a int)").await;
+        run(&mut s, "INSERT INTO t VALUES (1), (2), (3)").await;
+        run(&mut s, "BEGIN").await;
+        run(&mut s, "DROP TABLE t").await;
+        run(&mut s, "ROLLBACK").await;
+        let surviving = rows(&mut s, "SELECT a FROM t ORDER BY a")
+            .await
+            .into_iter()
+            .map(|row| text(row.first().and_then(Option::as_ref)))
+            .collect::<Vec<_>>();
+        assert!(
+            surviving
+                == vec![
+                    Some("1".to_string()),
+                    Some("2".to_string()),
+                    Some("3".to_string())
+                ]
+        );
+    }
+
+    /// `COMMIT` keeps the block's DDL — the undo images are bookkeeping for the
+    /// abort path and must never reach the catalog on the success path.
+    #[tokio::test]
+    async fn commit_keeps_the_blocks_ddl() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        run(&mut s, "BEGIN").await;
+        run(&mut s, "CREATE TABLE kept (a int)").await;
+        run(&mut s, "INSERT INTO kept VALUES (1)").await;
+        run(&mut s, "COMMIT").await;
+        assert!(count(&mut s, "SELECT count(*) FROM kept").await == 1);
+    }
+
+    /// `RELEASE` merges a savepoint's effects into the block; it does not make
+    /// them permanent. The block still has to be able to unwind DDL that a
+    /// released savepoint performed, which is why the block keeps undo images
+    /// of its own instead of reading them out of the frames.
+    #[tokio::test]
+    async fn rollback_undoes_ddl_from_a_released_savepoint() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        run(&mut s, "BEGIN").await;
+        run(&mut s, "SAVEPOINT sp").await;
+        run(&mut s, "CREATE TABLE viasp (a int)").await;
+        run(&mut s, "RELEASE SAVEPOINT sp").await;
+        run(&mut s, "ROLLBACK").await;
+        assert!(
+            count(
+                &mut s,
+                "SELECT count(*) FROM pg_class WHERE relname = 'viasp'"
+            )
+            .await
+                == 0
+        );
+    }
+
+    /// Undoing `CREATE SEQUENCE` has to drop the cached counter with the
+    /// catalog record. A surviving cache entry would let the next sequence of
+    /// that name resume the rolled-back one's numbering instead of starting
+    /// over.
+    #[tokio::test]
+    async fn rollback_forgets_a_sequence_created_in_the_block() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        run(&mut s, "BEGIN").await;
+        run(&mut s, "CREATE SEQUENCE q").await;
+        assert!(count(&mut s, "SELECT nextval('q')").await == 1);
+        assert!(count(&mut s, "SELECT nextval('q')").await == 2);
+        run(&mut s, "ROLLBACK").await;
+        run(&mut s, "CREATE SEQUENCE q").await;
+        assert!(count(&mut s, "SELECT nextval('q')").await == 1);
+    }
+
+    /// An aborted block unwinds its DDL too: the statement that failed leaves
+    /// the block in the failed state, and `ROLLBACK` out of it has the same
+    /// schema changes to take back.
+    #[tokio::test]
+    async fn rollback_of_a_failed_block_undoes_its_ddl() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        run(&mut s, "BEGIN").await;
+        run(&mut s, "CREATE TABLE made (a int)").await;
+        let _ = s
+            .simple_query("SELECT nosuchcolumn FROM made")
+            .await
+            .expect_err("the block fails here");
+        run(&mut s, "ROLLBACK").await;
+        assert!(
+            count(
+                &mut s,
+                "SELECT count(*) FROM pg_class WHERE relname = 'made'"
+            )
+            .await
+                == 0
+        );
+    }
+}

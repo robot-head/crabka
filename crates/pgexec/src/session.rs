@@ -114,6 +114,16 @@ pub(crate) struct TxnCtx {
     /// Whether a query, DML, or DDL statement has established transaction semantics.
     /// PostgreSQL rejects SET TRANSACTION after this point.
     pub(crate) activity_started: bool,
+    /// Catalog-key before-images for every DDL statement run since `BEGIN`,
+    /// replayed by `ROLLBACK` to undo them.
+    ///
+    /// Rows need no equivalent: a version carries its writer's xid, so aborting
+    /// the xid is what makes them disappear. Catalog records are plain keys with
+    /// no xid to abort, so the only way back is the image they had before. The
+    /// map holds the *first* image of each key, which is what makes a key
+    /// rewritten by several statements in one block unwind to where the block
+    /// found it rather than to some midpoint.
+    pub(crate) catalog_undo: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
 }
 
 /// Shared physical gate held while a transaction issues ordinary writes.
@@ -146,11 +156,19 @@ impl Drop for UniqueIndexGuard {
 /// Per-connection transaction state. `Failed` carries the aborted block's
 /// context so its xid (and any row locks it holds) stay held until
 /// COMMIT/ROLLBACK, which records the abort in the clog and releases them.
+///
+/// The context is boxed so this enum stays pointer-sized. `BEGIN`, `COMMIT` and
+/// `ROLLBACK` move it by value, and their futures sit in the statement-dispatch
+/// match that a PL/pgSQL function reproduces on the stack at every level of
+/// recursion — inline, a [`TxnCtx`] is paid for once per nested call, and the
+/// debug-build frame was already within a few bytes of a test thread's 2 MiB
+/// stack at a recursion depth of three. Behind a box, growing `TxnCtx` costs
+/// that path nothing.
 enum TxnState {
     Idle,
-    InTransaction(TxnCtx),
-    Prepared(TxnCtx),
-    Failed(TxnCtx),
+    InTransaction(Box<TxnCtx>),
+    Prepared(Box<TxnCtx>),
+    Failed(Box<TxnCtx>),
 }
 
 #[derive(Debug, Clone)]
@@ -3963,10 +3981,7 @@ impl SqlSession {
         require_supported_isolation(level)?;
         if matches!(
             &self.state,
-            TxnState::InTransaction(TxnCtx {
-                activity_started: true,
-                ..
-            })
+            TxnState::InTransaction(ctx) if ctx.activity_started
         ) {
             return Err(ExecError::ActiveSqlTransaction(
                 "SET TRANSACTION ISOLATION LEVEL must be called before any query".into(),
@@ -4190,32 +4205,7 @@ impl SqlSession {
                     .or_insert_with(|| value.clone());
             }
         }
-        let user_type_prefix = crabka_pgkv::key::user_type_prefix();
-        let restores_user_types = catalog_undo.keys().any(|key| {
-            crabka_pgkv::key::user_type_key_parts(key).is_some()
-                || key.starts_with(user_type_prefix.as_slice())
-        });
-        let user_types_before = restores_user_types
-            .then(|| crabka_pgcatalog::list_user_types(&*self.catalog_kv))
-            .transpose()?;
-        let catalog_undo_ops = catalog_undo
-            .into_iter()
-            .map(|(key, value)| match value {
-                Some(value) => WriteOp::Put { key, value },
-                None => WriteOp::Delete { key },
-            })
-            .collect::<Vec<_>>();
-        if !catalog_undo_ops.is_empty() {
-            if Arc::ptr_eq(&self.kv, &self.catalog_kv) {
-                self.committer.commit(catalog_undo_ops).await?;
-            } else {
-                self.catalog_kv.write_batch(&catalog_undo_ops)?;
-            }
-        }
-        if let Some(before) = user_types_before {
-            let after = crabka_pgcatalog::list_user_types(&*self.catalog_kv)?;
-            crabka_pgtypes::usertype::publish_catalog_delta(&before, &after);
-        }
+        self.undo_catalog_writes(catalog_undo).await?;
 
         let (row_locks, table_lock_count, advisory_lock_count) = {
             let frame = &self.savepoints[index];
@@ -6280,7 +6270,7 @@ impl SqlSession {
 
     /// Record an aborted transaction's outcome (clog Aborted + deregister) and
     /// release its row locks. Shared by ROLLBACK and COMMIT-of-failed.
-    async fn abort_ctx(&mut self, ctx: TxnCtx) -> Result<(), ExecError> {
+    async fn abort_ctx(&mut self, ctx: Box<TxnCtx>) -> Result<(), ExecError> {
         // Queued notifications, queued LISTEN/UNLISTEN and deferred referential
         // checks all die with the transaction that queued them.
         self.discard_pending_notifications();
@@ -6416,7 +6406,7 @@ impl SqlSession {
             Some(read_ts) => Some(self.ts_gc.pin_read(self.kv.as_ref(), read_ts)?),
             None => None,
         };
-        self.state = TxnState::InTransaction(TxnCtx {
+        self.state = TxnState::InTransaction(Box::new(TxnCtx {
             role_at_start: self.current_role.clone(),
             xid: None,
             snapshot,
@@ -6434,7 +6424,8 @@ impl SqlSession {
             table_write_guard: None,
             writer_fence_guard: None,
             activity_started: false,
-        });
+            catalog_undo: BTreeMap::new(),
+        }));
         self.sync_transaction_isolation();
         self.guc
             .force("transaction_read_only", GucValue::Bool(read_only));
@@ -6515,7 +6506,7 @@ impl SqlSession {
     /// LISTEN/UNLISTEN are applied *after* it. Any error on the way out drops
     /// the queue, and the unsent [`PreparedPublish`] releases its reservations
     /// as it falls.
-    async fn commit_open_block(&mut self, ctx: TxnCtx) -> Result<QueryResult, ExecError> {
+    async fn commit_open_block(&mut self, ctx: Box<TxnCtx>) -> Result<QueryResult, ExecError> {
         let role_at_start = ctx.role_at_start.clone();
         let mut reserved = match self.reserve_pending_notifications() {
             Ok(reserved) => reserved,
@@ -6553,7 +6544,7 @@ impl SqlSession {
 
     async fn commit_reserved_block(
         &mut self,
-        ctx: TxnCtx,
+        ctx: Box<TxnCtx>,
         reserved: &mut ReservedNotifications,
     ) -> Result<QueryResult, ExecError> {
         // Empty unless this engine replicates notifications; folded into the
@@ -6663,8 +6654,13 @@ impl SqlSession {
     async fn end_block_rollback(&mut self) -> Result<QueryResult, ExecError> {
         self.finish_transaction_scoped_state(false);
         match std::mem::replace(&mut self.state, TxnState::Idle) {
-            TxnState::InTransaction(ctx) | TxnState::Failed(ctx) => {
+            TxnState::InTransaction(mut ctx) | TxnState::Failed(mut ctx) => {
                 self.current_role.clone_from(&ctx.role_at_start);
+                // Before the xid is aborted, so a catalog record and the rows
+                // filed under it go back together: a restored table whose rows
+                // were still visible would be a table with phantom contents.
+                let catalog_undo = std::mem::take(&mut ctx.catalog_undo);
+                self.undo_catalog_writes(catalog_undo).await?;
                 self.abort_current_global().await?;
                 self.abort_ctx(ctx).await?;
             }
@@ -7725,6 +7721,51 @@ impl SqlSession {
         Ok(())
     }
 
+    /// Put every catalog key back to the image `before` records for it, undoing
+    /// the DDL that ran between then and now.
+    ///
+    /// Shared by the two levels that unwind DDL — `ROLLBACK TO SAVEPOINT` and
+    /// `ROLLBACK` — because the accounting either does everything or is a bug:
+    /// a restore that writes the keys but skips the type-registry delta leaves
+    /// the process disagreeing with its own catalog, and one that skips the
+    /// sequence cache leaves a live entry for a sequence that no longer exists,
+    /// so the next `CREATE SEQUENCE` of that name resumes the dead one's
+    /// counter.
+    async fn undo_catalog_writes(
+        &self,
+        undo: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    ) -> Result<(), ExecError> {
+        if undo.is_empty() {
+            return Ok(());
+        }
+        let user_type_prefix = crabka_pgkv::key::user_type_prefix();
+        let restores_user_types = undo.keys().any(|key| {
+            crabka_pgkv::key::user_type_key_parts(key).is_some()
+                || key.starts_with(user_type_prefix.as_slice())
+        });
+        let user_types_before = restores_user_types
+            .then(|| crabka_pgcatalog::list_user_types(&*self.catalog_kv))
+            .transpose()?;
+        let undo_ops = undo
+            .into_iter()
+            .map(|(key, value)| match value {
+                Some(value) => WriteOp::Put { key, value },
+                None => WriteOp::Delete { key },
+            })
+            .collect::<Vec<_>>();
+        self.seq.forget_sequences(&undo_ops);
+        if Arc::ptr_eq(&self.kv, &self.catalog_kv) {
+            self.committer.commit(undo_ops).await?;
+        } else {
+            self.catalog_kv.write_batch(&undo_ops)?;
+        }
+        if let Some(before) = user_types_before {
+            let after = crabka_pgcatalog::list_user_types(&*self.catalog_kv)?;
+            crabka_pgtypes::usertype::publish_catalog_delta(&before, &after);
+        }
+        Ok(())
+    }
+
     async fn restore_catalog_snapshot(
         &self,
         before: &BTreeMap<Vec<u8>, Option<Vec<u8>>>,
@@ -7904,22 +7945,30 @@ impl SqlSession {
         let inheritance_notices =
             crate::exec::inheritance_merge_notices(&*self.catalog_kv, &resolution, stmt)?;
         let (result, ops) = crate::exec::execute_ddl(&*self.catalog_kv, stmt, fctx)?;
-        let catalog_before = if self.savepoints.is_empty() && !fires_event_triggers {
-            BTreeMap::new()
-        } else {
-            let mut before = BTreeMap::new();
-            for op in &ops {
-                let key = match op {
-                    WriteOp::Put { key, .. }
-                    | WriteOp::ConditionalPut { key, .. }
-                    | WriteOp::Delete { key } => key,
-                };
-                if !before.contains_key(key) {
-                    before.insert(key.clone(), self.catalog_kv.get(key)?);
+        // An open block needs the before-images whether or not it has taken a
+        // savepoint: DDL commits its batch here and now, so `ROLLBACK` has
+        // nothing but these images to undo it with.
+        let in_transaction_block = matches!(
+            &self.state,
+            TxnState::InTransaction(_) | TxnState::Failed(_)
+        );
+        let catalog_before =
+            if self.savepoints.is_empty() && !fires_event_triggers && !in_transaction_block {
+                BTreeMap::new()
+            } else {
+                let mut before = BTreeMap::new();
+                for op in &ops {
+                    let key = match op {
+                        WriteOp::Put { key, .. }
+                        | WriteOp::ConditionalPut { key, .. }
+                        | WriteOp::Delete { key } => key,
+                    };
+                    if !before.contains_key(key) {
+                        before.insert(key.clone(), self.catalog_kv.get(key)?);
+                    }
                 }
-            }
-            before
-        };
+                before
+            };
         // A data-range session reads schema metadata from range 0. Its committer
         // targets the local data range, so applying a catalog batch through it
         // would create metadata that is neither authoritative nor visible to
@@ -7963,9 +8012,23 @@ impl SqlSession {
             });
         // Both guards borrow `self`, and the bookkeeping below needs it back.
         // The batch has landed, so neither has anything left to protect.
+        //
+        // The block and the innermost savepoint each keep their own copy rather
+        // than the block deriving one from the frames. `RELEASE` discards a
+        // frame's images — its effects are meant to survive to COMMIT — and a
+        // block that read its undo out of the frames would lose exactly the DDL
+        // a released savepoint performed.
         if let Some(frame) = self.savepoints.last_mut() {
             for (key, value) in &catalog_before {
                 frame
+                    .catalog_undo
+                    .entry(key.clone())
+                    .or_insert_with(|| value.clone());
+            }
+        }
+        if let TxnState::InTransaction(context) | TxnState::Failed(context) = &mut self.state {
+            for (key, value) in &catalog_before {
+                context
                     .catalog_undo
                     .entry(key.clone())
                     .or_insert_with(|| value.clone());
