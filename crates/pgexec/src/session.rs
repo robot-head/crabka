@@ -10895,6 +10895,7 @@ fn param_column_type(param: &BoundParam) -> Result<Option<ColumnType>, PgError> 
         Some(crabka_pgtypes::oids::REGCLASS) => Ok(Some(ColumnType::Regclass)),
         Some(crabka_pgtypes::oids::REGTYPE) => Ok(Some(ColumnType::Regtype)),
         Some(crabka_pgtypes::oids::REGPROCEDURE) => Ok(Some(ColumnType::Regprocedure)),
+        Some(crabka_pgtypes::oids::REGNAMESPACE) => Ok(Some(ColumnType::Regnamespace)),
         Some(crabka_pgtypes::oids::OIDVECTOR) => Ok(Some(ColumnType::OidVector)),
         Some(crabka_pgtypes::oids::INT2VECTOR) => Ok(Some(ColumnType::Int2Vector)),
         Some(crabka_pgtypes::oids::INT8) => Ok(Some(ColumnType::Int8)),
@@ -10975,7 +10976,8 @@ fn decode_binary_value(
         ColumnType::Int4
         | ColumnType::Regclass
         | ColumnType::Regtype
-        | ColumnType::Regprocedure => {
+        | ColumnType::Regprocedure
+        | ColumnType::Regnamespace => {
             let bytes = binary_array(value)?;
             Ok(Datum::Int4(i32::from_be_bytes(bytes)))
         }

@@ -108,6 +108,46 @@ async fn regprocedure_resolves_and_renders_identity_arguments() {
     }
 }
 
+/// `regnamespacein`/`regnamespaceout`. A written name folds and resolves like
+/// any identifier; an oid with no schema prints as the bare number rather than
+/// failing, which is what makes `psql`'s `\d` cast chain safe on a stale row.
+#[tokio::test]
+async fn regnamespace_resolves_names_and_falls_back_to_a_bare_oid() {
+    let engine = SqlEngine::new();
+    let mut client = Client::new(&engine);
+    client.run("CREATE SCHEMA myschema").await;
+    for (sql, expected) in [
+        ("SELECT 'public'::regnamespace::text", "public"),
+        // An unquoted name downcases; a quoted one is literal.
+        ("SELECT 'PUBLIC'::regnamespace::text", "public"),
+        ("SELECT '\"public\"'::regnamespace::text", "public"),
+        ("SELECT '  public  '::regnamespace::text", "public"),
+        ("SELECT 'myschema'::regnamespace::text", "myschema"),
+        // A numeric string is an oid, not a name.
+        ("SELECT '2200'::regnamespace::text", "public"),
+        ("SELECT 11::regnamespace::text", "pg_catalog"),
+        ("SELECT 'public'::regnamespace::oid", "2200"),
+        // Identity is the oid, so comparison crosses the two spellings.
+        ("SELECT 11 = 'pg_catalog'::regnamespace", "t"),
+        // `regnamespaceout` has no name for an unknown oid and prints it bare.
+        ("SELECT 999999::regnamespace::text", "999999"),
+        // The cast chain `psql`'s `\d` runs over `pg_statistic_ext`.
+        (
+            "SELECT 2200::pg_catalog.regnamespace::pg_catalog.text",
+            "public",
+        ),
+    ] {
+        assert!(client.scalar(sql).await == Some(expected.into()), "{sql}");
+    }
+    assert!(client.scalar("SELECT NULL::regnamespace").await == None);
+    // A written name that no schema answers to is 3F000, as `regnamespacein`
+    // raises it — unlike an unknown oid, which is not an error at all.
+    assert!(
+        client.fails("SELECT 'nope'::regnamespace").await
+            == ("3F000".into(), "schema \"nope\" does not exist".into())
+    );
+}
+
 #[tokio::test]
 async fn pg_proc_argument_vectors_are_zero_based_arrays() {
     let engine = SqlEngine::new();

@@ -128,7 +128,10 @@ fn catalog_func(name: &str) -> Option<CatalogFunc> {
         "pg_get_function_identity_arguments" => RoutineDef(RoutineDefKind::IdentityArguments),
         "pg_get_function_result" => RoutineDef(RoutineDefKind::Result),
         "pg_get_triggerdef" => TriggerDef,
-        "pg_get_ruledef" | "pg_get_partkeydef" | "pg_get_statisticsobjdef" => NullDef,
+        "pg_get_ruledef"
+        | "pg_get_partkeydef"
+        | "pg_get_statisticsobjdef"
+        | "pg_get_statisticsobjdef_columns" => NullDef,
         "pg_type_is_visible"
         | "pg_function_is_visible"
         | "pg_opclass_is_visible"

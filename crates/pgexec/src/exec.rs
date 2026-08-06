@@ -16540,6 +16540,65 @@ pub(crate) fn regprocedure_cast(
     })))
 }
 
+/// PostgreSQL `regnamespacein`/`regnamespaceout`, resolved over the same
+/// schemas `pg_namespace` projects.
+///
+/// A non-numeric string is a schema NAME, and an unknown one is 3F000 — the
+/// same error `regnamespacein` raises. An unknown OID is not an error in
+/// either direction: `regnamespaceout` falls back to the bare number, so
+/// `999999::regnamespace::text` is `999999`.
+pub(crate) fn regnamespace_cast(
+    catalog_kv: &dyn Kv,
+    value: &Datum,
+) -> Result<Option<Datum>, ExecError> {
+    let rows = pg_namespace_rows(catalog_kv)?;
+    let schema_name = |row: &Vec<Datum>| match row.get(1) {
+        Some(Datum::Text(name)) => Some(name.clone()),
+        _ => None,
+    };
+    let oid = match value {
+        Datum::Text(text) => {
+            let written = text.trim();
+            match written.parse::<i32>() {
+                Ok(oid) => oid,
+                Err(_) => {
+                    // Unquoted identifiers fold to lower case; a quoted one is
+                    // taken verbatim, as `regnamespacein`'s parser does.
+                    let wanted = written
+                        .strip_prefix('"')
+                        .and_then(|s| s.strip_suffix('"'))
+                        .map_or_else(|| written.to_ascii_lowercase(), ToString::to_string);
+                    rows.iter()
+                        .find(|row| schema_name(row).as_deref() == Some(wanted.as_str()))
+                        .and_then(|row| match row.first() {
+                            Some(Datum::Int4(oid)) => Some(*oid),
+                            _ => None,
+                        })
+                        .ok_or(ExecError::Catalog(
+                            crabka_pgcatalog::CatalogError::UndefinedSchema(wanted),
+                        ))?
+                }
+            }
+        }
+        Datum::Int4(oid) => *oid,
+        Datum::Int8(oid) => match i32::try_from(*oid) {
+            Ok(oid) => oid,
+            Err(_) => return Ok(None),
+        },
+        Datum::Regclass(value) => value.oid,
+        _ => return Ok(None),
+    };
+    let name = rows
+        .iter()
+        .find(|row| row.first() == Some(&Datum::Int4(oid)))
+        .and_then(schema_name)
+        .unwrap_or_else(|| oid.to_string());
+    Ok(Some(Datum::Regclass(crabka_pgtypes::RegclassValue {
+        oid,
+        name: name.into(),
+    })))
+}
+
 /// The base-table half of [`resolve_regclass`]: virtual catalog relations and
 /// ordinary/foreign tables. [`crate::catalog_fn`] layers views, sequences and
 /// indexes, the other three `pg_class` kinds, on top.
@@ -16611,6 +16670,14 @@ fn scalar_type_rows() -> &'static [BuiltinTypeRow] {
             category: "N",
             elem: 0,
             array: 2207,
+        },
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::REGNAMESPACE as i32,
+            name: "regnamespace",
+            len: 4,
+            category: "N",
+            elem: 0,
+            array: crabka_pgtypes::oids::REGNAMESPACEARRAY as i32,
         },
         BuiltinTypeRow {
             oid: 2205,
@@ -16942,6 +17009,14 @@ fn builtin_type_rows() -> &'static [BuiltinTypeRow] {
                 len: -1,
                 category: "A",
                 elem: crabka_pgtypes::oids::REGPROCEDURE as i32,
+                array: 0,
+            },
+            BuiltinTypeRow {
+                oid: crabka_pgtypes::oids::REGNAMESPACEARRAY as i32,
+                name: "_regnamespace",
+                len: -1,
+                category: "A",
+                elem: crabka_pgtypes::oids::REGNAMESPACE as i32,
                 array: 0,
             },
         ]);
@@ -18315,6 +18390,7 @@ pub(crate) fn column_type_from_oid(oid: u32) -> Result<ColumnType, ExecError> {
         crabka_pgtypes::oids::OIDVECTOR => ColumnType::OidVector,
         crabka_pgtypes::oids::REGTYPE => ColumnType::Regtype,
         crabka_pgtypes::oids::REGPROCEDURE => ColumnType::Regprocedure,
+        crabka_pgtypes::oids::REGNAMESPACE => ColumnType::Regnamespace,
         crabka_pgtypes::oids::INT8 => ColumnType::Int8,
         crabka_pgtypes::oids::TEXT => ColumnType::Text,
         crabka_pgtypes::oids::VARCHAR => ColumnType::Varchar(None),

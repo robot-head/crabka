@@ -193,6 +193,8 @@ mod type_tag {
     pub const CIRCLE: u8 = 33;
     /// `PostgreSQL` `box`. Append-only — no version bump.
     pub const BOX: u8 = 34;
+    /// `PostgreSQL` `regnamespace`. Append-only — no version bump.
+    pub const REGNAMESPACE: u8 = 35;
 }
 
 #[derive(Debug)]
@@ -273,6 +275,7 @@ pub(crate) fn write_type(out: &mut Vec<u8>, ty: ColumnType) {
         ColumnType::Regclass => out.push(type_tag::REGCLASS),
         ColumnType::Regtype => out.push(type_tag::REGTYPE),
         ColumnType::Regprocedure => out.push(type_tag::REGPROCEDURE),
+        ColumnType::Regnamespace => out.push(type_tag::REGNAMESPACE),
         ColumnType::OidVector => out.push(type_tag::OIDVECTOR),
         ColumnType::Int2Vector => out.push(type_tag::INT2VECTOR),
         ColumnType::TsVector => out.push(type_tag::TSVECTOR),
@@ -391,6 +394,7 @@ fn read_type_with(
         type_tag::REGCLASS => ColumnType::Regclass,
         type_tag::REGTYPE => ColumnType::Regtype,
         type_tag::REGPROCEDURE => ColumnType::Regprocedure,
+        type_tag::REGNAMESPACE => ColumnType::Regnamespace,
         type_tag::OIDVECTOR => ColumnType::OidVector,
         type_tag::INT2VECTOR => ColumnType::Int2Vector,
         type_tag::TSVECTOR => ColumnType::TsVector,

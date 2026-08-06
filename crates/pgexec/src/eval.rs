@@ -358,6 +358,12 @@ fn eval_depth_inner(
             {
                 return Ok(resolved);
             }
+            if *ty == crabka_pgtypes::ColumnType::Regnamespace
+                && let Some(catalog) = ctx.catalog()
+                && let Some(resolved) = crate::exec::regnamespace_cast(catalog, &v)?
+            {
+                return Ok(resolved);
+            }
             let cast = if matches!(
                 ty.storage_type(),
                 ColumnType::JsonPath | ColumnType::Array(ElemType::JsonPath)

@@ -39,6 +39,10 @@ pub mod oids {
     pub const REGCLASS: u32 = 2205;
     pub const REGTYPE: u32 = 2206;
     pub const REGPROCEDURE: u32 = 2202;
+    /// PostgreSQL `regnamespace` — a schema's `pg_namespace` oid rendered as
+    /// its name. `psql`'s `\d` casts `stxnamespace` through it.
+    pub const REGNAMESPACE: u32 = 4089;
+    pub const REGNAMESPACEARRAY: u32 = 4090;
     pub const REGTYPEARRAY: u32 = 2211;
     pub const BPCHAR: u32 = 1042;
     pub const VARCHAR: u32 = 1043;
@@ -284,6 +288,7 @@ impl ElemType {
             | ColumnType::Box
             | ColumnType::Regclass
             | ColumnType::Regprocedure
+            | ColumnType::Regnamespace
             | ColumnType::OidVector
             | ColumnType::Int2Vector
             | ColumnType::TsVector
@@ -629,6 +634,10 @@ pub enum ColumnType {
     /// PostgreSQL `regprocedure` (OID 2202), a `pg_proc` oid rendered with its
     /// identity argument types.
     Regprocedure,
+    /// PostgreSQL `regnamespace` (OID 4089), a `pg_namespace` oid rendered as
+    /// the schema's name. Values share `Datum::Regclass` with the other reg
+    /// types because comparison and wire identity are the oid.
+    Regnamespace,
     /// PostgreSQL `oidvector` (OID 30), an oid array with lower bound zero and
     /// a space-separated text representation.
     OidVector,
@@ -772,6 +781,7 @@ impl ColumnType {
             "regclass" => Some(ColumnType::Regclass),
             "regtype" => Some(ColumnType::Regtype),
             "regprocedure" => Some(ColumnType::Regprocedure),
+            "regnamespace" => Some(ColumnType::Regnamespace),
             "oidvector" => Some(ColumnType::OidVector),
             "int2vector" => Some(ColumnType::Int2Vector),
             "tsvector" => Some(ColumnType::TsVector),
@@ -869,6 +879,7 @@ impl ColumnType {
             ColumnType::Regclass => oids::REGCLASS,
             ColumnType::Regtype => oids::REGTYPE,
             ColumnType::Regprocedure => oids::REGPROCEDURE,
+            ColumnType::Regnamespace => oids::REGNAMESPACE,
             ColumnType::OidVector => oids::OIDVECTOR,
             ColumnType::Int2Vector => oids::INT2VECTOR,
             ColumnType::TsVector => oids::TSVECTOR,
@@ -914,6 +925,7 @@ impl ColumnType {
             ColumnType::Regclass => "regclass",
             ColumnType::Regtype => "regtype",
             ColumnType::Regprocedure => "regprocedure",
+            ColumnType::Regnamespace => "regnamespace",
             ColumnType::OidVector => "oidvector",
             ColumnType::Int2Vector => "int2vector",
             ColumnType::TsVector => "tsvector",
@@ -956,7 +968,7 @@ impl ColumnType {
             ColumnType::Uuid => 16,
             ColumnType::Regclass => 4,
             ColumnType::Regtype => 4,
-            ColumnType::Regprocedure => 4,
+            ColumnType::Regprocedure | ColumnType::Regnamespace => 4,
             ColumnType::OidVector | ColumnType::Int2Vector => -1,
             ColumnType::TsVector | ColumnType::TsQuery => -1,
             // jsonb, jsonpath, arrays and composites are variable-length.

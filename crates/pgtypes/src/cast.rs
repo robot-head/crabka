@@ -97,10 +97,16 @@ pub fn cast_allowed(from: ColumnType, to: ColumnType) -> bool {
         // covered by the string rules below.
         (
             Int4 | ColumnType::Int8,
-            ColumnType::Regclass | ColumnType::Regtype | ColumnType::Regprocedure,
+            ColumnType::Regclass
+            | ColumnType::Regtype
+            | ColumnType::Regprocedure
+            | ColumnType::Regnamespace,
         )
         | (
-            ColumnType::Regclass | ColumnType::Regtype | ColumnType::Regprocedure,
+            ColumnType::Regclass
+            | ColumnType::Regtype
+            | ColumnType::Regprocedure
+            | ColumnType::Regnamespace,
             Int4 | ColumnType::Int8,
         ) => true,
         _ if from.is_string() || to.is_string() => true,
@@ -466,7 +472,10 @@ pub fn cast_in(
         // what `regclass::oid`/`::int` yields in PostgreSQL.
         (
             Datum::Regclass(r),
-            ColumnType::Regclass | ColumnType::Regtype | ColumnType::Regprocedure,
+            ColumnType::Regclass
+            | ColumnType::Regtype
+            | ColumnType::Regprocedure
+            | ColumnType::Regnamespace,
         ) => Ok(Datum::Regclass(r.clone())),
         (Datum::Regclass(r), Int4) => Ok(Datum::Int4(r.oid)),
         (Datum::Regclass(r), Int8) => Ok(Datum::Int8(i64::from(r.oid))),
@@ -484,6 +493,9 @@ pub fn cast_in(
         (Datum::Int4(n), ColumnType::Regprocedure) => {
             Ok(Datum::Regclass(crate::RegclassValue::unresolved(*n)))
         }
+        (Datum::Int4(n), ColumnType::Regnamespace) => {
+            Ok(Datum::Regclass(crate::RegclassValue::unresolved(*n)))
+        }
         (Datum::Int8(n), ColumnType::Regclass) => i4_from_i64(*n).map(|d| match d {
             Datum::Int4(n) => Datum::Regclass(crate::RegclassValue::unresolved(n)),
             other => other,
@@ -493,6 +505,10 @@ pub fn cast_in(
             other => other,
         }),
         (Datum::Int8(n), ColumnType::Regprocedure) => i4_from_i64(*n).map(|d| match d {
+            Datum::Int4(n) => Datum::Regclass(crate::RegclassValue::unresolved(n)),
+            other => other,
+        }),
+        (Datum::Int8(n), ColumnType::Regnamespace) => i4_from_i64(*n).map(|d| match d {
             Datum::Int4(n) => Datum::Regclass(crate::RegclassValue::unresolved(n)),
             other => other,
         }),
@@ -518,6 +534,14 @@ pub fn cast_in(
             .map(|n| Datum::Regclass(crate::RegclassValue::unresolved(n)))
             .map_err(|_| TypeError::InvalidText {
                 type_name: "regprocedure",
+                value: s.clone(),
+            }),
+        (Datum::Text(s), ColumnType::Regnamespace) => s
+            .trim()
+            .parse::<i32>()
+            .map(|n| Datum::Regclass(crate::RegclassValue::unresolved(n)))
+            .map_err(|_| TypeError::InvalidText {
+                type_name: "regnamespace",
                 value: s.clone(),
             }),
         (Datum::Text(s), ColumnType::TsVector) => s.parse().map(Datum::TsVector),
