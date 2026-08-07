@@ -33,7 +33,7 @@ split-debuginfo = "packed"
 # Columnar / dataframe support for the streams client (opt-in via crate
 # features). `polars` and `polars-arrow` MUST share the same version.
 polars = { version = "=0.54.4", default-features = false, features = ["lazy", "ipc", "dtype-full", "parquet", "strings", "json"] }
-polars-arrow = { version = "=0.55.1", default-features = false }
+polars-arrow = { version = "=0.55.2", default-features = false }
 arrow = { version = "59", default-features = false, features = ["ipc"] }
 # Observability block store (crabka-blockstore): DataFusion query engine over
 # Parquet blocks on object storage. Pinned to apache/datafusion `main` because
