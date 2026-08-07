@@ -401,7 +401,7 @@ fn input_error_info_rows(vals: &[Datum], ctx: &EvalCtx) -> Result<Vec<Vec<Datum>
         Datum::Text(value) => value.as_str(),
         other => return Err(type_error("pg_input_error_info", other)),
     };
-    let Some(error) = crate::func::input_error(input, type_name, &ctx.time_zone)? else {
+    let Some(error) = crate::func::input_error(input, type_name, ctx)? else {
         return Ok(vec![vec![Datum::Null; 4]]);
     };
     let detail = error

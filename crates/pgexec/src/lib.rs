@@ -95,6 +95,7 @@ mod privilege;
 mod procarray;
 mod query;
 mod read_gate;
+mod reg_fn;
 mod regexp_fn;
 mod relname;
 pub mod rls;

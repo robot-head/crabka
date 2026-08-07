@@ -245,6 +245,20 @@ mod type_tag {
     pub const TID: u8 = 48;
     /// `PostgreSQL` `pg_lsn`. Append-only — no version bump.
     pub const PG_LSN: u8 = 49;
+    /// `PostgreSQL` `regproc`. Append-only — no version bump.
+    pub const REGPROC: u8 = 50;
+    /// `PostgreSQL` `regoper`. Append-only — no version bump.
+    pub const REGOPER: u8 = 51;
+    /// `PostgreSQL` `regoperator`. Append-only — no version bump.
+    pub const REGOPERATOR: u8 = 52;
+    /// `PostgreSQL` `regconfig`. Append-only — no version bump.
+    pub const REGCONFIG: u8 = 53;
+    /// `PostgreSQL` `regdictionary`. Append-only — no version bump.
+    pub const REGDICTIONARY: u8 = 54;
+    /// `PostgreSQL` `regrole`. Append-only — no version bump.
+    pub const REGROLE: u8 = 55;
+    /// `PostgreSQL` `regcollation`. Append-only — no version bump.
+    pub const REGCOLLATION: u8 = 56;
 }
 
 #[derive(Debug)]
@@ -326,6 +340,13 @@ pub(crate) fn write_type(out: &mut Vec<u8>, ty: ColumnType) {
         ColumnType::Regtype => out.push(type_tag::REGTYPE),
         ColumnType::Regprocedure => out.push(type_tag::REGPROCEDURE),
         ColumnType::Regnamespace => out.push(type_tag::REGNAMESPACE),
+        ColumnType::Regproc => out.push(type_tag::REGPROC),
+        ColumnType::Regoper => out.push(type_tag::REGOPER),
+        ColumnType::Regoperator => out.push(type_tag::REGOPERATOR),
+        ColumnType::Regconfig => out.push(type_tag::REGCONFIG),
+        ColumnType::Regdictionary => out.push(type_tag::REGDICTIONARY),
+        ColumnType::Regrole => out.push(type_tag::REGROLE),
+        ColumnType::Regcollation => out.push(type_tag::REGCOLLATION),
         ColumnType::OidVector => out.push(type_tag::OIDVECTOR),
         ColumnType::Int2Vector => out.push(type_tag::INT2VECTOR),
         ColumnType::TsVector => out.push(type_tag::TSVECTOR),
@@ -459,6 +480,13 @@ fn read_type_with(
         type_tag::REGTYPE => ColumnType::Regtype,
         type_tag::REGPROCEDURE => ColumnType::Regprocedure,
         type_tag::REGNAMESPACE => ColumnType::Regnamespace,
+        type_tag::REGPROC => ColumnType::Regproc,
+        type_tag::REGOPER => ColumnType::Regoper,
+        type_tag::REGOPERATOR => ColumnType::Regoperator,
+        type_tag::REGCONFIG => ColumnType::Regconfig,
+        type_tag::REGDICTIONARY => ColumnType::Regdictionary,
+        type_tag::REGROLE => ColumnType::Regrole,
+        type_tag::REGCOLLATION => ColumnType::Regcollation,
         type_tag::OIDVECTOR => ColumnType::OidVector,
         type_tag::INT2VECTOR => ColumnType::Int2Vector,
         type_tag::TSVECTOR => ColumnType::TsVector,

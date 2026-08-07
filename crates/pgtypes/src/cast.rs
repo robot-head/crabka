@@ -91,21 +91,8 @@ pub fn cast_allowed(from: ColumnType, to: ColumnType) -> bool {
         // `oid → int2` does not.
         (ColumnType::Int2 | Int4 | ColumnType::Int8, ColumnType::Oid)
         | (ColumnType::Oid, Int4 | ColumnType::Int8)
-        | (
-            ColumnType::Oid,
-            ColumnType::Regclass
-            | ColumnType::Regtype
-            | ColumnType::Regprocedure
-            | ColumnType::Regnamespace,
-        )
-        | (
-            ColumnType::Regclass
-            | ColumnType::Regtype
-            | ColumnType::Regprocedure
-            | ColumnType::Regnamespace,
-            ColumnType::Oid,
-        )
         | (ColumnType::Xid8, ColumnType::Xid) => true,
+        (ColumnType::Oid, reg) | (reg, ColumnType::Oid) if reg.is_reg() => true,
         (
             ColumnType::Oid
             | ColumnType::Xid
@@ -174,22 +161,9 @@ pub fn cast_allowed(from: ColumnType, to: ColumnType) -> bool {
         _ if num_family(from) && num_family(to) => true,
         // PostgreSQL defines bool↔int only for int4 (not int8 / float8 / numeric).
         (Bool, Int4) | (Int4, Bool) => true,
-        // `regclass` interconverts with the integer oid family; text↔regclass is
-        // covered by the string rules below.
-        (
-            Int4 | ColumnType::Int8,
-            ColumnType::Regclass
-            | ColumnType::Regtype
-            | ColumnType::Regprocedure
-            | ColumnType::Regnamespace,
-        )
-        | (
-            ColumnType::Regclass
-            | ColumnType::Regtype
-            | ColumnType::Regprocedure
-            | ColumnType::Regnamespace,
-            Int4 | ColumnType::Int8,
-        ) => true,
+        // The `reg*` family interconverts with the integer oid family;
+        // text↔`reg*` is covered by the string rules below.
+        (Int4 | ColumnType::Int8, reg) | (reg, Int4 | ColumnType::Int8) if reg.is_reg() => true,
         _ if from.is_string() || to.is_string() => true,
         // Anything → text (the output function), and text → anything (the input
         // function). Together these also cover text→text (already by identity),
@@ -261,21 +235,8 @@ pub fn assignment_cast_allowed(from: ColumnType, to: ColumnType) -> bool {
         // column and back into an integer one without an explicit cast. The
         // `reg*` pairs are all implicit binary coercions.
         (ColumnType::Int2 | ColumnType::Int4 | ColumnType::Int8, ColumnType::Oid)
-        | (ColumnType::Oid, ColumnType::Int4 | ColumnType::Int8)
-        | (
-            ColumnType::Oid,
-            ColumnType::Regclass
-            | ColumnType::Regtype
-            | ColumnType::Regprocedure
-            | ColumnType::Regnamespace,
-        )
-        | (
-            ColumnType::Regclass
-            | ColumnType::Regtype
-            | ColumnType::Regprocedure
-            | ColumnType::Regnamespace,
-            ColumnType::Oid,
-        ) => true,
+        | (ColumnType::Oid, ColumnType::Int4 | ColumnType::Int8) => true,
+        (ColumnType::Oid, reg) | (reg, ColumnType::Oid) if reg.is_reg() => true,
         // `pg_cast` marks `cidr → inet` and both MAC conversions implicit and
         // `inet → cidr` assignment-level, so `INSERT` into a column of the
         // other type converts without an explicit cast.
@@ -699,89 +660,38 @@ pub fn cast_in(
         (Datum::Text(s), ColumnType::Box) => crate::geometry::Box2::parse(s).map(Datum::Box),
         // `regclass` → the oid family drops the name and keeps the oid, which is
         // what `regclass::oid`/`::int` yields in PostgreSQL.
-        (
-            Datum::Regclass(r),
-            ColumnType::Regclass
-            | ColumnType::Regtype
-            | ColumnType::Regprocedure
-            | ColumnType::Regnamespace,
-        ) => Ok(Datum::Regclass(r.clone())),
+        (Datum::Regclass(r), reg) if reg.is_reg() => Ok(Datum::Regclass(r.clone())),
         (Datum::Regclass(r), Int4) => Ok(Datum::Int4(r.oid)),
         (Datum::Regclass(r), Int8) => Ok(Datum::Int8(i64::from(r.oid))),
         // `reg* ↔ oid` are binary coercions, so the oid survives unchanged in
         // both directions and only the rendering differs.
         (Datum::Regclass(r), ColumnType::Oid) => Ok(Datum::Oid(r.oid as u32)),
-        (
-            Datum::Oid(value),
-            ColumnType::Regclass
-            | ColumnType::Regtype
-            | ColumnType::Regprocedure
-            | ColumnType::Regnamespace,
-        ) => Ok(Datum::Regclass(crate::RegclassValue::unresolved(
-            *value as i32,
-        ))),
-        // → `regclass`. The pure cast has no catalog, so it can only produce the
-        // unresolved rendering (`regclassout`'s bare-oid fallback); the executor
-        // resolves the name before reaching here when a catalog is in scope. A
-        // relation NAME likewise needs the catalog — a non-numeric string that
-        // falls through is 22P02, mirroring an unresolvable input.
-        (Datum::Int4(n), ColumnType::Regclass) => {
-            Ok(Datum::Regclass(crate::RegclassValue::unresolved(*n)))
-        }
-        (Datum::Int4(n), ColumnType::Regtype) => {
-            Ok(Datum::Regclass(crate::RegclassValue::unresolved(*n)))
-        }
-        (Datum::Int4(n), ColumnType::Regprocedure) => {
-            Ok(Datum::Regclass(crate::RegclassValue::unresolved(*n)))
-        }
-        (Datum::Int4(n), ColumnType::Regnamespace) => {
+        (Datum::Oid(value), reg) if reg.is_reg() => Ok(Datum::Regclass(
+            crate::RegclassValue::unresolved(*value as i32),
+        )),
+        // → a `reg*` type. The pure cast has no catalog, so it can only produce
+        // the unresolved rendering (`regclassout`'s bare-oid fallback); the
+        // executor resolves the name before reaching here when a catalog is in
+        // scope. An object NAME likewise needs the catalog — a non-numeric
+        // string that falls through is 22P02, mirroring an unresolvable input.
+        (Datum::Int4(n), reg) if reg.is_reg() => {
             Ok(Datum::Regclass(crate::RegclassValue::unresolved(*n)))
         }
         // A `bigint` reaches a `reg*` type the way PostgreSQL routes it: through
         // the implicit `oid(bigint)`, which range-checks against the UNSIGNED
         // 32-bit range. `4294967295::regclass` is therefore a valid oid, not
         // `integer out of range`.
-        (
-            Datum::Int8(n),
-            ColumnType::Regclass
-            | ColumnType::Regtype
-            | ColumnType::Regprocedure
-            | ColumnType::Regnamespace,
-        ) => u32::try_from(*n)
+        (Datum::Int8(n), reg) if reg.is_reg() => u32::try_from(*n)
             .map(|oid| Datum::Regclass(crate::RegclassValue::unresolved(oid as i32)))
             .map_err(|_| TypeError::OutOfRange {
                 message: "OID out of range".to_string(),
             }),
-        (Datum::Text(s), ColumnType::Regclass) => s
+        (Datum::Text(s), reg) if reg.is_reg() => s
             .trim()
             .parse::<i32>()
             .map(|n| Datum::Regclass(crate::RegclassValue::unresolved(n)))
             .map_err(|_| TypeError::InvalidText {
-                type_name: "regclass",
-                value: s.clone(),
-            }),
-        (Datum::Text(s), ColumnType::Regtype) => s
-            .trim()
-            .parse::<i32>()
-            .map(|n| Datum::Regclass(crate::RegclassValue::unresolved(n)))
-            .map_err(|_| TypeError::InvalidText {
-                type_name: "regtype",
-                value: s.clone(),
-            }),
-        (Datum::Text(s), ColumnType::Regprocedure) => s
-            .trim()
-            .parse::<i32>()
-            .map(|n| Datum::Regclass(crate::RegclassValue::unresolved(n)))
-            .map_err(|_| TypeError::InvalidText {
-                type_name: "regprocedure",
-                value: s.clone(),
-            }),
-        (Datum::Text(s), ColumnType::Regnamespace) => s
-            .trim()
-            .parse::<i32>()
-            .map(|n| Datum::Regclass(crate::RegclassValue::unresolved(n)))
-            .map_err(|_| TypeError::InvalidText {
-                type_name: "regnamespace",
+                type_name: reg.name(),
                 value: s.clone(),
             }),
         // `cash_in`.

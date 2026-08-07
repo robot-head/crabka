@@ -9060,6 +9060,15 @@ pub(crate) fn coerce(
     {
         return Ok(value);
     }
+    // The eleven `reg*` types share one datum, which carries the oid and the
+    // rendering but not which of them produced it — so a store has only the
+    // target column's type to go on. That is enough: the row encoding keeps the
+    // oid and nothing else, and the name is re-derived from the *column's* type
+    // on the way out. The value passes through unchanged, which keeps a stored
+    // `regclass` DEFAULT deparsing as the literal it was written as.
+    if matches!(&value, Datum::Regclass(_)) && target.is_reg() {
+        return Ok(value);
+    }
     if target == ColumnType::JsonPath {
         return match value {
             Datum::Null => Ok(Datum::Null),
@@ -10415,7 +10424,7 @@ fn build_correlated_scalar_lookup(
         .iter()
         .enumerate()
         .filter_map(|(projected, source)| {
-            holds_regclass(plan.table.columns[*source].ty).then_some(projected)
+            holds_reg(plan.table.columns[*source].ty).map(|kind| (projected, kind))
         })
         .collect::<Vec<_>>();
     let result_column = usize::from(plan.key_column != plan.result_column);
@@ -15445,9 +15454,9 @@ fn pg_partitioned_table_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exe
     Ok(rows)
 }
 
-/// `pg_namespace`: one row per schema the catalog holds. This adds nothing, so
-/// a schema appears exactly once and a dropped one not at all.
-fn pg_namespace_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+/// `pg_namespace`: one row per schema the catalog holds — nothing is added
+/// here, so a schema appears exactly once and a dropped one not at all.
+pub(crate) fn pg_namespace_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     Ok(crabka_pgcatalog::list_schemas(catalog_kv)?
         .into_iter()
         .map(|schema| {
@@ -16324,11 +16333,7 @@ fn text_search_catalog_rows(
     Ok(crate::text_search_catalog::catalog_rows(kv, kind)?
         .into_iter()
         .map(|(name, base)| {
-            let mut hash = 2_166_136_261u32;
-            for byte in name.bytes() {
-                hash = (hash ^ u32::from(byte)).wrapping_mul(16_777_619);
-            }
-            let oid = i32::try_from(60_000 + hash % 1_000_000).expect("bounded oid");
+            let oid = crate::text_search_catalog::object_oid(&name);
             match kind {
                 crabka_pgparser::ast::TextSearchObjectKind::Configuration => vec![
                     Datum::Int4(oid),
@@ -16926,17 +16931,16 @@ pub(crate) fn regclass_by_oid(
     )
 }
 
-/// Whether a column of this type holds a `regclass` value: the type itself, or
-/// a domain over it, whose values *are* the base type's values.
-fn holds_regclass(ty: ColumnType) -> bool {
+/// Which `reg*` type a column holds, if any — the type itself, or a domain over
+/// it, whose values *are* the base type's values.
+fn holds_reg(ty: ColumnType) -> Option<crate::reg_fn::RegKind> {
     match ty {
-        ColumnType::Regclass => true,
-        ColumnType::Domain(domain) => holds_regclass(*domain.base),
-        _ => false,
+        ColumnType::Domain(domain) => holds_reg(*domain.base),
+        _ => crate::reg_fn::RegKind::of(ty),
     }
 }
 
-/// Re-attach the relation name to every `regclass` a scan just decoded.
+/// Re-attach the object name to every `reg*` value a scan just decoded.
 ///
 /// The row encoding stores a `regclass` as its bare oid, which is all
 /// PostgreSQL keeps on disk too, so a decoded value arrives as a
@@ -16964,15 +16968,17 @@ fn resolve_scanned_regclass(
 }
 
 /// The positions of `table`'s `regclass`-valued columns within a scanned row
-/// whose first column sits at `offset`. That offset is non-zero for a join
-/// result, which concatenates one table's columns after another's.
-fn regclass_column_indexes(table: &crabka_pgcatalog::Table, offset: usize) -> Vec<usize> {
+/// whose first column sits at `offset` — non-zero for a join result, which
+/// concatenates one table's columns after another's.
+fn regclass_column_indexes(
+    table: &crabka_pgcatalog::Table,
+    offset: usize,
+) -> Vec<(usize, crate::reg_fn::RegKind)> {
     table
         .columns
         .iter()
         .enumerate()
-        .filter(|(_, column)| holds_regclass(column.ty))
-        .map(|(index, _)| index + offset)
+        .filter_map(|(index, column)| Some((index + offset, holds_reg(column.ty)?)))
         .collect()
 }
 
@@ -16980,26 +16986,27 @@ fn regclass_column_indexes(table: &crabka_pgcatalog::Table, offset: usize) -> Ve
 /// columns.
 fn resolve_regclass_at(
     catalog_kv: &dyn Kv,
-    columns: &[usize],
+    columns: &[(usize, crate::reg_fn::RegKind)],
     rows: &mut [Vec<Datum>],
 ) -> Result<(), ExecError> {
     if columns.is_empty() {
         return Ok(());
     }
-    let mut resolved: HashMap<i32, crabka_pgtypes::RegclassValue> = HashMap::new();
+    let mut resolved: HashMap<(i32, crate::reg_fn::RegKind), crabka_pgtypes::RegclassValue> =
+        HashMap::new();
     for row in rows {
-        for &index in columns {
+        for &(index, kind) in columns {
             // A projection that dropped the column, or a NULL, leaves nothing to
             // resolve; a value already carrying its name is left alone.
             let Some(Datum::Int4(oid)) = row.get(index) else {
                 continue;
             };
             let oid = *oid;
-            let value = match resolved.entry(oid) {
+            let value = match resolved.entry((oid, kind)) {
                 std::collections::hash_map::Entry::Occupied(entry) => entry.get().clone(),
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(regclass_by_oid(catalog_kv, oid)?).clone()
-                }
+                std::collections::hash_map::Entry::Vacant(entry) => entry
+                    .insert(crate::reg_fn::stored_value(kind, oid, catalog_kv)?)
+                    .clone(),
             };
             row[index] = Datum::Regclass(value);
         }
@@ -17050,54 +17057,91 @@ pub(crate) fn regclass_cast(
         .map(Some)
 }
 
-/// PostgreSQL `regtypein`/`regtypeout` using the existing built-in signature
-/// map and user-type registry.
-pub(crate) fn regtype_cast(value: &Datum) -> Result<Option<Datum>, ExecError> {
-    let oid = match value {
-        Datum::Text(text) => {
-            let trimmed = text.trim();
-            match trimmed.parse::<i32>() {
-                Ok(oid) => oid,
-                Err(_) => {
-                    let name = trimmed
-                        .strip_prefix("pg_catalog.")
-                        .unwrap_or(trimmed)
-                        .trim_matches('"')
-                        .to_ascii_lowercase();
-                    regtype_oid(&name)
-                        .or_else(|| {
-                            crabka_pgtypes::usertype::lookup(&name)
-                                .and_then(|ty| i32::try_from(ty.oid).ok())
-                        })
-                        .ok_or_else(|| {
-                            ExecError::UndefinedObject(format!("type \"{name}\" does not exist"))
-                        })?
-                }
-            }
+/// The oid of a written type name, as `regtypein` and `parseNameAndArgTypes`
+/// both need it: the built-in signature map first, then the user-type registry,
+/// and 42704 when neither knows it.
+///
+/// One resolver rather than three, because `regtype`, `regprocedure`'s argument
+/// list and `regoperator`'s operand list must agree about what `int4` and
+/// `"char"` mean or a round trip through one of them stops reading back.
+///
+/// A qualifier is resolved before the type name is, which is where the two
+/// error shapes come from: `public.int4` is a missing *type* while
+/// `ng_catalog.int4` is a missing *schema*, because `DeconstructQualifiedName`
+/// looks the namespace up first and raises 3F000 there.
+///
+/// # Errors
+///
+/// 3F000 for a qualifier naming no schema, 42704 `type "…" does not exist`
+/// otherwise.
+pub(crate) fn resolve_type_name(kv: &dyn Kv, written: &str) -> Result<i32, ExecError> {
+    let written = written.trim();
+    let parts = crate::relname::split_identifier_string(written)
+        .filter(|parts| !parts.is_empty())
+        .ok_or_else(crate::relname::invalid_name_syntax)?;
+    // `DeconstructQualifiedName`, whose two length checks are *hard* errors —
+    // the one place `to_regtype` propagates rather than answering NULL.
+    let (schema, name) = match parts.as_slice() {
+        [name] => (None, name.clone()),
+        [schema, name] => (Some(schema.clone()), name.clone()),
+        [catalog, schema, name] if catalog == CURRENT_DATABASE => {
+            (Some(schema.clone()), name.clone())
         }
-        Datum::Int4(oid) => *oid,
-        Datum::Int8(oid) => match i32::try_from(*oid) {
-            Ok(oid) => oid,
-            Err(_) => return Ok(None),
-        },
-        Datum::Regclass(value) => value.oid,
-        _ => return Ok(None),
+        [_, _, _] => {
+            return Err(ExecError::FunctionError {
+                sqlstate: "0A000",
+                message: format!("cross-database references are not implemented: {written}"),
+            });
+        }
+        _ => {
+            return Err(ExecError::FunctionError {
+                sqlstate: "42601",
+                message: format!("improper qualified name (too many dotted names): {written}"),
+            });
+        }
     };
-    let name = regtype_name(oid);
-    Ok(Some(Datum::Regclass(crabka_pgtypes::RegclassValue {
-        oid,
-        name: name.into(),
-    })))
+    if let Some(schema) = &schema
+        && !schema_exists(kv, schema)?
+    {
+        return Err(ExecError::Catalog(
+            crabka_pgcatalog::CatalogError::UndefinedSchema(schema.clone()),
+        ));
+    }
+    // crabka declares every type in `pg_catalog`, so a qualifier that names an
+    // existing schema other than that one finds nothing — which is exactly what
+    // PostgreSQL reports for `public.int4`.
+    let qualified_elsewhere = schema
+        .as_deref()
+        .is_some_and(|schema| schema != "pg_catalog");
+    let found = if qualified_elsewhere {
+        None
+    } else {
+        regtype_oid(&name).or_else(|| {
+            crabka_pgtypes::usertype::lookup(&name).and_then(|ty| i32::try_from(ty.oid).ok())
+        })
+    };
+    found.ok_or_else(|| {
+        let spelled = schema.map_or_else(|| name.clone(), |schema| format!("{schema}.{name}"));
+        ExecError::UndefinedObject(format!("type \"{spelled}\" does not exist"))
+    })
 }
 
-fn regtype_oid(name: &str) -> Option<i32> {
+/// Does `name` name a schema? `pg_namespace` is the whole answer, and it is the
+/// same list `regnamespace` resolves against.
+fn schema_exists(kv: &dyn Kv, name: &str) -> Result<bool, ExecError> {
+    Ok(pg_namespace_rows(kv)?
+        .iter()
+        .any(|row| row.get(1) == Some(&Datum::Text(name.to_string()))))
+}
+
+pub(crate) fn regtype_oid(name: &str) -> Option<i32> {
     crate::routine::TYPE_OIDS
         .iter()
         .find(|(candidate, _)| *candidate == name)
         .map(|(_, oid)| *oid)
 }
 
-fn regtype_name(oid: i32) -> String {
+pub(crate) fn regtype_name(oid: i32) -> String {
     crabka_pgtypes::usertype::lookup_oid(u32::try_from(oid).unwrap_or(0))
         .map(|ty| ty.name)
         .unwrap_or_else(|| {
@@ -17111,160 +17155,6 @@ fn regtype_name(oid: i32) -> String {
                 formatted
             }
         })
-}
-
-/// PostgreSQL `regprocedurein`/`regprocedureout`, resolved from the same rows
-/// exposed through `pg_proc`.
-pub(crate) fn regprocedure_cast(
-    catalog_kv: &dyn Kv,
-    value: &Datum,
-) -> Result<Option<Datum>, ExecError> {
-    let rows = crate::routine::pg_proc_rows(catalog_kv)?;
-    let oid = match value {
-        Datum::Text(text) => match text.trim().parse::<i32>() {
-            Ok(oid) => oid,
-            Err(_) => {
-                let written = text.trim();
-                let Some((name, args)) = written.strip_suffix(')').and_then(|s| s.split_once('('))
-                else {
-                    return Err(ExecError::UndefinedFunction(format!(
-                        "function \"{written}\" does not exist"
-                    )));
-                };
-                let name = name
-                    .rsplit_once('.')
-                    .map_or(name, |(_, bare)| bare)
-                    .trim_matches('"')
-                    .to_ascii_lowercase();
-                let arg_oids = if args.trim().is_empty() {
-                    Vec::new()
-                } else {
-                    args.split(',')
-                        .map(|arg| {
-                            let arg = arg.trim().trim_matches('"').to_ascii_lowercase();
-                            regtype_oid(&arg).ok_or_else(|| {
-                                ExecError::UndefinedObject(format!("type \"{arg}\" does not exist"))
-                            })
-                        })
-                        .collect::<Result<Vec<_>, _>>()?
-                };
-                rows.iter()
-                    .find(|row| {
-                        row.get(1) == Some(&Datum::Text(name.clone()))
-                            && matches!(
-                                row.get(19),
-                                Some(Datum::OidVector(arguments))
-                                    if arguments.elems
-                                        == arg_oids.iter().copied().map(Datum::Int4).collect::<Vec<_>>()
-                            )
-                    })
-                    .and_then(|row| match row.first() {
-                        Some(Datum::Int4(oid)) => Some(*oid),
-                        _ => None,
-                    })
-                    .ok_or_else(|| {
-                        ExecError::UndefinedFunction(format!(
-                            "function \"{written}\" does not exist"
-                        ))
-                    })?
-            }
-        },
-        Datum::Int4(oid) => *oid,
-        Datum::Int8(oid) => match i32::try_from(*oid) {
-            Ok(oid) => oid,
-            Err(_) => return Ok(None),
-        },
-        Datum::Regclass(value) => value.oid,
-        _ => return Ok(None),
-    };
-    let name = rows
-        .iter()
-        .find(|row| row.first() == Some(&Datum::Int4(oid)))
-        .and_then(|row| {
-            let Datum::Text(name) = row.get(1)? else {
-                return None;
-            };
-            let Datum::OidVector(arguments) = row.get(19)? else {
-                return None;
-            };
-            Some(format!(
-                "{}({})",
-                name,
-                arguments
-                    .elems
-                    .iter()
-                    .filter_map(|arg| match arg {
-                        Datum::Int4(oid) => Some(regtype_name(*oid)),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join(",")
-            ))
-        })
-        .unwrap_or_else(|| oid.to_string());
-    Ok(Some(Datum::Regclass(crabka_pgtypes::RegclassValue {
-        oid,
-        name: name.into(),
-    })))
-}
-
-/// PostgreSQL `regnamespacein`/`regnamespaceout`, resolved over the same
-/// schemas `pg_namespace` projects.
-///
-/// A non-numeric string is a schema NAME, and an unknown one is 3F000 — the
-/// same error `regnamespacein` raises. An unknown OID is not an error in
-/// either direction: `regnamespaceout` falls back to the bare number, so
-/// `999999::regnamespace::text` is `999999`.
-pub(crate) fn regnamespace_cast(
-    catalog_kv: &dyn Kv,
-    value: &Datum,
-) -> Result<Option<Datum>, ExecError> {
-    let rows = pg_namespace_rows(catalog_kv)?;
-    let schema_name = |row: &Vec<Datum>| match row.get(1) {
-        Some(Datum::Text(name)) => Some(name.clone()),
-        _ => None,
-    };
-    let oid = match value {
-        Datum::Text(text) => {
-            let written = text.trim();
-            match written.parse::<i32>() {
-                Ok(oid) => oid,
-                Err(_) => {
-                    // Unquoted identifiers fold to lower case; a quoted one is
-                    // taken verbatim, as `regnamespacein`'s parser does.
-                    let wanted = written
-                        .strip_prefix('"')
-                        .and_then(|s| s.strip_suffix('"'))
-                        .map_or_else(|| written.to_ascii_lowercase(), ToString::to_string);
-                    rows.iter()
-                        .find(|row| schema_name(row).as_deref() == Some(wanted.as_str()))
-                        .and_then(|row| match row.first() {
-                            Some(Datum::Int4(oid)) => Some(*oid),
-                            _ => None,
-                        })
-                        .ok_or(ExecError::Catalog(
-                            crabka_pgcatalog::CatalogError::UndefinedSchema(wanted),
-                        ))?
-                }
-            }
-        }
-        Datum::Int4(oid) => *oid,
-        Datum::Int8(oid) => match i32::try_from(*oid) {
-            Ok(oid) => oid,
-            Err(_) => return Ok(None),
-        },
-        Datum::Regclass(value) => value.oid,
-        _ => return Ok(None),
-    };
-    let name = rows
-        .iter()
-        .find(|row| row.first() == Some(&Datum::Int4(oid)))
-        .and_then(schema_name)
-        .unwrap_or_else(|| oid.to_string());
-    Ok(Some(Datum::Regclass(crabka_pgtypes::RegclassValue {
-        oid,
-        name: name.into(),
-    })))
 }
 
 /// The base-table half of [`resolve_regclass`]: virtual catalog relations and
@@ -17387,12 +17277,68 @@ fn scalar_type_rows() -> &'static [BuiltinTypeRow] {
             array: crabka_pgtypes::oids::REGNAMESPACEARRAY as i32,
         },
         BuiltinTypeRow {
-            oid: 2205,
+            oid: crabka_pgtypes::oids::REGCLASS as i32,
             name: "regclass",
             len: 4,
             category: "N",
             elem: 0,
-            array: 0,
+            array: 2210,
+        },
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::REGPROC as i32,
+            name: "regproc",
+            len: 4,
+            category: "N",
+            elem: 0,
+            array: 1008,
+        },
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::REGOPER as i32,
+            name: "regoper",
+            len: 4,
+            category: "N",
+            elem: 0,
+            array: 2208,
+        },
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::REGOPERATOR as i32,
+            name: "regoperator",
+            len: 4,
+            category: "N",
+            elem: 0,
+            array: 2209,
+        },
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::REGCONFIG as i32,
+            name: "regconfig",
+            len: 4,
+            category: "N",
+            elem: 0,
+            array: 3735,
+        },
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::REGDICTIONARY as i32,
+            name: "regdictionary",
+            len: 4,
+            category: "N",
+            elem: 0,
+            array: 3770,
+        },
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::REGROLE as i32,
+            name: "regrole",
+            len: 4,
+            category: "N",
+            elem: 0,
+            array: 4097,
+        },
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::REGCOLLATION as i32,
+            name: "regcollation",
+            len: 4,
+            category: "N",
+            elem: 0,
+            array: 4192,
         },
         BuiltinTypeRow {
             oid: crabka_pgtypes::oids::REGTYPE as i32,
@@ -17781,6 +17727,31 @@ fn builtin_type_rows() -> &'static [BuiltinTypeRow] {
                 array: 0,
             },
         ]);
+        // The rest of the `reg*` family. crabka refuses to *build* an array of
+        // any of them, but `pg_type` still has to describe the array type each
+        // scalar's `typarray` points at — `type_sanity` checks exactly that
+        // link, and a dangling one is a catalog error whether or not the type
+        // is constructible.
+        rows.extend(
+            [
+                (1008, "_regproc", crabka_pgtypes::oids::REGPROC),
+                (2208, "_regoper", crabka_pgtypes::oids::REGOPER),
+                (2209, "_regoperator", crabka_pgtypes::oids::REGOPERATOR),
+                (2210, "_regclass", crabka_pgtypes::oids::REGCLASS),
+                (3735, "_regconfig", crabka_pgtypes::oids::REGCONFIG),
+                (3770, "_regdictionary", crabka_pgtypes::oids::REGDICTIONARY),
+                (4097, "_regrole", crabka_pgtypes::oids::REGROLE),
+                (4192, "_regcollation", crabka_pgtypes::oids::REGCOLLATION),
+            ]
+            .map(|(oid, name, elem)| BuiltinTypeRow {
+                oid,
+                name,
+                len: -1,
+                category: "A",
+                elem: elem as i32,
+                array: 0,
+            }),
+        );
         for (oid, name, array) in [
             (
                 crabka_pgtypes::oids::INT4MULTIRANGE,
@@ -19252,9 +19223,20 @@ pub(crate) fn column_type_from_oid(oid: u32) -> Result<ColumnType, ExecError> {
         crabka_pgtypes::oids::INT2 => ColumnType::Int2,
         crabka_pgtypes::oids::INT4 => ColumnType::Int4,
         crabka_pgtypes::oids::OIDVECTOR => ColumnType::OidVector,
+        // The whole `reg*` family, including `regclass` itself: a UNION or a
+        // CTE over a column of one of them has to name its type, and an oid
+        // this table has no entry for is a hard error rather than a fallback.
+        crabka_pgtypes::oids::REGCLASS => ColumnType::Regclass,
         crabka_pgtypes::oids::REGTYPE => ColumnType::Regtype,
         crabka_pgtypes::oids::REGPROCEDURE => ColumnType::Regprocedure,
         crabka_pgtypes::oids::REGNAMESPACE => ColumnType::Regnamespace,
+        crabka_pgtypes::oids::REGPROC => ColumnType::Regproc,
+        crabka_pgtypes::oids::REGOPER => ColumnType::Regoper,
+        crabka_pgtypes::oids::REGOPERATOR => ColumnType::Regoperator,
+        crabka_pgtypes::oids::REGCONFIG => ColumnType::Regconfig,
+        crabka_pgtypes::oids::REGDICTIONARY => ColumnType::Regdictionary,
+        crabka_pgtypes::oids::REGROLE => ColumnType::Regrole,
+        crabka_pgtypes::oids::REGCOLLATION => ColumnType::Regcollation,
         crabka_pgtypes::oids::INT8 => ColumnType::Int8,
         crabka_pgtypes::oids::TEXT => ColumnType::Text,
         crabka_pgtypes::oids::VARCHAR => ColumnType::Varchar(None),

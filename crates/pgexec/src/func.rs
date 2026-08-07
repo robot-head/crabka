@@ -747,7 +747,7 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
         }
         ScalarFunc::FormatType => {
             require_arity(fc, n == 2)?;
-            require_int_or_null(&args[0], scope)?;
+            require_oid_or_null(&args[0], scope)?;
             require_int_or_null(&args[1], scope)?;
             Ok(ColumnType::Text)
         }
@@ -1726,9 +1726,7 @@ fn eval_eager(
             require_arity(fc, vals.len() == 2)?;
             let input = text_arg(&vals[0])?;
             let type_name = text_arg(&vals[1])?;
-            Ok(Datum::Bool(
-                input_error(input, type_name, &ctx.time_zone)?.is_none(),
-            ))
+            Ok(Datum::Bool(input_error(input, type_name, ctx)?.is_none()))
         }
         ScalarFunc::BinaryCoercible => {
             require_arity(fc, vals.len() == 2)?;
@@ -1862,12 +1860,29 @@ fn eval_multirange_predicate(name: &str, vals: &[Datum]) -> Result<Datum, ExecEr
 pub(crate) fn input_error(
     input: &str,
     type_name: &str,
-    time_zone: &jiff::tz::TimeZone,
+    ctx: &EvalCtx,
 ) -> Result<Option<crabka_pgwire::error::PgError>, ExecError> {
+    let time_zone = &ctx.time_zone;
     let ty = input_type(type_name).ok_or_else(|| ExecError::FunctionError {
         sqlstate: "42704",
         message: format!("type \"{type_name}\" does not exist"),
     })?;
+    // A `reg*` input function resolves against the catalog, so the pure cast
+    // this otherwise drives would report `invalid input syntax` for every name
+    // rather than the missing-object error PostgreSQL reports. Route it through
+    // the same resolver the cast operator uses.
+    // A hard error still propagates: PostgreSQL's own `regproc.sql` records
+    // `pg_input_error_info('way.too.many.names', 'regtype')` as an ERROR rather
+    // than a row, and `crate::reg_fn::soft` is the same test that decides
+    // whether `to_reg*` swallows it.
+    if let Some(kind) = crate::reg_fn::RegKind::of(ty) {
+        let value = Datum::Text(input.to_string());
+        return match crate::reg_fn::reg_cast(kind, &value, ctx) {
+            Ok(_) => Ok(None),
+            Err(error) if crate::reg_fn::soft(&error) => Ok(Some(error.into_pg())),
+            Err(error) => Err(error),
+        };
+    }
     // `bit_in` / `varbit_in` take the length modifier themselves and reject a
     // mismatch, where the *cast* to `bit(n)` would silently pad or truncate.
     // `pg_input_error_info('01010001', 'bit(10)')` is the input function, so it
@@ -2126,8 +2141,23 @@ fn type_display_name(t: ColumnType) -> String {
     }
 }
 
-/// Require an integer argument, or a bare `NULL`. PostgreSQL resolves such a
-/// `NULL` to the parameter's own type and does not reject it.
+/// `format_type`'s first argument is declared `oid`, and every `reg*` reaches
+/// `oid` by a binary coercion — so `format_type('int4'::regtype, -1)` and
+/// `format_type(to_regtype('varchar(32)'), 36)` both type-check, which is the
+/// spelling PostgreSQL's own `regproc.sql` uses.
+fn require_oid_or_null(arg: &Expr, scope: &Scope) -> Result<(), ExecError> {
+    if matches!(arg, Expr::NullLiteral) {
+        return Ok(());
+    }
+    let ty = crate::eval::infer_type(arg, scope)?;
+    if ty.is_reg() || ty == ColumnType::Oid {
+        return Ok(());
+    }
+    require_int(arg, scope).map(|_| ())
+}
+
+/// Require an integer argument, or a bare `NULL` (which PostgreSQL resolves to
+/// the parameter's own type rather than rejecting).
 fn require_int_or_null(arg: &Expr, scope: &Scope) -> Result<(), ExecError> {
     if matches!(arg, Expr::NullLiteral) {
         return Ok(());
@@ -2268,8 +2298,20 @@ fn builtin_format_type(oid: u32) -> Option<(&'static str, TypmodKind)> {
         1231 => ("numeric[]", PrecisionScale),
         1266 => ("time with time zone", Seconds),
         1700 => ("numeric", PrecisionScale),
+        // The `reg*` family. `format_type` is what `psql`'s `\d` prints in the
+        // Type column and what `pg_attribute` reports, so a missing entry here
+        // is a blank column rather than a wrong one.
+        24 => ("regproc", NoMod),
+        2202 => ("regprocedure", NoMod),
+        2203 => ("regoper", NoMod),
+        2204 => ("regoperator", NoMod),
         2205 => ("regclass", NoMod),
         2206 => ("regtype", NoMod),
+        3734 => ("regconfig", NoMod),
+        3769 => ("regdictionary", NoMod),
+        4089 => ("regnamespace", NoMod),
+        4096 => ("regrole", NoMod),
+        4191 => ("regcollation", NoMod),
         2278 => ("void", NoMod),
         2950 => ("uuid", NoMod),
         2951 => ("uuid[]", NoMod),
@@ -2439,6 +2481,12 @@ pub(crate) fn int_arg(d: &Datum) -> Result<i64, ExecError> {
         // PostgreSQL declares int2/int4/int8 -> oid implicit, so widening the
         // other direction here is the same coercion read backwards.
         Datum::Oid(n) => Ok(i64::from(*n)),
+        // A `reg*` is binary-coercible to `oid` in both directions, so the same
+        // arguments read as `'v'::regclass`. Without this arm
+        // `pg_get_viewdef('v'::regclass)` — the spelling PostgreSQL's own
+        // `pg_get_viewdef(regclass)` overload takes — reports that the function
+        // does not accept an argument of type regclass.
+        Datum::Regclass(value) => Ok(i64::from(value.oid)),
         other => Err(type_error("function", other)),
     }
 }

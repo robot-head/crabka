@@ -1540,34 +1540,41 @@ fn pg_authid_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         .collect())
 }
 
-/// The three collations every UTF-8 PostgreSQL cluster has.
+/// The three collations every UTF-8 PostgreSQL cluster has, with the oids
+/// PostgreSQL itself assigns them. crabka compares text with memcmp semantics,
+/// which is what `C` describes; `default` is the database default and is what
+/// every column reports.
 ///
-/// Crabka compares text with memcmp semantics, which is what `C` describes.
-/// `default` is the database default and is what every column reports.
+/// `regcollation` reads the same table, so `951::regcollation` and
+/// `SELECT oid FROM pg_collation WHERE collname = 'POSIX'` can never drift
+/// apart.
+pub(crate) const BUILTIN_COLLATIONS: &[(i32, &str, &str, i32)] = &[
+    (DEFAULT_COLLATION_OID, "default", "d", 0),
+    (950, "C", "c", -1),
+    (951, "POSIX", "c", -1),
+];
+
 fn pg_collation_rows() -> Vec<Vec<Datum>> {
-    [
-        (DEFAULT_COLLATION_OID, "default", "d", 0),
-        (950, "C", "c", -1),
-        (951, "POSIX", "c", -1),
-    ]
-    .into_iter()
-    .map(|(oid, name, provider, encoding)| {
-        vec![
-            int(oid),
-            text(name),
-            int(crate::exec::PG_CATALOG_NAMESPACE_OID),
-            int(10),
-            text(provider),
-            Datum::Bool(true),
-            int(encoding),
-            Datum::Null,
-            Datum::Null,
-            Datum::Null,
-            Datum::Null,
-            Datum::Null,
-        ]
-    })
-    .collect()
+    BUILTIN_COLLATIONS
+        .iter()
+        .copied()
+        .map(|(oid, name, provider, encoding)| {
+            vec![
+                int(oid),
+                text(name),
+                int(crate::exec::PG_CATALOG_NAMESPACE_OID),
+                int(10),
+                text(provider),
+                Datum::Bool(true),
+                int(encoding),
+                Datum::Null,
+                Datum::Null,
+                Datum::Null,
+                Datum::Null,
+                Datum::Null,
+            ]
+        })
+        .collect()
 }
 
 /// The single database crabka exposes, which matches what `current_database()`

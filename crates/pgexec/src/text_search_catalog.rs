@@ -226,6 +226,21 @@ pub(crate) fn execute(
     }
 }
 
+/// The oid `pg_ts_config`/`pg_ts_dict` reports for a text-search object, and
+/// the one `regconfig`/`regdictionary` resolve to.
+///
+/// crabka has no oid counter for these — they are named, not numbered, in the
+/// catalog — so the oid is derived from the name by FNV-1a within a reserved
+/// band. Both readers call this so a `regconfig` value and the `pg_ts_config`
+/// row for the same name can never disagree.
+pub(crate) fn object_oid(name: &str) -> i32 {
+    let mut hash = 2_166_136_261u32;
+    for byte in name.bytes() {
+        hash = (hash ^ u32::from(byte)).wrapping_mul(16_777_619);
+    }
+    i32::try_from(60_000 + hash % 1_000_000).expect("bounded oid")
+}
+
 pub(crate) fn catalog_rows(
     kv: &dyn Kv,
     kind: TextSearchObjectKind,

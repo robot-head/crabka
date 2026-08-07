@@ -391,7 +391,7 @@ pub fn parse_written_relation(text: &str) -> Result<WrittenRelation, ExecError> 
     Ok(WrittenRelation { reference, dotted })
 }
 
-fn invalid_name_syntax() -> ExecError {
+pub(crate) fn invalid_name_syntax() -> ExecError {
     ExecError::FunctionError {
         sqlstate: "42602",
         message: "invalid name syntax".into(),
@@ -401,7 +401,7 @@ fn invalid_name_syntax() -> ExecError {
 /// `PostgreSQL`'s `SplitIdentifierString(text, '.')`: the parts of a written
 /// name, or `None` for the text it rejects. An empty result is the empty input,
 /// which that function accepts and its one caller here does not.
-fn split_identifier_string(text: &str) -> Option<Vec<String>> {
+pub(crate) fn split_identifier_string(text: &str) -> Option<Vec<String>> {
     let mut rest = text.trim_start_matches(is_scanner_space);
     if rest.is_empty() {
         return Some(Vec::new());

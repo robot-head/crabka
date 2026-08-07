@@ -11169,11 +11169,20 @@ fn decode_binary_value(
 ) -> Result<Datum, PgError> {
     match ty {
         ColumnType::Int2 => Ok(Datum::Int2(i16::from_be_bytes(binary_array(value)?))),
+        // Every `reg*` type's `*_recv` is `oidrecv`, so all eleven decode as the
+        // four-byte oid, exactly like `int4`.
         ColumnType::Int4
         | ColumnType::Regclass
         | ColumnType::Regtype
         | ColumnType::Regprocedure
-        | ColumnType::Regnamespace => {
+        | ColumnType::Regnamespace
+        | ColumnType::Regproc
+        | ColumnType::Regoper
+        | ColumnType::Regoperator
+        | ColumnType::Regconfig
+        | ColumnType::Regdictionary
+        | ColumnType::Regrole
+        | ColumnType::Regcollation => {
             let bytes = binary_array(value)?;
             Ok(Datum::Int4(i32::from_be_bytes(bytes)))
         }

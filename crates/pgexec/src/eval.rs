@@ -205,6 +205,11 @@ fn eval_depth_inner(
         Expr::Func(fc) if crate::catalog_fn::is_catalog_func(&fc.name) => {
             crate::catalog_fn::eval_catalog(fc, ctx, |e| eval_depth(e, scope, values, ctx, d))
         }
+        // The object-identifier family: `to_regclass(…)` and the type-as-function
+        // spelling `regclass(…)`, both of which resolve against the catalog.
+        Expr::Func(fc) if crate::reg_fn::is_reg_func(&fc.name) => {
+            crate::reg_fn::eval_reg_func(fc, ctx, |e| eval_depth(e, scope, values, ctx, d))
+        }
         Expr::Func(fc) if crate::func::is_scalar(&fc.name) => {
             crate::func::eval_scalar(fc, Some(scope), ctx, |e| {
                 eval_depth(e, scope, values, ctx, d)
@@ -319,24 +324,18 @@ fn eval_depth_inner(
                 return Ok(empty);
             }
             let v = eval_depth(expr, scope, values, ctx, d)?;
-            // `::regclass` is the one cast that needs the catalog: a name has to
-            // be resolved to its oid (PostgreSQL's regclassin), and an oid has
-            // to be resolved *back* to the name `regclassout` prints, because
-            // the value layer that renders it has no catalog handle. This is the
-            // point where one is in scope, so the name is attached here and
-            // travels with the value — and it is also where the session's search
-            // path is in scope, which is what decides the schema a bare name
-            // lands in. Without a catalog — a planning context or a unit test —
-            // the pure cast below yields the bare-oid rendering.
-            if *ty == crabka_pgtypes::ColumnType::Regclass
-                && let Some(catalog) = ctx.catalog()
-                && let Some(resolved) =
-                    crate::catalog_fn::regclass_cast(catalog, ctx.resolution(), &v)?
-            {
-                return Ok(resolved);
-            }
-            if *ty == crabka_pgtypes::ColumnType::Regtype
-                && let Some(resolved) = crate::exec::regtype_cast(&v)?
+            // The `reg*` family is the one set of casts that needs the catalog:
+            // a name has to be resolved to its oid (PostgreSQL's `reg*in`), and
+            // an oid has to be resolved *back* to the name `reg*out` prints,
+            // because the value layer that renders it has no catalog handle.
+            // This is the point where one is in scope, so the name is attached
+            // here and travels with the value — and it is also where the
+            // session's search path is in scope, which is what decides the
+            // schema a bare name lands in. Without a catalog — a planning
+            // context or a unit test — the pure cast below yields the bare-oid
+            // rendering.
+            if let Some(kind) = crate::reg_fn::RegKind::of(*ty)
+                && let Some(resolved) = crate::reg_fn::reg_cast(kind, &v, ctx)?
             {
                 return Ok(resolved);
             }
@@ -347,9 +346,10 @@ fn eval_depth_inner(
                     .elems
                     .iter()
                     .map(|argument| {
-                        crate::exec::regtype_cast(argument)?.ok_or_else(|| {
-                            ExecError::TypeMismatch("cannot cast oid to regtype".into())
-                        })
+                        crate::reg_fn::reg_cast(crate::reg_fn::RegKind::Type, argument, ctx)?
+                            .ok_or_else(|| {
+                                ExecError::TypeMismatch("cannot cast oid to regtype".into())
+                            })
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 return Ok(Datum::Array(crabka_pgtypes::ArrayValue::with_dims(
@@ -357,18 +357,6 @@ fn eval_depth_inner(
                     elems,
                     arguments.dims.clone(),
                 )));
-            }
-            if *ty == crabka_pgtypes::ColumnType::Regprocedure
-                && let Some(catalog) = ctx.catalog()
-                && let Some(resolved) = crate::exec::regprocedure_cast(catalog, &v)?
-            {
-                return Ok(resolved);
-            }
-            if *ty == crabka_pgtypes::ColumnType::Regnamespace
-                && let Some(catalog) = ctx.catalog()
-                && let Some(resolved) = crate::exec::regnamespace_cast(catalog, &v)?
-            {
-                return Ok(resolved);
             }
             let cast = if matches!(
                 ty.storage_type(),
@@ -3113,6 +3101,9 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
         Expr::Func(fc) if crate::grouping::is_grouping_call(fc) => Ok(ColumnType::Int4),
         Expr::Func(fc) if crate::catalog_fn::is_catalog_func(&fc.name) => {
             crate::catalog_fn::catalog_func_result_type(fc, scope)
+        }
+        Expr::Func(fc) if crate::reg_fn::is_reg_func(&fc.name) => {
+            crate::reg_fn::reg_func_result_type(fc, scope)
         }
         Expr::Func(fc) if crate::func::is_scalar(&fc.name) => {
             crate::func::scalar_result_type(fc, scope)

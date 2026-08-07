@@ -65,6 +65,26 @@ pub mod oids {
     pub const REGNAMESPACE: u32 = 4089;
     pub const REGNAMESPACEARRAY: u32 = 4090;
     pub const REGTYPEARRAY: u32 = 2211;
+    /// PostgreSQL `regproc` — a `pg_proc` oid rendered as the bare function
+    /// name, without its argument types. Unlike every other member of the
+    /// family its oid is in the bootstrap band, because `pg_proc.protransform`
+    /// and friends are declared with it.
+    pub const REGPROC: u32 = 24;
+    /// PostgreSQL `regoper` — a `pg_operator` oid rendered as the bare operator
+    /// name.
+    pub const REGOPER: u32 = 2203;
+    /// PostgreSQL `regoperator` — a `pg_operator` oid rendered with its operand
+    /// types, `NONE` standing in for the missing side of a unary operator.
+    pub const REGOPERATOR: u32 = 2204;
+    /// PostgreSQL `regconfig` — a `pg_ts_config` oid.
+    pub const REGCONFIG: u32 = 3734;
+    /// PostgreSQL `regdictionary` — a `pg_ts_dict` oid.
+    pub const REGDICTIONARY: u32 = 3769;
+    /// PostgreSQL `regrole` — a `pg_authid` oid. Roles are cluster-wide, so it
+    /// is one of the two members that never schema-qualifies.
+    pub const REGROLE: u32 = 4096;
+    /// PostgreSQL `regcollation` — a `pg_collation` oid.
+    pub const REGCOLLATION: u32 = 4191;
     pub const BPCHAR: u32 = 1042;
     pub const VARCHAR: u32 = 1043;
     /// PostgreSQL `real`: single-precision IEEE-754 (`f32`).
@@ -342,6 +362,13 @@ impl ElemType {
             | ColumnType::Regclass
             | ColumnType::Regprocedure
             | ColumnType::Regnamespace
+            | ColumnType::Regproc
+            | ColumnType::Regoper
+            | ColumnType::Regoperator
+            | ColumnType::Regconfig
+            | ColumnType::Regdictionary
+            | ColumnType::Regrole
+            | ColumnType::Regcollation
             | ColumnType::OidVector
             | ColumnType::Int2Vector
             | ColumnType::TsVector
@@ -710,6 +737,25 @@ pub enum ColumnType {
     /// the schema's name. Values share `Datum::Regclass` with the other reg
     /// types because comparison and wire identity are the oid.
     Regnamespace,
+    /// PostgreSQL `regproc` (OID 24), a `pg_proc` oid rendered as the bare
+    /// function name. It differs from [`Regprocedure`](Self::Regprocedure) in
+    /// that a name matching more than one overload is 42725 rather than a
+    /// resolution.
+    Regproc,
+    /// PostgreSQL `regoper` (OID 2203), a `pg_operator` oid rendered as the
+    /// bare operator name.
+    Regoper,
+    /// PostgreSQL `regoperator` (OID 2204), a `pg_operator` oid rendered with
+    /// its operand types.
+    Regoperator,
+    /// PostgreSQL `regconfig` (OID 3734), a `pg_ts_config` oid.
+    Regconfig,
+    /// PostgreSQL `regdictionary` (OID 3769), a `pg_ts_dict` oid.
+    Regdictionary,
+    /// PostgreSQL `regrole` (OID 4096), a `pg_authid` oid.
+    Regrole,
+    /// PostgreSQL `regcollation` (OID 4191), a `pg_collation` oid.
+    Regcollation,
     /// PostgreSQL `oidvector` (OID 30), an oid array with lower bound zero and
     /// a space-separated text representation.
     OidVector,
@@ -898,6 +944,13 @@ impl ColumnType {
             "regtype" => Some(ColumnType::Regtype),
             "regprocedure" => Some(ColumnType::Regprocedure),
             "regnamespace" => Some(ColumnType::Regnamespace),
+            "regproc" => Some(ColumnType::Regproc),
+            "regoper" => Some(ColumnType::Regoper),
+            "regoperator" => Some(ColumnType::Regoperator),
+            "regconfig" => Some(ColumnType::Regconfig),
+            "regdictionary" => Some(ColumnType::Regdictionary),
+            "regrole" => Some(ColumnType::Regrole),
+            "regcollation" => Some(ColumnType::Regcollation),
             "oidvector" => Some(ColumnType::OidVector),
             "int2vector" => Some(ColumnType::Int2Vector),
             "tsvector" => Some(ColumnType::TsVector),
@@ -1002,6 +1055,13 @@ impl ColumnType {
             ColumnType::Regtype => oids::REGTYPE,
             ColumnType::Regprocedure => oids::REGPROCEDURE,
             ColumnType::Regnamespace => oids::REGNAMESPACE,
+            ColumnType::Regproc => oids::REGPROC,
+            ColumnType::Regoper => oids::REGOPER,
+            ColumnType::Regoperator => oids::REGOPERATOR,
+            ColumnType::Regconfig => oids::REGCONFIG,
+            ColumnType::Regdictionary => oids::REGDICTIONARY,
+            ColumnType::Regrole => oids::REGROLE,
+            ColumnType::Regcollation => oids::REGCOLLATION,
             ColumnType::OidVector => oids::OIDVECTOR,
             ColumnType::Int2Vector => oids::INT2VECTOR,
             ColumnType::TsVector => oids::TSVECTOR,
@@ -1062,6 +1122,13 @@ impl ColumnType {
             ColumnType::Regtype => "regtype",
             ColumnType::Regprocedure => "regprocedure",
             ColumnType::Regnamespace => "regnamespace",
+            ColumnType::Regproc => "regproc",
+            ColumnType::Regoper => "regoper",
+            ColumnType::Regoperator => "regoperator",
+            ColumnType::Regconfig => "regconfig",
+            ColumnType::Regdictionary => "regdictionary",
+            ColumnType::Regrole => "regrole",
+            ColumnType::Regcollation => "regcollation",
             ColumnType::OidVector => "oidvector",
             ColumnType::Int2Vector => "int2vector",
             ColumnType::TsVector => "tsvector",
@@ -1119,6 +1186,15 @@ impl ColumnType {
             ColumnType::Regclass => 4,
             ColumnType::Regtype => 4,
             ColumnType::Regprocedure | ColumnType::Regnamespace => 4,
+            // The seven remaining `reg*` types are oids too: `pg_type.typlen`
+            // is 4 for every member of the family.
+            ColumnType::Regproc
+            | ColumnType::Regoper
+            | ColumnType::Regoperator
+            | ColumnType::Regconfig
+            | ColumnType::Regdictionary
+            | ColumnType::Regrole
+            | ColumnType::Regcollation => 4,
             ColumnType::OidVector | ColumnType::Int2Vector => -1,
             ColumnType::TsVector | ColumnType::TsQuery => -1,
             // `inet`/`cidr` are varlena; the two MAC types are fixed-width.
@@ -1157,6 +1233,28 @@ impl ColumnType {
         matches!(
             self,
             ColumnType::Text | ColumnType::Varchar(_) | ColumnType::Char(_)
+        )
+    }
+
+    /// True for the eleven object-identifier types. Every one of them is an
+    /// `oid` underneath — same storage, same comparison, same binary wire form
+    /// — and differs only in the catalog its input and output functions read.
+    /// The cast table keys off this rather than listing all eleven at each of
+    /// its half-dozen sites.
+    pub const fn is_reg(self) -> bool {
+        matches!(
+            self,
+            ColumnType::Regclass
+                | ColumnType::Regtype
+                | ColumnType::Regprocedure
+                | ColumnType::Regnamespace
+                | ColumnType::Regproc
+                | ColumnType::Regoper
+                | ColumnType::Regoperator
+                | ColumnType::Regconfig
+                | ColumnType::Regdictionary
+                | ColumnType::Regrole
+                | ColumnType::Regcollation
         )
     }
 
@@ -1348,12 +1446,16 @@ impl RegclassValue {
     /// `PostgreSQL`'s `regclassout` does not error here: it prints `-` for
     /// `InvalidOid` and the bare oid otherwise, so `SELECT 999999::oid::regclass`
     /// yields `999999`.
+    ///
+    /// The fallback is `oidout`, which is **unsigned**: an oid past 2^31 is
+    /// stored as a negative `i32` here and still prints as
+    /// `4294967295::regclass` does in PostgreSQL, not as `-1`.
     #[must_use]
     pub fn unresolved(oid: i32) -> Self {
         let name = if oid == 0 {
             "-".into()
         } else {
-            oid.to_string().into()
+            (oid as u32).to_string().into()
         };
         RegclassValue { oid, name }
     }
