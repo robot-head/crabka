@@ -87,6 +87,28 @@ pub fn cast_allowed(from: ColumnType, to: ColumnType) -> bool {
         | (ColumnType::Inet, ColumnType::Cidr)
         | (ColumnType::MacAddr, ColumnType::MacAddr8)
         | (ColumnType::MacAddr8, ColumnType::MacAddr) => true,
+        // `bit` and `bit varying` are binary-coercible to each other in both
+        // directions, and each re-coerces to its own type under a different
+        // length modifier.
+        (
+            ColumnType::Bit(_) | ColumnType::VarBit(_),
+            ColumnType::Bit(_) | ColumnType::VarBit(_),
+        ) => true,
+        // `pg_cast` gives `bit` explicit casts to and from `int4` and `int8`
+        // ONLY — not `int2`, not `numeric`, and not from `bit varying`, whose
+        // values reach an integer only by being relabelled `bit` first.
+        (ColumnType::Bit(_), Int4 | ColumnType::Int8)
+        | (Int4 | ColumnType::Int8, ColumnType::Bit(_)) => true,
+        // `pg_cast` gives `money` exactly four conversions: from `int4`,
+        // `int8` and `numeric`, and to `numeric`. There is deliberately no
+        // `money → int`, no `money → float`, and no `float → money`.
+        (Int4 | ColumnType::Int8 | ColumnType::Numeric(_), ColumnType::Money)
+        | (ColumnType::Money, ColumnType::Numeric(_)) => true,
+        (ColumnType::Money, _) | (_, ColumnType::Money) => from.is_string() || to.is_string(),
+        // Everything else in the bit family converts only through its text
+        // form, so it must not fall into the numeric rules further down.
+        (ColumnType::Bit(_) | ColumnType::VarBit(_), _)
+        | (_, ColumnType::Bit(_) | ColumnType::VarBit(_)) => from.is_string() || to.is_string(),
         // `jsonb` and arrays otherwise interconvert ONLY with the string family
         // (the rule below): PostgreSQL has no jsonb/array ↔ number/bool/temporal
         // cast, and this arm keeps the permissive numeric rules from claiming one.
@@ -190,6 +212,18 @@ pub fn assignment_cast_allowed(from: ColumnType, to: ColumnType) -> bool {
         | (ColumnType::Inet, ColumnType::Cidr)
         | (ColumnType::MacAddr, ColumnType::MacAddr8)
         | (ColumnType::MacAddr8, ColumnType::MacAddr) => true,
+        // All four of `money`'s casts are `castcontext = 'a'`, so a `bigint`
+        // column value stores into a `money` column and back into a `numeric`
+        // one without an explicit cast.
+        (ColumnType::Int4 | ColumnType::Int8 | ColumnType::Numeric(_), ColumnType::Money)
+        | (ColumnType::Money, ColumnType::Numeric(_)) => true,
+        // `pg_cast` marks every bit-family conversion `'i'`, so storing a
+        // `bit varying` in a `bit(n)` column needs no explicit cast — what it
+        // does need is the length to match, which the coercion enforces.
+        (
+            ColumnType::Bit(_) | ColumnType::VarBit(_),
+            ColumnType::Bit(_) | ColumnType::VarBit(_),
+        ) => true,
         _ => false,
     }
 }
@@ -229,6 +263,29 @@ pub fn cast_assign(
         ColumnType::Varchar(Some(_)) | ColumnType::Char(Some(_)) => {
             let unbounded = cast(value, unbounded_string(to), tz)?;
             bounded_string(&unbounded, to)
+        }
+        // `bit(n)` rejects a length mismatch and `bit varying(n)` an over-long
+        // value when the coercion is not explicit, which is the whole
+        // difference between `B'10'::bit(11)` and storing `B'10'` in one.
+        ColumnType::Bit(Some(len)) | ColumnType::VarBit(Some(len)) => {
+            let varying = matches!(to, ColumnType::VarBit(_));
+            let unbounded = cast(
+                value,
+                if varying {
+                    ColumnType::VarBit(None)
+                } else {
+                    ColumnType::Bit(None)
+                },
+                tz,
+            )?;
+            let Datum::BitString(bits) = &unbounded else {
+                return Ok(unbounded);
+            };
+            if varying {
+                bits.coerce_varbit(len, false).map(Datum::BitString)
+            } else {
+                bits.coerce_bit(len, false).map(Datum::BitString)
+            }
         }
         // An array of a bounded string enforces the bound on every element: the
         // modifier rides on the element type, so `varchar(3)[]` rejects a row
@@ -321,6 +378,38 @@ pub fn cast_in(
         (Datum::MacAddr8(value), ColumnType::MacAddr8) => Ok(Datum::MacAddr8(*value)),
         (Datum::MacAddr(value), ColumnType::MacAddr8) => Ok(Datum::MacAddr8(value.to_macaddr8())),
         (Datum::MacAddr8(value), ColumnType::MacAddr) => value.to_macaddr().map(Datum::MacAddr),
+        // `money`'s own conversions. `cash_numeric` divides by 100 and keeps
+        // scale 2; `numeric_cash` / `int4_cash` / `int8_cash` multiply by 100
+        // and report `bigint out of range` on overflow, because they delegate
+        // to `numeric_int8` and `int8mul`.
+        (Datum::Money(value), ColumnType::Money) => Ok(Datum::Money(*value)),
+        (Datum::Money(value), Numeric(_)) => Ok(Datum::Numeric(crate::money::to_numeric(*value))),
+        (Datum::Numeric(value), ColumnType::Money) => {
+            crate::money::from_numeric(value).map(Datum::Money)
+        }
+        (Datum::Int4(n), ColumnType::Money) => crate::money::from_int4(*n).map(Datum::Money),
+        (Datum::Int8(n), ColumnType::Money) => crate::money::from_int8(*n).map(Datum::Money),
+        // `bit()` / `varbit()` — the length coercions, which under an explicit
+        // cast zero-pad or truncate rather than rejecting a mismatch. A target
+        // with no modifier only relabels, which is `pg_cast`'s binary coercion
+        // between the two types.
+        (Datum::BitString(bits), ColumnType::Bit(len)) => bits
+            .coerce_bit(len.unwrap_or(-1), true)
+            .map(Datum::BitString),
+        (Datum::BitString(bits), ColumnType::VarBit(len)) => bits
+            .coerce_varbit(len.unwrap_or(-1), true)
+            .map(Datum::BitString),
+        // `bittoint4` / `bittoint8`: the bits read right-aligned as a two's
+        // complement integer. `int2` has no such cast in PostgreSQL.
+        (Datum::BitString(bits), Int4) => bits.to_int4().map(Datum::Int4),
+        (Datum::BitString(bits), Int8) => bits.to_int8().map(Datum::Int8),
+        // `bitfromint4` / `bitfromint8`: the low `n` bits, sign-extended.
+        (Datum::Int4(n), ColumnType::Bit(len)) => Ok(Datum::BitString(
+            crate::bitstring::BitString::from_int(i64::from(*n), len),
+        )),
+        (Datum::Int8(n), ColumnType::Bit(len)) => Ok(Datum::BitString(
+            crate::bitstring::BitString::from_int(*n, len),
+        )),
         (Datum::Text(s), Text) => Ok(Datum::Text(s.clone())),
         // The executor owns jsonpath parsing/canonicalization. Keeping only
         // identity here makes it impossible for a raw string to masquerade as
@@ -571,6 +660,18 @@ pub fn cast_in(
                 type_name: "regnamespace",
                 value: s.clone(),
             }),
+        // `cash_in`.
+        (Datum::Text(s), ColumnType::Money) => crate::money::parse(s).map(Datum::Money),
+        // `bit_in` / `varbit_in` with no length modifier, then the length
+        // coercion — which is how PostgreSQL coerces an unknown literal, and
+        // why `'1011'::bit(8)` pads while storing `'1011'` in a `bit(8)`
+        // column does not.
+        (Datum::Text(s), ColumnType::Bit(len)) => crate::bitstring::BitString::parse(s, false)?
+            .coerce_bit(len.unwrap_or(-1), true)
+            .map(Datum::BitString),
+        (Datum::Text(s), ColumnType::VarBit(len)) => crate::bitstring::BitString::parse(s, true)?
+            .coerce_varbit(len.unwrap_or(-1), true)
+            .map(Datum::BitString),
         (Datum::Text(s), ColumnType::TsVector) => s.parse().map(Datum::TsVector),
         (Datum::Text(s), ColumnType::TsQuery) => s.parse().map(Datum::TsQuery),
         // `inet_in` / `cidr_in` / `macaddr_in` / `macaddr8_in`.

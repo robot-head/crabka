@@ -171,6 +171,18 @@ pub mod oids {
     pub const MACADDR8: u32 = 774;
     /// `macaddr8[]`.
     pub const MACADDR8ARRAY: u32 = 775;
+    /// PostgreSQL `money` — a 64-bit count of minor currency units.
+    pub const MONEY: u32 = 790;
+    /// `money[]`.
+    pub const MONEYARRAY: u32 = 791;
+    /// PostgreSQL `bit` — a fixed-length string of bits.
+    pub const BIT: u32 = 1560;
+    /// `bit[]`.
+    pub const BITARRAY: u32 = 1561;
+    /// PostgreSQL `bit varying` (`varbit`).
+    pub const VARBIT: u32 = 1562;
+    /// `varbit[]`.
+    pub const VARBITARRAY: u32 = 1563;
 }
 
 /// The element type of a SQL array.
@@ -316,6 +328,9 @@ impl ElemType {
             | ColumnType::Cidr
             | ColumnType::MacAddr
             | ColumnType::MacAddr8
+            | ColumnType::Money
+            | ColumnType::Bit(_)
+            | ColumnType::VarBit(_)
             | ColumnType::Array(_)
             | ColumnType::Record(_)
             | ColumnType::Enum(_)
@@ -680,6 +695,18 @@ pub enum ColumnType {
     MacAddr,
     /// PostgreSQL `macaddr8` (OID 774) — an eight-byte EUI-64 address.
     MacAddr8,
+    /// PostgreSQL `money` (OID 790) — a signed 64-bit count of minor currency
+    /// units, rendered through `lc_monetary`.
+    Money,
+    /// PostgreSQL `bit` (OID 1560) — a fixed-length bit string. The modifier is
+    /// the declared length; `None` is the unconstrained type, which `bit_in`
+    /// treats as "however many bits the input has" and which every other path
+    /// treats as `bit(1)`, exactly as PostgreSQL does.
+    Bit(Option<i32>),
+    /// PostgreSQL `bit varying` (OID 1562) — a bit string with an optional
+    /// maximum length. Shares `bit`'s values: the two are binary-coercible in
+    /// both directions.
+    VarBit(Option<i32>),
     /// PostgreSQL `jsonb` (OID 3802) — decomposed JSON. `json` (114) is accepted
     /// on input as an alias but never reported.
     Jsonb,
@@ -778,9 +805,7 @@ impl ColumnType {
             // columns are already Text, so `'x'::name` and a `name[]` column
             // resolve consistently with them. RowDescription therefore reports
             // text (25), not name (19), and the 63-byte truncation is not applied.
-            // ponytail: varbit reuses ordered text storage until the bit-operator
-            // corpus needs a packed bit datum.
-            "text" | "name" | "varbit" | "bit varying" => Some(ColumnType::Text),
+            "text" | "name" => Some(ColumnType::Text),
             "varchar" | "character varying" => Some(ColumnType::Varchar(None)),
             // `bpchar` is PostgreSQL's own internal name for the blank-padded
             // character type, and it is accepted as a type name: `'ab'::bpchar`
@@ -819,6 +844,9 @@ impl ColumnType {
             "int2vector" => Some(ColumnType::Int2Vector),
             "tsvector" => Some(ColumnType::TsVector),
             "tsquery" => Some(ColumnType::TsQuery),
+            "money" => Some(ColumnType::Money),
+            "bit" => Some(ColumnType::Bit(None)),
+            "varbit" | "bit varying" => Some(ColumnType::VarBit(None)),
             "inet" => Some(ColumnType::Inet),
             "cidr" => Some(ColumnType::Cidr),
             "macaddr" => Some(ColumnType::MacAddr),
@@ -925,6 +953,9 @@ impl ColumnType {
             ColumnType::Cidr => oids::CIDR,
             ColumnType::MacAddr => oids::MACADDR,
             ColumnType::MacAddr8 => oids::MACADDR8,
+            ColumnType::Money => oids::MONEY,
+            ColumnType::Bit(_) => oids::BIT,
+            ColumnType::VarBit(_) => oids::VARBIT,
             ColumnType::Jsonb => oids::JSONB,
             ColumnType::JsonPath => oids::JSONPATH,
             ColumnType::Array(elem) => elem.array_oid(),
@@ -975,6 +1006,9 @@ impl ColumnType {
             ColumnType::Cidr => "cidr",
             ColumnType::MacAddr => "macaddr",
             ColumnType::MacAddr8 => "macaddr8",
+            ColumnType::Money => "money",
+            ColumnType::Bit(_) => "bit",
+            ColumnType::VarBit(_) => "bit varying",
             ColumnType::Jsonb => "jsonb",
             ColumnType::JsonPath => "jsonpath",
             ColumnType::Array(elem) => elem.array_name(),
@@ -1020,6 +1054,9 @@ impl ColumnType {
             ColumnType::Inet | ColumnType::Cidr => -1,
             ColumnType::MacAddr => 6,
             ColumnType::MacAddr8 => 8,
+            // `money` is a pass-by-value int64; the two bit types are varlena.
+            ColumnType::Money => 8,
+            ColumnType::Bit(_) | ColumnType::VarBit(_) => -1,
             // jsonb, jsonpath, arrays and composites are variable-length.
             ColumnType::Jsonb
             | ColumnType::JsonPath
@@ -1049,6 +1086,9 @@ impl ColumnType {
     pub fn typmod(self) -> i32 {
         match self {
             ColumnType::Varchar(Some(n)) | ColumnType::Char(Some(n)) => i32::from(n) + 4,
+            // `bittypmodin` stores the bit count with no varlena adjustment,
+            // so `bit(4)`'s typmod is 4, not 8.
+            ColumnType::Bit(Some(n)) | ColumnType::VarBit(Some(n)) => n,
             // A domain inherits its base type's length modifier.
             ColumnType::Domain(domain) => domain.base.typmod(),
             _ => -1,
@@ -1141,6 +1181,13 @@ pub enum Datum {
     /// PostgreSQL full-text document/query values.
     TsVector(crate::text_search::TsVector),
     TsQuery(crate::text_search::TsQuery),
+    /// PostgreSQL `money`, stored the way PostgreSQL stores it: a count of
+    /// minor currency units, so `$1.00` is 100.
+    Money(i64),
+    /// PostgreSQL `bit` or `bit varying`. One variant for both, because the two
+    /// are binary-coercible in either direction and share every operation; the
+    /// value's own `varying` flag is what reports which type it is.
+    BitString(crate::bitstring::BitString),
     /// PostgreSQL `inet` or `cidr`. One variant for both, because PostgreSQL
     /// stores both in one struct and compares them with one function; the
     /// value's `is_cidr` flag decides only how it renders and which SQL type
@@ -1540,6 +1587,10 @@ impl PartialEq for Datum {
             // `Inet`'s own `PartialEq` ignores `is_cidr`, so a `cidr` and an
             // `inet` naming the same address are one value — which is what
             // PostgreSQL's shared `network_cmp` gives `'x'::cidr = 'x'::inet`.
+            (Datum::Money(a), Datum::Money(b)) => a == b,
+            // `BitString`'s own `PartialEq` ignores `varying`, so a `bit` and a
+            // `bit varying` holding the same bits are one value.
+            (Datum::BitString(a), Datum::BitString(b)) => a == b,
             (Datum::Inet(a), Datum::Inet(b)) => a == b,
             (Datum::MacAddr(a), Datum::MacAddr(b)) => a == b,
             (Datum::MacAddr8(a), Datum::MacAddr8(b)) => a == b,
@@ -1619,6 +1670,8 @@ impl std::hash::Hash for Datum {
             Datum::Regclass(r) => r.oid.hash(state),
             Datum::TsVector(v) => v.hash(state),
             Datum::TsQuery(q) => q.hash(state),
+            Datum::Money(value) => value.hash(state),
+            Datum::BitString(value) => value.hash(state),
             Datum::Inet(value) => value.hash(state),
             Datum::MacAddr(value) => value.hash(state),
             Datum::MacAddr8(value) => value.hash(state),
@@ -1664,6 +1717,14 @@ impl Datum {
             Datum::Regclass(_) => Some(ColumnType::Regclass),
             Datum::TsVector(_) => Some(ColumnType::TsVector),
             Datum::TsQuery(_) => Some(ColumnType::TsQuery),
+            Datum::Money(_) => Some(ColumnType::Money),
+            // A runtime bit string carries no typmod; what it does carry is
+            // which of the two SQL types produced it.
+            Datum::BitString(value) => Some(if value.varying {
+                ColumnType::VarBit(None)
+            } else {
+                ColumnType::Bit(None)
+            }),
             Datum::Inet(value) => Some(if value.is_cidr {
                 ColumnType::Cidr
             } else {
@@ -1819,11 +1880,19 @@ mod tests {
         assert_eq!(ColumnType::from_sql_name("int8"), Some(ColumnType::Int8));
         assert_eq!(ColumnType::from_sql_name("bigint"), Some(ColumnType::Int8));
         assert_eq!(ColumnType::from_sql_name("text"), Some(ColumnType::Text));
-        assert_eq!(ColumnType::from_sql_name("varbit"), Some(ColumnType::Text));
+        assert_eq!(
+            ColumnType::from_sql_name("varbit"),
+            Some(ColumnType::VarBit(None))
+        );
         assert_eq!(
             ColumnType::from_sql_name("bit varying"),
-            Some(ColumnType::Text)
+            Some(ColumnType::VarBit(None))
         );
+        assert_eq!(
+            ColumnType::from_sql_name("bit"),
+            Some(ColumnType::Bit(None))
+        );
+        assert_eq!(ColumnType::from_sql_name("money"), Some(ColumnType::Money));
         assert_eq!(
             ColumnType::from_sql_name("varchar"),
             Some(ColumnType::Varchar(None))

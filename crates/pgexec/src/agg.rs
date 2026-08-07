@@ -281,6 +281,10 @@ pub(crate) fn func_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnTyp
                 ColumnType::Int2 | ColumnType::Int4 | ColumnType::Int8 => Ok(ColumnType::Int8),
                 ColumnType::Float4 => Ok(ColumnType::Float4),
                 ColumnType::Float8 => Ok(ColumnType::Float8),
+                // `sum(money)` accumulates in `money`'s own minor units and
+                // raises `money out of range`, not `bigint out of range`, on
+                // overflow.
+                ColumnType::Money => Ok(ColumnType::Money),
                 _ if t.is_numeric() => Ok(ColumnType::Numeric(None)),
                 other => Err(undefined_for_arg("sum", other)),
             }
@@ -594,18 +598,19 @@ fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
             {
                 return Err(undefined_for_arg(&fc.name, arg_type));
             }
-            // sum/avg accept only numeric arguments (int4/int8/float8/numeric).
-            if matches!(func, AggFunc::Sum | AggFunc::Avg)
-                && !matches!(
-                    arg_type,
-                    ColumnType::Int2
-                        | ColumnType::Int4
-                        | ColumnType::Int8
-                        | ColumnType::Float4
-                        | ColumnType::Float8
-                )
-                && !arg_type.is_numeric()
-            {
+            // sum/avg accept only numeric arguments (int4/int8/float8/numeric),
+            // plus — for `sum` alone — `money`: PostgreSQL has `sum(money)` but
+            // deliberately no `avg(money)`.
+            let accepts = matches!(
+                arg_type,
+                ColumnType::Int2
+                    | ColumnType::Int4
+                    | ColumnType::Int8
+                    | ColumnType::Float4
+                    | ColumnType::Float8
+            ) || arg_type.is_numeric()
+                || (func == AggFunc::Sum && arg_type == ColumnType::Money);
+            if matches!(func, AggFunc::Sum | AggFunc::Avg) && !accepts {
                 return Err(undefined_for_arg(&fc.name, arg_type));
             }
             Ok(AggSpec {
@@ -857,6 +862,7 @@ pub(crate) fn collect_streamable_aggregate_calls(e: &Expr, calls: &mut Vec<FuncC
         Expr::IntLiteral(_)
         | Expr::NumericLiteral(_)
         | Expr::StringLiteral(_)
+        | Expr::BitStringLiteral(_)
         | Expr::BoolLiteral(_)
         | Expr::NullLiteral
         | Expr::Const { .. } => true,
@@ -1146,6 +1152,12 @@ fn eval_grouped_depth(
                 })
             }),
         Expr::StringLiteral(s) => Ok(Datum::Text(s.clone())),
+        // `B'…'` / `X'…'` — already decoded to binary digits by the parser,
+        // which also ran `bit_in`, so the value cannot fail here.
+        Expr::BitStringLiteral(bits) => Ok(Datum::BitString(
+            crabka_pgtypes::BitString::parse(bits, false)
+                .expect("the parser validated the bit-string literal"),
+        )),
         Expr::BoolLiteral(b) => Ok(Datum::Bool(*b)),
         Expr::NullLiteral => Ok(Datum::Null),
         Expr::Param(_) => Err(ExecError::Unsupported(
@@ -1390,6 +1402,11 @@ enum AccState {
     SumI {
         acc: Option<i64>,
     },
+    /// `sum(money)` — the same `i64` accumulation as `SumI`, but overflowing
+    /// with `money`'s own message rather than the integer one.
+    SumMoney {
+        acc: Option<i64>,
+    },
     SumF {
         acc: f64,
         any: bool,
@@ -1627,6 +1644,7 @@ impl AccState {
                     acc: 0.0,
                     any: false,
                 },
+                Some(ColumnType::Money) => AccState::SumMoney { acc: None },
                 Some(t) if t.is_numeric() => AccState::SumN { acc: None },
                 _ => AccState::SumI { acc: None },
             },
@@ -1712,6 +1730,18 @@ impl AccState {
                     None => add,
                 };
                 *acc = Some(next);
+            }
+            AccState::SumMoney { acc } => {
+                let Datum::Money(add) = v else {
+                    return Err(undefined_for_arg(
+                        "sum",
+                        v.column_type().unwrap_or(ColumnType::Text),
+                    ));
+                };
+                *acc = Some(match acc {
+                    Some(cur) => crabka_pgtypes::money::add(*cur, add)?,
+                    None => add,
+                });
             }
             AccState::SumF { acc, any } => {
                 *acc += as_f64(&v).ok_or_else(|| {
@@ -1988,6 +2018,7 @@ impl AccState {
         Ok(match self {
             AccState::Count { n } => Datum::Int8(*n),
             AccState::SumI { acc } => acc.map(Datum::Int8).unwrap_or(Datum::Null),
+            AccState::SumMoney { acc } => acc.map(Datum::Money).unwrap_or(Datum::Null),
             // An empty / all-null float sum is NULL (matches the integer sum).
             AccState::SumF { acc, any } => {
                 if *any {

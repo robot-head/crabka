@@ -624,6 +624,10 @@ pub fn compare(a: &Datum, b: &Datum) -> Result<Option<Ordering>, TypeError> {
         (Datum::TsQuery(x), Datum::TsQuery(y)) => x.cmp(y),
         // `network_cmp`: one comparison for `inet` and `cidr` alike, so a
         // `cidr` and an `inet` naming the same address compare equal.
+        (Datum::Money(x), Datum::Money(y)) => x.cmp(y),
+        // `bitcmp` and `varbitcmp` are the same routine, so a `bit` and a
+        // `bit varying` holding the same bits compare equal.
+        (Datum::BitString(x), Datum::BitString(y)) => x.cmp(y),
         (Datum::Inet(x), Datum::Inet(y)) => x.cmp(y),
         (Datum::MacAddr(x), Datum::MacAddr(y)) => x.cmp(y),
         (Datum::MacAddr8(x), Datum::MacAddr8(y)) => x.cmp(y),

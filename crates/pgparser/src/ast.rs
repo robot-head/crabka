@@ -3136,6 +3136,11 @@ pub enum Expr {
     /// is now scale-faithful `numeric`, and `float8` needs an explicit cast).
     NumericLiteral(String),
     StringLiteral(String),
+    /// A `B'…'` / `X'…'` bit-string literal, already decoded to its binary
+    /// digits. `PostgreSQL` gives these the type `bit` with no length modifier
+    /// and, being a constant rather than a cast, no column label of their own —
+    /// `SELECT B'101'` is `?column?`, not `bit`.
+    BitStringLiteral(String),
     BoolLiteral(bool),
     NullLiteral,
     /// SP33: a column reference, optionally table-qualified (`a.col`). `table` is

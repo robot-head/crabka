@@ -126,6 +126,16 @@ fn column_hash(value: &Datum, seed: u64) -> Result<Option<u64>, ExecError> {
         }
         Datum::MacAddr(_) => return Err(unsupported("macaddr")),
         Datum::MacAddr8(_) => return Err(unsupported("macaddr8")),
+        // `money` hashes through `hashint8extended`, as `pg_amproc` records
+        // for its default operator family.
+        Datum::Money(value) => hash_int64_extended(*value, seed),
+        Datum::BitString(value) => {
+            return Err(unsupported(if value.varying {
+                "bit varying"
+            } else {
+                "bit"
+            }));
+        }
         Datum::Range(range) => return Err(unsupported(range.ty.name)),
         Datum::Multirange(multirange) => return Err(unsupported(multirange.ty.name)),
     };

@@ -62,6 +62,21 @@ pub fn lex(sql: &str) -> Result<Vec<(Token, usize)>, ParseError> {
                 i = end;
                 out.push((Token::StringLit(text), start));
             }
+            // `B'…'` / `X'…'` — a bit-string literal, binary or hexadecimal.
+            // The marker is kept on the token so the parser can run PostgreSQL's
+            // `bit_in`, which is the routine that decides `x` means hex. Checked
+            // ahead of the identifier arm, and only when the quote follows the
+            // letter immediately, so `box'x'` is still the identifier `box`.
+            b'b' | b'B' | b'x' | b'X' if bytes.get(i + 1) == Some(&b'\'') => {
+                let start = i;
+                let marker = bytes[i].to_ascii_lowercase();
+                let (text, end) = string_literal(bytes, i + 1, false)?;
+                i = end;
+                out.push((
+                    Token::BitStringLit(format!("{}{text}", char::from(marker))),
+                    start,
+                ));
+            }
             b'"' => {
                 let start = i;
                 i += 1;

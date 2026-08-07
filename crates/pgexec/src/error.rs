@@ -682,6 +682,34 @@ fn referencing_row_message(table: &str, constraint: &str) -> PgError {
     )
 }
 
+/// `PostgreSQL` attaches a standing HINT to every "does not exist" 42883, one
+/// wording for functions and one for operators. It is attached here rather than
+/// at each raise site so that the two always travel together — but only for a
+/// message in PostgreSQL's own shape, because a message crabka phrases
+/// differently is a divergence the HINT would merely decorate.
+fn undefined_function_hint(message: &str) -> Option<&'static str> {
+    if let Some(operands) = message.strip_prefix("operator does not exist: ") {
+        // PostgreSQL words the hint in the singular for a PREFIX operator. Both
+        // renderings put the operand types and the spelling in one
+        // space-separated run, so a two-word tail is `<op> <type>` — the prefix
+        // form — and a three-word tail is `<type> <op> <type>`.
+        return Some(if operands.split_whitespace().count() <= 2 {
+            "No operator matches the given name and argument type. You might need to add an \
+             explicit type cast."
+        } else {
+            "No operator matches the given name and argument types. You might need to add \
+             explicit type casts."
+        });
+    }
+    if message.starts_with("function ") && message.ends_with(" does not exist") {
+        return Some(
+            "No function matches the given name and argument types. You might need to add \
+             explicit type casts.",
+        );
+    }
+    None
+}
+
 impl ExecError {
     pub fn into_pg(self) -> PgError {
         match self {
@@ -894,7 +922,14 @@ impl ExecError {
             ),
             ExecError::Grouping(m) => PgError::error("42803", m),
             ExecError::InvalidRecursion(m) => PgError::error("42P19", m),
-            ExecError::UndefinedFunction(m) => PgError::error("42883", m),
+            ExecError::UndefinedFunction(m) => {
+                let hint = undefined_function_hint(&m);
+                let error = PgError::error("42883", m);
+                match hint {
+                    Some(hint) => error.with_hint(hint),
+                    None => error,
+                }
+            }
             ExecError::WrongObjectType(m) => PgError::error("42809", m),
             ExecError::InFailedTransaction => PgError::error(
                 "25P02",

@@ -123,6 +123,13 @@ mod datum_tag {
     /// already tags the variant and holds the `is_cidr` flag. Append-only — no
     /// version bump.
     pub const NETWORK: u8 = 17;
+    /// A `bit` / `bit varying` value, stored as a one-column
+    /// `crabka_pgkv::rowenc` row, which already carries the bit count and the
+    /// `varying` flag. Append-only — no version bump.
+    pub const BITSTRING: u8 = 18;
+    /// A `money` value, stored as its `i64` minor-unit count. Append-only — no
+    /// version bump.
+    pub const MONEY: u8 = 19;
 }
 
 mod type_tag {
@@ -208,6 +215,14 @@ mod type_tag {
     pub const MACADDR: u8 = 38;
     /// `PostgreSQL` `macaddr8`. Append-only — no version bump.
     pub const MACADDR8: u8 = 39;
+    /// `PostgreSQL` `bit`, with its optional length modifier. Append-only — no
+    /// version bump.
+    pub const BIT: u8 = 40;
+    /// `PostgreSQL` `bit varying`, with its optional length modifier.
+    /// Append-only — no version bump.
+    pub const VARBIT: u8 = 41;
+    /// `PostgreSQL` `money`. Append-only — no version bump.
+    pub const MONEY: u8 = 42;
 }
 
 #[derive(Debug)]
@@ -297,6 +312,9 @@ pub(crate) fn write_type(out: &mut Vec<u8>, ty: ColumnType) {
         ColumnType::Cidr => out.push(type_tag::CIDR),
         ColumnType::MacAddr => out.push(type_tag::MACADDR),
         ColumnType::MacAddr8 => out.push(type_tag::MACADDR8),
+        ColumnType::Money => out.push(type_tag::MONEY),
+        ColumnType::Bit(len) => write_optional_i32_type(out, type_tag::BIT, len),
+        ColumnType::VarBit(len) => write_optional_i32_type(out, type_tag::VARBIT, len),
         ColumnType::Jsonb => out.push(type_tag::JSONB),
         ColumnType::JsonPath => out.push(type_tag::JSONPATH),
         ColumnType::Array(elem) => {
@@ -420,6 +438,9 @@ fn read_type_with(
         type_tag::CIDR => ColumnType::Cidr,
         type_tag::MACADDR => ColumnType::MacAddr,
         type_tag::MACADDR8 => ColumnType::MacAddr8,
+        type_tag::MONEY => ColumnType::Money,
+        type_tag::BIT => ColumnType::Bit(read_optional_i32_type(cur)?),
+        type_tag::VARBIT => ColumnType::VarBit(read_optional_i32_type(cur)?),
         type_tag::JSONB => ColumnType::Jsonb,
         type_tag::JSONPATH => ColumnType::JsonPath,
         type_tag::ARRAY => ColumnType::Array(read_elem_type_with(cur, resolve_user_type)?),
@@ -475,6 +496,31 @@ fn read_elem_type_with(
         _ => Err(
             KvError::CorruptRow(format!("array element oid {oid} has the wrong type kind")).into(),
         ),
+    }
+}
+
+/// The same shape as [`write_optional_u16_type`] over the wider range a
+/// `bit(n)` length modifier occupies.
+fn write_optional_i32_type(out: &mut Vec<u8>, tag: u8, value: Option<i32>) {
+    out.push(tag);
+    match value {
+        Some(value) => {
+            out.push(1);
+            out.extend_from_slice(&value.to_be_bytes());
+        }
+        None => out.push(0),
+    }
+}
+
+fn read_optional_i32_type(cur: &mut &[u8]) -> Result<Option<i32>, KvError> {
+    match take_u8(cur)? {
+        0 => Ok(None),
+        1 => Ok(Some(i32::from_be_bytes(
+            take_n(cur, 4)?.try_into().expect("4"),
+        ))),
+        flag => Err(KvError::CorruptRow(format!(
+            "unknown bit typmod flag {flag}"
+        ))),
     }
 }
 
@@ -581,6 +627,19 @@ fn write_default_value(out: &mut Vec<u8>, default: &Datum) {
         }
         // The row encoder already distinguishes the four network types and
         // keeps `inet`'s `is_cidr` flag, so a default round-trips through it.
+        Datum::Money(value) => {
+            out.push(datum_tag::MONEY);
+            out.extend_from_slice(&value.to_be_bytes());
+        }
+        // The row encoder keeps the bit count and the `varying` flag, so a
+        // `bit`/`bit varying` default round-trips through it.
+        Datum::BitString(_) => {
+            out.push(datum_tag::BITSTRING);
+            write_bytes(
+                out,
+                &crabka_pgkv::rowenc::encode_row(std::slice::from_ref(default)),
+            );
+        }
         Datum::Inet(_) | Datum::MacAddr(_) | Datum::MacAddr8(_) => {
             out.push(datum_tag::NETWORK);
             write_bytes(
@@ -696,6 +755,18 @@ fn read_default_value(cur: &mut &[u8]) -> Result<Datum, KvError> {
             Datum::TsQuery(read_string(cur)?.parse().map_err(|error| {
                 KvError::CorruptRow(format!("invalid tsquery default: {error}"))
             })?)
+        }
+        datum_tag::MONEY => Datum::Money(i64::from_be_bytes(
+            take_n(cur, 8)?
+                .try_into()
+                .map_err(|_| KvError::CorruptRow("invalid money default".into()))?,
+        )),
+        datum_tag::BITSTRING => {
+            let mut values = crabka_pgkv::rowenc::decode_row(read_str(cur)?)?;
+            if values.len() != 1 || !matches!(values.first(), Some(Datum::BitString(_))) {
+                return Err(KvError::CorruptRow("invalid bit string default".into()));
+            }
+            values.pop().expect("length checked")
         }
         datum_tag::NETWORK => {
             let mut values = crabka_pgkv::rowenc::decode_row(read_str(cur)?)?;

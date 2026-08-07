@@ -42,6 +42,7 @@
 mod agg;
 mod array_fn;
 mod bind;
+mod bit_fn;
 mod builtin_aggregates;
 mod builtin_amop;
 mod builtin_amproc;
@@ -81,6 +82,7 @@ mod jsontable;
 mod local_sequence;
 mod lockmgr;
 mod math_fn;
+mod money_fn;
 mod network_fn;
 pub mod notify;
 mod partition;

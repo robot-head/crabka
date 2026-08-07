@@ -10500,6 +10500,7 @@ impl ParamBinder<'_> {
             Expr::IntLiteral(_)
             | Expr::NumericLiteral(_)
             | Expr::StringLiteral(_)
+            | Expr::BitStringLiteral(_)
             | Expr::BoolLiteral(_)
             | Expr::NullLiteral
             | Expr::Default
@@ -10692,7 +10693,7 @@ fn infer_param_context_type(expr: &Expr, scope: &crate::scope::Scope) -> Option<
             .ok()
             .map(|idx| scope.ty_at(idx)),
         Expr::IntLiteral(_) => Some(ColumnType::Int4),
-        Expr::StringLiteral(_) => Some(ColumnType::Text),
+        Expr::StringLiteral(_) | Expr::BitStringLiteral(_) => Some(ColumnType::Text),
         Expr::BoolLiteral(_) => Some(ColumnType::Bool),
         Expr::Default => None,
         Expr::Const { ty, .. } | Expr::Cast { ty, .. } => Some(*ty),
@@ -11047,6 +11048,7 @@ fn collect_expr_param(expr: &Expr, max: &mut usize) {
         Expr::IntLiteral(_)
         | Expr::NumericLiteral(_)
         | Expr::StringLiteral(_)
+        | Expr::BitStringLiteral(_)
         | Expr::BoolLiteral(_)
         | Expr::NullLiteral
         | Expr::Default
@@ -11286,6 +11288,19 @@ fn decode_binary_value(
         ColumnType::Inet | ColumnType::Cidr => {
             crabka_pgtypes::Inet::from_binary(value, ty == ColumnType::Cidr)
                 .map(Datum::Inet)
+                .map_err(ExecError::from)
+                .map_err(ExecError::into_pg)
+        }
+        // `cash_recv`: a big-endian int64 count of minor currency units.
+        ColumnType::Money => crabka_pgtypes::money::from_binary(value)
+            .map(Datum::Money)
+            .map_err(ExecError::from)
+            .map_err(ExecError::into_pg),
+        // `bit_recv` / `varbit_recv`: an int32 bit count, then the packed
+        // bytes, whose count the receiver checks against it.
+        ColumnType::Bit(_) | ColumnType::VarBit(_) => {
+            crabka_pgtypes::BitString::from_binary(value, matches!(ty, ColumnType::VarBit(_)))
+                .map(Datum::BitString)
                 .map_err(ExecError::from)
                 .map_err(ExecError::into_pg)
         }

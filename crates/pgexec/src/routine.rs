@@ -2076,6 +2076,7 @@ fn unsafe_to_duplicate(arg: &Expr) -> bool {
         Expr::IntLiteral(_)
         | Expr::NumericLiteral(_)
         | Expr::StringLiteral(_)
+        | Expr::BitStringLiteral(_)
         | Expr::BoolLiteral(_)
         | Expr::NullLiteral
         | Expr::Param(_)
@@ -2233,6 +2234,7 @@ fn substitute(binding: &Binding, expr: &Expr) -> Result<Expr, ExecError> {
         Expr::IntLiteral(_)
         | Expr::NumericLiteral(_)
         | Expr::StringLiteral(_)
+        | Expr::BitStringLiteral(_)
         | Expr::BoolLiteral(_)
         | Expr::NullLiteral
         | Expr::Column { .. }

@@ -195,6 +195,11 @@ pub fn encode_text_in(d: &Datum, style: OutputStyle<'_>) -> Vec<u8> {
         Datum::Regclass(r) => r.name.as_bytes().to_vec(),
         Datum::TsVector(vector) => vector.to_string().into_bytes(),
         Datum::TsQuery(query) => query.to_string().into_bytes(),
+        // `cash_out`, which renders through `lc_monetary` — `C` here, so
+        // `$1,234.56`.
+        Datum::Money(value) => crate::money::to_text(*value).into_bytes(),
+        // `bit_out` / `varbit_out` are the same routine: one character per bit.
+        Datum::BitString(value) => value.to_text().into_bytes(),
         // `inet_out` / `cidr_out`: the value's own `is_cidr` picks which.
         Datum::Inet(value) => value.to_text().into_bytes(),
         Datum::MacAddr(value) => value.to_text().into_bytes(),
@@ -480,6 +485,10 @@ pub fn encode_binary(d: &Datum) -> Vec<u8> {
         // layouts are implemented. Their OIDs and text format are exact.
         Datum::TsVector(vector) => vector.to_string().into_bytes(),
         Datum::TsQuery(query) => query.to_string().into_bytes(),
+        // `cash_send`: a big-endian int64.
+        Datum::Money(value) => crate::money::to_binary(*value),
+        // `bit_send` / `varbit_send`: the bit count, then the packed bytes.
+        Datum::BitString(value) => value.to_binary(),
         // `inet_send` / `cidr_send`: family, netmask, is_cidr, length, address.
         Datum::Inet(value) => value.to_binary(),
         // `macaddr_send` / `macaddr8_send`: the raw bytes, most significant

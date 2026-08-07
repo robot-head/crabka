@@ -7354,6 +7354,8 @@ fn datum_hash_bytes(value: &Datum) -> Option<Vec<u8>> {
         | Datum::Regclass(_)
         | Datum::TsVector(_)
         | Datum::TsQuery(_)
+        | Datum::BitString(_)
+        | Datum::Money(_)
         | Datum::Inet(_)
         | Datum::MacAddr(_)
         | Datum::MacAddr8(_)

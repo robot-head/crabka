@@ -126,6 +126,12 @@ fn eval_depth_inner(
                 })
             }),
         Expr::StringLiteral(s) => Ok(Datum::Text(s.clone())),
+        // `B'…'` / `X'…'` — already decoded to binary digits by the parser,
+        // which also ran `bit_in`, so the value cannot fail here.
+        Expr::BitStringLiteral(bits) => Ok(Datum::BitString(
+            crabka_pgtypes::BitString::parse(bits, false)
+                .expect("the parser validated the bit-string literal"),
+        )),
         Expr::BoolLiteral(b) => Ok(Datum::Bool(*b)),
         Expr::NullLiteral => Ok(Datum::Null),
         Expr::Param(_) => Err(ExecError::Unsupported(
@@ -743,6 +749,10 @@ pub(crate) fn apply_unary(op: UnaryOp, v: &Datum, _ctx: &EvalCtx) -> Result<Datu
             // without inventing a zero operand — so `-'NaN'::numeric` is `NaN`
             // and the display scale is the operand's own.
             Datum::Numeric(n) => Ok(Datum::Numeric(crabka_pgtypes::numeric::neg(n))),
+            // `money` has no unary minus at all in PostgreSQL, and the generic
+            // `0 - v` fallback would otherwise report an integer-operand
+            // mismatch instead of the missing operator.
+            Datum::Money(_) | Datum::BitString(_) => Err(undefined_prefix_operator(op, v)),
             _ => Ok(ops::sub(&Datum::Int4(0), v)?),
         },
         UnaryOp::Plus | UnaryOp::BitNot | UnaryOp::Abs | UnaryOp::Sqrt | UnaryOp::Cbrt => {
@@ -836,6 +846,9 @@ fn apply_prefix_op(op: UnaryOp, v: &Datum) -> Result<Datum, ExecError> {
             Datum::Int8(x) => Ok(Datum::Int8(!x)),
             // `~inet` inverts every address bit and keeps the netmask; a `cidr`
             // widens to `inet` first, so the result is always an `inet`.
+            // `bitnot` inverts every bit and keeps the length; a `bit varying`
+            // becomes a `bit`, because the operator is declared over `bit`.
+            Datum::BitString(value) => Ok(Datum::BitString(value.not())),
             Datum::Inet(value) => Ok(Datum::Inet(value.not())),
             Datum::MacAddr(value) => Ok(Datum::MacAddr(value.not())),
             Datum::MacAddr8(value) => Ok(Datum::MacAddr8(value.not())),
@@ -1276,6 +1289,51 @@ fn coerce_untyped_literal_operands(
         // `i <<= '192.168.1.0/24'` is a containment test. An `inet`/`cidr`
         // counterpart resolves the literal to `inet`, the category's preferred
         // type, exactly as PostgreSQL's operator resolution does.
+        // A `money` counterpart resolves the literal to `money`: `m + '123'`
+        // adds $123.00 and `m = '$123.00'` compares two cash values.
+        if matches!(other, Datum::Money(_)) {
+            return match op {
+                BinaryOp::Add
+                | BinaryOp::Sub
+                | BinaryOp::Div
+                | BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge
+                | BinaryOp::IsDistinctFrom
+                | BinaryOp::IsNotDistinctFrom => Some(ColumnType::Money),
+                // `money * x` has candidates for every numeric width, so the
+                // literal's meaning is not decidable here — as in PostgreSQL.
+                _ => None,
+            };
+        }
+        // A bit-string counterpart resolves the literal to a bit string, which
+        // is how `b = '1010'` compares two `bit`s and `v || '01'` concatenates.
+        if let Datum::BitString(bits) = other {
+            return match op {
+                BinaryOp::Concat
+                | BinaryOp::BitAnd
+                | BinaryOp::BitOr
+                | BinaryOp::BitXor
+                | BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge
+                | BinaryOp::IsDistinctFrom
+                | BinaryOp::IsNotDistinctFrom => Some(if bits.varying {
+                    ColumnType::VarBit(None)
+                } else {
+                    ColumnType::Bit(None)
+                }),
+                // `bit << int` is a shift, so the literal beside one is an
+                // integer rather than a bit string.
+                _ => None,
+            };
+        }
         let network_type = match other {
             Datum::Inet(_) => Some(ColumnType::Inet),
             Datum::MacAddr(_) => Some(ColumnType::MacAddr),
@@ -1463,6 +1521,18 @@ pub(crate) fn apply_binary(
     // range and arithmetic families; a network operand is what selects the
     // inet/cidr meaning, so this must run before the `match` below claims them.
     if let Some(result) = crate::network_fn::apply_network_operator(op, l, r)? {
+        return Ok(result);
+    }
+    // `||`, `&`, `|`, `#`, `<<` and `>>` are shared with the string, bitwise
+    // and network families; a bit-string operand is what selects this meaning,
+    // so this must run before the `match` below claims them.
+    if let Some(result) = crate::bit_fn::apply_bit_operator(op, l, r)? {
+        return Ok(result);
+    }
+    // `money` shares `+ - * /` with the numeric family, so a `money` operand is
+    // what selects the cash arithmetic — including its truncating integer
+    // division, which the numeric rules would otherwise round.
+    if let Some(result) = crate::money_fn::apply_money_operator(op, l, r)? {
         return Ok(result);
     }
     match op {
@@ -1820,6 +1890,9 @@ enum ConcatKind {
     TsVector,
     /// `tsquery || tsquery` (boolean OR).
     TsQuery,
+    /// `bitcat` — `bit varying || bit varying`, which `bit` reaches through its
+    /// binary coercion and whose result is always `bit varying`.
+    BitString,
 }
 
 /// Resolve `left || right` from the operands' STATIC types.
@@ -1853,7 +1926,8 @@ fn adopt_null_literal_type(
         matches!(
             t,
             ColumnType::Jsonb | ColumnType::TsVector | ColumnType::TsQuery
-        ) || t.array_element().is_some()
+        ) || crate::bit_fn::is_bit_type(t)
+            || t.array_element().is_some()
     };
     if matches!(left, Expr::NullLiteral) && adopts(rt) {
         (rt, rt)
@@ -2232,6 +2306,12 @@ fn concat_kind(lt: ColumnType, rt: ColumnType) -> Option<(ConcatKind, ColumnType
     if lt == ColumnType::Jsonb && rt == ColumnType::Jsonb {
         return Some((ConcatKind::Jsonb, ColumnType::Jsonb));
     }
+    // `bitcat` must be reached before the text fallback below: `bit || bit`
+    // has no text operand at all, and a bit string beside an `unknown` literal
+    // resolves to `bitcat` rather than to string concatenation.
+    if crate::bit_fn::is_bit_type(lt) && crate::bit_fn::is_bit_type(rt) {
+        return Some((ConcatKind::BitString, ColumnType::VarBit(None)));
+    }
     if let (Some(form), Some(ty)) = (
         array_fn::concat_form(lt, rt),
         array_fn::concat_result_type(lt, rt),
@@ -2247,6 +2327,11 @@ fn concat_kind(lt: ColumnType, rt: ColumnType) -> Option<(ConcatKind, ColumnType
 
 fn apply_concat(kind: ConcatKind, l: &Datum, r: &Datum, ctx: &EvalCtx) -> Result<Datum, ExecError> {
     match kind {
+        ConcatKind::BitString => match (l, r) {
+            (Datum::Null, _) | (_, Datum::Null) => Ok(Datum::Null),
+            _ => crate::bit_fn::apply_bit_operator(BinaryOp::Concat, l, r)?
+                .ok_or_else(|| undefined_operator_for(BinaryOp::Concat, l, r)),
+        },
         ConcatKind::Text => Ok(ops::concat(l, r, ctx.output_style())?),
         ConcatKind::Jsonb => json_fn::eval_json_operator(JsonOp::Concat, l, r),
         ConcatKind::Array(form) => array_fn::array_concat(form, l, r, ctx),
@@ -2737,6 +2822,11 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
         // SP32: a decimal/exponent literal types as unconstrained `numeric`.
         Expr::NumericLiteral(_) => Ok(ColumnType::Numeric(None)),
         Expr::StringLiteral(_) => Ok(ColumnType::Text),
+        // A bit-string literal is `bit` with no length modifier — PostgreSQL's
+        // `make_const` types `T_BitString` as `BITOID` with typmod -1, which is
+        // why storing `B'10'` in a `bit(11)` column complains about the value's
+        // own length rather than the literal's declared one.
+        Expr::BitStringLiteral(_) => Ok(ColumnType::Bit(None)),
         Expr::BoolLiteral(_) => Ok(ColumnType::Bool),
         // PostgreSQL types a bare NULL as "unknown"; the slice uses text as a
         // concrete stand-in so RowDescription has a real OID.
@@ -3002,6 +3092,12 @@ fn infer_binary_type(
     }
     if let Some(resolved) = crate::network_fn::network_operator_result_type(op, left, right, scope)?
     {
+        return Ok(resolved);
+    }
+    if let Some(resolved) = crate::bit_fn::bit_operator_result_type(op, left, right, scope)? {
+        return Ok(resolved);
+    }
+    if let Some(resolved) = crate::money_fn::money_operator_result_type(op, left, right, scope)? {
         return Ok(resolved);
     }
     match op {

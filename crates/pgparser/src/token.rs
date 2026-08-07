@@ -10,6 +10,10 @@ pub enum Token {
     /// The executor types it `float8`, because crabgresql has no `numeric`.
     FloatLit(String),
     StringLit(String),
+    /// A `B'…'` or `X'…'` bit-string literal, with its `b`/`x` marker kept as
+    /// the first character exactly as `PostgreSQL`'s grammar hands it to
+    /// `bit_in` — that marker is what selects binary or hexadecimal digits.
+    BitStringLit(String),
     LParen,
     RParen,
     Comma,

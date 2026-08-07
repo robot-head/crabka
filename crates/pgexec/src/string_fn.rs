@@ -366,12 +366,21 @@ fn eval_strict(
             let form = normalization_form(vals.get(1))?;
             Ok(Datum::Bool(is_normalized(text_arg(&vals[0])?, form)))
         }
+        // `bitoctetlength` counts the bytes the bits occupy, and `bit_length`
+        // over a bit string is `bitlength` — the bit count itself, which is not
+        // the byte count times eight when the last byte is part-full.
         StrFunc::OctetLength => {
             require_arity(fc, vals.len() == 1)?;
+            if let Datum::BitString(bits) = &vals[0] {
+                return Ok(Datum::Int4(bits.octet_len()));
+            }
             Ok(Datum::Int4(byte_len(bytes_of(&vals[0])?.len())))
         }
         StrFunc::BitLength => {
             require_arity(fc, vals.len() == 1)?;
+            if let Datum::BitString(bits) = &vals[0] {
+                return Ok(Datum::Int4(crate::bit_fn::length(bits)));
+            }
             Ok(Datum::Int4(byte_len(bytes_of(&vals[0])?.len() * 8)))
         }
         StrFunc::Format | StrFunc::ConcatWs => Err(undefined_function(&fc.name)),

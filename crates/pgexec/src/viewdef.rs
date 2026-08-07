@@ -864,7 +864,13 @@ pub(crate) fn const_text(value: &Datum, ty: ColumnType) -> String {
         Datum::Numeric(n) => n.to_string(),
         other => {
             let rendered = crate::func::text_render(other, &jiff::tz::TimeZone::UTC);
-            format!("'{}'::{}", rendered.replace('\'', "''"), ty.name())
+            // `bit` is a reserved word, so `pg_get_expr` double-quotes it:
+            // `'1001'::"bit"`, but plain `'1001'::bit varying`.
+            let type_name = match ty {
+                ColumnType::Bit(_) => "\"bit\"",
+                other => other.name(),
+            };
+            format!("'{}'::{type_name}", rendered.replace('\'', "''"))
         }
     }
 }

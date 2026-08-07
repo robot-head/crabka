@@ -1810,6 +1810,7 @@ fn validate_view_expr(expr: &Expr) -> Result<(), ExecError> {
         Expr::IntLiteral(_)
         | Expr::NumericLiteral(_)
         | Expr::StringLiteral(_)
+        | Expr::BitStringLiteral(_)
         | Expr::BoolLiteral(_)
         | Expr::NullLiteral
         | Expr::Column { .. }
@@ -2353,6 +2354,10 @@ fn ensure_default_can_be_persisted(value: &Datum) -> Result<(), ExecError> {
             // of a type that cannot be a *column* default (a date, say) still
             // persists inside one.
             | Datum::Array(_)
+            // Both have a `write_default` encoding: `money` as its `i64`, a
+            // bit string through the row encoder, which keeps its length.
+            | Datum::Money(_)
+            | Datum::BitString(_)
     ) {
         return Ok(());
     }
@@ -5689,7 +5694,9 @@ async fn execute_merge(
             .iter()
             .zip(&target_idx)
             .map(|(expr, slot)| match expr {
-                Expr::Default | Expr::StringLiteral(_) => Ok(expr.clone()),
+                Expr::Default | Expr::StringLiteral(_) | Expr::BitStringLiteral(_) => {
+                    Ok(expr.clone())
+                }
                 _ => crate::eval::eval(expr, &scope, &joined, ctx).map(|value| Expr::Const {
                     value,
                     ty: t.columns[*slot].ty,
@@ -9133,6 +9140,12 @@ pub(crate) fn coerce(
         // literal-assignment shape the `uuid` and `bytea` arms above use; an
         // array value converts element-wise so `ARRAY[1,2]` (int4[]) stores into
         // a `bigint[]` column. `cast` implements all four conversions.
+        // `bit(n)` rejects a length mismatch on a store and `bit varying(n)`
+        // an over-long value, where the explicit cast the catch-all would use
+        // pads or truncates silently.
+        (value @ Datum::BitString(_), ty @ (ColumnType::Bit(_) | ColumnType::VarBit(_))) => {
+            crabka_pgtypes::cast::cast_assign(&value, ty, &ctx.time_zone)?
+        }
         (value @ (Datum::Text(_) | Datum::Jsonb(_)), ty @ ColumnType::Jsonb)
         | (value @ (Datum::Text(_) | Datum::Array(_)), ty @ ColumnType::Array(_)) => {
             // `cast_assign`, because this is a store: an over-long element of a
@@ -10122,6 +10135,7 @@ fn lateral_cacheable_expr(expr: &Expr) -> bool {
         Expr::IntLiteral(_)
         | Expr::NumericLiteral(_)
         | Expr::StringLiteral(_)
+        | Expr::BitStringLiteral(_)
         | Expr::BoolLiteral(_)
         | Expr::NullLiteral
         | Expr::Column { .. }
@@ -10211,6 +10225,7 @@ pub(crate) fn expr_children(expr: &Expr) -> Vec<&Expr> {
         Expr::IntLiteral(_)
         | Expr::NumericLiteral(_)
         | Expr::StringLiteral(_)
+        | Expr::BitStringLiteral(_)
         | Expr::BoolLiteral(_)
         | Expr::NullLiteral
         | Expr::Column { .. }
@@ -10280,6 +10295,7 @@ fn expr_children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
         Expr::IntLiteral(_)
         | Expr::NumericLiteral(_)
         | Expr::StringLiteral(_)
+        | Expr::BitStringLiteral(_)
         | Expr::BoolLiteral(_)
         | Expr::NullLiteral
         | Expr::Column { .. }
@@ -16028,6 +16044,16 @@ fn format_column_default(catalog_kv: &dyn Kv, default: &ColumnDefault, ty: Colum
     }
 }
 
+/// A type name as `pg_get_expr` renders it in a default expression: quoted
+/// when the word is reserved, which for the types crabka has is `bit` alone —
+/// `'1001'::"bit"`, but `'1001'::bit varying`.
+fn quoted_type_name(ty: ColumnType) -> String {
+    match ty {
+        ColumnType::Bit(_) => "\"bit\"".to_string(),
+        other => other.name().to_string(),
+    }
+}
+
 fn format_default_value(value: &Datum, ty: ColumnType) -> String {
     match value {
         Datum::Null => "NULL".to_string(),
@@ -16060,11 +16086,18 @@ fn format_default_value(value: &Datum, ty: ColumnType) -> String {
         | Datum::TsQuery(_)
         | Datum::Inet(_)
         | Datum::MacAddr(_)
-        | Datum::MacAddr8(_) => {
+        | Datum::MacAddr8(_)
+        | Datum::BitString(_)
+        | Datum::Money(_) => {
             match zone_independent_text(value) {
                 Some(literal) => {
                     let mut out = String::new();
-                    let _ = write!(out, "'{}'::{}", escape_sql_string(&literal), ty.name());
+                    let _ = write!(
+                        out,
+                        "'{}'::{}",
+                        escape_sql_string(&literal),
+                        quoted_type_name(ty)
+                    );
                     out
                 }
                 None => "<unsupported>".to_string(),
@@ -17488,6 +17521,30 @@ fn scalar_type_rows() -> &'static [BuiltinTypeRow] {
             array: crabka_pgtypes::oids::TSQUERYARRAY as i32,
         },
         BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::MONEY as i32,
+            name: "money",
+            len: 8,
+            category: "N",
+            elem: 0,
+            array: crabka_pgtypes::oids::MONEYARRAY as i32,
+        },
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::BIT as i32,
+            name: "bit",
+            len: -1,
+            category: "V",
+            elem: 0,
+            array: crabka_pgtypes::oids::BITARRAY as i32,
+        },
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::VARBIT as i32,
+            name: "varbit",
+            len: -1,
+            category: "V",
+            elem: 0,
+            array: crabka_pgtypes::oids::VARBITARRAY as i32,
+        },
+        BuiltinTypeRow {
             oid: crabka_pgtypes::oids::INET as i32,
             name: "inet",
             len: -1,
@@ -17738,6 +17795,24 @@ fn builtin_type_rows() -> &'static [BuiltinTypeRow] {
                 crabka_pgtypes::oids::MACADDR8ARRAY,
                 "_macaddr8",
                 crabka_pgtypes::oids::MACADDR8,
+            ),
+            // `money` and the two bit types are in the same position: the array
+            // row exists so `typarray` resolves, but `ElemType` has no variant
+            // for them, so building a value of one is still 0A000.
+            (
+                crabka_pgtypes::oids::MONEYARRAY,
+                "_money",
+                crabka_pgtypes::oids::MONEY,
+            ),
+            (
+                crabka_pgtypes::oids::BITARRAY,
+                "_bit",
+                crabka_pgtypes::oids::BIT,
+            ),
+            (
+                crabka_pgtypes::oids::VARBITARRAY,
+                "_varbit",
+                crabka_pgtypes::oids::VARBIT,
             ),
         ] {
             rows.push(BuiltinTypeRow {
@@ -18818,7 +18893,7 @@ fn row_count_coercible(expr: &Expr, value: &Datum) -> bool {
         | Datum::Float4(_)
         | Datum::Float8(_)
         | Datum::Numeric(_) => true,
-        Datum::Text(_) => matches!(expr, Expr::StringLiteral(_)),
+        Datum::Text(_) => matches!(expr, Expr::StringLiteral(_) | Expr::BitStringLiteral(_)),
         _ => false,
     }
 }
@@ -18999,28 +19074,47 @@ fn is_window_binding(c: &ColumnBinding) -> bool {
 }
 
 pub(crate) fn derived_name(expr: &Expr) -> String {
+    named_expr(expr).0
+}
+
+/// `FigureColnameInternal`'s name AND its strength. The strength is what makes
+/// a cast override a name that itself came from a cast but not one that came
+/// from a column or a function: `'1'::text::int4` is `int4`, while
+/// `b::text::int4` is still `b`.
+fn named_expr(expr: &Expr) -> (String, u8) {
+    let (name, strength) = named_expr_inner(expr);
+    (name, strength)
+}
+
+fn named_expr_inner(expr: &Expr) -> (String, u8) {
     match expr {
         // A window placeholder carries the label PostgreSQL gives an unaliased
         // window call: the function's own name.
-        Expr::Column { name, .. } => crabka_pgparser::ast::window_binding_parts(name)
-            .map_or_else(|| name.clone(), |(_, label)| label.to_string()),
+        Expr::Column { name, .. } => (
+            crabka_pgparser::ast::window_binding_parts(name)
+                .map_or_else(|| name.clone(), |(_, label)| label.to_string()),
+            2,
+        ),
         // PostgreSQL names an aggregate output column after the function.
-        Expr::Func(fc) => fc.name.clone(),
+        Expr::Func(fc) => (fc.name.clone(), 2),
         // A SQL/JSON expression is labelled after its construct (`json_object`,
         // `json_value`, …); `IS JSON` is a predicate and stays `?column?`.
-        Expr::SqlJson(json) => json.output_label().to_string(),
+        Expr::SqlJson(json) => (json.output_label().to_string(), 2),
         // PostgreSQL's `FigureColname` looks THROUGH a cast and a COLLATE (and
         // through the parentheses the parser has already discarded), so
         // `b::numeric`, `count(*)::bigint`, `b COLLATE "C"` and `(b)` are labelled
         // `b`, `count`, `b`, `b`. When the inner expression supplies no name of
         // its own, a CAST falls back to the catalog TYPE name — `1::bigint` is
         // `int8`, not `?column?` — while a COLLATE has no such fallback.
-        Expr::Cast { expr, ty } => match derived_name(expr) {
-            unnamed if unnamed == "?column?" => catalog_type_name(*ty),
+        Expr::Cast { expr, ty } => match named_expr(expr) {
+            // Strength 1 is a name a cast (or another weak form) supplied, and
+            // this cast replaces it; strength 2 came from a column or a
+            // function and survives.
+            (_, strength) if strength <= 1 => (catalog_type_name(*ty), 1),
             named => named,
         },
-        Expr::Collate { expr, .. } => derived_name(expr),
-        _ => "?column?".to_string(),
+        Expr::Collate { expr, .. } => named_expr(expr),
+        _ => ("?column?".to_string(), 0),
     }
 }
 

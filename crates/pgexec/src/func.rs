@@ -306,6 +306,8 @@ pub(crate) fn is_scalar(name: &str) -> bool {
         || crate::regexp_fn::is_regexp_func(name)
         || crate::text_search_fn::is_text_search_func(name)
         || crate::network_fn::is_network_func(name)
+        || crate::bit_fn::is_bit_func(name)
+        || crate::money_fn::is_money_func(name)
 }
 
 /// The call a bare, unparenthesised `name` denotes, when `PostgreSQL` reserves
@@ -384,6 +386,12 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
     if crate::network_fn::is_network_func(&fc.name) {
         return crate::network_fn::network_func_result_type(fc, scope);
     }
+    if crate::bit_fn::is_bit_func(&fc.name) {
+        return crate::bit_fn::bit_func_result_type(fc, scope);
+    }
+    if crate::money_fn::is_money_func(&fc.name) {
+        return crate::money_fn::money_func_result_type(fc, scope);
+    }
     if crate::math_fn::is_math_func(&fc.name) {
         return crate::math_fn::math_func_result_type(fc, scope);
     }
@@ -402,6 +410,9 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
             match crate::eval::infer_type(&args[0], scope)? {
                 ColumnType::TsVector => {}
                 ColumnType::Bytea if fc.name == "length" => {}
+                // `length(bit)` is `bitlength` — the bit count, not a
+                // character count.
+                ty if crate::bit_fn::is_bit_type(ty) => {}
                 _ => require_text(&args[0], scope)?,
             }
             Ok(ColumnType::Int4)
@@ -427,6 +438,15 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
         }
         ScalarFunc::Substr => {
             require_arity(fc, n == 2 || n == 3)?;
+            // `substring(bit, int [, int])` is a distinct function returning
+            // `bit`; it has no pattern form, so the count arguments are always
+            // integers.
+            if crate::bit_fn::is_bit_type(crate::eval::infer_type(&args[0], scope)?) {
+                for a in &args[1..] {
+                    require_int(a, scope)?;
+                }
+                return Ok(ColumnType::Bit(None));
+            }
             require_text(&args[0], scope)?;
             // Two shapes share the name, and PostgreSQL tells them apart by the
             // second argument's type: `substring(text, int [, int])` takes a
@@ -447,6 +467,12 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
         // characters as it inserts.
         ScalarFunc::Overlay => {
             require_arity(fc, n == 3 || n == 4)?;
+            if crate::bit_fn::is_bit_type(crate::eval::infer_type(&args[0], scope)?) {
+                for a in &args[2..] {
+                    require_int(a, scope)?;
+                }
+                return Ok(ColumnType::Bit(None));
+            }
             require_text(&args[0], scope)?;
             require_text(&args[1], scope)?;
             for a in &args[2..] {
@@ -472,6 +498,14 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
         }
         ScalarFunc::Abs => {
             require_arity(fc, n == 1)?;
+            // `abs` is declared over the numeric family only; naming the
+            // argument's type is what PostgreSQL reports for `abs(money)`.
+            if matches!(
+                crate::eval::infer_type(&args[0], scope)?,
+                ColumnType::Money | ColumnType::Bit(_) | ColumnType::VarBit(_)
+            ) {
+                return Err(undefined_function_spelled(&fc.name, args, scope));
+            }
             // abs preserves the numeric type (int width, or SP30's float8).
             require_numeric(&args[0], scope)
         }
@@ -623,6 +657,13 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
         }
         ScalarFunc::Strpos => {
             require_arity(fc, n == 2)?;
+            // `position(bit, bit)` is `bitposition`; it shares the name and the
+            // `int4` result with the text form.
+            if crate::bit_fn::is_bit_type(crate::eval::infer_type(&args[0], scope)?)
+                || crate::bit_fn::is_bit_type(crate::eval::infer_type(&args[1], scope)?)
+            {
+                return Ok(ColumnType::Int4);
+            }
             require_text(&args[0], scope)?;
             require_text(&args[1], scope)?;
             Ok(ColumnType::Int4)
@@ -862,6 +903,12 @@ pub(crate) fn eval_scalar(
     }
     if crate::network_fn::is_network_func(&fc.name) {
         return crate::network_fn::eval_network(fc, ctx, eval_child);
+    }
+    if crate::bit_fn::is_bit_func(&fc.name) {
+        return crate::bit_fn::eval_bit(fc, ctx, eval_child);
+    }
+    if crate::money_fn::is_money_func(&fc.name) {
+        return crate::money_fn::eval_money(fc, ctx, eval_child);
     }
     if crate::math_fn::is_math_func(&fc.name) {
         return crate::math_fn::eval_math(fc, ctx, eval_child);
@@ -1133,6 +1180,9 @@ fn eval_eager(
         }
         ScalarFunc::Length => {
             require_arity(fc, vals.len() == 1)?;
+            if let Datum::BitString(bits) = &vals[0] {
+                return Ok(Datum::Int4(crate::bit_fn::length(bits)));
+            }
             let n = match &vals[0] {
                 Datum::TsVector(vector) => vector.len(),
                 Datum::Bytea(bytes) if fc.name == "length" => bytes.len(),
@@ -1264,6 +1314,14 @@ fn eval_eager(
         }
         ScalarFunc::Substr => {
             require_arity(fc, vals.len() == 2 || vals.len() == 3)?;
+            if let Datum::BitString(bits) = &vals[0] {
+                let start = bit_index(&vals[1])?;
+                let count = match vals.get(2) {
+                    None => None,
+                    Some(c) => Some(bit_index(c)?),
+                };
+                return crate::bit_fn::substring(bits, start, count);
+            }
             let s = text_arg(&vals[0])?;
             // The pattern forms, distinguished at runtime the same way the plan
             // gate distinguishes them: a text second argument is a regexp.
@@ -1288,6 +1346,14 @@ fn eval_eager(
         }
         ScalarFunc::Overlay => {
             require_arity(fc, vals.len() == 3 || vals.len() == 4)?;
+            if let Datum::BitString(bits) = &vals[0] {
+                let start = bit_index(&vals[2])?;
+                let count = match vals.get(3) {
+                    None => None,
+                    Some(c) => Some(bit_index(c)?),
+                };
+                return crate::bit_fn::overlay(bits, &vals[1], start, count);
+            }
             let s = text_arg(&vals[0])?;
             let replacement = text_arg(&vals[1])?;
             let start = int_arg(&vals[2])?;
@@ -1466,6 +1532,11 @@ fn eval_eager(
         }
         ScalarFunc::Strpos => {
             require_arity(fc, vals.len() == 2)?;
+            if (matches!(&vals[0], Datum::BitString(_)) || matches!(&vals[1], Datum::BitString(_)))
+                && let Some(found) = crate::bit_fn::position(&vals[0], &vals[1])?
+            {
+                return Ok(Datum::Int4(found));
+            }
             Ok(Datum::Int4(strpos(
                 text_arg(&vals[0])?,
                 text_arg(&vals[1])?,
@@ -1773,6 +1844,18 @@ pub(crate) fn input_error(
         sqlstate: "42704",
         message: format!("type \"{type_name}\" does not exist"),
     })?;
+    // `bit_in` / `varbit_in` take the length modifier themselves and reject a
+    // mismatch, where the *cast* to `bit(n)` would silently pad or truncate.
+    // `pg_input_error_info('01010001', 'bit(10)')` is the input function, so it
+    // must report `bit string length 8 does not match type bit(10)`.
+    if let ColumnType::Bit(len) | ColumnType::VarBit(len) = ty {
+        let varying = matches!(ty, ColumnType::VarBit(_));
+        return Ok(
+            crabka_pgtypes::BitString::parse_with_typmod(input, len, varying)
+                .err()
+                .map(|error| ExecError::from(error).into_pg()),
+        );
+    }
     let value = Datum::Text(input.to_string());
     let result = if matches!(ty, ColumnType::Varchar(Some(_)) | ColumnType::Char(Some(_))) {
         crabka_pgtypes::cast::cast_assign(&value, ty, time_zone).map_err(ExecError::from)
@@ -1788,6 +1871,12 @@ pub(crate) fn input_error(
 fn input_type(type_name: &str) -> Option<ColumnType> {
     let normalized = type_name.trim().to_ascii_lowercase();
     let Some(body) = normalized.strip_suffix(')') else {
+        // The grammar's `bit` production defaults to `bit(1)`, while a bare
+        // `bit varying` stays unconstrained — the same asymmetry the
+        // expression parser applies.
+        if normalized == "bit" {
+            return Some(ColumnType::Bit(Some(1)));
+        }
         return ColumnType::from_sql_name(&normalized);
     };
     let (base, modifier) = body.split_once('(')?;
@@ -1799,6 +1888,8 @@ fn input_type(type_name: &str) -> Option<ColumnType> {
         ("char" | "character" | "bpchar", [limit]) => {
             Some(ColumnType::Char(Some(limit.parse().ok()?)))
         }
+        ("bit", [len]) => Some(ColumnType::Bit(Some(len.parse().ok()?))),
+        ("varbit" | "bit varying", [len]) => Some(ColumnType::VarBit(Some(len.parse().ok()?))),
         ("numeric" | "decimal", [precision]) => {
             Some(ColumnType::Numeric(Some(crabka_pgtypes::numeric::Typmod {
                 precision: precision.parse().ok()?,
@@ -2071,6 +2162,11 @@ enum TypmodKind {
     /// A fractional-seconds precision (`timestamp(3)`), printed before the
     /// `with/without time zone` tail.
     Seconds,
+    /// A `bit(n)` / `bit varying(n)` length, stored raw. Distinct from
+    /// [`TypmodKind::Seconds`] even though both print the stored word, because
+    /// `bit varying` has a space in its name and the modifier goes at the END:
+    /// `bit varying(5)`, never `bit(5) varying`.
+    Bits,
 }
 
 fn type_modifier(kind: TypmodKind, typmod: i64) -> String {
@@ -2081,7 +2177,7 @@ fn type_modifier(kind: TypmodKind, typmod: i64) -> String {
             let packed = typmod - 4;
             format!("({},{})", (packed >> 16) & 0xffff, packed & 0xffff)
         }
-        TypmodKind::Seconds => format!("({typmod})"),
+        TypmodKind::Seconds | TypmodKind::Bits => format!("({typmod})"),
     }
 }
 
@@ -2089,8 +2185,14 @@ fn type_modifier(kind: TypmodKind, typmod: i64) -> String {
 /// The name carries a `[]` suffix for an array type, and the modifier goes in
 /// before that suffix (`character varying(6)[]`).
 fn builtin_format_type(oid: u32) -> Option<(&'static str, TypmodKind)> {
-    use TypmodKind::{Length, None as NoMod, PrecisionScale, Seconds};
+    use TypmodKind::{Bits, Length, None as NoMod, PrecisionScale, Seconds};
     Some(match oid {
+        790 => ("money", NoMod),
+        791 => ("money[]", NoMod),
+        1560 => ("bit", Bits),
+        1561 => ("bit[]", Bits),
+        1562 => ("bit varying", Bits),
+        1563 => ("bit varying[]", Bits),
         16 => ("boolean", NoMod),
         17 => ("bytea", NoMod),
         18 => ("\"char\"", NoMod),
@@ -2271,6 +2373,21 @@ fn advisory_key(vals: &[Datum]) -> Result<i64, ExecError> {
             Ok(crate::lockmgr::AdvisoryLockManager::pack_key(high, low))
         }
         _ => Err(ExecError::InvalidParameterValue("advisory lock key".into())),
+    }
+}
+
+/// A bit-string function's `int4` position argument. The bit routines take
+/// `int32` throughout — `SUBSTRING(b FROM 2 FOR 2147483646)` relies on the
+/// overflow of `start + count` in 32 bits meaning "to the end of the string" —
+/// so a wider value is out of range rather than silently clamped.
+fn bit_index(d: &Datum) -> Result<i32, ExecError> {
+    match d {
+        Datum::Int2(n) => Ok(i32::from(*n)),
+        Datum::Int4(n) => Ok(*n),
+        Datum::Int8(n) => {
+            i32::try_from(*n).map_err(|_| ExecError::Type(crabka_pgtypes::TypeError::Overflow))
+        }
+        other => Err(type_error("function", other)),
     }
 }
 

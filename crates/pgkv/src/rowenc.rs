@@ -71,6 +71,13 @@ mod tag {
     pub const MACADDR: u8 = 32;
     /// `PostgreSQL` `macaddr8` (`[33][8 bytes]`). Append-only.
     pub const MACADDR8: u8 = 33;
+    /// `PostgreSQL` `bit` / `bit varying` (`[34][varying][u32 bit count][packed
+    /// bytes]`). One tag for both SQL types, as one datum holds both.
+    /// Append-only — no version bump.
+    pub const BITSTRING: u8 = 34;
+    /// `PostgreSQL` `money` (`[35][8 big-endian bytes]`). Append-only — no
+    /// version bump.
+    pub const MONEY: u8 = 35;
 }
 
 /// Encodes one row in the current storage format.
@@ -256,6 +263,8 @@ fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
             Datum::Inet(_) | Datum::MacAddr(_) | Datum::MacAddr8(_) => {
                 encode_network(d, out);
             }
+            Datum::Money(value) => encode_money(*value, out),
+            Datum::BitString(bits) => encode_bit_string(bits, out),
             Datum::Range(range) => {
                 out.push(tag::RANGE);
                 out.extend_from_slice(&range.ty.oid.to_be_bytes());
@@ -286,6 +295,21 @@ fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
             }
         }
     }
+}
+
+/// Append one `money` value: its `i64` count of minor currency units.
+fn encode_money(value: i64, out: &mut Vec<u8>) {
+    out.push(tag::MONEY);
+    out.extend_from_slice(&value.to_be_bytes());
+}
+
+/// Append one bit string: which of the two SQL types produced it, the bit
+/// count, then the packed bytes.
+fn encode_bit_string(bits: &crabka_pgtypes::BitString, out: &mut Vec<u8>) {
+    out.push(tag::BITSTRING);
+    out.push(u8::from(bits.varying));
+    out.extend_from_slice(&bits.len().to_be_bytes());
+    out.extend_from_slice(bits.bytes());
 }
 
 /// Append one network address: `inet`/`cidr` as its `is_cidr` flag, family,
@@ -609,6 +633,19 @@ fn decode_field(cur: &mut &[u8]) -> Result<Datum, KvError> {
             }
             let addr: [u8; 16] = take_n(cur, 16)?.try_into().expect("16");
             Datum::Inet(crabka_pgtypes::Inet::new(is_cidr, family, bits, addr))
+        }
+        tag::MONEY => Datum::Money(i64::from_be_bytes(
+            take_n(cur, 8)?.try_into().expect("eight bytes make an i64"),
+        )),
+        tag::BITSTRING => {
+            let varying = take_u8(cur)? != 0;
+            let len =
+                u32::from_be_bytes(take_n(cur, 4)?.try_into().expect("four bytes make a u32"));
+            let bytes = take_n(cur, usize::try_from(len.div_ceil(8)).unwrap_or(usize::MAX))?;
+            Datum::BitString(
+                crabka_pgtypes::BitString::from_parts(varying, len, bytes.to_vec())
+                    .ok_or_else(|| KvError::CorruptRow("corrupt bit string".into()))?,
+            )
         }
         tag::MACADDR => Datum::MacAddr(crabka_pgtypes::MacAddr(
             take_n(cur, 6)?.try_into().expect("6"),

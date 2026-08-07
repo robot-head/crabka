@@ -415,6 +415,9 @@ fn deparse_bare_with(expr: &Expr, qualify: bool) -> String {
         Expr::FieldSelectAll(base) => format!("({}).*", deparse_bare_with(base, qualify)),
         Expr::IntLiteral(digits) | Expr::NumericLiteral(digits) => digits.clone(),
         Expr::StringLiteral(text) => format!("'{}'::text", text.replace('\'', "''")),
+        // `pg_get_expr` renders a bit constant with its type name quoted,
+        // because `bit` is a reserved word.
+        Expr::BitStringLiteral(bits) => format!("'{bits}'::\"bit\""),
         Expr::BoolLiteral(value) => if *value { "true" } else { "false" }.to_string(),
         Expr::NullLiteral => "NULL".to_string(),
         Expr::Param(index) => format!("${index}"),

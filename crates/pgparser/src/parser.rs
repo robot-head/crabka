@@ -518,6 +518,12 @@ impl Parser {
             self.bump();
             type_word = "character varying".to_string();
         }
+        if type_word.eq_ignore_ascii_case("bit")
+            && matches!(self.peek(), Token::Ident(w) if w.eq_ignore_ascii_case("varying"))
+        {
+            self.bump();
+            type_word = "bit varying".to_string();
+        }
         // A `timestamp(2)` / `time(2)` / `interval(2)` fractional-seconds
         // precision sits before any `with time zone` qualifier. Crabka stores
         // every date/time value at microsecond resolution, so the precision is
@@ -587,6 +593,11 @@ impl Parser {
         ) && *self.peek() == Token::LParen
         {
             self.parse_string_typmod(ty)?
+        } else if matches!(
+            ty,
+            crabka_pgtypes::ColumnType::Bit(_) | crabka_pgtypes::ColumnType::VarBit(_)
+        ) {
+            self.parse_bit_typmod(ty, type_pos)?
         } else {
             ty
         };
@@ -659,6 +670,37 @@ impl Parser {
         }
     }
 
+    /// Parse a `bit(n)` / `bit varying(n)` length modifier, and apply the
+    /// grammar's default: a bare `bit` is `bit(1)`, while a bare `bit varying`
+    /// stays unconstrained. That asymmetry is the SQL standard's, and it is why
+    /// `'101'::bit` is `1` while `'101'::bit varying` is `101`.
+    fn parse_bit_typmod(
+        &mut self,
+        ty: crabka_pgtypes::ColumnType,
+        type_pos: usize,
+    ) -> Result<crabka_pgtypes::ColumnType, ParseError> {
+        let varying = matches!(ty, crabka_pgtypes::ColumnType::VarBit(_));
+        if *self.peek() != Token::LParen {
+            return Ok(if varying {
+                crabka_pgtypes::ColumnType::VarBit(None)
+            } else {
+                crabka_pgtypes::ColumnType::Bit(Some(1))
+            });
+        }
+        self.expect(&Token::LParen)?;
+        let len = self.expect_i32("bit length")?;
+        self.expect(&Token::RParen)?;
+        crabka_pgtypes::bitstring::check_typmod(len, if varying { "varbit" } else { "bit" })
+            .map_err(|error| {
+                ParseError::new_sqlstate(error.sqlstate(), error.to_string(), type_pos)
+            })?;
+        Ok(if varying {
+            crabka_pgtypes::ColumnType::VarBit(Some(len))
+        } else {
+            crabka_pgtypes::ColumnType::Bit(Some(len))
+        })
+    }
+
     /// Parse a `numeric(precision[, scale])` modifier, positioned at `(`. `scale`
     /// defaults to 0 (`PostgreSQL` `numeric(p)` ≡ `numeric(p, 0)`).
     fn parse_numeric_typmod(&mut self) -> Result<crabka_pgtypes::ColumnType, ParseError> {
@@ -676,6 +718,21 @@ impl Parser {
     }
 
     /// Parse a small unsigned integer literal (a `numeric` precision/scale).
+    /// The same as [`Parser::expect_u16`] over the wider range a `bit(n)`
+    /// length modifier occupies — `PostgreSQL` accepts up to 83,886,080 bits.
+    fn expect_i32(&mut self, what: &str) -> Result<i32, ParseError> {
+        let pos = self.peek_pos();
+        match self.bump() {
+            Token::IntLit(s) => s
+                .parse::<i32>()
+                .map_err(|_| ParseError::new(format!("invalid {what}"), pos)),
+            other => Err(ParseError::new(
+                format!("expected {what}, found {other:?}"),
+                pos,
+            )),
+        }
+    }
+
     fn expect_u16(&mut self, what: &str) -> Result<u16, ParseError> {
         let pos = self.peek_pos();
         match self.bump() {
@@ -1319,6 +1376,21 @@ impl Parser {
                 self.bump();
                 Ok(Expr::StringLiteral(s))
             }
+            // `B'…'` / `X'…'`. PostgreSQL types these `bit` with no length
+            // modifier and runs `bit_in` while parsing, so a bad digit is a
+            // syntax-time error pointing at the literal — which is what makes
+            // `SELECT b' 0'` report `" " is not a valid binary digit` under a
+            // caret rather than failing at execution. Decoding here also means
+            // the rest of the parser sees an ordinary typed cast.
+            Token::BitStringLit(raw) => {
+                let pos = self.peek_pos();
+                self.bump();
+                let bits =
+                    crabka_pgtypes::bitstring::BitString::parse(&raw, false).map_err(|error| {
+                        ParseError::new_sqlstate(error.sqlstate(), error.to_string(), pos)
+                    })?;
+                Ok(Expr::BitStringLiteral(bits.to_text()))
+            }
             Token::Keyword(Keyword::True) => {
                 self.bump();
                 Ok(Expr::BoolLiteral(true))
@@ -1587,6 +1659,20 @@ impl Parser {
         if ty == crabka_pgtypes::ColumnType::Interval {
             return self.interval_literal(string).map(Some);
         }
+        // `ConstBit` clears the length modifier that `Bit` supplies, so the
+        // typed-constant `bit 'xff'` is eight bits while the cast `'xff'::bit`
+        // is `bit(1)` and keeps only the first. A modifier the query WROTE
+        // survives, so `bit(1) 'xff'` is still one bit — which is why this
+        // looks for the parenthesis rather than for the value 1.
+        let wrote_modifier = self.toks[start..self.pos]
+            .iter()
+            .any(|(token, _)| *token == Token::LParen);
+        let ty = match ty {
+            crabka_pgtypes::ColumnType::Bit(_) if !wrote_modifier => {
+                crabka_pgtypes::ColumnType::Bit(None)
+            }
+            other => other,
+        };
         Ok(Some(Expr::Cast {
             expr: Box::new(Expr::StringLiteral(string)),
             ty,
@@ -2532,7 +2618,13 @@ impl Parser {
     /// `PostgreSQL`'s grammar swaps them.
     fn position_expr(&mut self) -> Result<Option<Expr>, ParseError> {
         self.expect(&Token::LParen)?;
-        let needle = self.expr(0)?;
+        // The needle is a `b_expr` in PostgreSQL's grammar, which excludes the
+        // postfix predicates — otherwise `position(x IN (y))` reads its own
+        // `IN` as an IN-list and then finds no separator. Binding power 6 is
+        // the first level above them. It also excludes the comparisons, which
+        // `b_expr` allows; `POSITION(a = b IN c)` is the only casualty and is
+        // a type error in PostgreSQL regardless.
+        let needle = self.expr(6)?;
         if !self.eat_keyword(Keyword::In) {
             // The comma spelling is `position(needle, haystack)`, in that order.
             self.expect(&Token::Comma)?;
