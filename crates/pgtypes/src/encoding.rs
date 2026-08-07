@@ -206,6 +206,14 @@ pub fn encode_text_in(d: &Datum, style: OutputStyle<'_>) -> Vec<u8> {
         Datum::Inet(value) => value.to_text().into_bytes(),
         Datum::MacAddr(value) => value.to_text().into_bytes(),
         Datum::MacAddr8(value) => value.to_text().into_bytes(),
+        // `oidout` / `xidout` / `cidout` / `xid8out` all print `%u`: the
+        // unsigned value, which is the whole difference from `int4out`.
+        Datum::Oid(value) | Datum::Xid(value) | Datum::Cid(value) => value.to_string().into_bytes(),
+        Datum::Xid8(value) => value.to_string().into_bytes(),
+        // `tidout`: `(block,offset)`, no space.
+        Datum::Tid(value) => value.to_text().into_bytes(),
+        // `pg_lsn_out`: `%X/%X`, upper case and unpadded.
+        Datum::PgLsn(value) => crate::sysid::lsn_to_text(*value).into_bytes(),
         Datum::Range(range) => crate::range::to_text(range, |bound| {
             String::from_utf8(encode_text_in(bound, style))
                 .expect("a Datum's text encoding is always valid UTF-8")
@@ -500,6 +508,17 @@ pub fn encode_binary(d: &Datum) -> Vec<u8> {
         // first.
         Datum::MacAddr(value) => value.0.to_vec(),
         Datum::MacAddr8(value) => value.0.to_vec(),
+        // `oidsend` / `xidsend` / `cidsend`: a big-endian uint32.
+        Datum::Oid(value) | Datum::Xid(value) | Datum::Cid(value) => value.to_be_bytes().to_vec(),
+        // `xid8send` / `pg_lsn_send`: a big-endian uint64.
+        Datum::Xid8(value) | Datum::PgLsn(value) => value.to_be_bytes().to_vec(),
+        // `tidsend`: the block number then the offset, each big-endian.
+        Datum::Tid(value) => {
+            let mut out = Vec::with_capacity(6);
+            out.extend_from_slice(&value.block.to_be_bytes());
+            out.extend_from_slice(&value.offset.to_be_bytes());
+            out
+        }
     }
 }
 

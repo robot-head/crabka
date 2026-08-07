@@ -83,6 +83,19 @@ mod tag {
     /// decoding through the `jsonb` tag would normalise them and lose exactly
     /// what the type exists to keep. Append-only — no version bump.
     pub const JSON: u8 = 36;
+    /// `PostgreSQL` `oid` (`[37][u32 big-endian]`). Append-only — no version
+    /// bump.
+    pub const OID: u8 = 37;
+    /// `PostgreSQL` `xid` (`[38][u32 big-endian]`). Append-only.
+    pub const XID: u8 = 38;
+    /// `PostgreSQL` `xid8` (`[39][u64 big-endian]`). Append-only.
+    pub const XID8: u8 = 39;
+    /// `PostgreSQL` `cid` (`[40][u32 big-endian]`). Append-only.
+    pub const CID: u8 = 40;
+    /// `PostgreSQL` `tid` (`[41][u32 block][u16 offset]`). Append-only.
+    pub const TID: u8 = 41;
+    /// `PostgreSQL` `pg_lsn` (`[42][u64 big-endian]`). Append-only.
+    pub const PG_LSN: u8 = 42;
 }
 
 /// Encodes one row in the current storage format.
@@ -263,6 +276,12 @@ fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
                 encode_network(d, out);
             }
             Datum::Money(value) => encode_money(*value, out),
+            Datum::Oid(_)
+            | Datum::Xid(_)
+            | Datum::Cid(_)
+            | Datum::Xid8(_)
+            | Datum::PgLsn(_)
+            | Datum::Tid(_) => encode_system_identifier(d, out),
             Datum::BitString(bits) => encode_bit_string(bits, out),
             Datum::Range(range) => {
                 out.push(tag::RANGE);
@@ -293,6 +312,43 @@ fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
                 }
             }
         }
+    }
+}
+
+/// Append one system identifier value: its own fixed-width **unsigned** value
+/// under its own tag.
+///
+/// `oid` cannot ride on [`tag::INT4`] and `xid8`/`pg_lsn` cannot ride on
+/// [`tag::INT8`]: the round trip would come back signed, and 4294967295 would
+/// read as -1.
+fn encode_system_identifier(value: &Datum, out: &mut Vec<u8>) {
+    match value {
+        Datum::Oid(v) => {
+            out.push(tag::OID);
+            out.extend_from_slice(&v.to_be_bytes());
+        }
+        Datum::Xid(v) => {
+            out.push(tag::XID);
+            out.extend_from_slice(&v.to_be_bytes());
+        }
+        Datum::Cid(v) => {
+            out.push(tag::CID);
+            out.extend_from_slice(&v.to_be_bytes());
+        }
+        Datum::Xid8(v) => {
+            out.push(tag::XID8);
+            out.extend_from_slice(&v.to_be_bytes());
+        }
+        Datum::PgLsn(v) => {
+            out.push(tag::PG_LSN);
+            out.extend_from_slice(&v.to_be_bytes());
+        }
+        Datum::Tid(v) => {
+            out.push(tag::TID);
+            out.extend_from_slice(&v.block.to_be_bytes());
+            out.extend_from_slice(&v.offset.to_be_bytes());
+        }
+        _ => unreachable!("encode_system_identifier is reached only for a system identifier"),
     }
 }
 
@@ -661,6 +717,25 @@ fn decode_field(cur: &mut &[u8]) -> Result<Datum, KvError> {
         tag::MACADDR8 => Datum::MacAddr8(crabka_pgtypes::MacAddr8(
             take_n(cur, 8)?.try_into().expect("8"),
         )),
+        tag::OID => Datum::Oid(u32::from_be_bytes(
+            take_n(cur, 4)?.try_into().expect("four bytes make a u32"),
+        )),
+        tag::XID => Datum::Xid(u32::from_be_bytes(
+            take_n(cur, 4)?.try_into().expect("four bytes make a u32"),
+        )),
+        tag::CID => Datum::Cid(u32::from_be_bytes(
+            take_n(cur, 4)?.try_into().expect("four bytes make a u32"),
+        )),
+        tag::XID8 => Datum::Xid8(u64::from_be_bytes(
+            take_n(cur, 8)?.try_into().expect("eight bytes make a u64"),
+        )),
+        tag::PG_LSN => Datum::PgLsn(u64::from_be_bytes(
+            take_n(cur, 8)?.try_into().expect("eight bytes make a u64"),
+        )),
+        tag::TID => Datum::Tid(crabka_pgtypes::Tid {
+            block: u32::from_be_bytes(take_n(cur, 4)?.try_into().expect("four bytes make a u32")),
+            offset: u16::from_be_bytes(take_n(cur, 2)?.try_into().expect("two bytes make a u16")),
+        }),
         tag::RANGE => {
             let oid = u32::try_from(take_u32_len(cur)?)
                 .map_err(|_| KvError::CorruptRow("range type oid out of range".into()))?;

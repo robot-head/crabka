@@ -79,6 +79,51 @@ pub fn cast_allowed(from: ColumnType, to: ColumnType) -> bool {
             cast_allowed(a.column_type(), b.column_type())
         }
         (ColumnType::OidVector, ColumnType::Array(crate::ElemType::Regtype)) => true,
+        // The system identifier family. `pg_cast` gives `oid` conversions with
+        // the integer types and with every `reg*` type, and gives `xid8 → xid`
+        // (explicit); it gives the other four nothing at all, so they reach any
+        // other type only through the string rules below. The whole family must
+        // be decided here, ahead of the numeric fall-throughs, or `oid` would
+        // silently acquire `oid → numeric` and `float8 → oid`, which PostgreSQL
+        // reports as 42846.
+        //
+        // The integer directions are not symmetric: `int2 → oid` exists but
+        // `oid → int2` does not.
+        (ColumnType::Int2 | Int4 | ColumnType::Int8, ColumnType::Oid)
+        | (ColumnType::Oid, Int4 | ColumnType::Int8)
+        | (
+            ColumnType::Oid,
+            ColumnType::Regclass
+            | ColumnType::Regtype
+            | ColumnType::Regprocedure
+            | ColumnType::Regnamespace,
+        )
+        | (
+            ColumnType::Regclass
+            | ColumnType::Regtype
+            | ColumnType::Regprocedure
+            | ColumnType::Regnamespace,
+            ColumnType::Oid,
+        )
+        | (ColumnType::Xid8, ColumnType::Xid) => true,
+        (
+            ColumnType::Oid
+            | ColumnType::Xid
+            | ColumnType::Xid8
+            | ColumnType::Cid
+            | ColumnType::Tid
+            | ColumnType::PgLsn,
+            _,
+        )
+        | (
+            _,
+            ColumnType::Oid
+            | ColumnType::Xid
+            | ColumnType::Xid8
+            | ColumnType::Cid
+            | ColumnType::Tid
+            | ColumnType::PgLsn,
+        ) => from.is_string() || to.is_string(),
         // The network family's own casts (`pg_cast`): `cidr → inet` is
         // binary-coercible, `inet → cidr` runs `inet_to_cidr`, and the two MAC
         // widths convert both ways. Everything else in the family reaches
@@ -211,6 +256,26 @@ pub fn assignment_cast_allowed(from: ColumnType, to: ColumnType) -> bool {
         (Date, Timestamp | Timestamptz) | (Timestamp, Timestamptz) | (Timestamptz, Timestamp) => {
             true
         }
+        // `pg_cast` marks `int2`/`int4`/`int8 → oid` implicit and `oid → int4`
+        // and `oid → int8` assignment-level, so an integer stores into an `oid`
+        // column and back into an integer one without an explicit cast. The
+        // `reg*` pairs are all implicit binary coercions.
+        (ColumnType::Int2 | ColumnType::Int4 | ColumnType::Int8, ColumnType::Oid)
+        | (ColumnType::Oid, ColumnType::Int4 | ColumnType::Int8)
+        | (
+            ColumnType::Oid,
+            ColumnType::Regclass
+            | ColumnType::Regtype
+            | ColumnType::Regprocedure
+            | ColumnType::Regnamespace,
+        )
+        | (
+            ColumnType::Regclass
+            | ColumnType::Regtype
+            | ColumnType::Regprocedure
+            | ColumnType::Regnamespace,
+            ColumnType::Oid,
+        ) => true,
         // `pg_cast` marks `cidr → inet` and both MAC conversions implicit and
         // `inet → cidr` assignment-level, so `INSERT` into a column of the
         // other type converts without an explicit cast.
@@ -384,6 +449,36 @@ pub fn cast_in(
         (Datum::MacAddr8(value), ColumnType::MacAddr8) => Ok(Datum::MacAddr8(*value)),
         (Datum::MacAddr(value), ColumnType::MacAddr8) => Ok(Datum::MacAddr8(value.to_macaddr8())),
         (Datum::MacAddr8(value), ColumnType::MacAddr) => value.to_macaddr().map(Datum::MacAddr),
+        // The system identifier family's own conversions. `oid` is the only one
+        // with any: `int2`/`int4` are binary coercions, so `(-1)::oid` is
+        // 4294967295 and `4294967295::oid::int4` is -1, while `oid(bigint)` and
+        // `int8(oid)` are real functions and the first range-checks.
+        (Datum::Oid(value), ColumnType::Oid) => Ok(Datum::Oid(*value)),
+        (Datum::Xid(value), ColumnType::Xid) => Ok(Datum::Xid(*value)),
+        (Datum::Xid8(value), ColumnType::Xid8) => Ok(Datum::Xid8(*value)),
+        (Datum::Cid(value), ColumnType::Cid) => Ok(Datum::Cid(*value)),
+        (Datum::Tid(value), ColumnType::Tid) => Ok(Datum::Tid(*value)),
+        (Datum::PgLsn(value), ColumnType::PgLsn) => Ok(Datum::PgLsn(*value)),
+        (Datum::Int2(n), ColumnType::Oid) => Ok(Datum::Oid(i32::from(*n) as u32)),
+        (Datum::Int4(n), ColumnType::Oid) => Ok(Datum::Oid(*n as u32)),
+        (Datum::Int8(n), ColumnType::Oid) => {
+            u32::try_from(*n)
+                .map(Datum::Oid)
+                .map_err(|_| TypeError::OutOfRange {
+                    message: "OID out of range".to_string(),
+                })
+        }
+        (Datum::Oid(value), Int4) => Ok(Datum::Int4(*value as i32)),
+        (Datum::Oid(value), Int8) => Ok(Datum::Int8(i64::from(*value))),
+        // `xid8toxid` keeps the low 32 bits — the epoch is what `xid8` adds.
+        (Datum::Xid8(value), ColumnType::Xid) => Ok(Datum::Xid(*value as u32)),
+        // `oidin` / `xidin` / `cidin` / `xid8in` / `tidin` / `pg_lsn_in`.
+        (Datum::Text(s), ColumnType::Oid) => crate::sysid::uint32_in(s, "oid").map(Datum::Oid),
+        (Datum::Text(s), ColumnType::Xid) => crate::sysid::uint32_in(s, "xid").map(Datum::Xid),
+        (Datum::Text(s), ColumnType::Cid) => crate::sysid::uint32_in(s, "cid").map(Datum::Cid),
+        (Datum::Text(s), ColumnType::Xid8) => crate::sysid::uint64_in(s, "xid8").map(Datum::Xid8),
+        (Datum::Text(s), ColumnType::Tid) => crate::sysid::Tid::parse(s).map(Datum::Tid),
+        (Datum::Text(s), ColumnType::PgLsn) => crate::sysid::lsn_in(s).map(Datum::PgLsn),
         // `money`'s own conversions. `cash_numeric` divides by 100 and keeps
         // scale 2; `numeric_cash` / `int4_cash` / `int8_cash` multiply by 100
         // and report `bigint out of range` on overflow, because they delegate
@@ -613,6 +708,18 @@ pub fn cast_in(
         ) => Ok(Datum::Regclass(r.clone())),
         (Datum::Regclass(r), Int4) => Ok(Datum::Int4(r.oid)),
         (Datum::Regclass(r), Int8) => Ok(Datum::Int8(i64::from(r.oid))),
+        // `reg* ↔ oid` are binary coercions, so the oid survives unchanged in
+        // both directions and only the rendering differs.
+        (Datum::Regclass(r), ColumnType::Oid) => Ok(Datum::Oid(r.oid as u32)),
+        (
+            Datum::Oid(value),
+            ColumnType::Regclass
+            | ColumnType::Regtype
+            | ColumnType::Regprocedure
+            | ColumnType::Regnamespace,
+        ) => Ok(Datum::Regclass(crate::RegclassValue::unresolved(
+            *value as i32,
+        ))),
         // → `regclass`. The pure cast has no catalog, so it can only produce the
         // unresolved rendering (`regclassout`'s bare-oid fallback); the executor
         // resolves the name before reaching here when a catalog is in scope. A
@@ -630,22 +737,21 @@ pub fn cast_in(
         (Datum::Int4(n), ColumnType::Regnamespace) => {
             Ok(Datum::Regclass(crate::RegclassValue::unresolved(*n)))
         }
-        (Datum::Int8(n), ColumnType::Regclass) => i4_from_i64(*n).map(|d| match d {
-            Datum::Int4(n) => Datum::Regclass(crate::RegclassValue::unresolved(n)),
-            other => other,
-        }),
-        (Datum::Int8(n), ColumnType::Regtype) => i4_from_i64(*n).map(|d| match d {
-            Datum::Int4(n) => Datum::Regclass(crate::RegclassValue::unresolved(n)),
-            other => other,
-        }),
-        (Datum::Int8(n), ColumnType::Regprocedure) => i4_from_i64(*n).map(|d| match d {
-            Datum::Int4(n) => Datum::Regclass(crate::RegclassValue::unresolved(n)),
-            other => other,
-        }),
-        (Datum::Int8(n), ColumnType::Regnamespace) => i4_from_i64(*n).map(|d| match d {
-            Datum::Int4(n) => Datum::Regclass(crate::RegclassValue::unresolved(n)),
-            other => other,
-        }),
+        // A `bigint` reaches a `reg*` type the way PostgreSQL routes it: through
+        // the implicit `oid(bigint)`, which range-checks against the UNSIGNED
+        // 32-bit range. `4294967295::regclass` is therefore a valid oid, not
+        // `integer out of range`.
+        (
+            Datum::Int8(n),
+            ColumnType::Regclass
+            | ColumnType::Regtype
+            | ColumnType::Regprocedure
+            | ColumnType::Regnamespace,
+        ) => u32::try_from(*n)
+            .map(|oid| Datum::Regclass(crate::RegclassValue::unresolved(oid as i32)))
+            .map_err(|_| TypeError::OutOfRange {
+                message: "OID out of range".to_string(),
+            }),
         (Datum::Text(s), ColumnType::Regclass) => s
             .trim()
             .parse::<i32>()

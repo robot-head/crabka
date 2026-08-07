@@ -753,7 +753,18 @@ pub(crate) fn apply_unary(op: UnaryOp, v: &Datum, _ctx: &EvalCtx) -> Result<Datu
             // `money` has no unary minus at all in PostgreSQL, and the generic
             // `0 - v` fallback would otherwise report an integer-operand
             // mismatch instead of the missing operator.
-            Datum::Money(_) | Datum::BitString(_) => Err(undefined_prefix_operator(op, v)),
+            // Neither `money` nor any system identifier type has a unary
+            // minus in PostgreSQL, and the generic `0 - v` fallback would
+            // otherwise report an integer-operand mismatch (42804) instead of
+            // the missing operator (42883).
+            Datum::Money(_)
+            | Datum::BitString(_)
+            | Datum::Oid(_)
+            | Datum::Xid(_)
+            | Datum::Xid8(_)
+            | Datum::Cid(_)
+            | Datum::Tid(_)
+            | Datum::PgLsn(_) => Err(undefined_prefix_operator(op, v)),
             _ => Ok(ops::sub(&Datum::Int4(0), v)?),
         },
         UnaryOp::Plus | UnaryOp::BitNot | UnaryOp::Abs | UnaryOp::Sqrt | UnaryOp::Cbrt => {
@@ -1285,6 +1296,39 @@ fn coerce_untyped_literal_operands(
                 _ => None,
             };
         }
+        // A system identifier counterpart resolves the literal to its own type,
+        // which is how `f1 = '1234'` compares two `oid`s and `t = '(0,1)'` two
+        // `tid`s. `pg_lsn` also takes `-` here, and deliberately: PostgreSQL
+        // has both `pg_lsn - pg_lsn` and `pg_lsn - numeric`, and its preference
+        // for the exact-match candidate is what makes `lsn - '16'` a 22P02
+        // rather than an offset. `+` is left out because `pg_lsn + numeric` is
+        // its only candidate, so the literal there is a `numeric`.
+        let sysid_type = match other {
+            Datum::Oid(_) => Some(ColumnType::Oid),
+            Datum::Xid(_) => Some(ColumnType::Xid),
+            Datum::Xid8(_) => Some(ColumnType::Xid8),
+            Datum::Cid(_) => Some(ColumnType::Cid),
+            Datum::Tid(_) => Some(ColumnType::Tid),
+            Datum::PgLsn(_) => Some(ColumnType::PgLsn),
+            _ => None,
+        };
+        if let Some(sysid_type) = sysid_type {
+            return match op {
+                BinaryOp::Sub if sysid_type == ColumnType::PgLsn => Some(sysid_type),
+                // `pg_lsn + numeric` is the only `+` candidate, so an unknown
+                // literal there is a `numeric` and `lsn + '16'` is an offset.
+                BinaryOp::Add if sysid_type == ColumnType::PgLsn => Some(ColumnType::Numeric(None)),
+                BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge
+                | BinaryOp::IsDistinctFrom
+                | BinaryOp::IsNotDistinctFrom => Some(sysid_type),
+                _ => None,
+            };
+        }
         // A network counterpart resolves the literal to its own type, which is
         // how `b < '08:00:2b:01:02:04'` compares two `macaddr`s and
         // `i <<= '192.168.1.0/24'` is a containment test. An `inet`/`cidr`
@@ -1546,6 +1590,13 @@ pub(crate) fn apply_binary(
     // what selects the cash arithmetic — including its truncating integer
     // division, which the numeric rules would otherwise round.
     if let Some(result) = crate::money_fn::apply_money_operator(op, l, r)? {
+        return Ok(result);
+    }
+    // `pg_lsn` shares `+` and `-` with the numeric family, and its `-` against
+    // another `pg_lsn` leaves the type entirely (it is a `numeric` byte count),
+    // so a `pg_lsn` operand has to select this meaning before the numeric rules
+    // below claim it.
+    if let Some(result) = crate::sysid_fn::apply_sysid_operator(op, l, r)? {
         return Ok(result);
     }
     // A `json` operand has to be turned away from every family below before one
@@ -2659,6 +2710,26 @@ fn has_no_operator_class(ty: ColumnType) -> bool {
     )
 }
 
+/// The types with a **hash** operator class but no **btree** one, so equality,
+/// `GROUP BY`, `DISTINCT` and the set operations all work while `ORDER BY` and
+/// a btree index do not.
+///
+/// `xid` and `cid` are the pair PostgreSQL puts here, and `xid.c` says why:
+/// transaction ids compare with modular arithmetic, which does not respect the
+/// triangle inequality, so there is no total order for a btree to sort by. The
+/// consequence a corpus notices is that `SELECT DISTINCT x` over an `xid`
+/// column succeeds and `ORDER BY x` is 42883.
+fn has_no_btree_operator_class(ty: ColumnType) -> bool {
+    has_no_operator_class(ty) || has_no_btree_opclass(ty)
+}
+
+/// The types with a hash opclass but no btree one — see
+/// [`has_no_btree_operator_class`], which is this plus the types with no
+/// operator class at all.
+pub(crate) fn has_no_btree_opclass(ty: ColumnType) -> bool {
+    matches!(ty.storage_type(), ColumnType::Xid | ColumnType::Cid)
+}
+
 pub(crate) fn is_scalar_jsonpath(ty: ColumnType) -> bool {
     ty.storage_type() == ColumnType::JsonPath
 }
@@ -2714,6 +2785,18 @@ pub(crate) fn require_runtime_comparison(left: &Datum, right: &Datum) -> Result<
             "operator does not exist: line < line".into(),
         ));
     }
+    // `xid` and `cid` are `line`'s situation exactly: equality but no btree
+    // opclass, so an ordering comparison is `operator does not exist`.
+    let unordered = match (left, right) {
+        (Datum::Xid(_), Datum::Xid(_)) => Some("xid"),
+        (Datum::Cid(_), Datum::Cid(_)) => Some("cid"),
+        _ => None,
+    };
+    if let Some(name) = unordered {
+        return Err(ExecError::UndefinedFunction(format!(
+            "operator does not exist: {name} < {name}"
+        )));
+    }
     if matches!((left, right), (Datum::JsonPath(_), Datum::JsonPath(_)))
         || matches!(
             (left, right),
@@ -2744,9 +2827,26 @@ pub(crate) fn require_equality_operator(ty: ColumnType) -> Result<(), ExecError>
 /// Reject ORDER BY and other btree-dependent operations for the types with no
 /// btree opclass ([`has_no_operator_class`]).
 pub(crate) fn require_ordering_operator(ty: ColumnType) -> Result<(), ExecError> {
-    if has_no_operator_class(ty) {
+    if has_no_btree_operator_class(ty) {
         return Err(ExecError::UndefinedFunction(format!(
             "could not identify an ordering operator for type {}",
+            ty.name()
+        )));
+    }
+    Ok(())
+}
+
+/// Reject `greatest`/`least` over a type with no btree opclass.
+///
+/// PostgreSQL resolves these two through `btree`'s **comparison function**
+/// rather than through an ordering operator, and names the missing thing
+/// accordingly: `greatest('1'::xid, '2'::xid)` is `could not identify a
+/// comparison function for type xid`, not the `ordering operator` wording
+/// `ORDER BY` uses.
+pub(crate) fn require_comparison_function(ty: ColumnType) -> Result<(), ExecError> {
+    if has_no_btree_operator_class(ty) {
+        return Err(ExecError::UndefinedFunction(format!(
+            "could not identify a comparison function for type {}",
             ty.name()
         )));
     }
@@ -3192,6 +3292,9 @@ fn infer_binary_type(
     if let Some(resolved) = crate::money_fn::money_operator_result_type(op, left, right, scope)? {
         return Ok(resolved);
     }
+    if let Some(resolved) = crate::sysid_fn::sysid_operator_result_type(op, left, right, scope)? {
+        return Ok(resolved);
+    }
     match op {
         // `<<=` and `>>=` have no non-network overload.
         BinaryOp::ContainedByOrEq | BinaryOp::ContainsOrEq => {
@@ -3461,6 +3564,45 @@ fn reject_uncomparable_comparison(
             name(right, right_type),
         ));
     }
+    // The system identifier family's comparison partners are exactly what
+    // `pg_operator` declares plus what `pg_cast` marks implicit — a much
+    // shorter list than the value layer would otherwise accept. `oid` takes the
+    // integer widths and the `reg*` types (all implicit coercions), `xid` takes
+    // `int4` alone (`xideqint4`), and the other four take only themselves. An
+    // `unknown` literal beside any of them adopts it.
+    if let Some(error) = sysid_comparison_rejection(spelled, left, left_type, right, right_type) {
+        return Err(error);
+    }
+    // `xid` and `cid` have no ordering operator at any width, and `cid` has no
+    // `<>` either — `pg_operator` gives it `cideq` alone. Like `json`, an
+    // `unknown` literal beside one adopts nothing, so `'1'::xid < '2'` is
+    // `operator does not exist: xid < unknown`, naming the literal `unknown`.
+    let missing_operator = |ty: ColumnType| match ty.storage_type() {
+        ColumnType::Xid => matches!(
+            op,
+            BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
+        ),
+        ColumnType::Cid => matches!(
+            op,
+            BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge | BinaryOp::Ne
+        ),
+        _ => false,
+    };
+    let unordered = |e: &Expr, ty: ColumnType| !is_unknown_literal(e) && missing_operator(ty);
+    if unordered(left, left_type) || unordered(right, right_type) {
+        let name = |e: &Expr, t: ColumnType| {
+            if is_unknown_literal(e) {
+                "unknown"
+            } else {
+                t.name()
+            }
+        };
+        return Err(undefined_operator_named(
+            spelled,
+            name(left, left_type),
+            name(right, right_type),
+        ));
+    }
     if !is_scalar_jsonpath(left_type) && !is_scalar_jsonpath(right_type) {
         return Ok(());
     }
@@ -3471,6 +3613,64 @@ fn reject_uncomparable_comparison(
         right_type = left_type;
     }
     Err(undefined_operator(spelled, left_type, right_type))
+}
+
+/// The 42883 for a system identifier compared with a type it has no operator
+/// against, or `None` when the pair is one PostgreSQL declares.
+fn sysid_comparison_rejection(
+    spelled: &str,
+    left: &Expr,
+    left_type: ColumnType,
+    right: &Expr,
+    right_type: ColumnType,
+) -> Option<ExecError> {
+    let sysid = |e: &Expr, ty: ColumnType| {
+        (!is_unknown_literal(e)
+            && matches!(
+                ty.storage_type(),
+                ColumnType::Oid
+                    | ColumnType::Xid
+                    | ColumnType::Xid8
+                    | ColumnType::Cid
+                    | ColumnType::Tid
+                    | ColumnType::PgLsn
+            ))
+        .then(|| ty.storage_type())
+    };
+    let (family, other, other_expr, reflected) =
+        match (sysid(left, left_type), sysid(right, right_type)) {
+            (Some(family), _) => (family, right_type, right, false),
+            (None, Some(family)) => (family, left_type, left, true),
+            (None, None) => return None,
+        };
+    // An `unknown` literal takes the identifier's own type, so `f1 = '1234'`
+    // never reaches the partner check.
+    if is_unknown_literal(other_expr) {
+        return None;
+    }
+    let allowed = match family {
+        ColumnType::Oid => matches!(
+            other.storage_type(),
+            ColumnType::Oid
+                | ColumnType::Int2
+                | ColumnType::Int4
+                | ColumnType::Int8
+                | ColumnType::Regclass
+                | ColumnType::Regtype
+                | ColumnType::Regprocedure
+                | ColumnType::Regnamespace
+        ),
+        // `xideqint4` / `xidneqint4` have no commutator, so the integer must be
+        // on the RIGHT: `'1'::xid = 1` resolves and `1 = '1'::xid` does not.
+        // `int2` reaches it through the implicit widening to `int4`.
+        ColumnType::Xid => {
+            other.storage_type() == ColumnType::Xid
+                || (!reflected
+                    && matches!(other.storage_type(), ColumnType::Int2 | ColumnType::Int4))
+        }
+        other_family => other.storage_type() == other_family,
+    };
+    (!allowed).then(|| undefined_operator_named(spelled, left_type.name(), right_type.name()))
 }
 
 fn reject_uncomparable_in_list(expr: &Expr, list: &[Expr], scope: &Scope) -> Result<(), ExecError> {

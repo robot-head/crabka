@@ -110,7 +110,7 @@ mod sql92;
 mod srf;
 mod string_fn;
 mod subquery;
-pub mod telemetry;
+mod sysid_fn;
 mod text_search_catalog;
 mod text_search_fn;
 pub mod timestamp_txn;

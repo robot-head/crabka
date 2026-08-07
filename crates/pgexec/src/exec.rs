@@ -2285,6 +2285,19 @@ fn validate_default_index_opclass(
             index_method_name(method)
         )));
     }
+    // `xid` and `cid` are the reverse of `jsonpath`: they have a HASH opclass
+    // but no btree one, because transaction ids compare with modular
+    // arithmetic and so have no sort order for a btree to hold. `x xid UNIQUE`
+    // and `x xid PRIMARY KEY` fail for the same reason, since both build one.
+    if matches!(ty.storage_type(), ColumnType::Xid | ColumnType::Cid)
+        && method == crabka_pgcatalog::IndexMethod::Btree
+    {
+        return Err(ExecError::UndefinedObject(format!(
+            "data type {} has no default operator class for access method \"{}\"",
+            ty.name(),
+            index_method_name(method)
+        )));
+    }
     Ok(())
 }
 
@@ -16107,7 +16120,13 @@ fn format_default_value(value: &Datum, ty: ColumnType) -> String {
         | Datum::MacAddr(_)
         | Datum::MacAddr8(_)
         | Datum::BitString(_)
-        | Datum::Money(_) => {
+        | Datum::Money(_)
+        | Datum::Oid(_)
+        | Datum::Xid(_)
+        | Datum::Xid8(_)
+        | Datum::Cid(_)
+        | Datum::Tid(_)
+        | Datum::PgLsn(_) => {
             match zone_independent_text(value) {
                 Some(literal) => {
                     let mut out = String::new();
@@ -17301,8 +17320,47 @@ fn scalar_type_rows() -> &'static [BuiltinTypeRow] {
             len: 4,
             category: "N",
             elem: 0,
-            // `_oid` is not a supported value type yet.
-            array: 0,
+            array: crabka_pgtypes::oids::OIDARRAY as i32,
+        },
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::XID as i32,
+            name: "xid",
+            len: 4,
+            category: "U",
+            elem: 0,
+            array: crabka_pgtypes::oids::XIDARRAY as i32,
+        },
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::XID8 as i32,
+            name: "xid8",
+            len: 8,
+            category: "U",
+            elem: 0,
+            array: crabka_pgtypes::oids::XID8ARRAY as i32,
+        },
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::CID as i32,
+            name: "cid",
+            len: 4,
+            category: "U",
+            elem: 0,
+            array: crabka_pgtypes::oids::CIDARRAY as i32,
+        },
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::TID as i32,
+            name: "tid",
+            len: 6,
+            category: "U",
+            elem: 0,
+            array: crabka_pgtypes::oids::TIDARRAY as i32,
+        },
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::PG_LSN as i32,
+            name: "pg_lsn",
+            len: 8,
+            category: "U",
+            elem: 0,
+            array: crabka_pgtypes::oids::PG_LSNARRAY as i32,
         },
         BuiltinTypeRow {
             oid: crabka_pgtypes::oids::OIDVECTOR as i32,
@@ -17830,6 +17888,37 @@ fn builtin_type_rows() -> &'static [BuiltinTypeRow] {
                 crabka_pgtypes::oids::VARBITARRAY,
                 "_varbit",
                 crabka_pgtypes::oids::VARBIT,
+            ),
+            // The system identifier types are in that same position.
+            (
+                crabka_pgtypes::oids::OIDARRAY,
+                "_oid",
+                crabka_pgtypes::oids::OID,
+            ),
+            (
+                crabka_pgtypes::oids::XIDARRAY,
+                "_xid",
+                crabka_pgtypes::oids::XID,
+            ),
+            (
+                crabka_pgtypes::oids::XID8ARRAY,
+                "_xid8",
+                crabka_pgtypes::oids::XID8,
+            ),
+            (
+                crabka_pgtypes::oids::CIDARRAY,
+                "_cid",
+                crabka_pgtypes::oids::CID,
+            ),
+            (
+                crabka_pgtypes::oids::TIDARRAY,
+                "_tid",
+                crabka_pgtypes::oids::TID,
+            ),
+            (
+                crabka_pgtypes::oids::PG_LSNARRAY,
+                "_pg_lsn",
+                crabka_pgtypes::oids::PG_LSN,
             ),
         ] {
             rows.push(BuiltinTypeRow {
@@ -19184,6 +19273,12 @@ pub(crate) fn column_type_from_oid(oid: u32) -> Result<ColumnType, ExecError> {
         crabka_pgtypes::oids::JSON => ColumnType::Json,
         crabka_pgtypes::oids::JSONB => ColumnType::Jsonb,
         crabka_pgtypes::oids::JSONPATH => ColumnType::JsonPath,
+        crabka_pgtypes::oids::OID => ColumnType::Oid,
+        crabka_pgtypes::oids::XID => ColumnType::Xid,
+        crabka_pgtypes::oids::XID8 => ColumnType::Xid8,
+        crabka_pgtypes::oids::CID => ColumnType::Cid,
+        crabka_pgtypes::oids::TID => ColumnType::Tid,
+        crabka_pgtypes::oids::PG_LSN => ColumnType::PgLsn,
         crabka_pgtypes::oids::RECORD => ColumnType::Record(None),
         // Every array oid crabka has an element type for, `_json` included.
         _ => match crabka_pgtypes::ElemType::from_array_oid(oid) {

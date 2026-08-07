@@ -24,12 +24,33 @@ pub mod oids {
     pub const INT2: u32 = 21;
     pub const INT4: u32 = 23;
     pub const TEXT: u32 = 25;
-    /// PostgreSQL `oid`: object identifier, an unsigned 4-byte integer.
-    ///
-    /// Drivers send this OID for typeinfo-query parameters (e.g. tokio-postgres
-    /// declares `WHERE t.oid = $1` with OID). Values live in the existing `Int4`
-    /// datum, the same representation the catalog's oid-valued columns use.
+    /// PostgreSQL `oid` — object identifier, an **unsigned** 4-byte integer.
     pub const OID: u32 = 26;
+    /// `oid[]`.
+    pub const OIDARRAY: u32 = 1028;
+    /// PostgreSQL `xid` — a 32-bit transaction id. Equality only: transaction
+    /// ids compare with modular arithmetic, which has no total order.
+    pub const XID: u32 = 28;
+    /// `xid[]`.
+    pub const XIDARRAY: u32 = 1011;
+    /// PostgreSQL `xid8` — a 64-bit (epoch-extended) transaction id, fully
+    /// ordered unlike its 32-bit sibling.
+    pub const XID8: u32 = 5069;
+    /// `xid8[]`.
+    pub const XID8ARRAY: u32 = 271;
+    /// PostgreSQL `cid` — a 32-bit command id. Equality only.
+    pub const CID: u32 = 29;
+    /// `cid[]`.
+    pub const CIDARRAY: u32 = 1012;
+    /// PostgreSQL `tid` — a `(block, offset)` tuple identifier.
+    pub const TID: u32 = 27;
+    /// `tid[]`.
+    pub const TIDARRAY: u32 = 1010;
+    /// PostgreSQL `pg_lsn` — a write-ahead log sequence number, printed `X/Y`
+    /// in hexadecimal.
+    pub const PG_LSN: u32 = 3220;
+    /// `pg_lsn[]`.
+    pub const PG_LSNARRAY: u32 = 3221;
     pub const OIDVECTOR: u32 = 30;
     /// PostgreSQL `int2vector` — a zero-based `int2` array with the same
     /// space-separated text form `oidvector` uses.
@@ -332,6 +353,15 @@ impl ElemType {
             | ColumnType::Cidr
             | ColumnType::MacAddr
             | ColumnType::MacAddr8
+            // The system identifier types have no `ElemType` for the same
+            // reason: their array oids would need an element the array encoder
+            // cannot name.
+            | ColumnType::Oid
+            | ColumnType::Xid
+            | ColumnType::Xid8
+            | ColumnType::Cid
+            | ColumnType::Tid
+            | ColumnType::PgLsn
             | ColumnType::Money
             | ColumnType::Bit(_)
             | ColumnType::VarBit(_)
@@ -699,6 +729,25 @@ pub enum ColumnType {
     MacAddr,
     /// PostgreSQL `macaddr8` (OID 774) — an eight-byte EUI-64 address.
     MacAddr8,
+    /// PostgreSQL `oid` (OID 26) — an **unsigned** 32-bit object identifier.
+    /// Not `int4` under another name: real catalog oids exceed 2^31, and
+    /// `oidin` reads `-1` as 4294967295 rather than rejecting it.
+    Oid,
+    /// PostgreSQL `xid` (OID 28) — a 32-bit transaction id. It shares `oid`'s
+    /// input function and width but has **only** `=` and `<>`, because
+    /// transaction ids compare with modular arithmetic.
+    Xid,
+    /// PostgreSQL `xid8` (OID 5069) — a 64-bit transaction id, which unlike
+    /// `xid` is fully ordered and has both a B-tree and a hash opclass.
+    Xid8,
+    /// PostgreSQL `cid` (OID 29) — a 32-bit command id, with `=` and nothing
+    /// else (not even `<>`).
+    Cid,
+    /// PostgreSQL `tid` (OID 27) — a `(block, offset)` tuple identifier.
+    Tid,
+    /// PostgreSQL `pg_lsn` (OID 3220) — a 64-bit log sequence number written
+    /// `X/Y` in hexadecimal.
+    PgLsn,
     /// PostgreSQL `money` (OID 790) — a signed 64-bit count of minor currency
     /// units, rendered through `lc_monetary`.
     Money,
@@ -803,12 +852,12 @@ impl ColumnType {
             "int2" | "smallint" => Some(ColumnType::Int2),
             "int4" | "integer" | "int" => Some(ColumnType::Int4),
             "int8" | "bigint" => Some(ColumnType::Int8),
-            // `oid` (object identifier, OID 26) is a pragmatic alias for `int4`:
-            // the catalog's oid-valued columns (pg_type.oid, pg_namespace.oid,
-            // pg_type.typnamespace, …) are Int4, so `NULL::oid` and
-            // `CAST(x AS oid)` resolve consistently with them. RowDescription
-            // consequently reports int4 (23), not oid (26), for such expressions.
-            "oid" => Some(ColumnType::Int4),
+            "oid" => Some(ColumnType::Oid),
+            "xid" => Some(ColumnType::Xid),
+            "xid8" => Some(ColumnType::Xid8),
+            "cid" => Some(ColumnType::Cid),
+            "tid" => Some(ColumnType::Tid),
+            "pg_lsn" => Some(ColumnType::PgLsn),
             // `name` (OID 19) is a pragmatic alias for `text`, the same shape of
             // divergence as `oid` → `int4` above: the catalog's name-valued
             // columns are already Text, so `'x'::name` and a `name[]` column
@@ -961,6 +1010,12 @@ impl ColumnType {
             ColumnType::Cidr => oids::CIDR,
             ColumnType::MacAddr => oids::MACADDR,
             ColumnType::MacAddr8 => oids::MACADDR8,
+            ColumnType::Oid => oids::OID,
+            ColumnType::Xid => oids::XID,
+            ColumnType::Xid8 => oids::XID8,
+            ColumnType::Cid => oids::CID,
+            ColumnType::Tid => oids::TID,
+            ColumnType::PgLsn => oids::PG_LSN,
             ColumnType::Money => oids::MONEY,
             ColumnType::Bit(_) => oids::BIT,
             ColumnType::VarBit(_) => oids::VARBIT,
@@ -1015,6 +1070,12 @@ impl ColumnType {
             ColumnType::Cidr => "cidr",
             ColumnType::MacAddr => "macaddr",
             ColumnType::MacAddr8 => "macaddr8",
+            ColumnType::Oid => "oid",
+            ColumnType::Xid => "xid",
+            ColumnType::Xid8 => "xid8",
+            ColumnType::Cid => "cid",
+            ColumnType::Tid => "tid",
+            ColumnType::PgLsn => "pg_lsn",
             ColumnType::Money => "money",
             ColumnType::Bit(_) => "bit",
             ColumnType::VarBit(_) => "bit varying",
@@ -1064,6 +1125,11 @@ impl ColumnType {
             ColumnType::Inet | ColumnType::Cidr => -1,
             ColumnType::MacAddr => 6,
             ColumnType::MacAddr8 => 8,
+            // `pg_type.typlen`: the three 32-bit identifiers are 4, `tid` is a
+            // 4-byte block plus a 2-byte offset, and `xid8`/`pg_lsn` are 8.
+            ColumnType::Oid | ColumnType::Xid | ColumnType::Cid => 4,
+            ColumnType::Tid => 6,
+            ColumnType::Xid8 | ColumnType::PgLsn => 8,
             // `money` is a pass-by-value int64; the two bit types are varlena.
             ColumnType::Money => 8,
             ColumnType::Bit(_) | ColumnType::VarBit(_) => -1,
@@ -1212,6 +1278,18 @@ pub enum Datum {
     MacAddr(crate::network::MacAddr),
     /// PostgreSQL `macaddr8` — eight bytes.
     MacAddr8(crate::network::MacAddr8),
+    /// PostgreSQL `oid`, held **unsigned** — the whole point of the type.
+    Oid(u32),
+    /// PostgreSQL `xid`, a 32-bit transaction id.
+    Xid(u32),
+    /// PostgreSQL `xid8`, a 64-bit transaction id.
+    Xid8(u64),
+    /// PostgreSQL `cid`, a 32-bit command id.
+    Cid(u32),
+    /// PostgreSQL `tid`, a block number and an offset within it.
+    Tid(crate::sysid::Tid),
+    /// PostgreSQL `pg_lsn`, a 64-bit log position.
+    PgLsn(u64),
 }
 
 /// A PostgreSQL range value.
@@ -1615,6 +1693,11 @@ impl PartialEq for Datum {
             (Datum::Inet(a), Datum::Inet(b)) => a == b,
             (Datum::MacAddr(a), Datum::MacAddr(b)) => a == b,
             (Datum::MacAddr8(a), Datum::MacAddr8(b)) => a == b,
+            (Datum::Oid(a), Datum::Oid(b))
+            | (Datum::Xid(a), Datum::Xid(b))
+            | (Datum::Cid(a), Datum::Cid(b)) => a == b,
+            (Datum::Xid8(a), Datum::Xid8(b)) | (Datum::PgLsn(a), Datum::PgLsn(b)) => a == b,
+            (Datum::Tid(a), Datum::Tid(b)) => a == b,
             (Datum::Range(a), Datum::Range(b)) => a == b,
             (Datum::Multirange(a), Datum::Multirange(b)) => a == b,
             _ => false,
@@ -1697,6 +1780,9 @@ impl std::hash::Hash for Datum {
             Datum::Inet(value) => value.hash(state),
             Datum::MacAddr(value) => value.hash(state),
             Datum::MacAddr8(value) => value.hash(state),
+            Datum::Oid(value) | Datum::Xid(value) | Datum::Cid(value) => value.hash(state),
+            Datum::Xid8(value) | Datum::PgLsn(value) => value.hash(state),
+            Datum::Tid(value) => value.hash(state),
             Datum::Range(range) => range.hash(state),
             Datum::Multirange(multirange) => multirange.hash(state),
         }
@@ -1755,6 +1841,12 @@ impl Datum {
             }),
             Datum::MacAddr(_) => Some(ColumnType::MacAddr),
             Datum::MacAddr8(_) => Some(ColumnType::MacAddr8),
+            Datum::Oid(_) => Some(ColumnType::Oid),
+            Datum::Xid(_) => Some(ColumnType::Xid),
+            Datum::Xid8(_) => Some(ColumnType::Xid8),
+            Datum::Cid(_) => Some(ColumnType::Cid),
+            Datum::Tid(_) => Some(ColumnType::Tid),
+            Datum::PgLsn(_) => Some(ColumnType::PgLsn),
             Datum::Range(range) => Some(range.column_type()),
             Datum::Multirange(multirange) => Some(multirange.column_type()),
         }
@@ -1970,16 +2062,56 @@ mod tests {
         }
     }
 
-    /// `oid` resolves as a type name (drivers' typeinfo queries cast
-    /// `NULL::OID`) and aliases the executor's oid representation, `Int4`. That
-    /// is consistent with the catalog's oid-valued columns (`pg_type.oid`,
-    /// `pg_namespace.oid`, `pg_type.typnamespace`, …).
+    /// `oid` is its own type, not a spelling of `int4`. The distinction is not
+    /// cosmetic: an `int4` alias cannot hold 4294967295, and this test would
+    /// have passed while `'4294967295'::oid` raised `out of range for type
+    /// integer`, which is how the alias survived.
     #[test]
-    fn oid_type_name_aliases_int4() {
+    fn oid_is_its_own_type_not_an_int4_alias() {
         use assert2::assert;
-        assert!(ColumnType::from_sql_name("oid") == Some(ColumnType::Int4));
-        assert!(ColumnType::from_sql_name("OID") == Some(ColumnType::Int4));
+        assert!(ColumnType::from_sql_name("oid") == Some(ColumnType::Oid));
+        assert!(ColumnType::from_sql_name("OID") == Some(ColumnType::Oid));
+        assert!(ColumnType::Oid.oid() == 26);
+        assert!(ColumnType::Oid.name() == "oid");
+        assert!(ColumnType::Oid.type_size() == 4);
         assert!(oids::OID == 26);
+        // The value `int4` cannot hold, and the negative input `int4` would
+        // have rejected.
+        let utc = jiff::tz::TimeZone::UTC;
+        let parse = |text: &str| {
+            crate::cast::cast_in(
+                &Datum::Text(text.to_string()),
+                ColumnType::Oid,
+                crate::encoding::OutputStyle::with_zone(&utc),
+            )
+        };
+        assert!(parse("4294967295") == Ok(Datum::Oid(u32::MAX)));
+        assert!(parse("-1") == Ok(Datum::Oid(u32::MAX)));
+        assert!(Datum::Oid(u32::MAX).column_type() == Some(ColumnType::Oid));
+        // Unsigned ordering: an `int4` would put 4294967295 below 1.
+        assert!(
+            crate::ops::compare(&Datum::Oid(u32::MAX), &Datum::Oid(1))
+                == Ok(Some(std::cmp::Ordering::Greater))
+        );
+    }
+
+    /// The other five system identifier types resolve too, at PostgreSQL's own
+    /// oids and `typlen`s.
+    #[test]
+    fn the_system_identifier_types_resolve_by_name() {
+        use assert2::assert;
+        for (name, ty, oid, size) in [
+            ("xid", ColumnType::Xid, 28_u32, 4_i16),
+            ("xid8", ColumnType::Xid8, 5069, 8),
+            ("cid", ColumnType::Cid, 29, 4),
+            ("tid", ColumnType::Tid, 27, 6),
+            ("pg_lsn", ColumnType::PgLsn, 3220, 8),
+        ] {
+            assert!(ColumnType::from_sql_name(name) == Some(ty), "{name}");
+            assert!(ty.oid() == oid, "{name}");
+            assert!(ty.name() == name, "{name}");
+            assert!(ty.type_size() == size, "{name}");
+        }
     }
 
     #[test]

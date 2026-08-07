@@ -7361,7 +7361,13 @@ fn datum_hash_bytes(value: &Datum) -> Option<Vec<u8>> {
         | Datum::MacAddr(_)
         | Datum::MacAddr8(_)
         | Datum::Range(_)
-        | Datum::Multirange(_) => None,
+        | Datum::Multirange(_)
+        | Datum::Oid(_)
+        | Datum::Xid(_)
+        | Datum::Xid8(_)
+        | Datum::Cid(_)
+        | Datum::Tid(_)
+        | Datum::PgLsn(_) => None,
     }
 }
 

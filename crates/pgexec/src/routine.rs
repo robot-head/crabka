@@ -1418,7 +1418,10 @@ pub(crate) fn bind_procedure_call(
 /// `f(bigint)` does not match `f(text)` even though the explicit cast exists.
 /// This is the implicit graph restricted to the types Gres models.
 fn implicitly_coercible(source: ColumnType, target: ColumnType) -> bool {
-    use ColumnType::{Char, Float8, Int4, Int8, Numeric, Text, Timestamp, Timestamptz, Varchar};
+    use ColumnType::{
+        Char, Float8, Int2, Int4, Int8, Numeric, Oid, Regclass, Regnamespace, Regprocedure,
+        Regtype, Text, Timestamp, Timestamptz, Varchar,
+    };
     if source == target {
         return true;
     }
@@ -1430,6 +1433,19 @@ fn implicitly_coercible(source: ColumnType, target: ColumnType) -> bool {
             | (Timestamp, Timestamptz)
             | (Text | Varchar(_) | Char(_), Text | Varchar(_) | Char(_))
             | (Numeric(_), Numeric(_))
+            // `pg_cast` marks every integer width implicitly coercible to
+            // `oid`, which is what lets `binary_coercible(23, 23)` — the
+            // `regress.so` helper `type_sanity` calls with bare integer
+            // literals — resolve against its `(oid, oid)` signature.
+            | (Int2 | Int4 | Int8, Oid)
+            | (
+                Oid,
+                Regclass | Regtype | Regprocedure | Regnamespace
+            )
+            | (
+                Regclass | Regtype | Regprocedure | Regnamespace,
+                Oid
+            )
     )
 }
 
@@ -1532,13 +1548,20 @@ fn is_regression_c_entrypoint(routine: &Routine, symbol: &str) -> bool {
         && routine.body == symbol
 }
 
+/// `pg_type.oid` of `oid` itself, as `pg_proc.proargtypes` records it.
+const OID_TYPE_OID: i32 = 26;
+
 fn is_regression_binary_coercible(routine: &Routine) -> bool {
     routine.name.eq_ignore_ascii_case("binary_coercible")
         && is_regression_c_entrypoint(routine, "binary_coercible")
+        // `regress.so` declares it `binary_coercible(oid, oid)`. This read 23
+        // (int4) while `oid` was an alias for `int4`; now that `oid` is its own
+        // type the parameters carry 26, and the old constant would silently
+        // stop recognising the helper.
         && routine
             .input_params()
             .map(|param| type_oid(&param.ty))
-            .eq([23, 23])
+            .eq([OID_TYPE_OID, OID_TYPE_OID])
         && matches!(
             &routine.result,
             RoutineResult::Type { ty, setof: false }

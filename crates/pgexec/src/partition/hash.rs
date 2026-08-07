@@ -133,6 +133,25 @@ fn column_hash(value: &Datum, seed: u64) -> Result<Option<u64>, ExecError> {
         // `money` hashes through `hashint8extended`, as `pg_amproc` records
         // for its default operator family.
         Datum::Money(value) => hash_int64_extended(*value, seed),
+        // `hashoidextended` / `hashxidextended` / `hashcidextended` are all
+        // `hash_uint32_extended` over the unsigned value.
+        Datum::Oid(value) | Datum::Xid(value) | Datum::Cid(value) => {
+            hash_uint32_extended(*value, seed)
+        }
+        // `hashxid8extended` and `pg_lsn_hash_extended` both delegate to
+        // `hashint8extended`, which reads the 64 bits as a signed integer.
+        Datum::Xid8(value) | Datum::PgLsn(value) => hash_int64_extended(value.cast_signed(), seed),
+        // `hashtidextended` hashes the six bytes of an `ItemPointerData` as
+        // they sit in memory: a `BlockIdData` of two `uint16` halves, high
+        // first, then the `OffsetNumber` — each in host byte order.
+        Datum::Tid(value) => {
+            let block = value.block.to_le_bytes();
+            let offset = value.offset.to_le_bytes();
+            hash_bytes_extended(
+                &[block[2], block[3], block[0], block[1], offset[0], offset[1]],
+                seed,
+            )?
+        }
         Datum::BitString(value) => {
             return Err(unsupported(if value.varying {
                 "bit varying"

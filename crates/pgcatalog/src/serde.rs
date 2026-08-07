@@ -134,6 +134,10 @@ mod datum_tag {
     /// returned verbatim. Distinct from [`JSONB`] because a `jsonb` round trip
     /// would normalise it. Append-only — no version bump.
     pub const JSON: u8 = 20;
+    /// A system identifier value — `oid`, `xid`, `xid8`, `cid`, `tid` or
+    /// `pg_lsn` — stored as a one-column `crabka_pgkv::rowenc` row, which
+    /// already tags which of the six it is. Append-only — no version bump.
+    pub const SYSID: u8 = 21;
 }
 
 mod type_tag {
@@ -229,6 +233,18 @@ mod type_tag {
     pub const MONEY: u8 = 42;
     /// `json`. Append-only — no version bump.
     pub const JSON: u8 = 43;
+    /// `PostgreSQL` `oid`. Append-only — no version bump.
+    pub const OID: u8 = 44;
+    /// `PostgreSQL` `xid`. Append-only — no version bump.
+    pub const XID: u8 = 45;
+    /// `PostgreSQL` `xid8`. Append-only — no version bump.
+    pub const XID8: u8 = 46;
+    /// `PostgreSQL` `cid`. Append-only — no version bump.
+    pub const CID: u8 = 47;
+    /// `PostgreSQL` `tid`. Append-only — no version bump.
+    pub const TID: u8 = 48;
+    /// `PostgreSQL` `pg_lsn`. Append-only — no version bump.
+    pub const PG_LSN: u8 = 49;
 }
 
 #[derive(Debug)]
@@ -319,6 +335,12 @@ pub(crate) fn write_type(out: &mut Vec<u8>, ty: ColumnType) {
         ColumnType::MacAddr => out.push(type_tag::MACADDR),
         ColumnType::MacAddr8 => out.push(type_tag::MACADDR8),
         ColumnType::Money => out.push(type_tag::MONEY),
+        ColumnType::Oid => out.push(type_tag::OID),
+        ColumnType::Xid => out.push(type_tag::XID),
+        ColumnType::Xid8 => out.push(type_tag::XID8),
+        ColumnType::Cid => out.push(type_tag::CID),
+        ColumnType::Tid => out.push(type_tag::TID),
+        ColumnType::PgLsn => out.push(type_tag::PG_LSN),
         ColumnType::Bit(len) => write_optional_i32_type(out, type_tag::BIT, len),
         ColumnType::VarBit(len) => write_optional_i32_type(out, type_tag::VARBIT, len),
         ColumnType::Json => out.push(type_tag::JSON),
@@ -446,6 +468,12 @@ fn read_type_with(
         type_tag::MACADDR => ColumnType::MacAddr,
         type_tag::MACADDR8 => ColumnType::MacAddr8,
         type_tag::MONEY => ColumnType::Money,
+        type_tag::OID => ColumnType::Oid,
+        type_tag::XID => ColumnType::Xid,
+        type_tag::XID8 => ColumnType::Xid8,
+        type_tag::CID => ColumnType::Cid,
+        type_tag::TID => ColumnType::Tid,
+        type_tag::PG_LSN => ColumnType::PgLsn,
         type_tag::BIT => ColumnType::Bit(read_optional_i32_type(cur)?),
         type_tag::VARBIT => ColumnType::VarBit(read_optional_i32_type(cur)?),
         type_tag::JSON => ColumnType::Json,
@@ -659,6 +687,18 @@ fn write_default_value(out: &mut Vec<u8>, default: &Datum) {
                 &crabka_pgkv::rowenc::encode_row(std::slice::from_ref(default)),
             );
         }
+        Datum::Oid(_)
+        | Datum::Xid(_)
+        | Datum::Xid8(_)
+        | Datum::Cid(_)
+        | Datum::Tid(_)
+        | Datum::PgLsn(_) => {
+            out.push(datum_tag::SYSID);
+            write_bytes(
+                out,
+                &crabka_pgkv::rowenc::encode_row(std::slice::from_ref(default)),
+            );
+        }
         Datum::Range(_) => {
             out.push(datum_tag::RANGE);
             write_bytes(
@@ -791,6 +831,27 @@ fn read_default_value(cur: &mut &[u8]) -> Result<Datum, KvError> {
             {
                 return Err(KvError::CorruptRow(
                     "invalid network address default".into(),
+                ));
+            }
+            values.pop().expect("length checked")
+        }
+        datum_tag::SYSID => {
+            let mut values = crabka_pgkv::rowenc::decode_row(read_str(cur)?)?;
+            if values.len() != 1
+                || !matches!(
+                    values.first(),
+                    Some(
+                        Datum::Oid(_)
+                            | Datum::Xid(_)
+                            | Datum::Xid8(_)
+                            | Datum::Cid(_)
+                            | Datum::Tid(_)
+                            | Datum::PgLsn(_)
+                    )
+                )
+            {
+                return Err(KvError::CorruptRow(
+                    "invalid system identifier default".into(),
                 ));
             }
             values.pop().expect("length checked")

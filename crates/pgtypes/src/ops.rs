@@ -643,6 +643,34 @@ pub fn compare(a: &Datum, b: &Datum) -> Result<Option<Ordering>, TypeError> {
         (Datum::Inet(x), Datum::Inet(y)) => x.cmp(y),
         (Datum::MacAddr(x), Datum::MacAddr(y)) => x.cmp(y),
         (Datum::MacAddr8(x), Datum::MacAddr8(y)) => x.cmp(y),
+        // The system identifier family compares **unsigned**, which is the
+        // whole difference from `int4` for `oid`: 4294967295 is the largest
+        // value, not -1. `xid` and `cid` reach this arm only for `=`/`<>` —
+        // the executor refuses `<`/`<=`/`>`/`>=` before it gets here, because
+        // PostgreSQL declares no such operator (transaction ids compare with
+        // modular arithmetic, which has no total order).
+        (Datum::Oid(x), Datum::Oid(y))
+        | (Datum::Xid(x), Datum::Xid(y))
+        | (Datum::Cid(x), Datum::Cid(y)) => x.cmp(y),
+        (Datum::Xid8(x), Datum::Xid8(y)) | (Datum::PgLsn(x), Datum::PgLsn(y)) => x.cmp(y),
+        // `ItemPointerCompare`: block number first, then offset.
+        (Datum::Tid(x), Datum::Tid(y)) => x.cmp(y),
+        // `pg_cast` makes `int2`/`int4`/`int8 → oid` implicit, so PostgreSQL
+        // resolves `oidcol = intcol` to `oideq(oid, oid)` — the integer is
+        // reinterpreted, not widened, which is why `4294967295::oid = -1` is
+        // true. `int8` is range-checked instead, because its cast is a
+        // function that raises `OID out of range`.
+        (Datum::Oid(x), Datum::Int2(_) | Datum::Int4(_) | Datum::Int8(_)) => {
+            x.cmp(&oid_operand(b)?)
+        }
+        (Datum::Int2(_) | Datum::Int4(_) | Datum::Int8(_), Datum::Oid(y)) => oid_operand(a)?.cmp(y),
+        // `xideqint4` / `xidneqint4` are the only cross-type operators in the
+        // family, and they compare the int4's bits against the xid's. They have
+        // no commutator, so the plan layer refuses the reflected spelling; this
+        // arm still takes both orders because `IN` and `CASE` route their
+        // operands through here in whichever order they were written.
+        (Datum::Xid(x), Datum::Int2(_) | Datum::Int4(_)) => x.cmp(&oid_operand(b)?),
+        (Datum::Int2(_) | Datum::Int4(_), Datum::Xid(y)) => oid_operand(a)?.cmp(y),
         // SQL arrays compare element-wise, shorter first on a common prefix.
         (Datum::Array(x), Datum::Array(y)) => compare_arrays(x, y)?,
         (Datum::OidVector(x), Datum::OidVector(y)) => compare_arrays(x, y)?,
@@ -687,6 +715,21 @@ pub fn compare(a: &Datum, b: &Datum) -> Result<Option<Ordering>, TypeError> {
         },
     };
     Ok(Some(ord))
+}
+
+/// An integer operand read as the `oid` PostgreSQL's implicit cast makes it.
+///
+/// `int2` and `int4` are binary coercions — the bits are reinterpreted — while
+/// `int8` runs `i8tooid`, which range-checks and raises 22003.
+fn oid_operand(value: &Datum) -> Result<u32, TypeError> {
+    match value {
+        Datum::Int2(n) => Ok(i32::from(*n).cast_unsigned()),
+        Datum::Int4(n) => Ok(n.cast_unsigned()),
+        Datum::Int8(n) => u32::try_from(*n).map_err(|_| TypeError::OutOfRange {
+            message: "OID out of range".to_string(),
+        }),
+        other => Err(cannot_compare(other, other)),
+    }
 }
 
 fn compare_ranges(a: &crate::RangeValue, b: &crate::RangeValue) -> Result<Ordering, TypeError> {

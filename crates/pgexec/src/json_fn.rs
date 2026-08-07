@@ -1925,6 +1925,16 @@ pub(crate) fn to_jsonb(d: &Datum, ctx: &EvalCtx) -> Result<JsonbValue, ExecError
         | Datum::Money(_)
         | Datum::Range(_)
         | Datum::Multirange(_)
+        // The system identifier family joins the stringly group even though
+        // `oid` is `typcategory` N: `to_jsonb` special-cases the six concrete
+        // numeric types by oid, and `oid` is not one of them, so
+        // `to_jsonb(4294967295::oid)` is `"4294967295"`, not a JSON number.
+        | Datum::Oid(_)
+        | Datum::Xid(_)
+        | Datum::Xid8(_)
+        | Datum::Cid(_)
+        | Datum::Tid(_)
+        | Datum::PgLsn(_)
         | Datum::Bytea(_) => JsonbValue::String(datum_text(d, ctx)),
     })
 }

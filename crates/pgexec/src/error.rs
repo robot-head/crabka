@@ -688,6 +688,12 @@ fn referencing_row_message(table: &str, constraint: &str) -> PgError {
 /// message in PostgreSQL's own shape, because a message crabka phrases
 /// differently is a divergence the HINT would merely decorate.
 fn undefined_function_hint(message: &str) -> Option<&'static str> {
+    // `could not identify an ordering operator for type X` is the one message
+    // in this family PostgreSQL hints on; the equality and comparison-function
+    // wordings carry none.
+    if message.starts_with("could not identify an ordering operator for type ") {
+        return Some("Use an explicit ordering operator or modify the query.");
+    }
     if let Some(operands) = message.strip_prefix("operator does not exist: ") {
         // PostgreSQL words the hint in the singular for a PREFIX operator. Both
         // renderings put the operand types and the spelling in one

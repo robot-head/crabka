@@ -11080,9 +11080,6 @@ fn param_column_type(param: &BoundParam) -> Result<Option<ColumnType>, PgError> 
     match param.type_oid {
         Some(crabka_pgtypes::oids::INT2) => Ok(Some(ColumnType::Int2)),
         Some(crabka_pgtypes::oids::INT4) => Ok(Some(ColumnType::Int4)),
-        // `oid` aliases Int4 (see ColumnType::from_sql_name): drivers declare
-        // OID parameters in their pg_catalog typeinfo lookups.
-        Some(crabka_pgtypes::oids::OID) => Ok(Some(ColumnType::Int4)),
         Some(crabka_pgtypes::oids::REGCLASS) => Ok(Some(ColumnType::Regclass)),
         Some(crabka_pgtypes::oids::REGTYPE) => Ok(Some(ColumnType::Regtype)),
         Some(crabka_pgtypes::oids::REGPROCEDURE) => Ok(Some(ColumnType::Regprocedure)),
@@ -11115,6 +11112,14 @@ fn param_column_type(param: &BoundParam) -> Result<Option<ColumnType>, PgError> 
         Some(crabka_pgtypes::oids::CIDR) => Ok(Some(ColumnType::Cidr)),
         Some(crabka_pgtypes::oids::MACADDR) => Ok(Some(ColumnType::MacAddr)),
         Some(crabka_pgtypes::oids::MACADDR8) => Ok(Some(ColumnType::MacAddr8)),
+        // Drivers declare OID parameters in their pg_catalog typeinfo lookups
+        // (`WHERE t.oid = $1`), so this is a live path, not a formality.
+        Some(crabka_pgtypes::oids::OID) => Ok(Some(ColumnType::Oid)),
+        Some(crabka_pgtypes::oids::XID) => Ok(Some(ColumnType::Xid)),
+        Some(crabka_pgtypes::oids::XID8) => Ok(Some(ColumnType::Xid8)),
+        Some(crabka_pgtypes::oids::CID) => Ok(Some(ColumnType::Cid)),
+        Some(crabka_pgtypes::oids::TID) => Ok(Some(ColumnType::Tid)),
+        Some(crabka_pgtypes::oids::PG_LSN) => Ok(Some(ColumnType::PgLsn)),
         Some(0) | None => Ok(None),
         // Every array OID crabka has an element type for (`_int4`, `_text`, …).
         Some(oid) => match ElemType::from_array_oid(oid) {
@@ -11287,6 +11292,32 @@ fn decode_binary_value(
                 .map(Datum::Inet)
                 .map_err(ExecError::from)
                 .map_err(ExecError::into_pg)
+        }
+        // `oidrecv` / `xidrecv` / `cidrecv`: a big-endian uint32.
+        ColumnType::Oid | ColumnType::Xid | ColumnType::Cid => {
+            let bits = u32::from_be_bytes(binary_array(value)?);
+            Ok(match ty {
+                ColumnType::Oid => Datum::Oid(bits),
+                ColumnType::Xid => Datum::Xid(bits),
+                _ => Datum::Cid(bits),
+            })
+        }
+        // `xid8recv` / `pg_lsn_recv`: a big-endian uint64.
+        ColumnType::Xid8 | ColumnType::PgLsn => {
+            let bits = u64::from_be_bytes(binary_array(value)?);
+            Ok(if ty == ColumnType::Xid8 {
+                Datum::Xid8(bits)
+            } else {
+                Datum::PgLsn(bits)
+            })
+        }
+        // `tidrecv`: the block number then the offset, each big-endian.
+        ColumnType::Tid => {
+            let bytes: [u8; 6] = value.try_into().map_err(|_| malformed_binary_parameter())?;
+            Ok(Datum::Tid(crabka_pgtypes::Tid {
+                block: u32::from_be_bytes(bytes[..4].try_into().expect("4 bytes")),
+                offset: u16::from_be_bytes(bytes[4..].try_into().expect("2 bytes")),
+            }))
         }
         // `cash_recv`: a big-endian int64 count of minor currency units.
         ColumnType::Money => crabka_pgtypes::money::from_binary(value)

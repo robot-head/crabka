@@ -308,6 +308,7 @@ pub(crate) fn is_scalar(name: &str) -> bool {
         || crate::network_fn::is_network_func(name)
         || crate::bit_fn::is_bit_func(name)
         || crate::money_fn::is_money_func(name)
+        || crate::sysid_fn::is_sysid_func(name)
 }
 
 /// The call a bare, unparenthesised `name` denotes, when `PostgreSQL` reserves
@@ -391,6 +392,9 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
     }
     if crate::money_fn::is_money_func(&fc.name) {
         return crate::money_fn::money_func_result_type(fc, scope);
+    }
+    if crate::sysid_fn::is_sysid_func(&fc.name) {
+        return crate::sysid_fn::sysid_func_result_type(fc, scope);
     }
     if crate::math_fn::is_math_func(&fc.name) {
         return crate::math_fn::math_func_result_type(fc, scope);
@@ -921,6 +925,9 @@ pub(crate) fn eval_scalar(
     if crate::money_fn::is_money_func(&fc.name) {
         return crate::money_fn::eval_money(fc, ctx, eval_child);
     }
+    if crate::sysid_fn::is_sysid_func(&fc.name) {
+        return crate::sysid_fn::eval_sysid(fc, ctx, eval_child);
+    }
     if crate::math_fn::is_math_func(&fc.name) {
         return crate::math_fn::eval_math(fc, ctx, eval_child);
     }
@@ -970,7 +977,7 @@ pub(crate) fn eval_scalar(
         ScalarFunc::Greatest | ScalarFunc::Least => {
             require_arity(fc, !args.is_empty())?;
             if let Some(scope) = scope {
-                crate::eval::require_ordering_operator(unify_args(f, args, scope)?)?;
+                crate::eval::require_comparison_function(unify_args(f, args, scope)?)?;
             }
             let want_greater = matches!(f, ScalarFunc::Greatest);
             let vals = resolved_args(f, args, scope, ctx, &mut eval_child)?;
@@ -2219,6 +2226,17 @@ fn builtin_format_type(oid: u32) -> Option<(&'static str, TypmodKind)> {
         23 => ("integer", NoMod),
         25 => ("text", NoMod),
         26 => ("oid", NoMod),
+        27 => ("tid", NoMod),
+        28 => ("xid", NoMod),
+        29 => ("cid", NoMod),
+        271 => ("xid8[]", NoMod),
+        1010 => ("tid[]", NoMod),
+        1011 => ("xid[]", NoMod),
+        1012 => ("cid[]", NoMod),
+        1028 => ("oid[]", NoMod),
+        3220 => ("pg_lsn", NoMod),
+        3221 => ("pg_lsn[]", NoMod),
+        5069 => ("xid8", NoMod),
         114 => ("json", NoMod),
         142 => ("xml", NoMod),
         199 => ("json[]", NoMod),
