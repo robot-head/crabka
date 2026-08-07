@@ -113,11 +113,11 @@ pub(crate) fn network_func_result_type(
         ))
     };
     match function {
-        NetworkFunc::Text => {
-            require_arity(fc, args.len() == 1)?;
-            Ok(ColumnType::Text)
-        }
-        NetworkFunc::Host | NetworkFunc::Abbrev => {
+        // `text(inet)` is `network_show`, a function on the network types
+        // alone. Resolving it for any argument would answer where PostgreSQL
+        // reports that no function matches -- `rowtypes` asserts exactly that
+        // for `text(fullname)` over a composite.
+        NetworkFunc::Text | NetworkFunc::Host | NetworkFunc::Abbrev => {
             require_arity(fc, args.len() == 1)?;
             require_inet(fc, arg_type(0)?)?;
             Ok(ColumnType::Text)

@@ -2,13 +2,13 @@
 
 **Goal:** Make the unmodified PostgreSQL 18.4 core regression schedule pass against Gres, replacing the partial adopted-corpus percentage with a literal upstream `pg_regress` result.
 
-**Current state:** The authoritative serial result is `28/231` whole upstream
+**Current state:** The authoritative serial result is `30/231` whole upstream
 test files, not the adopted corpus's statement matches. The checked-in floor has
 been ratcheted from `6/231` to `28/231` against this certification, overriding
 the tool's per-file monotone guard on the evidence recorded in
 `docs/PG_COMPAT_MATRIX.md`. Serial completes all 231 files with zero infrastructure
-failures, leaving 203 semantic failures across 165540 canonical changed lines
-and 4765 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
+failures, leaving 201 semantic failures across 163953 canonical changed lines
+and 4763 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
 postflight probe succeeds, and the infrastructure report is empty.
 
 The measurement immediately before this wave was `22/231` at 176686 changed
