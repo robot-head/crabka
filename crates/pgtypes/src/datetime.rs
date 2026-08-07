@@ -1480,9 +1480,16 @@ pub fn parse_timestamptz_in(
                     .map(|z| z.timestamp())
                     .map_err(|_| overflow())?,
             };
-            check_finite_timestamp(dt, s)?;
-            if timestamptz_is_infinite(instant) {
-                return Err(overflow());
+            // The range check belongs on the INSTANT, not on the local reading:
+            // `4714-11-23 16:00:00-08 BC` is a legal `timestamptz` precisely
+            // because its UTC equivalent is the first representable moment, even
+            // though the wall clock it was written at falls a day earlier.
+            if timestamptz_is_infinite(instant)
+                || TimeZone::UTC.to_datetime(instant).date() < MIN_FINITE_DATE
+            {
+                return Err(TypeError::DatetimeOutOfRange {
+                    message: format!("timestamp out of range: \"{s}\""),
+                });
             }
             Ok(instant)
         }
@@ -1622,9 +1629,16 @@ impl IntervalField {
     }
 
     /// Parse a unit word, in every spelling `PostgreSQL` accepts.
+    ///
+    /// The lookup truncates at ten characters first, exactly as `DecodeUnits`
+    /// does against its token table. That truncation is not a size limit but
+    /// part of the accepted grammar: it is the only reason `millenniums` and
+    /// `microseconds` are units at all, since neither spelling is in the table.
     #[must_use]
     pub fn parse(word: &str) -> Option<Self> {
-        Some(match word.trim().to_ascii_lowercase().as_str() {
+        let word = word.trim().to_ascii_lowercase();
+        let word = word.get(..10).unwrap_or(&word);
+        Some(match word {
             "microsecond" | "microseconds" | "microsecon" | "usecond" | "useconds" | "usec"
             | "usecs" | "us" => IntervalField::Microsecond,
             "millisecond" | "milliseconds" | "millisecon" | "msecond" | "mseconds" | "msec"
@@ -1693,13 +1707,6 @@ pub fn parse_interval_ranged(
     range: Option<(IntervalField, IntervalField)>,
 ) -> Result<Interval, TypeError> {
     let t = s.trim();
-    let err = || TypeError::InvalidDatetimeFormat {
-        type_name: "interval",
-        value: s.to_string(),
-    };
-    if t.is_empty() {
-        return Err(err());
-    }
     // The two non-finite intervals, spelled exactly as PostgreSQL accepts them.
     let lower = t.to_ascii_lowercase();
     match lower.as_str() {
@@ -1707,27 +1714,302 @@ pub fn parse_interval_ranged(
         "-infinity" => return Ok(Interval::NEG_INFINITY),
         _ => {}
     }
-    if lower.starts_with('p') && !lower.starts_with("p ") {
-        return parse_iso8601_interval(t).ok_or_else(err);
+    // `interval_in` runs the decoder, then folds the accumulator into the stored
+    // three-field value. The two stages fail differently: a field that leaves
+    // its accumulator is `interval field value out of range` (22015 — SQL99
+    // gives interval its own code, so `interval_in` promotes the shared
+    // decoder's 22008 field overflow to it), while a decode that only fails when
+    // years and months are combined is `interval out of range` (22008).
+    let itm = decode_interval(t, range).map_err(|e| match e {
+        IntervalError::Format => TypeError::InvalidDatetimeFormat {
+            type_name: "interval",
+            value: s.to_string(),
+        },
+        IntervalError::FieldOverflow => TypeError::IntervalFieldOverflow {
+            value: s.to_string(),
+        },
+    })?;
+    let value = itm
+        .into_interval()
+        .ok_or_else(|| TypeError::DatetimeOutOfRange {
+            message: "interval out of range".to_string(),
+        })?;
+    Ok(truncate_to_range(value, range))
+}
+
+/// Which of the two failures `PostgreSQL`'s interval input path keeps apart.
+/// Collapsing them would be invisible in the value but wrong on the wire: they
+/// carry different SQLSTATEs and different messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IntervalError {
+    /// `DTERR_BAD_FORMAT` — the text is not an interval literal.
+    Format,
+    /// `DTERR_FIELD_OVERFLOW` — a field, or the accumulator it feeds, is out of
+    /// range.
+    FieldOverflow,
+}
+
+/// `PostgreSQL`'s `struct pg_itm_in`: the accumulator `DecodeInterval` fills
+/// before the parts become an `Interval`.
+///
+/// The field WIDTHS are load-bearing rather than an implementation detail. They
+/// place the boundary between the two failures above: `'2147483647 years'`
+/// accumulates fine (the years field is `i32`) and fails only when the years and
+/// months are folded into one month count, so it is `interval out of range`,
+/// while `'2147483648 years'` overflows the field itself and is `interval field
+/// value out of range`. Accumulating into wider types would move that boundary.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ItmIn {
+    usec: i64,
+    mday: i32,
+    mon: i32,
+    year: i32,
+}
+
+impl ItmIn {
+    /// `AdjustFractMicroseconds`: scale a fraction to microseconds and add it.
+    /// The half-microsecond tail rounds away from zero only past the halfway
+    /// point, which is what `PostgreSQL` does and what `f64::round` does not.
+    fn add_fract_micros(&mut self, frac: f64, scale: i64) -> Result<(), IntervalError> {
+        if frac == 0.0 {
+            return Ok(());
+        }
+        let scaled = frac * scale as f64;
+        let mut usec = scaled as i64;
+        let tail = scaled - usec as f64;
+        if tail > 0.5 {
+            usec += 1;
+        } else if tail < -0.5 {
+            usec -= 1;
+        }
+        self.usec = self
+            .usec
+            .checked_add(usec)
+            .ok_or(IntervalError::FieldOverflow)?;
+        Ok(())
     }
 
-    // The verbose form brackets the terms with `@` and may end with `ago`, which
-    // negates the whole interval.
-    let body = t.strip_prefix('@').unwrap_or(t).trim();
-    let (body, negate) = match body.to_ascii_lowercase().strip_suffix("ago") {
-        Some(prefix) if prefix.is_empty() || prefix.ends_with(char::is_whitespace) => {
-            (&body[..prefix.len()], true)
+    /// `AdjustFractDays`: the whole part of the scaled fraction is days, the
+    /// leftover part of a day is microseconds.
+    fn add_fract_days(&mut self, frac: f64, scale: i32) -> Result<(), IntervalError> {
+        if frac == 0.0 {
+            return Ok(());
         }
-        _ => (body, false),
-    };
+        let scaled = frac * f64::from(scale);
+        let extra_days = scaled as i32;
+        self.mday = self
+            .mday
+            .checked_add(extra_days)
+            .ok_or(IntervalError::FieldOverflow)?;
+        self.add_fract_micros(scaled - f64::from(extra_days), USECS_PER_DAY_I64)
+    }
 
-    let mut months: i64 = 0;
-    let mut days: i64 = 0;
-    let mut micros: i128 = 0;
+    /// `AdjustFractYears`: a fraction of a year reaches months and stops — there
+    /// is no spill from a fractional year into days.
+    fn add_fract_years(&mut self, frac: f64, scale: i32) -> Result<(), IntervalError> {
+        let extra_months = (frac * f64::from(scale) * 12.0).round_ties_even() as i32;
+        self.mon = self
+            .mon
+            .checked_add(extra_months)
+            .ok_or(IntervalError::FieldOverflow)?;
+        Ok(())
+    }
+
+    /// `AdjustMicroseconds`: `(val + fval) * scale` microseconds.
+    fn add_micros(&mut self, val: i64, fval: f64, scale: i64) -> Result<(), IntervalError> {
+        self.usec = val
+            .checked_mul(scale)
+            .and_then(|product| self.usec.checked_add(product))
+            .ok_or(IntervalError::FieldOverflow)?;
+        self.add_fract_micros(fval, scale)
+    }
+
+    /// `AdjustDays`: `val * scale` days.
+    fn add_days(&mut self, val: i64, scale: i32) -> Result<(), IntervalError> {
+        let val = i32::try_from(val).map_err(|_| IntervalError::FieldOverflow)?;
+        self.mday = val
+            .checked_mul(scale)
+            .and_then(|days| self.mday.checked_add(days))
+            .ok_or(IntervalError::FieldOverflow)?;
+        Ok(())
+    }
+
+    /// `AdjustMonths`: `val` is already a month count.
+    fn add_months(&mut self, val: i64) -> Result<(), IntervalError> {
+        let val = i32::try_from(val).map_err(|_| IntervalError::FieldOverflow)?;
+        self.mon = self
+            .mon
+            .checked_add(val)
+            .ok_or(IntervalError::FieldOverflow)?;
+        Ok(())
+    }
+
+    /// `AdjustYears`: `val * scale` years.
+    fn add_years(&mut self, val: i64, scale: i32) -> Result<(), IntervalError> {
+        let val = i32::try_from(val).map_err(|_| IntervalError::FieldOverflow)?;
+        self.year = val
+            .checked_mul(scale)
+            .and_then(|years| self.year.checked_add(years))
+            .ok_or(IntervalError::FieldOverflow)?;
+        Ok(())
+    }
+
+    /// The `ago` suffix negates every field. A field already at its minimum has
+    /// no negation, so `'-2147483648 months ago'` is a field overflow.
+    fn negate(&mut self) -> Result<(), IntervalError> {
+        self.usec = self
+            .usec
+            .checked_neg()
+            .ok_or(IntervalError::FieldOverflow)?;
+        self.mday = self
+            .mday
+            .checked_neg()
+            .ok_or(IntervalError::FieldOverflow)?;
+        self.mon = self.mon.checked_neg().ok_or(IntervalError::FieldOverflow)?;
+        self.year = self
+            .year
+            .checked_neg()
+            .ok_or(IntervalError::FieldOverflow)?;
+        Ok(())
+    }
+
+    /// `itmin2interval`: fold years into months and build the stored value.
+    /// `None` when the combined month count leaves `i32` — the one failure that
+    /// is `interval out of range` rather than a field overflow.
+    fn into_interval(self) -> Option<Interval> {
+        let total_months = i64::from(self.year)
+            .checked_mul(12)?
+            .checked_add(i64::from(self.mon))?;
+        Some(Interval {
+            months: i32::try_from(total_months).ok()?,
+            days: self.mday,
+            micros: self.usec,
+        })
+    }
+}
+
+/// Split an interval literal into `ParseDateTime`'s fields.
+///
+/// Whitespace is not what separates them — punctuation does most of the work,
+/// and a letter run ends a number without any gap. That is why `1mon` is one
+/// month, `1 month - 1 second` subtracts rather than failing on a lone `-`, and
+/// `2562047788.1:0:54.775807` is a number followed by a clock reading rather
+/// than one unreadable clock reading. A whitespace split gets all three wrong.
+fn split_interval_fields(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut fields = Vec::new();
+    let mut i = 0;
+    let soak = |chars: &[char], i: &mut usize, accept: &dyn Fn(char) -> bool, out: &mut String| {
+        while let Some(&c) = chars.get(*i)
+            && accept(c)
+        {
+            out.push(c);
+            *i += 1;
+        }
+    };
+    while let Some(&c) = chars.get(i) {
+        if c.is_whitespace() {
+            i += 1;
+            continue;
+        }
+        let mut field = String::new();
+        if c.is_ascii_digit() || c == '.' {
+            field.push(c);
+            i += 1;
+            soak(&chars, &mut i, &|c| c.is_ascii_digit(), &mut field);
+            match chars.get(i) {
+                // A clock reading runs to the end of its digits and separators.
+                Some(':') => soak(
+                    &chars,
+                    &mut i,
+                    &|c| c.is_ascii_digit() || c == ':' || c == '.',
+                    &mut field,
+                ),
+                // A delimiter joins a second group only when a third group
+                // repeats the SAME delimiter, which is what keeps `1.5` a number
+                // and makes `1-2-3` one field.
+                Some(&delim @ ('-' | '/' | '.'))
+                    if chars.get(i + 1).is_some_and(char::is_ascii_digit) =>
+                {
+                    field.push(delim);
+                    i += 1;
+                    soak(&chars, &mut i, &|c| c.is_ascii_digit(), &mut field);
+                    if chars.get(i) == Some(&delim) {
+                        soak(
+                            &chars,
+                            &mut i,
+                            &|c| c.is_ascii_digit() || c == delim,
+                            &mut field,
+                        );
+                    }
+                }
+                _ => {}
+            }
+        } else if c.is_ascii_alphabetic() {
+            while let Some(&c) = chars.get(i)
+                && c.is_ascii_alphabetic()
+            {
+                field.push(c.to_ascii_lowercase());
+                i += 1;
+            }
+        } else if c == '+' || c == '-' {
+            field.push(c);
+            i += 1;
+            while chars.get(i).is_some_and(|c| c.is_whitespace()) {
+                i += 1;
+            }
+            match chars.get(i) {
+                Some(c) if c.is_ascii_digit() => soak(
+                    &chars,
+                    &mut i,
+                    &|c| c.is_ascii_digit() || matches!(c, ':' | '.' | '-'),
+                    &mut field,
+                ),
+                Some(c) if c.is_ascii_alphabetic() => {
+                    while let Some(&c) = chars.get(i)
+                        && c.is_ascii_alphabetic()
+                    {
+                        field.push(c.to_ascii_lowercase());
+                        i += 1;
+                    }
+                }
+                // A sign with nothing behind it is its own (unreadable) field.
+                _ => {}
+            }
+        } else {
+            // Any other punctuation — `@`, a stray `,` — separates and is dropped.
+            i += 1;
+            continue;
+        }
+        fields.push(field);
+    }
+    fields
+}
+
+/// `DecodeInterval` plus the ISO-8601 fallback: read a literal into the
+/// `pg_itm_in` accumulator without deciding what its failure means.
+fn decode_interval(
+    t: &str,
+    range: Option<(IntervalField, IntervalField)>,
+) -> Result<ItmIn, IntervalError> {
+    if t.is_empty() {
+        return Err(IntervalError::Format);
+    }
+    if t.starts_with(['p', 'P']) && !t[1..].starts_with(' ') {
+        return parse_iso8601_interval(t);
+    }
+
+    let mut itm = ItmIn::default();
 
     // Terms are read right to left so an unqualified quantity can take its unit
     // from the field range and pass it on to its neighbour.
-    let tokens: Vec<&str> = body.split_whitespace().collect();
+    let mut tokens = split_interval_fields(t);
+    // `ago` negates the whole interval, and only at the very end.
+    let negate = tokens.last().is_some_and(|last| last == "ago");
+    if negate {
+        tokens.pop();
+    }
+    let tokens: Vec<&str> = tokens.iter().map(String::as_str).collect();
     // With no qualifier the rightmost bare quantity is seconds, PostgreSQL's
     // `INTERVAL_FULL_RANGE` default.
     let mut implied = range.map_or(IntervalField::Second, |(_, end)| end);
@@ -1736,7 +2018,7 @@ pub fn parse_interval_ranged(
     let mut supplied: u32 = 0;
     let claim = |bits: u32, supplied: &mut u32| {
         if bits & *supplied != 0 {
-            return Err(err());
+            return Err(IntervalError::Format);
         }
         *supplied |= bits;
         Ok(())
@@ -1747,7 +2029,11 @@ pub fn parse_interval_ranged(
         // A clock term stands alone; the quantity to its left is a day count.
         if tok.contains(':') {
             claim(CLOCK_FIELDS, &mut supplied)?;
-            micros += i128::from(parse_clock_term(tok, range).ok_or_else(err)?);
+            let clock = parse_clock_term(tok, range)?;
+            itm.usec = itm
+                .usec
+                .checked_add(clock)
+                .ok_or(IntervalError::FieldOverflow)?;
             implied = IntervalField::Day;
             i -= 1;
             continue;
@@ -1756,7 +2042,7 @@ pub fn parse_interval_ranged(
         // month count and leaves months as the unit for the quantity to its left.
         if let Some(shorthand) = parse_year_month_term(tok) {
             claim(IntervalField::Month.mask_bit(), &mut supplied)?;
-            months += shorthand;
+            itm.add_months(shorthand?)?;
             implied = IntervalField::Month;
             i -= 1;
             continue;
@@ -1767,10 +2053,10 @@ pub fn parse_interval_ranged(
                 unit
             }
             // A trailing word that is not a unit, or a unit with no quantity.
-            Some(_) | None if Quantity::parse(tok).is_none() => return Err(err()),
+            Some(_) | None if Quantity::parse(tok).is_err() => return Err(IntervalError::Format),
             _ => implied,
         };
-        let qty = Quantity::parse(tokens.get(i - 1).ok_or_else(err)?).ok_or_else(err)?;
+        let qty = Quantity::parse(tokens.get(i - 1).ok_or(IntervalError::Format)?)?;
         // A fraction of a second reaches the millisecond and microsecond fields,
         // so it supplies all three; a fraction of any coarser unit does not.
         let bits = if unit == IntervalField::Second && qty.frac != 0.0 {
@@ -1779,27 +2065,15 @@ pub fn parse_interval_ranged(
             unit.mask_bit()
         };
         claim(bits, &mut supplied)?;
-        accumulate_unit(qty, unit, &mut months, &mut days, &mut micros).ok_or_else(err)?;
+        accumulate_unit(qty, unit, &mut itm)?;
         implied = unit.next_bare_unit();
         i -= 1;
     }
 
-    let overflow = || TypeError::DatetimeFieldOverflow {
-        value: s.to_string(),
-    };
-    let sign = if negate { -1 } else { 1 };
-    let months = i32::try_from(months * i64::from(sign)).map_err(|_| overflow())?;
-    let days = i32::try_from(days * i64::from(sign)).map_err(|_| overflow())?;
-    let micros = i64::try_from(micros * i128::from(sign)).map_err(|_| overflow())?;
-    let value = Interval {
-        months,
-        days,
-        micros,
-    };
-    if value.is_infinite() {
-        return Err(overflow());
+    if negate {
+        itm.negate()?;
     }
-    Ok(truncate_to_range(value, range))
+    Ok(itm)
 }
 
 /// Drop everything finer than the range's end field, the way a qualified
@@ -1808,6 +2082,10 @@ fn truncate_to_range(iv: Interval, range: Option<(IntervalField, IntervalField)>
     let Some((_, end)) = range else {
         return iv;
     };
+    // The non-finite values have no fields to truncate.
+    if iv.is_infinite() {
+        return iv;
+    }
     let step = match end {
         IntervalField::Microsecond | IntervalField::Millisecond | IntervalField::Second => {
             return iv;
@@ -1833,166 +2111,378 @@ fn truncate_to_range(iv: Interval, range: Option<(IntervalField, IntervalField)>
     }
 }
 
-/// Parse the `Y-M` year-month shorthand into a signed month count.
-fn parse_year_month_term(tok: &str) -> Option<i64> {
-    let (sign, rest) = match tok.strip_prefix('-') {
-        Some(rest) => (-1i64, rest),
-        None => (1i64, tok.strip_prefix('+').unwrap_or(tok)),
+/// Parse the `Y-M` year-month shorthand into a signed month count. The outer
+/// `Option` says whether the token is that shape at all; the inner `Result`
+/// reports a year or month field that will not fit, which `PostgreSQL` range-checks
+/// here rather than at the accumulator (`0-12` is already out of range, and a
+/// year whose month product leaves `i64` is a field overflow).
+fn parse_year_month_term(tok: &str) -> Option<Result<i64, IntervalError>> {
+    let (negative, rest) = match tok.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, tok.strip_prefix('+').unwrap_or(tok)),
     };
     let (years, months) = rest.split_once('-')?;
-    let years: i64 = years.parse().ok()?;
-    let months: i64 = months.parse().ok()?;
-    Some(sign * (years * 12 + months))
-}
-
-/// Parse an ISO-8601 duration, in both the designator form (`P1Y2M3DT4H5M6S`)
-/// and the alternative all-numeric form (`P0001-02-03T04:05:06`).
-fn parse_iso8601_interval(text: &str) -> Option<Interval> {
-    let body = text.get(1..)?;
-    let (date_part, time_part) = match body.split_once(['T', 't']) {
-        Some((date, time)) => (date, Some(time)),
-        None => (body, None),
-    };
-    if date_part.contains('-') || time_part.is_some_and(|t| t.contains(':')) {
-        return parse_iso8601_alternative(date_part, time_part);
-    }
-    let mut months: i64 = 0;
-    let mut days: i64 = 0;
-    let mut micros: i128 = 0;
-    for (part, in_time) in [(date_part, false), (time_part.unwrap_or(""), true)] {
-        let mut number = String::new();
-        for c in part.chars() {
-            if c.is_ascii_digit() || c == '.' || c == '-' || c == '+' {
-                number.push(c);
-                continue;
-            }
-            let qty = Quantity::parse(&number)?;
-            number.clear();
-            // Each designator belongs to ONE of the two halves — `PT1D` and
-            // `P1H` are as malformed as an unknown letter would be.
-            let unit = match (c.to_ascii_uppercase(), in_time) {
-                ('Y', false) => IntervalField::Year,
-                ('M', false) => IntervalField::Month,
-                ('W', false) => IntervalField::Week,
-                ('D', false) => IntervalField::Day,
-                ('H', true) => IntervalField::Hour,
-                ('M', true) => IntervalField::Minute,
-                ('S', true) => IntervalField::Second,
-                _ => return None,
-            };
-            accumulate_unit(qty, unit, &mut months, &mut days, &mut micros)?;
-        }
-        if !number.is_empty() {
-            return None;
-        }
-    }
-    Some(Interval {
-        months: i32::try_from(months).ok()?,
-        days: i32::try_from(days).ok()?,
-        micros: i64::try_from(micros).ok()?,
-    })
-}
-
-/// The alternative ISO-8601 form, whose fields are positional rather than
-/// designated: `P<years>-<months>-<days>T<hours>:<minutes>:<seconds>`.
-fn parse_iso8601_alternative(date_part: &str, time_part: Option<&str>) -> Option<Interval> {
-    let mut months: i64 = 0;
-    let mut days: i64 = 0;
-    let mut micros: i128 = 0;
-    let date_fields: Vec<&str> = date_part.split('-').collect();
-    if date_fields.len() != 3 {
+    if years.is_empty() || !years.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    for (text, unit) in date_fields.iter().zip([
-        IntervalField::Year,
-        IntervalField::Month,
-        IntervalField::Day,
-    ]) {
-        accumulate_unit(
-            Quantity::parse(text)?,
-            unit,
-            &mut months,
-            &mut days,
-            &mut micros,
-        )?;
-    }
-    if let Some(time_part) = time_part {
-        let time_fields: Vec<&str> = time_part.split(':').collect();
-        if time_fields.len() != 3 {
-            return None;
-        }
-        for (text, unit) in time_fields.iter().zip([
-            IntervalField::Hour,
-            IntervalField::Minute,
-            IntervalField::Second,
-        ]) {
-            accumulate_unit(
-                Quantity::parse(text)?,
-                unit,
-                &mut months,
-                &mut days,
-                &mut micros,
-            )?;
-        }
-    }
-    Some(Interval {
-        months: i32::try_from(months).ok()?,
-        days: i32::try_from(days).ok()?,
-        micros: i64::try_from(micros).ok()?,
-    })
-}
-
-/// Parse a `[-]HH:MM[:SS[.ffffff]]` clock term into signed microseconds. A
-/// two-field term is hours and minutes unless the field range says the reading
-/// ends at `SECOND`, in which case it is minutes and seconds.
-fn parse_clock_term(tok: &str, range: Option<(IntervalField, IntervalField)>) -> Option<i64> {
-    let (sign, rest) = match tok.strip_prefix('-') {
-        Some(r) => (-1i64, r),
-        None => (1i64, tok.strip_prefix('+').unwrap_or(tok)),
-    };
-    let mut fields: Vec<&str> = rest.split(':').collect();
-    if fields.len() < 2 || fields.len() > 3 {
+    if months.is_empty() || !months.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    // `MINUTE TO SECOND` re-reads a two-field term one place down the clock.
-    if fields.len() == 2 && range == Some((IntervalField::Minute, IntervalField::Second)) {
-        fields.insert(0, "0");
+    Some(year_month_months(negative, years, months))
+}
+
+/// The arithmetic half of [`parse_year_month_term`], split out so the shape test
+/// and the range test give different answers.
+fn year_month_months(negative: bool, years: &str, months: &str) -> Result<i64, IntervalError> {
+    let overflow = |_| IntervalError::FieldOverflow;
+    let years: i64 = if negative {
+        format!("-{years}").parse().map_err(overflow)?
+    } else {
+        years.parse().map_err(overflow)?
+    };
+    let months: i32 = months.parse().map_err(overflow)?;
+    if !(0..12).contains(&months) {
+        return Err(IntervalError::FieldOverflow);
     }
-    let hours: i64 = fields[0].parse().ok()?;
-    let minutes: i64 = fields[1].parse().ok()?;
-    let (whole_seconds, frac_micros): (i64, i64) = match fields.get(2) {
-        Some(sec) => match sec.split_once('.') {
-            Some((whole, frac)) => {
-                // Pad/truncate the fraction to six µs digits.
-                let mut digits = frac.to_string();
-                while digits.len() < 6 {
-                    digits.push('0');
+    let months = if negative { -months } else { months };
+    years
+        .checked_mul(12)
+        .and_then(|y| y.checked_add(i64::from(months)))
+        .ok_or(IntervalError::FieldOverflow)
+}
+
+/// Read the leading C `strtod` number, returning its value and the unconsumed
+/// tail. `PostgreSQL`'s ISO-8601 interval reader delegates to `strtod`, so the
+/// grammar here is `strtod`'s — exponent notation and the spelled-out
+/// infinities included — not the stricter one [`Quantity::parse`] uses.
+fn strtod_prefix(s: &str) -> Option<(f64, &str)> {
+    let bytes = s.as_bytes();
+    let mut i = usize::from(matches!(bytes.first(), Some(b'+' | b'-')));
+    let negative = bytes.first() == Some(&b'-');
+    for (word, value) in [
+        ("infinity", f64::INFINITY),
+        ("inf", f64::INFINITY),
+        ("nan", f64::NAN),
+    ] {
+        if s.len() >= i + word.len() && s[i..i + word.len()].eq_ignore_ascii_case(word) {
+            let value = if negative { -value } else { value };
+            return Some((value, &s[i + word.len()..]));
+        }
+    }
+    let mut digits = 0usize;
+    while matches!(bytes.get(i), Some(b) if b.is_ascii_digit()) {
+        i += 1;
+        digits += 1;
+    }
+    if bytes.get(i) == Some(&b'.') {
+        i += 1;
+        while matches!(bytes.get(i), Some(b) if b.is_ascii_digit()) {
+            i += 1;
+            digits += 1;
+        }
+    }
+    if digits == 0 {
+        return None;
+    }
+    // An `e` only joins the number when real exponent digits follow it, so
+    // `P1E` keeps the `E` as a (rejected) unit designator rather than eating it.
+    if matches!(bytes.get(i), Some(b'e' | b'E')) {
+        let mut j = i + 1;
+        if matches!(bytes.get(j), Some(b'+' | b'-')) {
+            j += 1;
+        }
+        let exponent_start = j;
+        while matches!(bytes.get(j), Some(b) if b.is_ascii_digit()) {
+            j += 1;
+        }
+        if j > exponent_start {
+            i = j;
+        }
+    }
+    s[..i].parse().ok().map(|value| (value, &s[i..]))
+}
+
+/// `ParseISO8601Number`: the number plus its truncated integer and fractional
+/// halves. The 1e15 cap is PostgreSQL's, and it is what makes the integer part
+/// exact and the fraction's magnitude strictly below one.
+fn parse_iso8601_number(s: &str) -> Result<(i64, f64, &str), IntervalError> {
+    if !matches!(s.as_bytes().first(), Some(b'0'..=b'9' | b'-' | b'.')) {
+        return Err(IntervalError::Format);
+    }
+    let (value, rest) = strtod_prefix(s).ok_or(IntervalError::Format)?;
+    if value.is_nan() || !(-1.0e15..=1.0e15).contains(&value) {
+        return Err(IntervalError::FieldOverflow);
+    }
+    let integral = value.trunc();
+    Ok((integral as i64, value - integral, rest))
+}
+
+/// `ISO8601IntegerWidth`: how many integral digits a field was written with,
+/// which is what tells `P00021015` (the eight-digit basic date) from `P2015`.
+fn iso8601_integer_width(field: &str) -> usize {
+    let field = field.strip_prefix('-').unwrap_or(field);
+    field.bytes().take_while(u8::is_ascii_digit).count()
+}
+
+/// Parse an ISO-8601 duration into the accumulator: the designator form
+/// (`P1Y2M3DT4H5M6S`), the basic alternative form (`P00021015T103020`) and the
+/// extended alternative form (`P0002-10-15T10:30:20`).
+///
+/// This is `DecodeISO8601Interval` transcribed. Its shape looks redundant — the
+/// alternative formats are reached by *falling through* the designator switch —
+/// but that fallthrough is what lets `P0002` mean two years while `P0002-10`
+/// means two years and ten months, so it is kept.
+fn parse_iso8601_interval(text: &str) -> Result<ItmIn, IntervalError> {
+    let mut itm = ItmIn::default();
+    let mut datepart = true;
+    let mut havefield = false;
+    if text.len() < 2 || !text.starts_with('P') {
+        return Err(IntervalError::Format);
+    }
+    let mut s = &text[1..];
+    while !s.is_empty() {
+        // `T` opens the time half and supplies no field of its own.
+        if let Some(rest) = s.strip_prefix('T') {
+            datepart = false;
+            havefield = false;
+            s = rest;
+            continue;
+        }
+        let fieldstart = s;
+        let (val, fval, rest) = parse_iso8601_number(s)?;
+        // The designator is the character right after the number; at the end of
+        // the string it is the terminator, which several branches accept.
+        let unit = rest.chars().next().unwrap_or('\0');
+        s = rest.get(unit.len_utf8()..).unwrap_or("");
+        if datepart {
+            match unit {
+                'Y' => {
+                    itm.add_years(val, 1)?;
+                    itm.add_fract_years(fval, 1)?;
                 }
-                (whole.parse().ok()?, digits[..6].parse().ok()?)
+                'M' => {
+                    itm.add_months(val)?;
+                    itm.add_fract_days(fval, 30)?;
+                }
+                'W' => {
+                    itm.add_days(val, 7)?;
+                    itm.add_fract_days(fval, 7)?;
+                }
+                'D' => {
+                    itm.add_days(val, 1)?;
+                    itm.add_fract_micros(fval, USECS_PER_DAY_I64)?;
+                }
+                'T' | '\0' | '-' => {
+                    // `PyyyymmddThhmmss` — eight digits with nothing before them.
+                    if unit != '-' && iso8601_integer_width(fieldstart) == 8 && !havefield {
+                        itm.add_years(val / 10_000, 1)?;
+                        itm.add_months((val / 100) % 100)?;
+                        itm.add_days(val % 100, 1)?;
+                        itm.add_fract_micros(fval, USECS_PER_DAY_I64)?;
+                        if unit == '\0' {
+                            return Ok(itm);
+                        }
+                        datepart = false;
+                        havefield = false;
+                        continue;
+                    }
+                    if havefield {
+                        return Err(IntervalError::Format);
+                    }
+                    itm.add_years(val, 1)?;
+                    itm.add_fract_years(fval, 1)?;
+                    if unit == '\0' {
+                        return Ok(itm);
+                    }
+                    if unit == 'T' {
+                        datepart = false;
+                        havefield = false;
+                        continue;
+                    }
+                    let (val, fval, rest) = parse_iso8601_number(s)?;
+                    itm.add_months(val)?;
+                    itm.add_fract_days(fval, 30)?;
+                    s = rest;
+                    if s.is_empty() {
+                        return Ok(itm);
+                    }
+                    // A `T` here is left for the loop head to consume.
+                    if s.starts_with('T') {
+                        datepart = false;
+                        havefield = false;
+                        continue;
+                    }
+                    let Some(rest) = s.strip_prefix('-') else {
+                        return Err(IntervalError::Format);
+                    };
+                    let (val, fval, rest) = parse_iso8601_number(rest)?;
+                    itm.add_days(val, 1)?;
+                    itm.add_fract_micros(fval, USECS_PER_DAY_I64)?;
+                    s = rest;
+                    if s.is_empty() {
+                        return Ok(itm);
+                    }
+                    if s.starts_with('T') {
+                        datepart = false;
+                        havefield = false;
+                        continue;
+                    }
+                    return Err(IntervalError::Format);
+                }
+                _ => return Err(IntervalError::Format),
             }
-            None => (sec.parse().ok()?, 0),
-        },
-        None => (0, 0),
-    };
-    // A field can be spelled with arbitrarily many digits, so every step here
-    // is checked: an unrepresentable literal is a rejected literal, never a
-    // wrapped one.
-    let total = hours
-        .checked_mul(3_600_000_000)?
-        .checked_add(minutes.checked_mul(60_000_000)?)?
-        .checked_add(whole_seconds.checked_mul(1_000_000)?)?
-        .checked_add(frac_micros)?;
-    total.checked_mul(sign)
+        } else {
+            match unit {
+                'H' => itm.add_micros(val, fval, 3_600_000_000)?,
+                'M' => itm.add_micros(val, fval, 60_000_000)?,
+                'S' => itm.add_micros(val, fval, 1_000_000)?,
+                '\0' | ':' => {
+                    // `PThhmmss` — six digits with nothing before them.
+                    if unit == '\0' && iso8601_integer_width(fieldstart) == 6 && !havefield {
+                        itm.add_micros(val / 10_000, 0.0, 3_600_000_000)?;
+                        itm.add_micros((val / 100) % 100, 0.0, 60_000_000)?;
+                        itm.add_micros(val % 100, 0.0, 1_000_000)?;
+                        itm.add_fract_micros(fval, 1)?;
+                        return Ok(itm);
+                    }
+                    if havefield {
+                        return Err(IntervalError::Format);
+                    }
+                    itm.add_micros(val, fval, 3_600_000_000)?;
+                    if unit == '\0' {
+                        return Ok(itm);
+                    }
+                    let (val, fval, rest) = parse_iso8601_number(s)?;
+                    itm.add_micros(val, fval, 60_000_000)?;
+                    s = rest;
+                    if s.is_empty() {
+                        return Ok(itm);
+                    }
+                    let Some(rest) = s.strip_prefix(':') else {
+                        return Err(IntervalError::Format);
+                    };
+                    let (val, fval, rest) = parse_iso8601_number(rest)?;
+                    itm.add_micros(val, fval, 1_000_000)?;
+                    s = rest;
+                    if s.is_empty() {
+                        return Ok(itm);
+                    }
+                    return Err(IntervalError::Format);
+                }
+                _ => return Err(IntervalError::Format),
+            }
+        }
+        havefield = true;
+    }
+    Ok(itm)
 }
 
-/// Add `whole` plus the rounded fraction of `qty` to a month accumulator, in
-/// units of `per_unit` months, refusing to wrap.
-fn add_months(months: &mut i64, whole: i64, frac: f64, per_unit: i64) -> Option<()> {
-    let fraction = (frac * per_unit as f64).round() as i64;
-    *months = months
-        .checked_add(whole.checked_mul(per_unit)?)?
-        .checked_add(fraction)?;
-    Some(())
+/// Read the leading run of digits as an `i64`, with the unconsumed tail —
+/// C `strtoi64` over the clock fields. A run too long for the type is a field
+/// overflow; no run at all leaves the text untouched for the caller's delimiter
+/// check to reject.
+fn take_int64(s: &str) -> Result<(i64, &str), IntervalError> {
+    let digits = s.strip_prefix(['+', '-']).unwrap_or(s);
+    let width = digits.bytes().take_while(u8::is_ascii_digit).count();
+    if width == 0 {
+        return Ok((0, s));
+    }
+    let end = s.len() - digits.len() + width;
+    let value = s[..end].parse().map_err(|_| IntervalError::FieldOverflow)?;
+    Ok((value, &s[end..]))
+}
+
+/// [`take_int64`] into an `i32` — the width `PostgreSQL` reads the minute and
+/// second fields at.
+fn take_int32(s: &str) -> Result<(i32, &str), IntervalError> {
+    let (value, rest) = take_int64(s)?;
+    let value = i32::try_from(value).map_err(|_| IntervalError::FieldOverflow)?;
+    Ok((value, rest))
+}
+
+/// `ParseFractionalSecond`: a `.` and its digits, and nothing after them,
+/// rounded to microseconds.
+fn parse_fractional_second(s: &str) -> Result<i64, IntervalError> {
+    let digits = s.strip_prefix('.').ok_or(IntervalError::Format)?;
+    // `1.` is a whole second; `1.x` is malformed.
+    if digits.is_empty() {
+        return Ok(0);
+    }
+    if !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(IntervalError::Format);
+    }
+    let frac: f64 = format!("0.{digits}")
+        .parse()
+        .map_err(|_| IntervalError::Format)?;
+    Ok((frac * 1_000_000.0).round_ties_even() as i64)
+}
+
+/// Parse a `[-]HH:MM[:SS[.ffffff]]` clock term into signed microseconds
+/// (`DecodeTimeForInterval`).
+///
+/// A two-field term is hours and minutes — except that a *fraction* on the
+/// second field re-reads the whole term one place down the clock, so `2:03.4567`
+/// is two minutes and three and a bit seconds, not two hours. The field range
+/// `MINUTE TO SECOND` shifts it the same way.
+fn parse_clock_term(
+    tok: &str,
+    range: Option<(IntervalField, IntervalField)>,
+) -> Result<i64, IntervalError> {
+    let (negative, body) = match tok.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, tok.strip_prefix('+').unwrap_or(tok)),
+    };
+    let (mut hour, rest) = take_int64(body)?;
+    let Some(rest) = rest.strip_prefix(':') else {
+        return Err(IntervalError::Format);
+    };
+    let (mut minute, rest) = take_int32(rest)?;
+    let mut second: i32 = 0;
+    let mut fsec: i64 = 0;
+    // Shift a two-field reading down to `mm:ss`.
+    let shift_down = |hour: &mut i64, minute: &mut i32, second: &mut i32| {
+        *second = *minute;
+        *minute = i32::try_from(*hour).map_err(|_| IntervalError::FieldOverflow)?;
+        *hour = 0;
+        Ok::<(), IntervalError>(())
+    };
+    if rest.is_empty() {
+        if range == Some((IntervalField::Minute, IntervalField::Second)) {
+            shift_down(&mut hour, &mut minute, &mut second)?;
+        }
+    } else if rest.starts_with('.') {
+        fsec = parse_fractional_second(rest)?;
+        shift_down(&mut hour, &mut minute, &mut second)?;
+    } else if let Some(rest) = rest.strip_prefix(':') {
+        let (parsed, rest) = take_int32(rest)?;
+        second = parsed;
+        if rest.starts_with('.') {
+            fsec = parse_fractional_second(rest)?;
+        } else if !rest.is_empty() {
+            return Err(IntervalError::Format);
+        }
+    } else {
+        return Err(IntervalError::Format);
+    }
+    if hour < 0 || !(0..60).contains(&minute) || !(0..=60).contains(&second) {
+        return Err(IntervalError::FieldOverflow);
+    }
+    let total = [
+        (hour, 3_600_000_000i64),
+        (i64::from(minute), 60_000_000),
+        (i64::from(second), 1_000_000),
+    ]
+    .into_iter()
+    .try_fold(fsec, |acc, (value, scale)| {
+        value
+            .checked_mul(scale)
+            .and_then(|product| acc.checked_add(product))
+    })
+    .ok_or(IntervalError::FieldOverflow)?;
+    if negative {
+        return total.checked_neg().ok_or(IntervalError::FieldOverflow);
+    }
+    Ok(total)
 }
 
 /// One interval quantity, split the way PostgreSQL's decoder reads it: the whole
@@ -2008,10 +2498,12 @@ struct Quantity {
 }
 
 impl Quantity {
-    /// Parse a signed decimal quantity. `None` for anything that is not one,
-    /// including the exponent forms `f64::from_str` would otherwise accept,
-    /// which PostgreSQL's interval decoder rejects.
-    fn parse(text: &str) -> Option<Quantity> {
+    /// Parse a signed decimal quantity. [`IntervalError::Format`] for anything
+    /// that is not one — including the exponent forms `f64::from_str` would
+    /// otherwise accept, which PostgreSQL's interval decoder rejects — and
+    /// [`IntervalError::FieldOverflow`] for a well-formed run of digits too long
+    /// for the `i64` `strtoi64` reads it into.
+    fn parse(text: &str) -> Result<Quantity, IntervalError> {
         let (negative, digits) = match text.as_bytes().first() {
             Some(b'-') => (true, &text[1..]),
             Some(b'+') => (false, &text[1..]),
@@ -2019,108 +2511,92 @@ impl Quantity {
         };
         let (int_text, frac_text) = digits.split_once('.').unwrap_or((digits, ""));
         if int_text.is_empty() && frac_text.is_empty() {
-            return None;
+            return Err(IntervalError::Format);
         }
         // `.5` is fine but `-.5` is not: PostgreSQL reads the integer part first,
         // and a sign with no digit behind it leaves the sign unconsumed.
         if int_text.is_empty() && digits.len() != text.len() {
-            return None;
+            return Err(IntervalError::Format);
         }
         if !int_text
             .bytes()
             .chain(frac_text.bytes())
             .all(|b| b.is_ascii_digit())
         {
-            return None;
+            return Err(IntervalError::Format);
         }
         // Parse the sign WITH the digits, so `-9223372036854775808` is readable
         // (its magnitude alone is not).
         let whole: i64 = if int_text.is_empty() {
             0
         } else if negative {
-            format!("-{int_text}").parse().ok()?
+            format!("-{int_text}")
+                .parse()
+                .map_err(|_| IntervalError::FieldOverflow)?
         } else {
-            int_text.parse().ok()?
+            int_text.parse().map_err(|_| IntervalError::FieldOverflow)?
         };
         let frac: f64 = if frac_text.is_empty() {
             0.0
         } else {
-            format!("0.{frac_text}").parse().ok()?
+            format!("0.{frac_text}")
+                .parse()
+                .map_err(|_| IntervalError::Format)?
         };
-        Some(Quantity {
+        Ok(Quantity {
             whole,
             frac: if negative { -frac } else { frac },
         })
     }
 }
 
-/// Add one `<qty> <unit>` term, spilling a fractional quantity into the next
-/// smaller field (PG semantics). Returns `None` on arithmetic that cannot be
-/// represented.
+/// Add one `<qty> <unit>` term to the accumulator, spilling a fractional
+/// quantity into the next smaller field. This is the unit switch at the heart of
+/// `DecodeInterval`, term for term.
 fn accumulate_unit(
     qty: Quantity,
     unit: IntervalField,
-    months: &mut i64,
-    days: &mut i64,
-    micros: &mut i128,
-) -> Option<()> {
+    itm: &mut ItmIn,
+) -> Result<(), IntervalError> {
     // The whole part of `qty`; the fractional part spills down.
     let Quantity { whole, frac } = qty;
     match unit {
         IntervalField::Millennium => {
-            add_months(months, whole, frac, 12_000)?;
+            itm.add_years(whole, 1_000)?;
+            itm.add_fract_years(frac, 1_000)?;
         }
         IntervalField::Century => {
-            add_months(months, whole, frac, 1_200)?;
+            itm.add_years(whole, 100)?;
+            itm.add_fract_years(frac, 100)?;
         }
         IntervalField::Decade => {
-            add_months(months, whole, frac, 120)?;
+            itm.add_years(whole, 10)?;
+            itm.add_fract_years(frac, 10)?;
         }
         IntervalField::Year => {
-            // Fractional years → months.
-            add_months(months, whole, frac, 12)?;
+            itm.add_years(whole, 1)?;
+            itm.add_fract_years(frac, 1)?;
         }
         IntervalField::Month => {
-            *months = months.checked_add(whole)?;
+            itm.add_months(whole)?;
             // Fractional months → days (PG uses a 30-day month).
-            *days = days.checked_add((frac * 30.0).trunc() as i64)?;
-            let day_frac = (frac * 30.0).fract();
-            *micros += (day_frac * USECS_PER_DAY_I64 as f64).round() as i128;
+            itm.add_fract_days(frac, 30)?;
         }
         IntervalField::Week => {
-            *days = days.checked_add(whole.checked_mul(7)?)?;
-            // A fractional week spills into whole days first, then the leftover
-            // part of a day into microseconds.
-            *days = days.checked_add((frac * 7.0).trunc() as i64)?;
-            let day_frac = (frac * 7.0).fract();
-            *micros += (day_frac * USECS_PER_DAY_I64 as f64).round() as i128;
+            itm.add_days(whole, 7)?;
+            itm.add_fract_days(frac, 7)?;
         }
         IntervalField::Day => {
-            *days = days.checked_add(whole)?;
-            *micros += (frac * USECS_PER_DAY_I64 as f64).round() as i128;
+            itm.add_days(whole, 1)?;
+            itm.add_fract_micros(frac, USECS_PER_DAY_I64)?;
         }
-        IntervalField::Hour => {
-            *micros = micros.checked_add(i128::from(whole).checked_mul(3_600_000_000)?)?;
-            *micros += (frac * 3_600_000_000.0).round() as i128;
-        }
-        IntervalField::Minute => {
-            *micros = micros.checked_add(i128::from(whole).checked_mul(60_000_000)?)?;
-            *micros += (frac * 60_000_000.0).round() as i128;
-        }
-        IntervalField::Second => {
-            *micros = micros.checked_add(i128::from(whole).checked_mul(1_000_000)?)?;
-            *micros += (frac * 1_000_000.0).round() as i128;
-        }
-        IntervalField::Millisecond => {
-            *micros = micros.checked_add(i128::from(whole).checked_mul(1_000)?)?;
-            *micros += (frac * 1_000.0).round() as i128;
-        }
-        IntervalField::Microsecond => {
-            *micros = micros.checked_add(i128::from(whole))?;
-            *micros += frac.round() as i128;
-        }
+        IntervalField::Hour => itm.add_micros(whole, frac, 3_600_000_000)?,
+        IntervalField::Minute => itm.add_micros(whole, frac, 60_000_000)?,
+        IntervalField::Second => itm.add_micros(whole, frac, 1_000_000)?,
+        IntervalField::Millisecond => itm.add_micros(whole, frac, 1_000)?,
+        IntervalField::Microsecond => itm.add_micros(whole, frac, 1)?,
     }
-    Some(())
+    Ok(())
 }
 
 /// PostgreSQL's `IntervalStyle` GUC: the four spellings `interval_out` produces.
@@ -5236,19 +5712,23 @@ mod mutation_tests {
             )
         };
         // +05 → instant is 07:00 UTC (subtract the offset).
-        assert_eq!(inst("+05"), "2024-01-15 07:00:00+00");
-        // +0530 (colon-less HHMM, the `4 =>` arm) → 06:30 UTC.
-        assert_eq!(inst("+0530"), "2024-01-15 06:30:00+00");
-        // +053045 (colon-less HHMMSS, the `6 =>` arm) → 06:29:15 UTC.
-        assert_eq!(inst("+053045"), "2024-01-15 06:29:15+00");
+        assert!(inst("+05") == "2024-01-15 07:00:00+00");
+        // +0530 (colon-less HHMM) → 06:30 UTC: run together, the last two digits
+        // are the minutes.
+        assert!(inst("+0530") == "2024-01-15 06:30:00+00");
+        // There is no run-together HHMMSS spelling — PostgreSQL reads +053045 as
+        // 5304 hours and rejects it. Seconds need the colons.
+        let err = parse_timestamptz("2024-01-15 12:00:00+053045", &tz)
+            .expect_err("no run-together HHMMSS offset");
+        assert!(err.sqlstate() == "22009", "got {err}");
         // +05:30 (colon path) → 06:30 UTC.
-        assert_eq!(inst("+05:30"), "2024-01-15 06:30:00+00");
+        assert!(inst("+05:30") == "2024-01-15 06:30:00+00");
         // +05:30:45 (HH:MM:SS colon path) → 06:29:15 UTC.
-        assert_eq!(inst("+05:30:45"), "2024-01-15 06:29:15+00");
-        // -08 → 20:00 UTC (the `b'-'` arm + the negative sign, lines 585/609).
-        assert_eq!(inst("-08"), "2024-01-15 20:00:00+00");
+        assert!(inst("+05:30:45") == "2024-01-15 06:29:15+00");
+        // -08 → 20:00 UTC.
+        assert!(inst("-08") == "2024-01-15 20:00:00+00");
         // Z → UTC, unchanged.
-        assert_eq!(inst("Z"), "2024-01-15 12:00:00+00");
+        assert!(inst("Z") == "2024-01-15 12:00:00+00");
     }
 
     // -- push_offset ----------------------------------------------------

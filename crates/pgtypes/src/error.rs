@@ -52,9 +52,15 @@ pub enum TypeError {
     /// SP37: a date/time field out of range (e.g. month 13) (22008).
     #[error("date/time field value out of range: \"{value}\"")]
     DatetimeFieldOverflow { value: String },
-    /// A date/time value that leaves its type's range. It carries PostgreSQL's
-    /// exact message for the context: `timestamp out of range`, `interval out
-    /// of range`, or `cannot subtract infinite dates` (22008).
+    /// SP37: an `interval` field out of range (22015). SQL99 gives interval its
+    /// own SQLSTATE, so `interval_in` promotes every field overflow the shared
+    /// decoder reports into this one — `date/time field value out of range` is
+    /// never what an `interval` literal raises.
+    #[error("interval field value out of range: \"{value}\"")]
+    IntervalFieldOverflow { value: String },
+    /// A date/time value that leaves its type's range, carrying PostgreSQL's
+    /// exact message for the context — `timestamp out of range`, `interval out
+    /// of range`, `cannot subtract infinite dates` (22008).
     #[error("{message}")]
     DatetimeOutOfRange { message: String },
     /// A date/time literal whose UTC offset is outside ±15:59:59 (22009).
@@ -104,6 +110,7 @@ impl TypeError {
             TypeError::Domain { sqlstate, .. } => sqlstate,
             TypeError::InvalidDatetimeFormat { .. } => "22007",
             TypeError::DatetimeFieldOverflow { .. } => "22008",
+            TypeError::IntervalFieldOverflow { .. } => "22015",
             TypeError::DatetimeOutOfRange { .. } => "22008",
             TypeError::TimezoneDisplacementOverflow { .. } => "22009",
             TypeError::UnknownTimeZone { .. } => "22023",

@@ -188,7 +188,9 @@ fn split_fields(text: &str) -> Result<Vec<Field>, DecodeError> {
         } else if c == '+' || c == '-' {
             out.push(split_signed_field(&chars, &mut i)?);
         } else {
-            return Err(DecodeError::Syntax);
+            // Any other punctuation separates fields and is dropped, so
+            // `19971)24` is a year and a month rather than a lexical error.
+            i += 1;
         }
     }
     if out.is_empty() {
@@ -369,29 +371,56 @@ pub fn decode(text: &str, order: DateOrder) -> Result<Decoded, DecodeError> {
     let mut want_julian = false;
     let mut is_julian = false;
     let mut have_text_month = false;
+    // Whether a field outside the date itself has already been read. A
+    // punctuated date field insists nothing but a day-of-year or a zone has been
+    // seen yet, so a leading weekday makes `Fri 1-January-1999` malformed while
+    // the same literal with the weekday at the end is fine.
+    let mut have_non_date = false;
 
     for field in &fields {
         match field {
-            Field::Time(text) => decode_time(text, &mut tm)?,
+            Field::Time(text) => {
+                decode_time(text, &mut tm)?;
+                have_non_date = true;
+            }
             Field::Date(text) => {
+                // A Julian day with its zone run together — `J2452271-08` — is
+                // one punctuated field, so the day number and the offset have to
+                // be split apart here.
+                if std::mem::take(&mut want_julian) {
+                    let digits = text
+                        .find(|c: char| !c.is_ascii_digit())
+                        .unwrap_or(text.len());
+                    let (jd, offset) = text.split_at(digits);
+                    set_julian_date(jd, &mut tm)?;
+                    is_julian = true;
+                    zone = Some(Zone::Offset(decode_tz_offset(offset)?));
+                }
                 // Once month and day are known a punctuated field can only be a
                 // zone name — this is what makes `America/New_York` legal after a
                 // date and a syntax error without one.
-                if tm.month.is_some() && tm.day.is_some() {
+                else if tm.month.is_some() && tm.day.is_some() {
                     zone = Some(lookup_zone_spec(text)?);
                 } else {
+                    if have_non_date {
+                        return Err(DecodeError::Syntax);
+                    }
                     decode_date(text, order, &mut tm, &mut have_text_month)?;
                 }
             }
             Field::Number(text) => {
                 if std::mem::take(&mut want_julian) {
-                    let jd: i32 = text.parse().map_err(|_| DecodeError::FieldOverflow)?;
-                    let date = julian_to_date(jd)?;
-                    tm.year = Some(i32::from(date.year()));
-                    tm.month = Some(i32::from(date.month()));
-                    tm.day = Some(i32::from(date.day()));
-                    tm.two_digit_year = false;
+                    // A fractional Julian day carries the time of day with it.
+                    let (jd, fraction) = text.split_once('.').unwrap_or((text, ""));
+                    set_julian_date(jd, &mut tm)?;
                     is_julian = true;
+                    if !fraction.is_empty() {
+                        let micros = day_fraction_to_micros(fraction)?;
+                        tm.hour = Some((micros / 3_600_000_000) as i32);
+                        tm.minute = Some((micros / 60_000_000 % 60) as i32);
+                        tm.second = Some((micros / 1_000_000 % 60) as i32);
+                        tm.micro = micros % 1_000_000;
+                    }
                 } else {
                     decode_number_token(text, order, &mut tm, have_text_month)?;
                 }
@@ -406,10 +435,34 @@ pub fn decode(text: &str, order: DateOrder) -> Result<Decoded, DecodeError> {
                 // The ISO `T` separator and the noise words PostgreSQL drops.
                 "t" | "on" | "at" | "of" => {}
                 "j" | "jd" | "julian" => want_julian = true,
-                "am" => meridiem = Some(false),
-                "pm" => meridiem = Some(true),
-                "bc" => is_bc = true,
-                "ad" => is_bc = false,
+                "am" => {
+                    meridiem = Some(false);
+                    have_non_date = true;
+                }
+                "pm" => {
+                    meridiem = Some(true);
+                    have_non_date = true;
+                }
+                "bc" => {
+                    is_bc = true;
+                    have_non_date = true;
+                }
+                "ad" => {
+                    is_bc = false;
+                    have_non_date = true;
+                }
+                // `DST` as a word of its own moves the zone already named an
+                // hour east: `MET DST` is +02. It modifies a zone rather than
+                // being one, so it needs a fixed offset to modify.
+                "dst" => {
+                    let Some(Zone::Offset(offset)) = zone else {
+                        return Err(DecodeError::Syntax);
+                    };
+                    zone = Some(Zone::Offset(
+                        Offset::from_seconds(offset.seconds() + 3_600)
+                            .map_err(|_| DecodeError::TzDisplacement)?,
+                    ));
+                }
                 "allballs" => {
                     tm.hour = Some(0);
                     tm.minute = Some(0);
@@ -435,6 +488,7 @@ pub fn decode(text: &str, order: DateOrder) -> Result<Decoded, DecodeError> {
                     } else if is_weekday(word) {
                         // Day-of-week names are decoration; PostgreSQL does not
                         // cross-check them against the date.
+                        have_non_date = true;
                     } else if let Some(found) =
                         lookup_abbrev(word).or_else(|| lookup_zone_name(word))
                     {
@@ -481,25 +535,72 @@ pub fn decode(text: &str, order: DateOrder) -> Result<Decoded, DecodeError> {
     }))
 }
 
+/// Fill the calendar fields from a Julian day number.
+fn set_julian_date(digits: &str, tm: &mut Tm) -> Result<(), DecodeError> {
+    let jd: i32 = digits.parse().map_err(|_| DecodeError::FieldOverflow)?;
+    let date = julian_to_date(jd)?;
+    tm.year = Some(i32::from(date.year()));
+    tm.month = Some(i32::from(date.month()));
+    tm.day = Some(i32::from(date.day()));
+    tm.two_digit_year = false;
+    Ok(())
+}
+
+/// Turn the fractional part of a Julian day into microseconds since midnight.
+fn day_fraction_to_micros(digits: &str) -> Result<i64, DecodeError> {
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(DecodeError::Syntax);
+    }
+    let fraction: f64 = format!("0.{digits}")
+        .parse()
+        .map_err(|_| DecodeError::Syntax)?;
+    Ok((fraction * MICROS_PER_DAY as f64).round() as i64)
+}
+
 /// Apply the era and two-digit-year windows and build the calendar date.
+///
+/// `PostgreSQL`'s `ValidateDate` range-checks each field that arrived BEFORE
+/// anything insists the date is complete, and that order is observable:
+/// `19971)24` is a year and a month with no day, and it reports the month being
+/// out of range rather than the missing day.
 fn finish_date(tm: &Tm, is_bc: bool, is_julian: bool) -> Result<Option<Date>, DecodeError> {
-    let Some(year) = tm.year else {
+    // PostgreSQL stores BC years astronomically: 1 BC is year 0, so `n BC` is
+    // `-(n - 1)`. jiff numbers years the same way, so no further shift is needed.
+    let year = match tm.year {
+        Some(year) if is_julian => Some(year),
+        Some(year) if is_bc => {
+            if year <= 0 {
+                return Err(DecodeError::FieldOverflow);
+            }
+            Some(-(year - 1))
+        }
+        Some(year) if tm.two_digit_year && year < 100 => {
+            Some(if year < 70 { year + 2000 } else { year + 1900 })
+        }
+        Some(year) => {
+            // Year zero has no spelling outside the BC era.
+            if year <= 0 {
+                return Err(DecodeError::FieldOverflow);
+            }
+            Some(year)
+        }
+        None => None,
+    };
+    if let Some(month) = tm.month
+        && !(1..=12).contains(&month)
+    {
+        return Err(DecodeError::FieldOverflow);
+    }
+    if let Some(day) = tm.day
+        && !(1..=31).contains(&day)
+    {
+        return Err(DecodeError::FieldOverflow);
+    }
+    let Some(year) = year else {
         if tm.month.is_some() || tm.day.is_some() || tm.yday.is_some() {
             return Err(DecodeError::Syntax);
         }
         return Ok(None);
-    };
-    // PostgreSQL stores BC years astronomically: 1 BC is year 0, so `n BC` is
-    // `-(n - 1)`. jiff numbers years the same way, so no further shift is needed.
-    let year = if is_bc {
-        if year <= 0 {
-            return Err(DecodeError::FieldOverflow);
-        }
-        -(year - 1)
-    } else if tm.two_digit_year && !is_julian && year < 100 {
-        if year < 70 { year + 2000 } else { year + 1900 }
-    } else {
-        year
     };
     let year = i16::try_from(year).map_err(|_| DecodeError::FieldOverflow)?;
 
@@ -597,6 +698,13 @@ fn decode_date(
     tm: &mut Tm,
     have_text_month: &mut bool,
 ) -> Result<(), DecodeError> {
+    // `DecodeDate` reads a group, then skips separators hunting the next one;
+    // running out of text there is an error. So a trailing separator is
+    // malformed — which is the whole reason `1999-08-Jan` is rejected, since the
+    // field splitter hands the date half over as `1999-08-`.
+    if text.ends_with(|c: char| !c.is_ascii_alphanumeric()) {
+        return Err(DecodeError::Syntax);
+    }
     let raw: Vec<&str> = text
         .split(|c: char| !c.is_ascii_alphanumeric())
         .filter(|s| !s.is_empty())
@@ -620,6 +728,13 @@ fn decode_date(
     for part in numeric {
         decode_number(part, order, tm, *have_text_month)?;
     }
+    // A punctuated date field has to have carried a WHOLE date. PostgreSQL
+    // checks this at the end of `DecodeDate`, ahead of any range check, which is
+    // why `040506.07` — a year and a month and nothing else — is a syntax error
+    // rather than a complaint about the year.
+    if tm.year.is_none() || (tm.yday.is_none() && (tm.month.is_none() || tm.day.is_none())) {
+        return Err(DecodeError::Syntax);
+    }
     Ok(())
 }
 
@@ -640,7 +755,12 @@ fn decode_number_token(
         }
         // `040506.789` — a run-together time with fractional seconds.
         Some(dot) if dot > 2 => decode_number_field(text, tm),
-        _ if text.len() > 4 => decode_number_field(text, tm),
+        // A run-together `YYYYMMDD` or `HHMMSS` needs SIX digits. Five is a
+        // year, which is what leaves `19971)24` a month-out-of-range complaint
+        // rather than an unreadable field.
+        _ if text.len() >= 6 && !(tm.has_full_date() && tm.has_full_time()) => {
+            decode_number_field(text, tm)
+        }
         _ => decode_number(text, order, tm, have_text_month),
     }
 }
@@ -800,37 +920,72 @@ pub fn decode_numeric_time_zone(text: &str) -> Result<Offset, DecodeError> {
     decode_tz_offset(text)
 }
 
+/// Read the leading run of digits as an `i32` with the tail left over, C
+/// `strtoint` over one zone-offset field. No digits at all consumes nothing, so
+/// the caller's delimiter test is what rejects the text.
+fn take_offset_int(text: &str) -> Result<(i32, &str), DecodeError> {
+    let digits = text.strip_prefix(['+', '-']).unwrap_or(text);
+    let width = digits.bytes().take_while(u8::is_ascii_digit).count();
+    if width == 0 {
+        return Ok((0, text));
+    }
+    let end = text.len() - digits.len() + width;
+    let value = text[..end]
+        .parse()
+        .map_err(|_| DecodeError::TzDisplacement)?;
+    Ok((value, &text[end..]))
+}
+
 /// Parse a signed numeric UTC offset (`-08`, `-0800`, `+05:30:15`).
+///
+/// The shape of this grammar is what makes a *negative year* report a zone
+/// problem. `ParseDateTime` hands any `-` followed by digits to this function as
+/// a zone field, so `-44-02-01` arrives here as one offset: the hours read as
+/// 44, and the range check fires before the trailing `-02-01` is ever noticed as
+/// leftover text. `time zone displacement out of range` for what looks like a BC
+/// date is that ordering showing through, not a special case.
 fn decode_tz_offset(text: &str) -> Result<Offset, DecodeError> {
-    let (sign, rest) = match text.as_bytes().first() {
-        Some(b'+') => (1i32, &text[1..]),
-        Some(b'-') => (-1i32, &text[1..]),
+    let negative = match text.as_bytes().first() {
+        Some(b'+') => false,
+        Some(b'-') => true,
         _ => return Err(DecodeError::Syntax),
     };
-    let (hour, minute, second) = if rest.contains(':') {
-        let mut parts = rest.split(':');
-        let hour = parts.next().unwrap_or_default();
-        let minute = parts.next().unwrap_or("0");
-        let second = parts.next().unwrap_or("0");
-        if parts.next().is_some() {
-            return Err(DecodeError::Syntax);
+    let (mut hour, rest) = take_offset_int(&text[1..])?;
+    let mut minute = 0;
+    let mut second = 0;
+    let rest = if let Some(after_colon) = rest.strip_prefix(':') {
+        let (parsed, rest) = take_offset_int(after_colon)?;
+        minute = parsed;
+        match rest.strip_prefix(':') {
+            Some(after_colon) => {
+                let (parsed, rest) = take_offset_int(after_colon)?;
+                second = parsed;
+                rest
+            }
+            None => rest,
         }
-        (hour, minute, second)
+    } else if rest.is_empty() && text.len() > 3 {
+        // Run together, so the last two digits are minutes: `-0800`. There is no
+        // run-together `hhmmss` — `-080000` reads as 8000 hours and is rejected.
+        minute = hour % 100;
+        hour /= 100;
+        rest
     } else {
-        match rest.len() {
-            1 | 2 => (rest, "0", "0"),
-            4 => (&rest[..2], &rest[2..4], "0"),
-            6 => (&rest[..2], &rest[2..4], &rest[4..6]),
-            _ => return Err(DecodeError::Syntax),
-        }
+        rest
     };
-    let hour = parse_int(hour).map_err(|_| DecodeError::TzDisplacement)?;
-    let minute = parse_int(minute).map_err(|_| DecodeError::TzDisplacement)?;
-    let second = parse_int(second).map_err(|_| DecodeError::TzDisplacement)?;
-    if hour > MAX_TZDISP_HOUR || minute >= 60 || second >= 60 {
+    if !(0..=MAX_TZDISP_HOUR).contains(&hour)
+        || !(0..60).contains(&minute)
+        || !(0..60).contains(&second)
+    {
         return Err(DecodeError::TzDisplacement);
     }
-    Offset::from_seconds(sign * (hour * 3600 + minute * 60 + second))
+    // Trailing text is only a syntax error once the fields themselves are in
+    // range, which is the ordering that decides the message.
+    if !rest.is_empty() {
+        return Err(DecodeError::Syntax);
+    }
+    let seconds = hour * 3600 + minute * 60 + second;
+    Offset::from_seconds(if negative { -seconds } else { seconds })
         .map_err(|_| DecodeError::TzDisplacement)
 }
 

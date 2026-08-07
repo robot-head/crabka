@@ -228,3 +228,250 @@ fn interval_input_spellings_match_postgres() {
     }
     assert!(let Err(TypeError::InvalidDatetimeFormat { .. }) = parse_interval("garbage"));
 }
+
+// ---------------------------------------------------------------------------
+// Oracle rows, rendered the way a client sees them: either the output text or
+// the SQLSTATE and message. Writing the whole answer as one string keeps each
+// table row an exact transcript of what `PostgreSQL` 18.4 replied, so a row is
+// checkable against the oracle by eye and a wrong SQLSTATE cannot hide behind a
+// right message.
+// ---------------------------------------------------------------------------
+
+/// Render a result the way the oracle rows below spell it.
+fn outcome<T>(result: Result<T, TypeError>, render: impl FnOnce(T) -> String) -> String {
+    match result {
+        Ok(value) => format!("OK|{}", render(value)),
+        Err(error) => format!("ERR|{}|{error}", error.sqlstate()),
+    }
+}
+
+fn interval_outcome(input: &str) -> String {
+    outcome(parse_interval(input), interval_to_text)
+}
+
+fn timestamp_outcome(input: &str) -> String {
+    outcome(parse_timestamp(input), timestamp_to_text)
+}
+
+fn check(rows: &[(&str, &str)], probe: impl Fn(&str) -> String) {
+    for (input, expected) in rows {
+        assert!(probe(input) == *expected, "input {input}");
+    }
+}
+
+#[test]
+fn interval_field_overflow_is_22015_and_the_assembly_overflow_is_22008() {
+    check(
+        &[
+            // A field that leaves its accumulator mid-decode.
+            (
+                "-2147483649 years",
+                r#"ERR|22015|interval field value out of range: "-2147483649 years""#,
+            ),
+            (
+                "2147483648 months",
+                r#"ERR|22015|interval field value out of range: "2147483648 months""#,
+            ),
+            (
+                "9223372036854775808 microsecond",
+                r#"ERR|22015|interval field value out of range: "9223372036854775808 microsecond""#,
+            ),
+            // `ago` cannot negate a field already at its minimum.
+            (
+                "-2147483648 months ago",
+                r#"ERR|22015|interval field value out of range: "-2147483648 months ago""#,
+            ),
+            (
+                "P2147483648",
+                r#"ERR|22015|interval field value out of range: "P2147483648""#,
+            ),
+            (
+                "PT2562047789",
+                r#"ERR|22015|interval field value out of range: "PT2562047789""#,
+            ),
+            (
+                "P0.1Y2147483647M",
+                r#"ERR|22015|interval field value out of range: "P0.1Y2147483647M""#,
+            ),
+            (
+                "2562047788.1:0:54.775807",
+                r#"ERR|22015|interval field value out of range: "2562047788.1:0:54.775807""#,
+            ),
+            (
+                "0.1 2562047788:0:54.775807",
+                r#"ERR|22015|interval field value out of range: "0.1 2562047788:0:54.775807""#,
+            ),
+            // One step under each of those is a perfectly ordinary interval.
+            ("2562047788:0:54.775807", "OK|2562047788:00:54.775807"),
+            // The years field holds these; only folding years into months fails,
+            // and that is a different error with a different SQLSTATE.
+            ("-2147483648 years", "ERR|22008|interval out of range"),
+            ("2147483647 years", "ERR|22008|interval out of range"),
+            (
+                "P1-2147483647-2147483647",
+                "ERR|22008|interval out of range",
+            ),
+            // Malformed text keeps 22007 and never becomes an overflow.
+            (
+                "garbage",
+                r#"ERR|22007|invalid input syntax for type interval: "garbage""#,
+            ),
+        ],
+        interval_outcome,
+    );
+}
+
+#[test]
+fn interval_field_splitting_follows_postgres_rather_than_whitespace() {
+    check(
+        &[
+            // A unit word ends the number that precedes it, with no gap needed.
+            ("1mon", "OK|1 mon"),
+            (
+                "4 millenniums 5 centuries 4 decades 1 year 4 months 4 days 17 minutes 31 seconds",
+                "OK|4541 years 4 mons 4 days 00:17:31",
+            ),
+            // A lone sign binds to the number after it.
+            ("1 month - 1 second", "OK|1 mon -00:00:01"),
+            ("2 days - 12:34:56", "OK|2 days -12:34:56"),
+            // A fraction on the second field of a two-field clock reading shifts
+            // the whole reading down to minutes and seconds.
+            ("12:34.5678", "OK|00:12:34.5678"),
+            ("1 2:03.4567", "OK|1 day 00:02:03.4567"),
+            // The reserved non-finite encodings are reachable as literals.
+            (
+                "-2147483648 months -2147483648 days -9223372036854775808 us",
+                "OK|-infinity",
+            ),
+            (
+                "2147483647 months 2147483647 days 9223372036854775807 us",
+                "OK|infinity",
+            ),
+        ],
+        interval_outcome,
+    );
+}
+
+#[test]
+fn iso8601_interval_forms_match_postgres() {
+    check(
+        &[
+            ("P0002", "OK|2 years"),
+            ("P0002-10", "OK|2 years 10 mons"),
+            ("P0002-10-15T1S", "OK|2 years 10 mons 15 days 00:00:01"),
+            ("P00021015T103020", "OK|2 years 10 mons 15 days 10:30:20"),
+            ("PT10", "OK|10:00:00"),
+            ("PT10:30", "OK|10:30:00"),
+            // Exponent notation is `strtod`'s, and PostgreSQL keeps it here.
+            ("P10.5e4Y", "OK|105000 years"),
+            (
+                "P-1Y-2M-3DT-4H-5M-6.7S",
+                "OK|-1 years -2 mons -3 days -04:05:06.7",
+            ),
+        ],
+        interval_outcome,
+    );
+}
+
+#[test]
+fn a_leading_minus_lexes_as_a_zone_so_a_negative_year_reports_displacement() {
+    check(
+        &[
+            (
+                "-44-02-01",
+                r#"ERR|22009|time zone displacement out of range: "-44-02-01""#,
+            ),
+            (
+                "-44-02-01 11:12:13 BC",
+                r#"ERR|22009|time zone displacement out of range: "-44-02-01 11:12:13 BC""#,
+            ),
+            (
+                "-2147483648-1-1",
+                r#"ERR|22009|time zone displacement out of range: "-2147483648-1-1""#,
+            ),
+            // The same grammar reading ordinary offsets, on both sides of the
+            // ±15:59:59 limit.
+            ("1997-02-10 17:32:01 -08", "OK|1997-02-10 17:32:01"),
+            ("1997-02-10 17:32:01 -0800", "OK|1997-02-10 17:32:01"),
+            ("1997-02-10 17:32:01 -800", "OK|1997-02-10 17:32:01"),
+            ("1997-02-10 17:32:01 -15:59:59", "OK|1997-02-10 17:32:01"),
+            (
+                "1997-02-10 17:32:01 -16",
+                r#"ERR|22009|time zone displacement out of range: "1997-02-10 17:32:01 -16""#,
+            ),
+            // There is no run-together `hhmmss` offset: this reads as 8000 hours.
+            (
+                "1997-02-10 17:32:01 -080000",
+                r#"ERR|22009|time zone displacement out of range: "1997-02-10 17:32:01 -080000""#,
+            ),
+        ],
+        timestamp_outcome,
+    );
+}
+
+#[test]
+fn a_punctuated_date_field_must_carry_a_whole_date_and_stand_alone() {
+    check(
+        &[
+            // A year and a month with no day: malformed, not out of range.
+            (
+                "040506.07",
+                r#"ERR|22007|invalid input syntax for type timestamp: "040506.07""#,
+            ),
+            (
+                "T040506.789+08",
+                r#"ERR|22007|invalid input syntax for type timestamp: "T040506.789+08""#,
+            ),
+            // The date half lexes as `1999-08-`, and a trailing separator with
+            // nothing behind it is malformed.
+            (
+                "1999-08-Jan",
+                r#"ERR|22007|invalid input syntax for type timestamp: "1999-08-Jan""#,
+            ),
+            // A weekday BEFORE a punctuated date is malformed; after it is fine.
+            (
+                "Fri 1-January-1999",
+                r#"ERR|22007|invalid input syntax for type timestamp: "Fri 1-January-1999""#,
+            ),
+            ("1-January-1999 Fri", "OK|1999-01-01 00:00:00"),
+            // Five digits is a year, so the `24` lands in the month slot and it
+            // is the month that is out of range — the day never gets a say.
+            (
+                "19971)24",
+                r#"ERR|22008|date/time field value out of range: "19971)24""#,
+            ),
+        ],
+        timestamp_outcome,
+    );
+}
+
+#[test]
+fn julian_days_take_an_attached_zone_and_a_fractional_day() {
+    check(
+        &[
+            ("J2452271", "OK|2001-12-27 00:00:00"),
+            ("J2452271-08", "OK|2001-12-27 00:00:00"),
+            ("J2452271.5+08", "OK|2001-12-27 12:00:00"),
+            // `DST` on its own modifies the zone already named.
+            (
+                "2001-12-27 04:05:06.789 MET DST",
+                "OK|2001-12-27 04:05:06.789",
+            ),
+        ],
+        timestamp_outcome,
+    );
+}
+
+#[test]
+fn timestamptz_range_is_checked_on_the_instant_not_the_local_reading() {
+    // The first representable instant, written at a wall clock that falls on the
+    // day before it. Checking the local reading would reject this.
+    let first = parse_timestamptz("4714-11-23 16:00:00-08 BC", &utc()).expect("first instant");
+    assert!(timestamptz_to_text(first, &utc()) == "4714-11-24 00:00:00+00 BC");
+    let before = parse_timestamptz("4714-11-23 15:59:59-08 BC", &utc()).expect_err("one earlier");
+    assert!(before.sqlstate() == "22008", "got {before}");
+    assert!(
+        format!("{before}") == r#"timestamp out of range: "4714-11-23 15:59:59-08 BC""#,
+        "got {before}"
+    );
+}
