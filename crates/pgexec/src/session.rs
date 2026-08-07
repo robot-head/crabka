@@ -8031,6 +8031,9 @@ impl SqlSession {
         };
         let inheritance_notices =
             crate::exec::inheritance_merge_notices(&*self.catalog_kv, &resolution, stmt)?;
+        // Computed before the drop runs, while the dependents still exist.
+        let cascade_notice =
+            crate::exec::cascade_drop_notice(&*self.catalog_kv, &resolution, stmt)?;
         let (result, ops) = crate::exec::execute_ddl(&*self.catalog_kv, stmt, fctx)?;
         // An open block needs the before-images whether or not it has taken a
         // savepoint: DDL commits its batch here and now, so `ROLLBACK` has
@@ -8209,6 +8212,13 @@ impl SqlSession {
             self.plpgsql_notice(PgError::notice(format!(
                 "merging multiple inherited definitions of column \"{column}\""
             )))?;
+        }
+        if let Some((message, detail)) = cascade_notice {
+            let notice = PgError::notice(message);
+            self.plpgsql_notice(match detail {
+                Some(detail) => notice.with_detail(detail),
+                None => notice,
+            })?;
         }
         if let (Some(before), Some(changed)) = (&user_types_before, &changed_user_type_oids) {
             // Hooks can commit nested type DDL after the outer batch. Publish

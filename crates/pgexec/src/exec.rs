@@ -6513,6 +6513,66 @@ pub(crate) fn ddl_unique_local_relation(
     }
 }
 
+/// The `NOTICE` a `CASCADE` drop owes for the objects it takes with it.
+///
+/// PostgreSQL reports one dropped dependent inline and several as a count plus
+/// a `DETAIL` line each:
+///
+/// ```text
+/// NOTICE:  drop cascades to view d_mid
+///
+/// NOTICE:  drop cascades to 3 other objects
+/// DETAIL:  drop cascades to view m1
+/// drop cascades to view m3
+/// drop cascades to view m2
+/// ```
+///
+/// Returns `(message, detail)`, empty when the statement drops nothing beyond
+/// its target -- which includes every non-`CASCADE` drop, since one that would
+/// cascade is refused before it reaches here.
+pub(crate) fn cascade_drop_notice(
+    kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
+    stmt: &Statement,
+) -> Result<Option<(String, Option<String>)>, ExecError> {
+    let reference = match stmt {
+        Statement::DropTable {
+            names,
+            cascade: true,
+            ..
+        } => match names.as_slice() {
+            // `DROP TABLE a, b` cascades over the whole list; reporting it
+            // needs the union in PostgreSQL's order, which the single-name
+            // form does not tell us. Left alone rather than reported wrongly.
+            [only] => only,
+            _ => return Ok(None),
+        },
+        Statement::DropView {
+            name,
+            cascade: true,
+            ..
+        } => name,
+        _ => return Ok(None),
+    };
+    let column = None;
+    let Ok(name) = resolve_relation(kv, resolution, reference, SchemaDisposition::Reference) else {
+        return Ok(None);
+    };
+    let dependents = dependent_view_chain(kv, &name, column)?;
+    let mut lines: Vec<String> = dependents
+        .iter()
+        .map(|(view, _)| format!("drop cascades to view {}", view.name))
+        .collect();
+    match lines.len() {
+        0 => Ok(None),
+        1 => Ok(Some((lines.remove(0), None))),
+        n => Ok(Some((
+            format!("drop cascades to {n} other objects"),
+            Some(lines.join("\n")),
+        ))),
+    }
+}
+
 pub(crate) fn inheritance_merge_notices(
     kv: &dyn Kv,
     resolution: &crate::relname::ResolutionScope,
@@ -23642,23 +23702,32 @@ pub(crate) fn dependent_view_chain(
             found.push((name, table.clone()));
         }
     }
-    // Breadth-first from the direct dependents, which is the order PostgreSQL
-    // reports them in. A view cannot read itself, so the frontier only grows.
+    // Depth-first from each direct dependent: everything reading a view is
+    // reported directly after it, before the next sibling. That is the order
+    // PostgreSQL's DETAIL lines carry -- `findDependentObjects` recurses -- so
+    // three views where the third reads the first read out as first, third,
+    // second rather than in discovery order. A view cannot read itself, so the
+    // walk terminates.
     let mut frontier = 0;
     while frontier < found.len() {
         let via = found[frontier].0.clone();
         frontier += 1;
+        let mut children = Vec::new();
         for probe in &mut views {
             let name = probe.view.name.clone();
             if name == via
                 || name == *table
                 || found.iter().any(|(found, _)| *found == name)
+                || children.iter().any(|(child, _)| *child == name)
                 || !probe.can_reach_schema(&via.schema)
                 || !reads(probe, &via, false)
             {
                 continue;
             }
-            found.push((name, via.clone()));
+            children.push((name, via.clone()));
+        }
+        for (offset, child) in children.into_iter().enumerate() {
+            found.insert(frontier + offset, child);
         }
     }
     Ok(found)
