@@ -92,6 +92,17 @@ pub enum Zone {
     Named(TimeZone),
 }
 
+impl Zone {
+    /// The jiff zone this stands for.
+    #[must_use]
+    pub fn into_time_zone(self) -> TimeZone {
+        match self {
+            Zone::Offset(offset) => TimeZone::fixed(offset),
+            Zone::Named(tz) => tz,
+        }
+    }
+}
+
 /// Everything a literal supplied, before any per-type interpretation.
 #[derive(Debug, Clone)]
 pub struct Parts {
@@ -771,6 +782,24 @@ fn parse_fraction(digits: &str) -> Result<i64, DecodeError> {
 // Zones
 // ---------------------------------------------------------------------------
 
+/// Parse a signed numeric UTC offset (`-08`, `-0800`, `+05:30:15`) with the ISO
+/// sign, where a leading `-` is *behind* UTC.
+///
+/// This is `PostgreSQL`'s `DecodeTimezone`, the grammar it applies to the zone
+/// of a literal and to `make_timestamptz`'s zone argument. It is deliberately
+/// **not** the grammar behind a zone *specification* — `AT TIME ZONE '-08:00'`
+/// and `SET TimeZone = '-08:00'` both count the offset west of Greenwich
+/// instead. See [`posix_zone`] and [`resolve_guc_time_zone`].
+///
+/// # Errors
+///
+/// [`DecodeError::Syntax`] when the text is not of this shape at all, and
+/// [`DecodeError::TzDisplacement`] when it is but names an offset beyond
+/// ±15:59:59.
+pub fn decode_numeric_time_zone(text: &str) -> Result<Offset, DecodeError> {
+    decode_tz_offset(text)
+}
+
 /// Parse a signed numeric UTC offset (`-08`, `-0800`, `+05:30:15`).
 fn decode_tz_offset(text: &str) -> Result<Offset, DecodeError> {
     let (sign, rest) = match text.as_bytes().first() {
@@ -806,22 +835,107 @@ fn decode_tz_offset(text: &str) -> Result<Offset, DecodeError> {
 }
 
 /// Resolve a punctuated zone specification: a zone-database name, or a `POSIX`
-/// `STD±offset` spec whose sign counts *west* of UTC and so inverts.
+/// `TZ` specification whose sign counts *west* of UTC and so inverts.
 fn lookup_zone_spec(text: &str) -> Result<Zone, DecodeError> {
-    if let Some(zone) = lookup_zone_name(text) {
-        return Ok(zone);
+    lookup_zone_name(text)
+        .or_else(|| posix_zone(text))
+        .ok_or_else(|| DecodeError::UnknownZone(text.to_string()))
+}
+
+/// The transition rule `PostgreSQL` substitutes when a `POSIX` specification
+/// names a daylight abbreviation but gives no rule — tzcode's `TZDEFRULESTRING`,
+/// the United States rules in force since 2007. It is what makes `FOO8BAR` a
+/// zone that springs forward on the second Sunday in March.
+const POSIX_DEFAULT_RULE: &str = ",M3.2.0,M11.1.0";
+
+/// The largest hour `PostgreSQL`'s `POSIX` offset grammar accepts.
+const MAX_POSIX_HOUR: i64 = 167;
+
+/// Resolve a `POSIX` `TZ` specification — `STD offset [DST [offset] [,rule]]`.
+///
+/// The offset counts hours *west* of Greenwich, the opposite of the ISO sign, so
+/// `UTC-2` names UTC+2 and a naked `-08:00` names UTC+8. `PostgreSQL` is laxer
+/// than `POSIX` about the standard abbreviation — its `tzparse` allows one
+/// shorter than three characters, or none at all — which is precisely what makes
+/// a bare offset a legal specification. A specification with no daylight part
+/// therefore resolves to a fixed offset here rather than going through jiff,
+/// whose parser holds to the stricter `POSIX` grammar.
+///
+/// Two corners of `PostgreSQL`'s grammar stay out of reach and resolve to `None`
+/// instead. Its `tzparse` accepts an offset of up to 167 hours, where a jiff
+/// [`Offset`] stops at ±25:59:59, so `UTC-99` and `+30:00` are accepted there and
+/// rejected here. And a fractional spelling such as `-1.5` reads, to `tzparse`,
+/// as a one-hour standard offset followed by a daylight abbreviation spelled `.`
+/// — a zone that then observes United States daylight saving. Neither is
+/// reachable from the regression suite, whose fractional zone *settings* all
+/// arrive by the numeric route in [`resolve_guc_time_zone`] instead.
+fn posix_zone(spec: &str) -> Option<Zone> {
+    let after_abbrev = posix_abbrev(spec)?;
+    let (west_seconds, rest) = posix_offset(after_abbrev)?;
+    if rest.is_empty() {
+        let seconds = i32::try_from(-west_seconds).ok()?;
+        return Offset::from_seconds(seconds).ok().map(Zone::Offset);
     }
-    if let Some(at) = text.find(['+', '-']) {
-        let (name, offset) = text.split_at(at);
-        if name.len() >= 3 && name.bytes().all(|b| b.is_ascii_alphabetic()) {
-            let sign = if offset.starts_with('-') { -1 } else { 1 };
-            let magnitude = decode_tz_offset(&format!("+{}", &offset[1..]))?;
-            return Offset::from_seconds(-sign * magnitude.seconds())
-                .map(Zone::Offset)
-                .map_err(|_| DecodeError::TzDisplacement);
+    // A daylight abbreviation follows, so the zone has two offsets and needs a
+    // transition rule to switch between them. jiff owns that part; all this adds
+    // is PostgreSQL's default rule for a specification that names a daylight
+    // abbreviation and then stops.
+    let completed;
+    let full = if rest.contains([',', ';']) {
+        spec
+    } else {
+        completed = format!("{spec}{POSIX_DEFAULT_RULE}");
+        &completed
+    };
+    TimeZone::posix(full).ok().map(Zone::Named)
+}
+
+/// Skip a `POSIX` zone abbreviation — `<quoted>` or a bare run of characters —
+/// and return what follows it. `PostgreSQL` accepts an abbreviation of any
+/// length, including an empty one, so this never fails on a short name.
+fn posix_abbrev(spec: &str) -> Option<&str> {
+    if let Some(quoted) = spec.strip_prefix('<') {
+        let end = quoted.find('>')?;
+        return Some(&quoted[end + '>'.len_utf8()..]);
+    }
+    let end = spec
+        .find(|c: char| c.is_ascii_digit() || c == ',' || c == '+' || c == '-')
+        .unwrap_or(spec.len());
+    Some(&spec[end..])
+}
+
+/// Decode a `POSIX` offset — `[±]hh[:mm[:ss]]` — into seconds *west* of
+/// Greenwich, and return it with the text it did not consume.
+fn posix_offset(spec: &str) -> Option<(i64, &str)> {
+    let (negative, rest) = match spec.as_bytes().first()? {
+        b'-' => (true, &spec[1..]),
+        b'+' => (false, &spec[1..]),
+        _ => (false, spec),
+    };
+    let (hour, mut rest) = posix_number(rest, MAX_POSIX_HOUR)?;
+    let mut seconds = hour * 3600;
+    if let Some(after_hour) = rest.strip_prefix(':') {
+        let (minute, tail) = posix_number(after_hour, 59)?;
+        seconds += minute * 60;
+        rest = tail;
+        if let Some(after_minute) = rest.strip_prefix(':') {
+            // tzcode's `getsecs` allows a leap second here.
+            let (second, tail) = posix_number(after_minute, 60)?;
+            seconds += second;
+            rest = tail;
         }
     }
-    Err(DecodeError::UnknownZone(text.to_string()))
+    Some((if negative { -seconds } else { seconds }, rest))
+}
+
+/// Read the leading run of digits as a number no greater than `max`, and return
+/// it with the text it did not consume. An empty run is not a number.
+fn posix_number(spec: &str, max: i64) -> Option<(i64, &str)> {
+    let end = spec
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(spec.len());
+    let value: i64 = spec[..end].parse().ok()?;
+    (value <= max).then_some((value, &spec[end..]))
 }
 
 /// Look a name up in the zone database. Literals reach here lowercased, which
@@ -833,42 +947,101 @@ fn lookup_zone_name(name: &str) -> Option<Zone> {
     zone_by_name(name).map(Zone::Named)
 }
 
-/// Resolve a zone the way `AT TIME ZONE`, the `timezone()` function and the
-/// `TimeZone` setting do: a zone-database name, one of `PostgreSQL`'s
-/// abbreviations, a `POSIX` `STD±offset` spec, or a bare signed UTC offset.
+/// Resolve a zone the way `AT TIME ZONE`, the `timezone()` function and
+/// `date_trunc`'s third argument do — `PostgreSQL`'s `DecodeTimezoneName`: one
+/// of `PostgreSQL`'s abbreviations, a zone-database name, or a `POSIX` `TZ`
+/// specification.
 ///
 /// Database names come from the bundled database (see [`super::tzdb`]), so the
 /// vocabulary is the server build's, not the host's.
 ///
-/// A bare offset follows the ISO sign convention here — `'-05:00'` is five hours
-/// *behind* UTC. That does **not** match `PostgreSQL`, which reads a bare offset
-/// in this position as a `POSIX` zone spec and so counts it *west* of Greenwich:
-/// `SET TimeZone = '-08:00'` puts a session on UTC+8 there, and `AT TIME ZONE
-/// '-08:00'` shifts the same way. Zone-bearing *literals* are unaffected — those
-/// go through [`decode`], which is ISO in both systems.
+/// The abbreviation table is consulted *before* the database, because the
+/// database reuses a few spellings the default abbreviation set already binds:
+/// `AT TIME ZONE 'CET'` is a fixed +01 rather than the zone whose summers run
+/// at +02.
+///
+/// Everything that is neither an abbreviation nor a database name is a `POSIX`
+/// specification, whose offset counts *west* of Greenwich — so `AT TIME ZONE
+/// '-08:00'` yields UTC+8, and `'UTC-2'` yields UTC+2. Zone-bearing *literals*
+/// do not come through here: their numeric offsets go to
+/// [`decode_numeric_time_zone`], which is ISO, and only a punctuated zone
+/// *name* in a literal reaches the `POSIX` grammar.
 #[must_use]
 pub fn resolve_time_zone(name: &str) -> Option<TimeZone> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
         return None;
     }
-    if trimmed.starts_with(['+', '-']) {
-        return decode_tz_offset(trimmed).ok().map(TimeZone::fixed);
-    }
-    // An unsigned `HH:MM` setting is east of UTC, the same as `+HH:MM`.
-    if trimmed.contains(':') && trimmed.bytes().all(|b| b.is_ascii_digit() || b == b':') {
-        return decode_tz_offset(&format!("+{trimmed}"))
-            .ok()
-            .map(TimeZone::fixed);
-    }
     let lower = trimmed.to_ascii_lowercase();
-    let zone = lookup_zone_name(trimmed)
-        .or_else(|| lookup_abbrev(&lower))
-        .or_else(|| lookup_zone_spec(&lower).ok())?;
-    Some(match zone {
-        Zone::Offset(offset) => TimeZone::fixed(offset),
-        Zone::Named(tz) => tz,
-    })
+    let zone = lookup_abbrev(&lower)
+        .or_else(|| lookup_zone_name(trimmed))
+        .or_else(|| posix_zone(trimmed))?;
+    Some(zone.into_time_zone())
+}
+
+/// Resolve the value of the `TimeZone` setting, which `PostgreSQL`'s
+/// `check_timezone` reads by rules of its own.
+///
+/// A value that is wholly a number — `'-08'`, `'+2'`, `'0'`, `'-1.5'` — is a
+/// count of hours *east* of Greenwich, the ISO sign. Anything else is a
+/// zone-database name or a `POSIX` specification, where the sign is *west*.
+/// The two conventions therefore meet inside this one function: `SET TimeZone =
+/// '-08'` puts a session on UTC-8, while `SET TimeZone = '-08:00'` — the same
+/// offset written with a colon, which no longer parses as a number — puts it on
+/// UTC+8.
+///
+/// The abbreviation table is not consulted at all, so `SET TimeZone = 'PST'`
+/// fails here while `AT TIME ZONE 'PST'` succeeds.
+#[must_use]
+pub fn resolve_guc_time_zone(value: &str) -> Option<TimeZone> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(offset) = numeric_hours_offset(trimmed) {
+        return Some(TimeZone::fixed(offset));
+    }
+    let zone = lookup_zone_name(trimmed).or_else(|| posix_zone(trimmed))?;
+    Some(zone.into_time_zone())
+}
+
+/// Decode the `TimeZone` setting's plain-number form: a possibly fractional
+/// count of hours *east* of Greenwich. `None` when the text is not wholly a
+/// number, which is how `PostgreSQL` distinguishes this form (`strtod` must
+/// consume the entire string) from a zone name or `POSIX` specification.
+fn numeric_hours_offset(value: &str) -> Option<Offset> {
+    let (negative, magnitude) = match value.as_bytes().first()? {
+        b'-' => (true, &value[1..]),
+        b'+' => (false, &value[1..]),
+        _ => (false, value),
+    };
+    let (whole, fraction) = magnitude.split_once('.').unwrap_or((magnitude, ""));
+    if whole.is_empty() && fraction.is_empty() {
+        return None;
+    }
+    if !whole
+        .bytes()
+        .chain(fraction.bytes())
+        .all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    // Digits past the fourth cannot move a whole second, so dropping them keeps
+    // the arithmetic in range without changing the answer.
+    let fraction = &fraction[..fraction.len().min(9)];
+    let mut seconds = if whole.is_empty() {
+        0
+    } else {
+        whole.parse::<i64>().ok()?.checked_mul(3600)?
+    };
+    if !fraction.is_empty() {
+        let scale = 10_i64.checked_pow(u32::try_from(fraction.len()).ok()?)?;
+        // Truncating, like the C conversion PostgreSQL's `strtod` result goes
+        // through on the way to a `long`.
+        seconds = seconds.checked_add(fraction.parse::<i64>().ok()? * 3600 / scale)?;
+    }
+    let seconds = i32::try_from(if negative { -seconds } else { seconds }).ok()?;
+    Offset::from_seconds(seconds).ok()
 }
 
 /// Resolve a bare timezone abbreviation.
@@ -1177,7 +1350,7 @@ mod zone_resolution_tests {
     use assert2::assert;
     use jiff::Timestamp;
 
-    use super::resolve_time_zone;
+    use super::{resolve_guc_time_zone, resolve_time_zone};
 
     /// `1970-01-01T00:00:00Z` — northern-hemisphere winter, standard time.
     fn winter() -> Timestamp {
@@ -1190,8 +1363,13 @@ mod zone_resolution_tests {
     }
 
     /// The offset in seconds and the zone abbreviation a resolved zone reports.
+    ///
+    /// Resolution goes through the `TimeZone` setting's entry point, the one
+    /// that reaches the zone database without the abbreviation table in front
+    /// of it — and also the only entry point whose result is rendered with an
+    /// abbreviation at all, since `AT TIME ZONE` yields a bare `timestamp`.
     fn rendered(name: &str, at: Timestamp) -> (i32, String) {
-        let tz = resolve_time_zone(name).unwrap_or_else(|| panic!("{name} should resolve"));
+        let tz = resolve_guc_time_zone(name).unwrap_or_else(|| panic!("{name} should resolve"));
         let info = tz.to_offset_info(at);
         (info.offset().seconds(), info.abbreviation().to_string())
     }
@@ -1259,6 +1437,201 @@ mod zone_resolution_tests {
                 resolve_time_zone(name).is_none(),
                 "{name} should not resolve"
             );
+        }
+    }
+}
+
+/// The three sign conventions `PostgreSQL` applies to a zone, and where each one
+/// applies. Every expectation below was read off `PostgreSQL` 18.4.
+#[cfg(test)]
+mod posix_zone_tests {
+    use assert2::assert;
+    use jiff::{Timestamp, tz::TimeZone};
+
+    use super::{resolve_guc_time_zone, resolve_time_zone};
+    use crate::datetime::parse_timestamptz;
+
+    /// `1970-01-01T00:00:00Z`, the instant every offset row is measured at.
+    fn epoch() -> Timestamp {
+        Timestamp::from_second(0).expect("epoch")
+    }
+
+    fn instant(text: &str) -> Timestamp {
+        text.parse().expect("instant")
+    }
+
+    /// The seconds *east* of UTC a resolved zone is at `at`.
+    fn seconds_east(tz: &TimeZone, at: Timestamp) -> i32 {
+        tz.to_offset_info(at).offset().seconds()
+    }
+
+    /// `AT TIME ZONE`, `timezone()` and `date_trunc`'s zone argument all read
+    /// their text as a `POSIX` specification, whose offset counts *west* of
+    /// Greenwich. Writing `'-08:00'` there therefore selects UTC+8.
+    #[test]
+    fn a_zone_specification_counts_its_offset_west_of_greenwich() {
+        let cases: &[(&str, i32)] = &[
+            ("-08:00", 28800),
+            ("+08:00", -28800),
+            ("08:00", -28800),
+            ("-13:00", 46800),
+            ("-00:30", 1800),
+            ("00:30", -1800),
+            ("-04:15", 15300),
+            ("04:15", -15300),
+            ("-04:30", 16200),
+            ("04:30", -16200),
+            ("UTC-2", 7200),
+            ("UTC+10", -36000),
+            ("-08", 28800),
+            ("+10", -36000),
+            ("2", -7200),
+            ("0", 0),
+            ("+16:00", -57600),
+            ("00:00", 0),
+            ("+02:00", -7200),
+        ];
+        for &(spec, east) in cases {
+            let tz = resolve_time_zone(spec).unwrap_or_else(|| panic!("{spec} should resolve"));
+            assert!(seconds_east(&tz, epoch()) == east, "AT TIME ZONE {spec}");
+        }
+    }
+
+    /// The `TimeZone` setting is the one place a bare number keeps the ISO sign:
+    /// a value that is wholly a number counts hours *east*. The very same offset
+    /// written with a colon is no longer a number, falls through to the `POSIX`
+    /// grammar, and lands on the opposite side of Greenwich.
+    #[test]
+    fn the_time_zone_setting_reads_a_whole_number_as_hours_east() {
+        let cases: &[(&str, i32)] = &[
+            // Numeric: east.
+            ("-08", -28800),
+            ("+10", 36000),
+            ("2", 7200),
+            ("0", 0),
+            ("-1.5", -5400),
+            ("-0.5", -1800),
+            ("16", 57600),
+            ("+00", 0),
+            // POSIX: west.
+            ("00:00", 0),
+            ("+02:00", -7200),
+            ("-13:00", 46800),
+            ("-00:30", 1800),
+            ("00:30", -1800),
+            ("-04:30", 16200),
+            ("04:30", -16200),
+            ("-04:15", 15300),
+            ("04:15", -15300),
+            ("UTC-2", 7200),
+        ];
+        for &(value, east) in cases {
+            let tz = resolve_guc_time_zone(value).unwrap_or_else(|| panic!("{value} should set"));
+            assert!(seconds_east(&tz, epoch()) == east, "SET TimeZone = {value}");
+        }
+    }
+
+    /// The setting does not consult the abbreviation table, so a spelling that is
+    /// only an abbreviation is a `SET` error even though `AT TIME ZONE` takes it.
+    #[test]
+    fn the_time_zone_setting_refuses_abbreviations_at_time_zone_accepts() {
+        for abbrev in ["PST", "EDT", "ACST", "MSK"] {
+            assert!(
+                resolve_guc_time_zone(abbrev).is_none(),
+                "SET TimeZone = {abbrev} should fail"
+            );
+            assert!(
+                resolve_time_zone(abbrev).is_some(),
+                "AT TIME ZONE {abbrev} should resolve"
+            );
+        }
+    }
+
+    /// Where a spelling is both an abbreviation and a database name, each entry
+    /// point picks a different one — visible only outside standard time, since
+    /// the abbreviation is a fixed offset and the database name is not.
+    #[test]
+    fn an_abbreviation_outranks_a_database_name_of_the_same_spelling() {
+        let summer = instant("2001-07-01T12:00:00Z");
+        for (spelling, abbrev_east, zone_east) in [
+            ("CET", 3600, 7200),
+            ("MET", 3600, 7200),
+            ("EET", 7200, 10800),
+        ] {
+            let by_spec = resolve_time_zone(spelling).expect("abbreviation resolves");
+            assert!(seconds_east(&by_spec, summer) == abbrev_east, "{spelling}");
+            let by_setting = resolve_guc_time_zone(spelling).expect("database name resolves");
+            assert!(seconds_east(&by_setting, summer) == zone_east, "{spelling}");
+        }
+    }
+
+    /// A `POSIX` specification may carry a daylight-saving transition rule, and
+    /// the transition lands on the instant the rule names.
+    #[test]
+    fn posix_specifications_carry_daylight_saving_rules() {
+        let cases: &[(&str, &str, i32)] = &[
+            ("PST8PDT,M3.2.0,M11.1.0", "2014-03-09T09:59:00Z", -28800),
+            ("PST8PDT,M3.2.0,M11.1.0", "2014-03-09T10:01:00Z", -25200),
+            ("PST8PDT,M3.2.0,M11.1.0", "2014-11-02T08:59:00Z", -25200),
+            ("PST8PDT,M3.2.0,M11.1.0", "2014-11-02T09:01:00Z", -28800),
+            ("CST7CDT,M4.1.0,M10.5.0", "2014-01-15T12:00:00Z", -25200),
+            ("CST7CDT,M4.1.0,M10.5.0", "2014-07-15T12:00:00Z", -21600),
+            // A daylight abbreviation with no rule of its own takes
+            // PostgreSQL's default, which is the United States rule.
+            ("FOO8BAR", "2014-01-15T12:00:00Z", -28800),
+            ("FOO8BAR", "2014-07-15T12:00:00Z", -25200),
+        ];
+        for &(spec, at, east) in cases {
+            let at = instant(at);
+            let by_spec =
+                resolve_time_zone(spec).unwrap_or_else(|| panic!("{spec} should resolve"));
+            assert!(seconds_east(&by_spec, at) == east, "{spec} at {at}");
+            let by_setting =
+                resolve_guc_time_zone(spec).unwrap_or_else(|| panic!("{spec} should set"));
+            assert!(seconds_east(&by_setting, at) == east, "SET {spec} at {at}");
+        }
+    }
+
+    /// The zone of a *literal* is a separate grammar that neither resolver is
+    /// reachable from: a numeric offset there keeps the ISO sign, so
+    /// `'... -08:00'` is eight hours behind UTC and not eight ahead. Only a
+    /// zone *name* in a literal reaches the `POSIX` grammar, which is why
+    /// `'UTC-2'` still inverts.
+    #[test]
+    fn a_literals_own_offset_keeps_the_iso_sign() {
+        let cases: &[(&str, &str)] = &[
+            ("1997-02-10 17:32:01 -0800", "1997-02-11T01:32:01Z"),
+            ("1997-02-10 17:32:01 -08:00", "1997-02-11T01:32:01Z"),
+            ("1997-02-10 17:32:01 -08", "1997-02-11T01:32:01Z"),
+            ("1997-02-10 17:32:01 +08:00", "1997-02-10T09:32:01Z"),
+            ("1997-02-10 17:32:01 +0815", "1997-02-10T09:17:01Z"),
+            // An abbreviation, and then a POSIX specification.
+            ("1997-02-10 17:32:01 PST", "1997-02-11T01:32:01Z"),
+            ("1997-02-10 17:32:01 UTC-2", "1997-02-10T15:32:01Z"),
+        ];
+        for &(literal, expected) in cases {
+            let parsed = parse_timestamptz(literal, &TimeZone::UTC)
+                .unwrap_or_else(|e| panic!("{literal}: {e}"));
+            assert!(parsed == instant(expected), "{literal}");
+        }
+    }
+
+    /// Text that is neither a number, a name nor a well-formed specification
+    /// resolves nowhere.
+    #[test]
+    fn malformed_specifications_resolve_nowhere() {
+        for spec in [
+            "Not/AZone",
+            "PST8PDT,nonsense",
+            "-",
+            "+",
+            "UTC-",
+            "UTC-99",
+            "",
+            "   ",
+        ] {
+            assert!(resolve_time_zone(spec).is_none(), "AT TIME ZONE {spec}");
+            assert!(resolve_guc_time_zone(spec).is_none(), "SET TimeZone {spec}");
         }
     }
 }

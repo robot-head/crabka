@@ -246,6 +246,17 @@ pub enum ExecError {
     /// SP37: a `SET`/`SHOW`/`RESET` named a configuration parameter that does not
     /// exist (42704).
     UnrecognizedParameter(String),
+    /// SP37: a zone specification no zone entry point recognises — neither an
+    /// abbreviation, nor a name the bundled database knows, nor a well-formed
+    /// `POSIX` `TZ` specification (22023).
+    UnknownTimeZone(String),
+    /// SP37: `make_timestamptz`'s zone argument began with a digit, which
+    /// `PostgreSQL` refuses outright so that the `POSIX` grammar cannot claim a
+    /// spelling the numeric-offset grammar would have rejected (22023).
+    NumericTimeZoneSyntax(String),
+    /// SP37: `make_timestamptz`'s zone argument was a numeric offset naming a
+    /// displacement beyond ±15:59:59 (22023).
+    NumericTimeZoneOutOfRange(String),
     /// F-1: a `SET` value the named parameter's own parser rejected (22023).
     InvalidGucValue {
         name: String,
@@ -929,6 +940,18 @@ impl ExecError {
             ExecError::UnrecognizedParameter(n) => PgError::error(
                 "42704",
                 format!("unrecognized configuration parameter \"{n}\""),
+            ),
+            ExecError::UnknownTimeZone(zone) => {
+                PgError::error("22023", format!("time zone \"{zone}\" not recognized"))
+            }
+            ExecError::NumericTimeZoneSyntax(zone) => PgError::error(
+                "22023",
+                format!("invalid input syntax for type numeric time zone: \"{zone}\""),
+            )
+            .with_hint("Numeric time zones must have \"-\" or \"+\" as first character."),
+            ExecError::NumericTimeZoneOutOfRange(zone) => PgError::error(
+                "22023",
+                format!("numeric time zone \"{zone}\" out of range"),
             ),
             ExecError::InvalidGucValue { name, value } => PgError::error(
                 "22023",

@@ -1079,7 +1079,7 @@ static GUC_DEFINITIONS: &[GucDefinition] = &[
         0.0,
         2_147_483_647.0,
     ),
-    guc("timezone", "string", "UTC", parse_timezone).aliases(&["TimeZone", "time zone"]),
+    guc("TimeZone", "string", "UTC", parse_timezone).aliases(&["timezone", "time zone"]),
     // ---- F-1 breadth: the parameters real clients and the conformance
     // corpus set. The planner toggles have no planner to affect here; they are
     // accepted, stored, and reported exactly like PostgreSQL's so a corpus
@@ -1761,11 +1761,11 @@ fn canonical_guc_value(name: &str, value: &str) -> Result<String, ExecError> {
 }
 
 fn parse_timezone(value: &str, _: Option<&GucValue>) -> Result<GucValue, ExecError> {
-    // PostgreSQL accepts the whole zone vocabulary here, not just database
-    // names: abbreviations, POSIX specs and bare signed offsets all work.
-    if value.eq_ignore_ascii_case("UTC")
-        || crabka_pgtypes::datetime::resolve_time_zone(value).is_some()
-    {
+    // The setting's own vocabulary, which is narrower than `AT TIME ZONE`'s: a
+    // plain number of hours, a database name or a POSIX specification, but no
+    // abbreviations. `parse_guc_value` restates the rejection as the 22023 that
+    // names the parameter.
+    if crabka_pgtypes::datetime::resolve_guc_time_zone(value).is_some() {
         Ok(GucValue::Text(value.to_string()))
     } else {
         Err(ExecError::InvalidParameterValue(value.to_string()))
@@ -3235,12 +3235,13 @@ impl SqlSession {
     fn effective_time_zone(&self) -> jiff::tz::TimeZone {
         let name = self
             .guc
-            .effective("timezone")
+            .effective("TimeZone")
             .unwrap_or_else(|_| "UTC".into());
         if name.eq_ignore_ascii_case("UTC") {
             jiff::tz::TimeZone::UTC
         } else {
-            crabka_pgtypes::datetime::resolve_time_zone(&name).unwrap_or(jiff::tz::TimeZone::UTC)
+            crabka_pgtypes::datetime::resolve_guc_time_zone(&name)
+                .unwrap_or(jiff::tz::TimeZone::UTC)
         }
     }
 
@@ -13886,6 +13887,46 @@ mod tests {
         assert_eq!(g.effective("timezone").expect("timezone"), "UTC");
     }
 
+    /// SP37: the `TimeZone` setting takes a narrower vocabulary than every other
+    /// zone entry point — a plain number of hours, a database name, or a POSIX
+    /// specification, but no abbreviations. A rejection names the parameter the
+    /// way `PostgreSQL` spells it.
+    #[test]
+    fn guc_timezone_accepts_the_settings_own_vocabulary() {
+        use assert2::assert;
+
+        use crate::session::GucState;
+        let mut g = GucState::default();
+        for value in [
+            "America/New_York",
+            "PST8PDT",
+            "-08",
+            "+2",
+            "0",
+            "-1.5",
+            "-08:00",
+            "UTC-2",
+            "CST7CDT,M4.1.0,M10.5.0",
+            "PST8PDT,M3.2.0,M11.1.0",
+        ] {
+            assert!(g.set("TimeZone", value, false).is_ok(), "SET {value}");
+        }
+        // Abbreviations are not part of this parameter's vocabulary, however
+        // freely `AT TIME ZONE` takes them.
+        for value in ["PST", "EDT", "ACST", "Nowhere/Here"] {
+            let error = g
+                .set("TimeZone", value, false)
+                .expect_err("should be rejected")
+                .into_pg();
+            assert!(error.code == "22023", "{value}");
+            assert!(
+                error.message == format!("invalid value for parameter \"TimeZone\": \"{value}\""),
+                "{value}: {}",
+                error.message
+            );
+        }
+    }
+
     /// Run `sql`, returning the rows as text (an error becomes its SQLSTATE).
     async fn rows_or_sqlstate(
         session: &mut SqlSession,
@@ -13981,6 +14022,61 @@ mod tests {
         // Outside a block the rule does not apply at all.
         assert!(sqlstate(&mut s, "SELECT nosuchcolumn").await == "42703");
         assert!(rows_or_sqlstate(&mut s, "SELECT 1").await == Ok(vec![vec!["1".to_string()]]));
+    }
+
+    /// SP37: every `SET TimeZone` spelling the regression suite uses, rendered
+    /// end to end. The rows are `PostgreSQL` 18.4's, and they are what makes the
+    /// two sign conventions visible from SQL: `'-08'` is a number of hours east,
+    /// so it renders `-08`, while `'-13:00'` is a POSIX specification counted
+    /// west, so it renders `+13`.
+    #[tokio::test]
+    async fn setting_the_time_zone_renders_the_offsets_postgresql_renders() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        // value, `OF`, `TZH:TZM`, the rendered timestamptz
+        let cases: &[(&str, &str, &str, &str)] = &[
+            ("00:00", "+00", "+00:00", "2014-01-15 12:00:00+00"),
+            ("+02:00", "-02", "-02:00", "2014-01-15 10:00:00-02"),
+            ("-13:00", "+13", "+13:00", "2014-01-16 01:00:00+13"),
+            ("-00:30", "+00:30", "+00:30", "2014-01-15 12:30:00+00:30"),
+            ("00:30", "-00:30", "-00:30", "2014-01-15 11:30:00-00:30"),
+            ("-04:30", "+04:30", "+04:30", "2014-01-15 16:30:00+04:30"),
+            ("04:30", "-04:30", "-04:30", "2014-01-15 07:30:00-04:30"),
+            ("-04:15", "+04:15", "+04:15", "2014-01-15 16:15:00+04:15"),
+            ("04:15", "-04:15", "-04:15", "2014-01-15 07:45:00-04:15"),
+            ("-08", "-08", "-08:00", "2014-01-15 04:00:00-08"),
+            ("+10", "+10", "+10:00", "2014-01-15 22:00:00+10"),
+            ("0", "+00", "+00:00", "2014-01-15 12:00:00+00"),
+            ("-1.5", "-01:30", "-01:30", "2014-01-15 10:30:00-01:30"),
+            ("+2", "+02", "+02:00", "2014-01-15 14:00:00+02"),
+            ("UTC-2", "+02", "+02:00", "2014-01-15 14:00:00+02"),
+            (
+                "CST7CDT,M4.1.0,M10.5.0",
+                "-07",
+                "-07:00",
+                "2014-01-15 05:00:00-07",
+            ),
+        ];
+        for &(value, of, tzh_tzm, rendered) in cases {
+            assert!(
+                sqlstate(&mut s, &format!("SET timezone = '{value}'")).await == "00000",
+                "SET timezone = '{value}'"
+            );
+            let row = rows_or_sqlstate(
+                &mut s,
+                "SELECT to_char(timestamptz '2014-01-15 12:00:00+00', 'OF'), \
+                 to_char(timestamptz '2014-01-15 12:00:00+00', 'TZH:TZM'), \
+                 timestamptz '2014-01-15 12:00:00+00'",
+            )
+            .await;
+            let expected = Ok(vec![vec![
+                of.to_string(),
+                tzh_tzm.to_string(),
+                rendered.to_string(),
+            ]]);
+            assert!(row == expected, "timezone = '{value}': {row:?}");
+        }
     }
 
     #[tokio::test]

@@ -651,12 +651,14 @@ fn interval_value(d: &Datum, name: &str) -> Result<Interval, ExecError> {
     }
 }
 
-/// Resolve a zone-name text value to a jiff `TimeZone`. An unknown zone is 22023.
+/// Resolve `make_timestamptz`'s zone argument, which `PostgreSQL` reads by
+/// rules of its own (`parse_sane_timezone`).
 ///
-/// This goes through the same resolver as `AT TIME ZONE` and the `TimeZone`
-/// setting, so the full `PostgreSQL` zone vocabulary — bundled database names,
-/// the default abbreviation set, `POSIX` specs and bare offsets — is accepted
-/// identically wherever a zone is named.
+/// A numeric offset is tried first and keeps the ISO sign, so `'+2'` is two
+/// hours *east* — the opposite of what the same text means to `AT TIME ZONE`.
+/// To stop the `POSIX` grammar from quietly accepting a spelling the numeric
+/// grammar has already rejected, a leading digit is refused outright rather
+/// than falling through. Everything else resolves the way `AT TIME ZONE` does.
 fn zone_arg(d: &Datum, name: &str) -> Result<jiff::tz::TimeZone, ExecError> {
     let zone = match d {
         Datum::Text(s) => s.as_str(),
@@ -665,9 +667,18 @@ fn zone_arg(d: &Datum, name: &str) -> Result<jiff::tz::TimeZone, ExecError> {
     if zone.eq_ignore_ascii_case("utc") {
         return Ok(jiff::tz::TimeZone::UTC);
     }
-    crabka_pgtypes::datetime::resolve_time_zone(zone).ok_or_else(|| {
-        ExecError::InvalidParameterValue(format!("time zone \"{zone}\" not recognized"))
-    })
+    if zone.starts_with(|c: char| c.is_ascii_digit()) {
+        return Err(ExecError::NumericTimeZoneSyntax(zone.to_string()));
+    }
+    match crabka_pgtypes::datetime::decode_numeric_time_zone(zone) {
+        Ok(offset) => return Ok(jiff::tz::TimeZone::fixed(offset)),
+        Err(crabka_pgtypes::datetime::DecodeError::TzDisplacement) => {
+            return Err(ExecError::NumericTimeZoneOutOfRange(zone.to_string()));
+        }
+        Err(_) => {}
+    }
+    crabka_pgtypes::datetime::resolve_time_zone(zone)
+        .ok_or_else(|| ExecError::UnknownTimeZone(zone.to_string()))
 }
 
 #[cfg(test)]
@@ -832,6 +843,98 @@ mod tests {
             ev("make_timestamptz(2024, 1, 15, 12, 0, 0, 'America/New_York')"),
             Datum::Timestamptz("2024-01-15T17:00:00Z".parse().expect("ts"))
         );
+    }
+
+    /// `make_timestamptz` reads its zone by `PostgreSQL`'s
+    /// `parse_sane_timezone` rules, which are neither the setting's nor
+    /// `AT TIME ZONE`'s. A numeric offset keeps the ISO sign — `'+2'` is two
+    /// hours *east*, where `AT TIME ZONE '+2'` would be two hours west — and a
+    /// specification the numeric grammar cannot read falls through to the
+    /// `POSIX` one. Every expectation is `PostgreSQL` 18.4's.
+    #[test]
+    fn make_timestamptz_reads_a_numeric_zone_with_the_iso_sign() {
+        for (expr, expected) in [
+            // Numeric offsets: east.
+            (
+                "make_timestamptz(1973, 7, 15, 8, 15, 55, '+2')",
+                "1973-07-15T06:15:55Z",
+            ),
+            (
+                "make_timestamptz(1973, 7, 15, 8, 15, 55, '-2')",
+                "1973-07-15T10:15:55Z",
+            ),
+            (
+                "make_timestamptz(2014, 12, 10, 10, 10, 10, '-08:00')",
+                "2014-12-10T18:10:10Z",
+            ),
+            (
+                "make_timestamptz(2014, 12, 10, 10, 10, 10, '-08')",
+                "2014-12-10T18:10:10Z",
+            ),
+            // POSIX specifications: west, and daylight-saving aware.
+            (
+                "make_timestamptz(2014, 12, 10, 10, 10, 10, 'UTC-2')",
+                "2014-12-10T08:10:10Z",
+            ),
+            (
+                "make_timestamptz(2014, 12, 10, 10, 10, 10, 'PST8PDT,M3.2.0,M11.1.0')",
+                "2014-12-10T18:10:10Z",
+            ),
+            (
+                "make_timestamptz(2014, 12, 10, 10, 10, 10, 'FOO8BAR')",
+                "2014-12-10T18:10:10Z",
+            ),
+            // An abbreviation.
+            (
+                "make_timestamptz(2008, 12, 10, 10, 10, 10, 'EST')",
+                "2008-12-10T15:10:10Z",
+            ),
+        ] {
+            let want = Datum::Timestamptz(expected.parse().expect("expected instant"));
+            assert!(ev(expr) == want, "{expr}");
+        }
+    }
+
+    /// The three ways `make_timestamptz` rejects a zone, each with
+    /// `PostgreSQL`'s own wording. A leading digit is refused outright so the
+    /// `POSIX` grammar cannot accept a spelling the numeric grammar rejected.
+    #[test]
+    fn make_timestamptz_rejects_a_bad_zone_the_way_postgresql_words_it() {
+        for (expr, message, hint) in [
+            (
+                "make_timestamptz(1973, 7, 15, 8, 15, 55, '2')",
+                "invalid input syntax for type numeric time zone: \"2\"",
+                Some("Numeric time zones must have \"-\" or \"+\" as first character."),
+            ),
+            (
+                "make_timestamptz(2014, 12, 10, 10, 10, 10, '+16')",
+                "numeric time zone \"+16\" out of range",
+                None,
+            ),
+            (
+                "make_timestamptz(2014, 12, 10, 10, 10, 10, '-16')",
+                "numeric time zone \"-16\" out of range",
+                None,
+            ),
+            (
+                "make_timestamptz(1910, 12, 24, 0, 0, 0, 'Nehwon/Lankhmar')",
+                "time zone \"Nehwon/Lankhmar\" not recognized",
+                None,
+            ),
+        ] {
+            let error = crate::eval::eval(
+                &crabka_pgparser::parser::parse_expr_for_test(expr).expect("parse"),
+                &Scope::empty(),
+                &[],
+                &EvalCtx::test_default(),
+            )
+            .expect_err("zone should be rejected")
+            .into_pg();
+            assert!(error.code == "22023", "{expr}");
+            assert!(error.message == message, "{expr}: {}", error.message);
+            let got_hint = error.diagnostics.as_ref().and_then(|f| f.hint.clone());
+            assert!(got_hint.as_deref() == hint, "{expr}: {got_hint:?}");
+        }
     }
 
     #[test]

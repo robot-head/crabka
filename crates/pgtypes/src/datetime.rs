@@ -20,7 +20,10 @@ mod parse;
 mod tzdb;
 
 pub use self::{
-    parse::{DateOrder, DecodeError, Decoded, Parts, Special, Zone, decode, resolve_time_zone},
+    parse::{
+        DateOrder, DecodeError, Decoded, Parts, Special, Zone, decode, decode_numeric_time_zone,
+        resolve_guc_time_zone, resolve_time_zone,
+    },
     tzdb::zone_by_name,
 };
 

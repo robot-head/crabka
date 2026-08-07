@@ -457,8 +457,11 @@ fn literal_field(e: &Expr) -> Result<String, ExecError> {
     }
 }
 
-/// Resolve a zone-name text value to a jiff `TimeZone`. Jiff's tzdb handles
-/// `UTC` and fixed-offset spellings. An unknown zone is 22023.
+/// Resolve a zone-specification text value to a jiff `TimeZone`, the way
+/// `AT TIME ZONE` and `date_trunc`'s third argument do: the default
+/// abbreviation set, then the bundled zone database, then a `POSIX` `TZ`
+/// specification whose offset counts *west* of Greenwich. An unresolvable
+/// specification is 22023.
 fn zone_arg(d: &Datum) -> Result<TimeZone, ExecError> {
     let name = match d {
         Datum::Text(s) => s.as_str(),
@@ -467,10 +470,8 @@ fn zone_arg(d: &Datum) -> Result<TimeZone, ExecError> {
     if name.eq_ignore_ascii_case("utc") {
         return Ok(TimeZone::UTC);
     }
-    // The full PostgreSQL zone vocabulary: database names, the default
-    // abbreviation set, POSIX specs, and bare signed offsets.
     crabka_pgtypes::datetime::resolve_time_zone(name)
-        .ok_or_else(|| invalid_param(format!("time zone \"{name}\" not recognized")))
+        .ok_or_else(|| ExecError::UnknownTimeZone(name.to_string()))
 }
 
 /// Coerce a temporal Datum to a civil `DateTime` for `age` arithmetic. A
@@ -1193,6 +1194,81 @@ mod tests {
     }
     fn num(s: &str) -> Datum {
         Datum::Numeric(crabka_pgtypes::numeric::parse(s).expect("n"))
+    }
+
+    /// `AT TIME ZONE` and `date_trunc`'s zone argument read their text as a
+    /// POSIX specification, whose offset counts *west* of Greenwich — so
+    /// `'-08:00'` names UTC+8, the opposite of what the same text means inside
+    /// a literal. Every expectation is `PostgreSQL` 18.4's.
+    #[test]
+    fn at_time_zone_reads_a_specification_west_of_greenwich() {
+        use assert2::assert;
+
+        let ctx = ctx_at("2024-01-15T12:00:00Z");
+        for (expr, expected) in [
+            (
+                "timestamptz '1970-01-01 00:00:00+00' AT TIME ZONE '-08:00'",
+                "1970-01-01T08:00:00",
+            ),
+            (
+                "timestamptz '1970-01-01 00:00:00+00' AT TIME ZONE '+08:00'",
+                "1969-12-31T16:00:00",
+            ),
+            (
+                "timestamptz '1970-01-01 00:00:00+00' AT TIME ZONE '08:00'",
+                "1969-12-31T16:00:00",
+            ),
+            (
+                "timestamptz '1970-01-01 00:00:00+00' AT TIME ZONE '-08'",
+                "1970-01-01T08:00:00",
+            ),
+            (
+                "timestamptz '1970-01-01 00:00:00+00' AT TIME ZONE 'UTC-2'",
+                "1970-01-01T02:00:00",
+            ),
+            (
+                "timestamptz '1970-01-01 00:00:00+00' AT TIME ZONE 'UTC+10'",
+                "1969-12-31T14:00:00",
+            ),
+            // A specification with a rule, either side of its spring transition.
+            (
+                "timestamptz '2014-03-09 09:59:00+00' AT TIME ZONE 'PST8PDT,M3.2.0,M11.1.0'",
+                "2014-03-09T01:59:00",
+            ),
+            (
+                "timestamptz '2014-03-09 10:01:00+00' AT TIME ZONE 'PST8PDT,M3.2.0,M11.1.0'",
+                "2014-03-09T03:01:00",
+            ),
+            // An abbreviation the `TimeZone` setting would refuse.
+            (
+                "timestamptz '1970-01-01 00:00:00+00' AT TIME ZONE 'PST'",
+                "1969-12-31T16:00:00",
+            ),
+        ] {
+            let want = Datum::Timestamp(expected.parse().expect("expected civil datetime"));
+            assert!(ev(expr, &ctx) == want, "{expr}");
+        }
+    }
+
+    /// An unresolvable zone is `PostgreSQL`'s own one-line 22023, not a message
+    /// nested inside another message.
+    #[test]
+    fn at_time_zone_reports_an_unknown_zone_the_way_postgresql_words_it() {
+        use assert2::assert;
+
+        let error = crate::eval::eval(
+            &crabka_pgparser::parser::parse_expr_for_test(
+                "timestamptz '1970-01-01 00:00:00+00' AT TIME ZONE 'America/Does_not_exist'",
+            )
+            .expect("parse"),
+            &Scope::empty(),
+            &[],
+            &ctx_at("2024-01-15T12:00:00Z"),
+        )
+        .expect_err("unknown zone")
+        .into_pg();
+        assert!(error.code == "22023");
+        assert!(error.message == "time zone \"America/Does_not_exist\" not recognized");
     }
 
     #[test]
