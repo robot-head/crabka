@@ -6,8 +6,8 @@
 test files, not the adopted corpus's statement matches. The checked-in monotone
 floor remains `6/231`; this review is still non-monotone against that floor and
 does not ratchet it. Serial completes all 231 files with zero infrastructure
-failures, leaving 203 semantic failures across 169627 canonical changed lines
-and 4732 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
+failures, leaving 203 semantic failures across 168584 canonical changed lines
+and 4756 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
 postflight probe succeeds, and the infrastructure report is empty.
 
 The measurement immediately before this wave was `22/231` at 176686 changed
