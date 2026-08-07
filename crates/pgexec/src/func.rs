@@ -2428,8 +2428,17 @@ fn bit_index(d: &Datum) -> Result<i32, ExecError> {
 
 pub(crate) fn int_arg(d: &Datum) -> Result<i64, ExecError> {
     match d {
+        Datum::Int2(n) => Ok(i64::from(*n)),
         Datum::Int4(n) => Ok(i64::from(*n)),
         Datum::Int8(n) => Ok(*n),
+        // Every catalog function that takes an object identifier reads it
+        // through here, and psql writes those arguments as an explicit
+        // `'123'::pg_catalog.oid` rather than passing a catalog column. Without
+        // this arm `\d+` on a view fails: `pg_get_viewdef('123'::oid, true)`
+        // reports that the function does not accept an argument of type oid.
+        // PostgreSQL declares int2/int4/int8 -> oid implicit, so widening the
+        // other direction here is the same coercion read backwards.
+        Datum::Oid(n) => Ok(i64::from(*n)),
         other => Err(type_error("function", other)),
     }
 }
