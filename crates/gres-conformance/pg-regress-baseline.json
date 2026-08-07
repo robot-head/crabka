@@ -7,16 +7,16 @@
       "sha256": "c65b784c44e22655f691e75df7d440a313ba252cfffae156ea7c614601249c41"
     },
     "aggregates": {
-      "changed_lines": 1898,
+      "changed_lines": 1890,
       "expected": "aggregates.out",
-      "hunks": 75,
-      "sha256": "9ca0ded6c9a1f92f148f8719d3d18128e64409641c64accbcd5085f86ed7ab01"
+      "hunks": 74,
+      "sha256": "cf24b543ab2a296b1b70b6feb7e5e2246a7712217a5febf573fcd275cf52352c"
     },
     "alter_generic": {
-      "changed_lines": 313,
+      "changed_lines": 315,
       "expected": "alter_generic.out",
       "hunks": 7,
-      "sha256": "8a11f6755267765b9e6f71c99ae59fa028631dfb9d78f0adc912052526d45ea5"
+      "sha256": "8747e0accc0e6b133dfcde28603864789f33a8c9eedecffa17f15ca8fcc37025"
     },
     "alter_operator": {
       "changed_lines": 136,
@@ -25,10 +25,10 @@
       "sha256": "ad0bc578a19d88366ab8230078d6c299ac9cf25238bd3ffe66393bdcd0ea8f26"
     },
     "alter_table": {
-      "changed_lines": 2732,
+      "changed_lines": 2736,
       "expected": "alter_table.out",
       "hunks": 118,
-      "sha256": "89fecf2e626082eff52a3533a124934c9956a201227f60b98f1a501e3e549397"
+      "sha256": "9a48412938b81d12c5b8be9d31a761a2cb9872dc2d3c75f75bf7e51f8b1d76fc"
     },
     "amutils": {
       "changed_lines": 180,
@@ -37,22 +37,22 @@
       "sha256": "762b331fade072264a9e3789d28f6e27cf1341d20e5913c77ae5260f94c94d3b"
     },
     "arrays": {
-      "changed_lines": 857,
+      "changed_lines": 858,
       "expected": "arrays.out",
       "hunks": 36,
-      "sha256": "819dc7d882b1c8a84469f839d73d615d2e42466ee5d6867738308e0f8a604a5b"
+      "sha256": "63da8edae60b228b5832fe0421899a9acaf86750401180fa37fa07f79bc09129"
     },
     "bit": {
-      "changed_lines": 793,
+      "changed_lines": 10,
       "expected": "bit.out",
-      "hunks": 3,
-      "sha256": "edf00a15a015a1b05168afc01b104075dad986cf94c7efcff020cec0a85c7571"
+      "hunks": 2,
+      "sha256": "43efd79efe7f1095163b167ea7d15a89cffccb77329cd14cdc4b333aeac99f67"
     },
     "box": {
-      "changed_lines": 250,
+      "changed_lines": 252,
       "expected": "box.out",
       "hunks": 15,
-      "sha256": "aa55b0c3ad3270e8bdbc8408d5c4d67ee3dbf7666a980c7479fd7ded47b3e30b"
+      "sha256": "5c558534f114d6f4ba04f241a33cb9324645267ef77a9238535207aee936aaa5"
     },
     "brin": {
       "changed_lines": 151,
@@ -85,16 +85,16 @@
       "sha256": "b9f8cb3d67bb9a08c479fa8e152b5ab0541e4d89d7c2420e3742064e26fb37d1"
     },
     "char": {
-      "changed_lines": 42,
+      "changed_lines": 36,
       "expected": "char.out",
-      "hunks": 1,
-      "sha256": "377d14a72751dee030550fc4527e71f248a3beaaa34903b6c2c1711c71aea87b"
+      "hunks": 2,
+      "sha256": "6a94abcd9aae9018ec08cedd192fa9fda19da30f8ac45547b8181491f620b2c7"
     },
     "cluster": {
-      "changed_lines": 5302,
+      "changed_lines": 5305,
       "expected": "cluster.out",
       "hunks": 13,
-      "sha256": "c0cc63c8c52dc565b5b1747d7516896ddeeba53c8c2a39761b258141d7dbd1db"
+      "sha256": "a3bb63e74a99ed5376fe254704eef2e0bb19ee9002c0f229546155fd93f367eb"
     },
     "collate": {
       "changed_lines": 700,
@@ -139,10 +139,10 @@
       "sha256": "3478d31137548d049397f15712dd7361102bb101dc39d4bf87b17c7fbb0e847a"
     },
     "copy2": {
-      "changed_lines": 784,
+      "changed_lines": 788,
       "expected": "copy2.out",
       "hunks": 13,
-      "sha256": "cc8c0dd25585d468e9636e5d8e419de1de9ea096501fbc7b0419d05434883b82"
+      "sha256": "fa90023302aceda480015ab09230a244829387b78f0dbf3ced28c332ef9692a3"
     },
     "copydml": {
       "changed_lines": 58,
@@ -175,28 +175,28 @@
       "sha256": "ebf66fad344c4dc8e2f984c81150c9525f3e9dc9b4484a1e61196c3511fcef16"
     },
     "create_cast": {
-      "changed_lines": 71,
+      "changed_lines": 72,
       "expected": "create_cast.out",
       "hunks": 2,
-      "sha256": "a9fa3f06cec43236dc40e5ff90ca86a01510273b9d26681567e16c0e44ed2337"
+      "sha256": "a8290a32d74aa38f28d153dc01ca630ec82a8498c401ccf21852d476a8992845"
     },
     "create_function_sql": {
-      "changed_lines": 444,
+      "changed_lines": 446,
       "expected": "create_function_sql.out",
       "hunks": 23,
-      "sha256": "fe23f5fa9f40ba8f95e6b66a0f74acd291b48203eed8b0fe197246d4005d9452"
+      "sha256": "ddffae42d618fa7d1254d78cde9f358a3942f582beb2958de40dcf129e564d1f"
     },
     "create_index": {
-      "changed_lines": 1723,
+      "changed_lines": 1727,
       "expected": "create_index.out",
       "hunks": 106,
-      "sha256": "fbfd593cbbc1963da942aa486fe209d9af135569d24bfb6b7592100608ddde34"
+      "sha256": "3fef04fe5b892714fc6f31d3d78b3c425da216a6228cddd1ad7d1919be14fe95"
     },
     "create_index_spgist": {
-      "changed_lines": 804,
+      "changed_lines": 807,
       "expected": "create_index_spgist.out",
       "hunks": 65,
-      "sha256": "540dba234ebecbf4e094949c9063d89844d037abb37d206e8a64cd06ce7c10e7"
+      "sha256": "6064ccc6740fdf9cfa61e5e77f4e64b8a2febe3b21578ef3edd837004dad1a4c"
     },
     "create_misc": {
       "changed_lines": 349,
@@ -211,10 +211,10 @@
       "sha256": "09b278482b05c4103964e9db1202dd45012a86fdb13cfe3504494f62f699788d"
     },
     "create_procedure": {
-      "changed_lines": 279,
+      "changed_lines": 287,
       "expected": "create_procedure.out",
       "hunks": 13,
-      "sha256": "33957385db365fde9723f1f925ea0200dd3f9639f2cefeea7a8bcd9bd628f1da"
+      "sha256": "8594b3ae73e9d6fb04b6b68dd29b805b83efc13047e7c21f6be47b2bbfda28b3"
     },
     "create_role": {
       "changed_lines": 147,
@@ -229,10 +229,10 @@
       "sha256": "f9e7abfc32593256540e52fdd84e677b500adec7a6947c2a42161d0e5cfb3504"
     },
     "create_table": {
-      "changed_lines": 560,
+      "changed_lines": 555,
       "expected": "create_table.out",
       "hunks": 30,
-      "sha256": "1d1bb18645f9166e621b9afd36e1ca2d271f0ea4670d6390608a185fe88b3687"
+      "sha256": "08f0b9ad823d7e88cfb2e02c8f271f21e153b872d0540ed92f8da38c232fb008"
     },
     "create_table_like": {
       "changed_lines": 491,
@@ -241,10 +241,10 @@
       "sha256": "cb250209db8e43779b5a71489c9758a36c92c81fd78cb0f72860aca38c0eb136"
     },
     "create_type": {
-      "changed_lines": 270,
+      "changed_lines": 272,
       "expected": "create_type.out",
       "hunks": 9,
-      "sha256": "286007a940fc6f327d03eed7647de40bd9a75498fd520e270ad7eab38c398860"
+      "sha256": "8e66cfcbce174947b1cd27bf4638af567784358bfc9afeee18db1c9becb8af17"
     },
     "create_view": {
       "changed_lines": 1911,
@@ -271,16 +271,16 @@
       "sha256": "8185917a31b647afb09ac9f83f19f2caf2985f744b99d239d3c525debe3e37da"
     },
     "domain": {
-      "changed_lines": 880,
+      "changed_lines": 898,
       "expected": "domain.out",
       "hunks": 33,
-      "sha256": "86212df3ca06db5f9b2064245c4bd504b8b3995cc482b3bb809276cf3f86f684"
+      "sha256": "fa6b35bb002f4badd99d5ca4ad17832b1162f00b5911a64c6bbf5bc80b0a1347"
     },
     "drop_if_exists": {
-      "changed_lines": 188,
+      "changed_lines": 190,
       "expected": "drop_if_exists.out",
       "hunks": 8,
-      "sha256": "7ce809cac04767e88172c310b5282c9c196cd3690296b0da2d679bdbf0ce9d7b"
+      "sha256": "54e64fd5cdb697ea80f4dd6ad916cec3b584362fb82dff19d3dbcccbb66f4f78"
     },
     "drop_operator": {
       "changed_lines": 28,
@@ -295,10 +295,10 @@
       "sha256": "7fe35342e110decc11e4d9686a6edc180e83296014b68ca59331a5b65a155f05"
     },
     "enum": {
-      "changed_lines": 383,
+      "changed_lines": 384,
       "expected": "enum.out",
       "hunks": 19,
-      "sha256": "e3d504f952b2de5dc858d4ead8909ef91bcd52afd243d3d613d6816c23fad2d2"
+      "sha256": "ada81b21a0d0c1f9db3cfa9acc22ca3e31fec4d48d23e265dd35276e79721bbc"
     },
     "equivclass": {
       "changed_lines": 332,
@@ -307,16 +307,16 @@
       "sha256": "5d21d67ec7d6db22bf17e7bafaeff036a87ebc81321050d58faf3506276db8b5"
     },
     "errors": {
-      "changed_lines": 219,
+      "changed_lines": 220,
       "expected": "errors.out",
       "hunks": 11,
-      "sha256": "c2fe8ae2fc7c596183bbedf5a4d337ec9a5da20f9a5ac76a4b58582c4109de90"
+      "sha256": "2bc30e28e9f0a073d583b7a0d82324074aea1b442616f981af4082ae927198ea"
     },
     "event_trigger": {
-      "changed_lines": 430,
+      "changed_lines": 432,
       "expected": "event_trigger.out",
       "hunks": 21,
-      "sha256": "feb5bd5c4c92139897e3afdc38876a88e19397d62b76ac02818ad1c4e65eaea5"
+      "sha256": "56dd6e20261371cc8b2bd5a1f6b1b162f00640275f1e2fb871916c97b6b03dde"
     },
     "event_trigger_login": {
       "changed_lines": 8,
@@ -325,10 +325,10 @@
       "sha256": "5d6b6b7b313a53e7de3712aec1ac0e372ed3a17c360904c09c09eb61881c6b05"
     },
     "explain": {
-      "changed_lines": 695,
+      "changed_lines": 696,
       "expected": "explain.out",
       "hunks": 4,
-      "sha256": "ee14d93aae04a64ce0a1c2b7750d3ff5f4f6af6cb3a1dc4eabb991e3070e0201"
+      "sha256": "1cd0cad1680932f30084700f7d93179461e7e27d5ac104827e7156233c4c31b2"
     },
     "expressions": {
       "changed_lines": 272,
@@ -337,22 +337,22 @@
       "sha256": "b2fed2d4f751a09d9adfbdb958f16b335c5bacb6375e04eebe4f1fb8ecb280a1"
     },
     "fast_default": {
-      "changed_lines": 545,
+      "changed_lines": 543,
       "expected": "fast_default.out",
-      "hunks": 26,
-      "sha256": "f73ad0c7d2b49169d970e47cef5f3c50841702d4113ab9af945b56ef9ddafd52"
+      "hunks": 25,
+      "sha256": "269a7f3b6a3f538b1dce34c6c561f63fcbf2efe1969684350556de3bf6cf7c41"
     },
     "float4": {
-      "changed_lines": 484,
+      "changed_lines": 462,
       "expected": "float4.out",
-      "hunks": 8,
-      "sha256": "9491800cffafd9ee8450fba79f8c46538bc395c6e08247f387f79dc2c1379f42"
+      "hunks": 6,
+      "sha256": "b44b4c3df415e5f08fa7634c8826ddc3ff4731d6ae08ec170376508393a25ca8"
     },
     "float8": {
-      "changed_lines": 523,
+      "changed_lines": 501,
       "expected": "float8.out",
-      "hunks": 21,
-      "sha256": "ac8d23be4214d0ef833a71514a61b62b603de2bc1319b0e95b0a14a4b664a87d"
+      "hunks": 19,
+      "sha256": "1eb2cefb35910fee2de6ffc8fabfef0ebb3b99f1d15b692ecf0c92eae83c8753"
     },
     "foreign_data": {
       "changed_lines": 1824,
@@ -361,10 +361,10 @@
       "sha256": "98036d2a0f1053e29fab355d899746d575f665a12d932ca37f000b2603fb745a"
     },
     "foreign_key": {
-      "changed_lines": 1430,
+      "changed_lines": 1436,
       "expected": "foreign_key.out",
       "hunks": 77,
-      "sha256": "2451890bfd41035b443acb67e44bc8681f55cbda6fcea82a20cfe0cb14f573e2"
+      "sha256": "6ce06916fcd0f31d1dc017a56342b3455b14dabfdc05562cd7132ebcbc4115c7"
     },
     "functional_deps": {
       "changed_lines": 78,
@@ -385,10 +385,10 @@
       "sha256": "ed8ee0e9d70001c6c428aefa5dbc059afcae3a6ee8fd0d5864996ea4fa7abd22"
     },
     "geometry": {
-      "changed_lines": 4871,
+      "changed_lines": 4898,
       "expected": "geometry.out",
       "hunks": 11,
-      "sha256": "8f1296e04316518db699201952e1806a0ac3f090829e1d18138c6df1d661fec4"
+      "sha256": "d70253cc4aae6fb7667065bc5bd948df7ffb97e3ff571d22a700f25b3a4d53d6"
     },
     "gin": {
       "changed_lines": 134,
@@ -406,19 +406,19 @@
       "changed_lines": 2099,
       "expected": "groupingsets.out",
       "hunks": 50,
-      "sha256": "7db4e6d1f82eb8637184523f358fc55269d53ec8b944e712cdd38f620841b9d6"
+      "sha256": "e6cc56eeadf419c8f45e7feae9b8843789e2c62ada34b97d94774e48c9f355a6"
     },
     "guc": {
-      "changed_lines": 229,
+      "changed_lines": 230,
       "expected": "guc.out",
       "hunks": 41,
-      "sha256": "0bbb0e7af8696fa0ed56c60d4799bbc9f2dcdac04fdbf8e791c8f39f7bc75c26"
+      "sha256": "28fdb598525fea91a41e75b00a4a12940934c906749601eae2001bfeacd87790"
     },
     "hash_func": {
-      "changed_lines": 180,
+      "changed_lines": 184,
       "expected": "hash_func.out",
       "hunks": 21,
-      "sha256": "29b71ee02d1828e457bcd48f24687b1e89d8115bd3d343169afe30f94d259be5"
+      "sha256": "6460ce03a0d8063896999056bf6b5299c39d31a4f6f0d4abbb4e40b494802d1e"
     },
     "hash_index": {
       "changed_lines": 19,
@@ -433,10 +433,10 @@
       "sha256": "91bdb37f62d44ccdfe7f119f9a415cddfce2129ff5e3e3b4c4d1090b5ac88a6d"
     },
     "horology": {
-      "changed_lines": 3610,
+      "changed_lines": 3608,
       "expected": "horology.out",
       "hunks": 50,
-      "sha256": "73a71486076d96d3cb39ca2321c3cd9f90a7ed388422d5755faed4af3366ded7"
+      "sha256": "2d02816d1f75c92c9292ad5241ba403750e01efc754d172a69068589954e3f71"
     },
     "identity": {
       "changed_lines": 582,
@@ -469,10 +469,10 @@
       "sha256": "57e6f9f3e8a093f40ca6bf6fed20987d73d3525eafbd22a73b28ede086f32967"
     },
     "indirect_toast": {
-      "changed_lines": 122,
+      "changed_lines": 127,
       "expected": "indirect_toast.out",
       "hunks": 3,
-      "sha256": "3937b46d3af6a43ffbd1417b490441bf367e14bf94c569186abe231923f269b6"
+      "sha256": "0701e68321570215de1b90d28dc343ff5463a8fa6dca5d518d8f5d1a70698dba"
     },
     "inet": {
       "changed_lines": 86,
@@ -481,10 +481,10 @@
       "sha256": "181d6e2e36368eb00d84a879898540a1e8e6840bea4798373334ce7148ca1202"
     },
     "inherit": {
-      "changed_lines": 3047,
+      "changed_lines": 3048,
       "expected": "inherit.out",
       "hunks": 69,
-      "sha256": "81320829f59db9c2ffc4be6225e69a1c4c2ea48435ea9c33e63aa5efdc69f167"
+      "sha256": "63fed09c59089baf46633febd4a6e2e96f6a70d189b52f55d6a5ab1aaf2b11ca"
     },
     "init_privs": {
       "changed_lines": 9,
@@ -505,22 +505,22 @@
       "sha256": "23035867c601ee279df076e6f02eb2ccf10f4f9e9d3c71488cb4ff08642c7f89"
     },
     "int8": {
-      "changed_lines": 166,
+      "changed_lines": 162,
       "expected": "int8.out",
-      "hunks": 10,
-      "sha256": "845305d3c0450689290bc7c97da30ab7837066486f483d5ba71ae1cffeb5209a"
+      "hunks": 9,
+      "sha256": "99a9c15f022a689d4c9202ef7ba7eae3c5032952bc9f268c7230492d2afff978"
     },
     "interval": {
-      "changed_lines": 607,
+      "changed_lines": 608,
       "expected": "interval.out",
       "hunks": 32,
-      "sha256": "72de10de45b02554ee5c62c9fc43f21d85ff1495be21672520a312206f2171bf"
+      "sha256": "524893a2ab82087b12cdc36144984bdb4319c82d0cc20ba93079f57e7c621cb9"
     },
     "join": {
-      "changed_lines": 18061,
+      "changed_lines": 18067,
       "expected": "join.out",
       "hunks": 249,
-      "sha256": "32bd7ed14f11c08ba0afb5608597694aab703908955bcefdcf1234df8a75a47b"
+      "sha256": "96f7166fea0efb512bc5c893e826b3ed1fd5c7e76ec8c212a7cf25ea0ed53c94"
     },
     "join_hash": {
       "changed_lines": 845,
@@ -529,22 +529,22 @@
       "sha256": "ca989e09022d5d232b99a056ef1ca06618ed8609002f61bd12fc39e71b893cae"
     },
     "json": {
-      "changed_lines": 1816,
+      "changed_lines": 1356,
       "expected": "json.out",
-      "hunks": 35,
-      "sha256": "7a9d15baa40765ef0644fafae92332cc54a5236a44dc4a42a981ac3e5504c0fb"
+      "hunks": 36,
+      "sha256": "8cd1018ff6baed6f7a216c129bf5ddbbd93499acfc530de3ff6d4aafed711f73"
     },
     "json_encoding": {
-      "changed_lines": 154,
+      "changed_lines": 66,
       "expected": "json_encoding.out",
-      "hunks": 7,
-      "sha256": "42447143ba386a03a51cee0a66a7355c3120a7535483be0138f60b381d344841"
+      "hunks": 8,
+      "sha256": "f0a358350762b597ee0def4c80d11131ec6c827b6c474bb3b2010a964c097502"
     },
     "jsonb": {
-      "changed_lines": 1962,
+      "changed_lines": 1881,
       "expected": "jsonb.out",
-      "hunks": 52,
-      "sha256": "c47ef958422c8403aaf2f9c48f2c3bda07b9777e7767a97e293ed5f3b5b08df9"
+      "hunks": 53,
+      "sha256": "dcd2f16654d3f41689b8b09b09bc5ecee74da06621ba56c7af9a61a1f5befe15"
     },
     "jsonb_jsonpath": {
       "changed_lines": 2068,
@@ -565,10 +565,10 @@
       "sha256": "71debdcb65a0a6b850ddb6d60707162c8d36c0b3c4d3a4ee0038746431062ae5"
     },
     "largeobject": {
-      "changed_lines": 468,
+      "changed_lines": 477,
       "expected": "largeobject.out",
-      "hunks": 5,
-      "sha256": "df09de15688f889cecc8a8ab9761fd912efbfb0d2b4b5335170e63c0c93c8c09"
+      "hunks": 4,
+      "sha256": "138c348898c07903500aa255fc1b785e11fc4f5a34e06abc59af2ad3daf4a631"
     },
     "limit": {
       "changed_lines": 234,
@@ -601,22 +601,22 @@
       "sha256": "d745377773537d29a1306ba226256a55164c1c557b249a3f5c85514858651bd1"
     },
     "merge": {
-      "changed_lines": 994,
+      "changed_lines": 996,
       "expected": "merge.out",
       "hunks": 91,
-      "sha256": "318a3525e51e45474f98e9b34299fae8f874808e1ee38d53bc4f6c5eb352d1cf"
+      "sha256": "f114e987dfdced4425dc409a7473ac3217389e42418910c734241d4d0a4ab5e1"
     },
     "misc": {
-      "changed_lines": 235,
+      "changed_lines": 236,
       "expected": "misc.out",
       "hunks": 6,
-      "sha256": "2aefb9cd7a5704077a00688f78dad29adc653c23f43b61246d620ff7f942fabc"
+      "sha256": "95b36a05c106fa82d7facd4865f67222fca6b29b84430d9c847535024fe335a8"
     },
     "misc_functions": {
-      "changed_lines": 749,
+      "changed_lines": 767,
       "expected": "misc_functions.out",
       "hunks": 13,
-      "sha256": "2e75bd06186549bd7fdbec107d0b96791a2232a6ca953a330318333ac987978c"
+      "sha256": "9a2b0a07b4be564d9752d45cee4699ebfdd474cb2a94a583f5e19692c82affb5"
     },
     "misc_sanity": {
       "changed_lines": 504,
@@ -624,23 +624,17 @@
       "hunks": 4,
       "sha256": "8271c100fb281741ecc1c25a7fc3f51688aa57708958de57199c6b4bc0f7c9a3"
     },
-    "money": {
-      "changed_lines": 532,
-      "expected": "money.out",
-      "hunks": 1,
-      "sha256": "ff2ea3146e39f31e9b77add8517d7f23d767ac9ec0a0f679eb47f20cedacb1e9"
-    },
     "multirangetypes": {
-      "changed_lines": 205,
+      "changed_lines": 193,
       "expected": "multirangetypes.out",
-      "hunks": 37,
-      "sha256": "2743b5096b43e8ad3b16d91552433fc5f3c85b778da1bbdd32543efbef5fb352"
+      "hunks": 31,
+      "sha256": "f299352aa19c83709129503818edf1bb38f7418b37e8533cb02007f3071164f3"
     },
     "name": {
-      "changed_lines": 101,
+      "changed_lines": 102,
       "expected": "name.out",
       "hunks": 6,
-      "sha256": "27c49f7566f9a22459321989496832c44999067f1929f209dfd608c603baac22"
+      "sha256": "7112c2240a491b3f143f798ee345efd5d81d8a2060617910b9ba7cae69a2edf7"
     },
     "namespace": {
       "changed_lines": 80,
@@ -649,10 +643,10 @@
       "sha256": "f17ed634f90c2aee232a017d83402a9d1feba227e79c5a73f8526a0976b812b8"
     },
     "numeric": {
-      "changed_lines": 1113,
+      "changed_lines": 1067,
       "expected": "numeric.out",
-      "hunks": 46,
-      "sha256": "524f85169414e0670ccc7ca5686d4e762fb500f0042493390664e6f1d1d99dce"
+      "hunks": 45,
+      "sha256": "bd6e820551e4dd1db7babd161139680f7bedf1a167c6e02878a3a3b9da863e15"
     },
     "numerology": {
       "changed_lines": 170,
@@ -661,10 +655,10 @@
       "sha256": "bf002f3b714ce371091a52b21405e54236a5202a014a8e2132e0dfad55e6ad1d"
     },
     "object_address": {
-      "changed_lines": 687,
+      "changed_lines": 693,
       "expected": "object_address.out",
       "hunks": 6,
-      "sha256": "77c9f56b63f87234ff17b1ada236c986cd5a548eb922a49046a8b6894cad9358"
+      "sha256": "a082f32e0fce3156ab71ae49f44ac66f78927caee8742da37f01f7b2c6d7ea80"
     },
     "oid": {
       "changed_lines": 138,
@@ -673,16 +667,16 @@
       "sha256": "516cbedfbc71ec52b770e227eb6bb631c685e44b9d055159e3bd7aab191b000e"
     },
     "oidjoins": {
-      "changed_lines": 220,
+      "changed_lines": 221,
       "expected": "oidjoins.out",
       "hunks": 1,
-      "sha256": "e05df8f792749574c2742ce1a2db68a45a51c4d52d084d73312c672bbc0535de"
+      "sha256": "efef6dc7a1cf9fd2666ee8f9866cfc4c256c9b9893e6acfd095b56ffd9b798ca"
     },
     "opr_sanity": {
-      "changed_lines": 433,
+      "changed_lines": 436,
       "expected": "opr_sanity.out",
       "hunks": 49,
-      "sha256": "2a849201395b308bc1866aed7769b09319d6354b2d2032806d650344e86bf6d0"
+      "sha256": "e6488555cd3f82c906d3a39bd85064d767569a63648df8d2fccd643a8bac526e"
     },
     "partition_aggregate": {
       "changed_lines": 1210,
@@ -691,10 +685,10 @@
       "sha256": "9ada9e4db372b94331dfa3e8e66f19594bc8c72eb76aafc7535ebf9b3195c267"
     },
     "partition_info": {
-      "changed_lines": 304,
+      "changed_lines": 319,
       "expected": "partition_info.out",
       "hunks": 5,
-      "sha256": "dfd58088237d8d34ebded24d252bf372205731d6bb0372acd708dff403dc1f5b"
+      "sha256": "24a0f3eec3cc600efe4bdf16669e28b1e3f8bb8a9c3deee6832135b5c4659909"
     },
     "partition_join": {
       "changed_lines": 4208,
@@ -733,16 +727,16 @@
       "sha256": "0d76526b7ba184a7511f123052e10a2504e5b47b73fdc5125cf1b69a755e7b76"
     },
     "plpgsql": {
-      "changed_lines": 2055,
+      "changed_lines": 2074,
       "expected": "plpgsql.out",
       "hunks": 173,
-      "sha256": "170933ac91e9810393cd5c6e4e1bd92a6aab63c7dd8dcf2f5eef9784568423f6"
+      "sha256": "3abb3db0e2a3adfcd7e53bcee322e1a630a453efbdaad22cb252183324c1ce8d"
     },
     "point": {
-      "changed_lines": 206,
+      "changed_lines": 207,
       "expected": "point.out",
       "hunks": 19,
-      "sha256": "261f8d296f290204c39c1c53ef27794ec5dce004211be4099a545aa36b7b67cc"
+      "sha256": "f9a25fbfd007fe8ea9d791a0db3d2ff5c8726e62774c96c6bfec056cd5200903"
     },
     "polygon": {
       "changed_lines": 278,
@@ -751,10 +745,10 @@
       "sha256": "dbbc5209873ccbcb0a0aa3aeac2b1cfe574b6e840b3a10ec5591b07a02c9b458"
     },
     "polymorphism": {
-      "changed_lines": 1200,
+      "changed_lines": 1203,
       "expected": "polymorphism.out",
-      "hunks": 45,
-      "sha256": "d0173b2875d918b4b480f08020b3e5ceb96f0c31e73ab4a603da96f41ba0381a"
+      "hunks": 51,
+      "sha256": "fff8561d58b7405d03f94d8d47a670336562f8a2f6654d2c4cbd4b7f5480cdab"
     },
     "portals": {
       "changed_lines": 1236,
@@ -781,16 +775,16 @@
       "sha256": "6860deb687b19b78a5f6c5c2b694543343f7007f11d175b5893eab300d5a8ac1"
     },
     "privileges": {
-      "changed_lines": 1773,
+      "changed_lines": 1817,
       "expected": "privileges.out",
       "hunks": 83,
-      "sha256": "0e2087466745e7498c3fc780c957d05ae782ad55366044559aa0c5506d7a1004"
+      "sha256": "6d39a45eb0b751b9ee31d48996fbaa12c342d7ee3c4bb86131d659dc3a735f1f"
     },
     "psql": {
-      "changed_lines": 6403,
+      "changed_lines": 6426,
       "expected": "psql.out",
       "hunks": 72,
-      "sha256": "3a3e81e5439ab293b23f1ee0b6b7061468562f5c5dc87a7700d9c724bff18239"
+      "sha256": "efd687874d845c6b8d53cc569ffa1e356338051b05618b51b08de3b0c7976747"
     },
     "psql_pipeline": {
       "changed_lines": 171,
@@ -811,16 +805,16 @@
       "sha256": "099e290593ba78ea6bf0a68571dc9c2a39bea1ebe8fc7ffd5777acf7b9f4671b"
     },
     "rangefuncs": {
-      "changed_lines": 1835,
+      "changed_lines": 1865,
       "expected": "rangefuncs.out",
       "hunks": 47,
-      "sha256": "9b49c3f0832e74cc8c31d83d05e22f85aace424e0b5931c9610a61352d76aba0"
+      "sha256": "2fc5afe204ee5642c2c55e8913ebf319b39b825c54f3ede08abdcf43a0d6ea56"
     },
     "rangetypes": {
-      "changed_lines": 140,
+      "changed_lines": 137,
       "expected": "rangetypes.out",
-      "hunks": 12,
-      "sha256": "d2c66f1c5a92796ce029d4c6dd300c1a8aec87f1829232734747b44ef5e77582"
+      "hunks": 9,
+      "sha256": "c824a04c063d939bb8d6b240f7af0841d81d33259adc3aaaa87fead446f8542d"
     },
     "regex": {
       "changed_lines": 557,
@@ -853,16 +847,16 @@
       "sha256": "565a03150c1caf8dfbc20d7cf6797c0f6012c8cf7b41dfdcbfc97e2d03b7e073"
     },
     "rowsecurity": {
-      "changed_lines": 2789,
+      "changed_lines": 2799,
       "expected": "rowsecurity.out",
       "hunks": 128,
-      "sha256": "da1b93d19c1f6997db48c2206212a692330c15ec34e8c5af232b48a1355ffa11"
+      "sha256": "a9c7081dd5123f2eecafee05b1429800614ae19a023b853b2e54b42d51fd1140"
     },
     "rowtypes": {
-      "changed_lines": 874,
+      "changed_lines": 865,
       "expected": "rowtypes.out",
-      "hunks": 22,
-      "sha256": "295ba30d08e54e006ad6a50a6a2176145d470e0418881be18946849655cc6f08"
+      "hunks": 23,
+      "sha256": "befb3677c780525c0f741684c6ab5e5b3c479a946bc8f54dc2deb164f825c2ff"
     },
     "rules": {
       "changed_lines": 2857,
@@ -925,10 +919,10 @@
       "sha256": "5397020efbef709e8671f28db4af86ae9eb464b40c28527d7a97300f4c6b1b48"
     },
     "sequence": {
-      "changed_lines": 444,
+      "changed_lines": 446,
       "expected": "sequence.out",
       "hunks": 24,
-      "sha256": "bfa6a2b0c95b5a218ee86e54b000f6f41cce2789d4cf47f81fb27f1ec26ffd53"
+      "sha256": "5f7c70fb4376ed2cb5d6b10d31d6c9a5f896ed931d15a04d4c5cd997a21d1640"
     },
     "spgist": {
       "changed_lines": 21,
@@ -937,34 +931,34 @@
       "sha256": "628e868b18d78e8264034addd2d6774d51c3550b770eaa143671c31917bcd3eb"
     },
     "sqljson": {
-      "changed_lines": 821,
+      "changed_lines": 717,
       "expected": "sqljson.out",
-      "hunks": 26,
-      "sha256": "9786c97edd7e1431b8898b129ceeeceb641eb3cec67eabec37d5718a2724dbee"
+      "hunks": 28,
+      "sha256": "a1ca69bacdd18bf97dc12ee94bf9a86b34772d06651afc582fffb445a63d14f4"
     },
     "sqljson_jsontable": {
       "changed_lines": 316,
       "expected": "sqljson_jsontable.out",
       "hunks": 18,
-      "sha256": "bb1104644230677e782e07b745b890d2e0402c95ac88474a1afb3b68378173a7"
+      "sha256": "eeaf7aa77dcf15ff3f7c5f446cd5ff2f17de47347db2c0cf0c7efb55fcbdbf06"
     },
     "sqljson_queryfuncs": {
-      "changed_lines": 508,
+      "changed_lines": 510,
       "expected": "sqljson_queryfuncs.out",
-      "hunks": 27,
-      "sha256": "91fd624e0f8654a9ab268ae5001d3ed87a9982387d05eea27a0cd5834be4ba6f"
+      "hunks": 28,
+      "sha256": "f379e259df77e4734117ceeb772506f097ada6187aec3f2dec184355ffb54204"
     },
     "stats": {
-      "changed_lines": 1422,
+      "changed_lines": 1431,
       "expected": "stats.out",
       "hunks": 33,
-      "sha256": "b6b476bfece2bc3e8bca8b6cf66c5c0e3723dc052d78c01136e8b435a373d899"
+      "sha256": "7ac2152faa6e7aa78df1d0514947a0dce4a757e8459805e0e428e2a8c14051af"
     },
     "stats_ext": {
-      "changed_lines": 1452,
+      "changed_lines": 1453,
       "expected": "stats_ext.out",
       "hunks": 41,
-      "sha256": "050bbf91aac1f00bd949574e3066497fdcd04afeaf497c6eb3d71587daabd7f4"
+      "sha256": "538e7aa500b0f496f1c3aa6f62862cd4176eabdb61a1093edb1b3d496fdf6600"
     },
     "stats_import": {
       "changed_lines": 727,
@@ -973,10 +967,10 @@
       "sha256": "0a176d8350585497cbc2a9eda2ac0203d86fa0456f68afaf4494838a5c3918ae"
     },
     "strings": {
-      "changed_lines": 1017,
+      "changed_lines": 985,
       "expected": "strings.out",
-      "hunks": 32,
-      "sha256": "e1edc36424e2116cb08434201bb792acbb38b49f453ae01ced687fd3b1e82667"
+      "hunks": 33,
+      "sha256": "51954785b38c92521570b890a0b46cce46be0f9e88a9add028f8f29471f4e86c"
     },
     "subscription": {
       "changed_lines": 388,
@@ -1003,10 +997,10 @@
       "sha256": "14b77fdde643fdc8124b38233596f68a3baa1ec89ee33fd3e49b07cffac03037"
     },
     "tablespace": {
-      "changed_lines": 690,
+      "changed_lines": 691,
       "expected": "tablespace.out",
       "hunks": 16,
-      "sha256": "d2f45383ece1330793cdb97fe7f6e03908cf2dccc5660b5445f2c6ac03fd630e"
+      "sha256": "9e357e57644c3cabf8c440990ee5dc9f0c7991bac283e6c6711f15a3423f7c82"
     },
     "temp": {
       "changed_lines": 174,
@@ -1015,10 +1009,10 @@
       "sha256": "540e66c0c65ff0367829ad0f3fc8607956fbf4b31de0fc63a217fb42f59b8f35"
     },
     "text": {
-      "changed_lines": 141,
+      "changed_lines": 140,
       "expected": "text.out",
       "hunks": 10,
-      "sha256": "803c893823705eea0517d37652b4baa5766dfbec3a6b1047bc6a730b60be0892"
+      "sha256": "c4a9ab36c52e87c7c1214d0a37f20df661b138d3619931daafe2d97175f58ac9"
     },
     "tid": {
       "changed_lines": 86,
@@ -1051,10 +1045,10 @@
       "sha256": "a8058ef189e46e3c846c4da8ac9a904188187f1c44e0a4226f3a683e172e264c"
     },
     "timestamptz": {
-      "changed_lines": 3367,
+      "changed_lines": 3368,
       "expected": "timestamptz.out",
       "hunks": 50,
-      "sha256": "1b7ddfe839f4797fd8ed04463bd4f517f5068327c4d6e596246722cb0d65c33c"
+      "sha256": "ef9981e1648125667350f1ae94ed81a20cc27c3641c0dd313f0ed25e3f38e1a6"
     },
     "timetz": {
       "changed_lines": 84,
@@ -1069,10 +1063,10 @@
       "sha256": "228e3e0efe528a7f27439c0c3a10496bfb7d4613c12ce73f23bfc63fa8cc4924"
     },
     "triggers": {
-      "changed_lines": 1276,
+      "changed_lines": 1286,
       "expected": "triggers.out",
       "hunks": 87,
-      "sha256": "93ccaf787e9236e08e40bace885ff58d0ab7462824d20b7c26472486e81cb3fd"
+      "sha256": "aff5e154d8d97745e2122a5ce670dd5bcaa3d860a4cc675be11e1fde3cb13595"
     },
     "truncate": {
       "changed_lines": 186,
@@ -1087,10 +1081,10 @@
       "sha256": "aeb7b9c80352998358e6604d77cff90ec4ee1efe5d79e20946955bc7b3617342"
     },
     "tsearch": {
-      "changed_lines": 1510,
+      "changed_lines": 1534,
       "expected": "tsearch.out",
       "hunks": 73,
-      "sha256": "055249a3ee3202a6faf8022603c684522c8235a9cd481d949dc42ccfe6d63744"
+      "sha256": "480223aa160d98c71369f90fdcd4e35c5d02eedc1fa43300ef186c2c3eb26ca4"
     },
     "tsrf": {
       "changed_lines": 502,
@@ -1099,10 +1093,10 @@
       "sha256": "26c5b4a26dc9a996577d50c911dc7e74153039a94e200c49fd6ad34266877287"
     },
     "tstypes": {
-      "changed_lines": 480,
+      "changed_lines": 489,
       "expected": "tstypes.out",
       "hunks": 23,
-      "sha256": "0cb79256b7de3151763229a42eed663e25b4016cc1ba1ab1a962392fa4b8bae3"
+      "sha256": "870a93747457548c02166846927f65e1a5e8d39029f1a0eb7a5e0dfae674e45f"
     },
     "tuplesort": {
       "changed_lines": 503,
@@ -1117,10 +1111,10 @@
       "sha256": "b7a8de502384716ae6f8e9889325ff3b356251c28f9645e4dfd9a7296d5daf46"
     },
     "type_sanity": {
-      "changed_lines": 320,
+      "changed_lines": 319,
       "expected": "type_sanity.out",
       "hunks": 26,
-      "sha256": "b380f8ce90be8a1e8b1e784b5752a45c34145c252081f40ab01bf259ed73f11a"
+      "sha256": "888ebcf69108b6f0162c6876ce06622220c7f14eae576f676452c46a47225800"
     },
     "typed_table": {
       "changed_lines": 108,
@@ -1135,16 +1129,16 @@
       "sha256": "d8e60b7a777a5623d6294332d541c459bbbc8195bcd061a8b9b288813db18feb"
     },
     "union": {
-      "changed_lines": 827,
+      "changed_lines": 824,
       "expected": "union.out",
-      "hunks": 46,
-      "sha256": "792d611e22d937765183579c085e1e334dda2cd0941277eeddebb74a78575771"
+      "hunks": 45,
+      "sha256": "b04fdab7fe35cff8fec2a68af19825dcf236335fdc9a2e38cbaebe3753589379"
     },
     "updatable_views": {
-      "changed_lines": 2875,
+      "changed_lines": 2877,
       "expected": "updatable_views.out",
       "hunks": 70,
-      "sha256": "d9ad8b96121491a3fa826ab04227c966497103166eaec17ed11593e86a78bffd"
+      "sha256": "56a6e181351c808ea32c0958e039f5e2ced6b2eb609322d95e9059e06311944f"
     },
     "update": {
       "changed_lines": 555,
@@ -1165,16 +1159,16 @@
       "sha256": "b0eba7737107c7846ab497abdca5770715393a1b54127396649264c7d00052ac"
     },
     "window": {
-      "changed_lines": 2571,
+      "changed_lines": 2570,
       "expected": "window.out",
       "hunks": 168,
-      "sha256": "3c600104398537628526dd8c9c6320048ada00ec8fc9fa2ce02d747e5d1e31e7"
+      "sha256": "3577208a8dd01b13a8e97390b45980897e6b4baf11c683e55825e8295628f68f"
     },
     "with": {
-      "changed_lines": 1990,
+      "changed_lines": 1989,
       "expected": "with.out",
       "hunks": 107,
-      "sha256": "fa7941dea472ebb2c39a4d2e70f3ed8d00f87d628bc81dda44b4d9a1bcc94175"
+      "sha256": "34ac0969e898d509f03f56996b13d2753f588a1a9768fbeeb5e7a2a07ded5029"
     },
     "without_overlaps": {
       "changed_lines": 434,
@@ -1207,7 +1201,7 @@
       "sha256": "9e40681156288d1d178653bce938cf7db8f9f64acd764a844f6b65c6ec1d9fd4"
     }
   },
-  "passed": 30,
+  "passed": 31,
   "postgres_tag": "REL_18_4",
   "schedule": [
     "test_setup",
