@@ -7,8 +7,9 @@ use std::{
 use bytes::{BufMut, Bytes, BytesMut};
 use crabka_pgwire::{
     engine::{
-        BoundParam, CloseTarget, CopyOutResponse, Engine, ExecuteOutcome, FieldDescription,
-        PortalDescription, PreparedDescription, QueryResult, Session, TxStatus, oids,
+        BoundParam, CloseTarget, CopyOutResponse, CopyOutStream, Engine, ExecuteOutcome,
+        FieldDescription, Notification, PortalDescription, PreparedDescription, QueryResult,
+        Session, TxStatus, oids,
     },
     error::{PgError, sqlstate},
     session::SessionConfig,
@@ -128,11 +129,17 @@ impl Session for RecordingSession {
             .expect("calls")
             .push(Call::Execute(portal.into(), max_rows));
         if portal == "reserved" {
-            return Ok(ExecuteOutcome::CopyOut {
-                response: CopyOutResponse {
-                    overall_format: 0,
-                    column_formats: vec![0],
+            return Ok(ExecuteOutcome::Notification {
+                notification: Notification {
+                    process_id: 1,
+                    channel: "reserved".into(),
+                    payload: String::new(),
                 },
+            });
+        }
+        if portal == "copyout" {
+            return Ok(ExecuteOutcome::CopyOut {
+                stream: copy_out_stream(),
             });
         }
         if self.slow.contains(portal) {
@@ -194,6 +201,23 @@ fn text_field() -> FieldDescription {
         type_size: -1,
         type_modifier: -1,
         format: 0,
+    }
+}
+
+/// The copy a `PostgreSQL` 18.4 backend produced for `COPY t TO STDOUT` over a
+/// two-column table holding `(1, 'one')`, `(2, NULL)` and `(3, 'th<tab>ree')`.
+fn copy_out_stream() -> CopyOutStream {
+    CopyOutStream {
+        response: CopyOutResponse {
+            overall_format: 0,
+            column_formats: vec![0, 0],
+        },
+        rows: vec![
+            Bytes::from_static(b"1\tone\n"),
+            Bytes::from_static(b"2\t\\N\n"),
+            Bytes::from_static(b"3\tth\\tree\n"),
+        ],
+        tag: "COPY 3".into(),
     }
 }
 
@@ -430,4 +454,74 @@ async fn reserved_outcome_is_0a000_skips_until_sync_then_recovers() {
     stream.write_all(&recovery).await.expect("recovery");
     assert_eq!(read_backend(&mut stream).await.0, b'1');
     assert_eq!(read_backend(&mut stream).await.0, b'Z');
+}
+
+/// Drive an extended-protocol COPY TO STDOUT to `portal` and return every
+/// backend message up to and including `ReadyForQuery`.
+async fn extended_copy_out(portal: &str, max_rows: i32) -> Vec<(u8, Vec<u8>)> {
+    let port = spawn(RecordingEngine::default()).await;
+    let mut stream = raw_connect(port).await;
+
+    let mut parse = BytesMut::new();
+    parse.put_slice(b"cs\0COPY t TO STDOUT\0");
+    parse.put_i16(0);
+    let mut bind = BytesMut::new();
+    bind.put_slice(portal.as_bytes());
+    bind.put_u8(0);
+    bind.put_slice(b"cs\0");
+    bind.put_i16(0);
+    bind.put_i16(0);
+    bind.put_i16(0);
+    let mut execute = BytesMut::new();
+    execute.put_slice(portal.as_bytes());
+    execute.put_u8(0);
+    execute.put_i32(max_rows);
+
+    let mut batch = BytesMut::new();
+    batch.extend_from_slice(&tagged(b'P', &parse));
+    batch.extend_from_slice(&tagged(b'B', &bind));
+    batch.extend_from_slice(&tagged(b'E', &execute));
+    batch.extend_from_slice(&tagged(b'S', b""));
+    stream.write_all(&batch).await.expect("batch");
+
+    let mut messages = Vec::new();
+    loop {
+        let message = read_backend(&mut stream).await;
+        let done = message.0 == b'Z';
+        messages.push(message);
+        if done {
+            return messages;
+        }
+    }
+}
+
+/// Postgres answers an extended-protocol COPY TO STDOUT with the same copy
+/// block as the simple protocol, and owes `ReadyForQuery` only at Sync.
+#[tokio::test]
+async fn extended_copy_out_streams_the_postgres_message_sequence() {
+    let messages = extended_copy_out("copyout", 0).await;
+
+    let expected: Vec<(u8, Vec<u8>)> = vec![
+        (b'1', vec![]),
+        (b'2', vec![]),
+        (b'H', b"\x00\x00\x02\x00\x00\x00\x00".to_vec()),
+        (b'd', b"1\tone\n".to_vec()),
+        (b'd', b"2\t\\N\n".to_vec()),
+        (b'd', b"3\tth\\tree\n".to_vec()),
+        (b'c', vec![]),
+        (b'C', b"COPY 3\0".to_vec()),
+        (b'Z', b"I".to_vec()),
+    ];
+    assert2::assert!(messages == expected);
+}
+
+/// Postgres ignores Execute's row limit for a COPY TO portal: the whole copy
+/// arrives and the command completes rather than suspending the portal.
+#[tokio::test]
+async fn extended_copy_out_ignores_the_execute_row_limit() {
+    let limited = extended_copy_out("copyout", 1).await;
+    let unlimited = extended_copy_out("copyout", 0).await;
+
+    assert2::assert!(limited == unlimited);
+    assert2::assert!(!limited.iter().any(|(tag, _)| *tag == b's'));
 }

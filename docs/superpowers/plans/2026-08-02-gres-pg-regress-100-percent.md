@@ -468,13 +468,20 @@ and their certified artifact describe current conformance.
       one: they are cascades from unsupported partial indexes, where a column
       cannot be dropped because an index depends on it and the later `ATTACH`
       then finds the partition short a column.
-- [ ] Two pre-existing gaps found while tracing the above, both in DML rather
-      than DDL. `TRUNCATE` on an inheritance parent does not recurse at all --
-      the children keep their rows. And a partition declaring its columns in a
-      different order than its parent is refused outright in `DELETE`/`TRUNCATE`
-      (`exec.rs`), because `RETURNING` resolves against the leaf's order;
-      gating that refusal on `returning.is_some()` looks correct but is a DML
-      change with its own test surface.
+- [ ] One pre-existing gap found while tracing the above, in DML rather than
+      DDL: `TRUNCATE` on an inheritance parent does not recurse at all -- the
+      children keep their rows.
+- [x] A partition declaring its columns in a different order than its parent
+      was refused outright in `DELETE`/`UPDATE`, and so in `TRUNCATE`, which
+      runs as an unfiltered `DELETE`. The refusal existed only because
+      `RETURNING` resolves against the leaf's order, so it is now gated on
+      `returning.is_some()`: a `WHERE` clause resolves column references by
+      name and is order-insensitive, and without `RETURNING` no row shape
+      escapes the statement. Covered by
+      `crates/pgexec/tests/partitioned_dml_column_order.rs`. This is what lets
+      `copy.sql`'s `parted_copytest` round trip empty its table; left refused,
+      the table accumulated rows and inflated `copy.out` by roughly a thousand
+      lines.
 - [x] **The "intermittent hang" was never a hang.** Corrected by profiling a
       live specimen: the process sits at 99.9% CPU, not idle. The earlier
       recorded signature -- runtime parked in `ep_poll` while a client waits --

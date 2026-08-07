@@ -57,6 +57,7 @@ mod catalog_fn;
 mod catalog_rel;
 pub mod clock;
 mod commit;
+mod copyfmt;
 mod cte;
 mod cursor;
 mod datetime_fn;

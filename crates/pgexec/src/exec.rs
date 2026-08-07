@@ -2577,68 +2577,6 @@ fn build_copy_row(
     Ok(row)
 }
 
-pub(crate) fn decode_copy_text(data: &[u8]) -> Result<Vec<Vec<Option<String>>>, ExecError> {
-    let text = std::str::from_utf8(data)
-        .map_err(|_| ExecError::Syntax("invalid byte sequence for encoding \"UTF8\"".into()))?;
-    if text.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut rows = Vec::new();
-    let mut lines = text.split('\n').peekable();
-    while let Some(raw_line) = lines.next() {
-        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
-        // PostgreSQL's text-format end-of-data marker: clients on the old
-        // PQputline/PQendcopy API (pgbench -i among them) send a final `\.`
-        // line; it terminates the data and everything after it is ignored.
-        if line == r"\." {
-            break;
-        }
-        if raw_line.is_empty() && lines.peek().is_none() && text.ends_with('\n') {
-            continue;
-        }
-        rows.push(decode_copy_text_line(line)?);
-    }
-    Ok(rows)
-}
-
-fn decode_copy_text_line(line: &str) -> Result<Vec<Option<String>>, ExecError> {
-    line.split('\t')
-        .map(|field| {
-            if field == r"\N" {
-                return Ok(None);
-            }
-            decode_copy_text_field(field).map(Some)
-        })
-        .collect()
-}
-
-fn decode_copy_text_field(field: &str) -> Result<String, ExecError> {
-    let mut out = String::with_capacity(field.len());
-    let mut chars = field.chars();
-    while let Some(ch) = chars.next() {
-        if ch != '\\' {
-            out.push(ch);
-            continue;
-        }
-        let Some(escaped) = chars.next() else {
-            return Err(ExecError::Syntax(
-                "unterminated COPY escape sequence".into(),
-            ));
-        };
-        out.push(match escaped {
-            'b' => '\u{0008}',
-            'f' => '\u{000c}',
-            'n' => '\n',
-            'r' => '\r',
-            't' => '\t',
-            'v' => '\u{000b}',
-            '\\' => '\\',
-            other => other,
-        });
-    }
-    Ok(out)
-}
-
 /// The per-row work every write path shares once the target values are in
 /// place.
 ///
@@ -3851,9 +3789,13 @@ async fn partitioned_dml(
     writes: &mut StatementWrites,
 ) -> Result<(WriteOutcome, Vec<crabka_pgkv::WriteOp>), ExecError> {
     let resolution = write_ctx.eval_ctx.resolution();
-    let (parent, verb) = match stmt {
-        Statement::Update { table, .. } => (table, "UPDATE"),
-        Statement::Delete { table, .. } => (table, "DELETE"),
+    let (parent, verb, returning) = match stmt {
+        Statement::Update {
+            table, returning, ..
+        } => (table, "UPDATE", returning),
+        Statement::Delete {
+            table, returning, ..
+        } => (table, "DELETE", returning),
         _ => unreachable!("the caller matched an UPDATE or a DELETE"),
     };
     let parent = resolve_relation(
@@ -3871,12 +3813,16 @@ async fn partitioned_dml(
         // order, so a leaf whose columns are ordered differently would
         // contribute rows in a different shape. That only arises for a leaf
         // attached from a table declared out of order, and it is refused rather
-        // than answered with mismatched columns.
+        // than answered with mismatched columns. Without `RETURNING` no row
+        // shape escapes the statement, so the mismatch cannot be observed and
+        // the write proceeds -- which is what lets `TRUNCATE` reach such a
+        // partition, since it runs as an unqualified `DELETE`.
         let leaf_table = crabka_pgcatalog::get_table(write_ctx.catalog_kv, &leaf)?;
-        if column_mapping(&parent_table, &leaf_table)?
-            .iter()
-            .enumerate()
-            .any(|(expected, actual)| expected != *actual)
+        if returning.is_some()
+            && column_mapping(&parent_table, &leaf_table)?
+                .iter()
+                .enumerate()
+                .any(|(expected, actual)| expected != *actual)
         {
             return Err(ExecError::Unsupported(format!(
                 "{verb} over a partitioned table is not supported when a partition declares its \
@@ -6079,9 +6025,21 @@ fn insert_source_rows(
     }
 }
 
+/// The relation a `COPY … FROM` loads into, and the column list it fills.
+///
+/// `PostgreSQL`'s grammar has no `COPY ( <query> ) FROM` spelling, so the target
+/// of a load is always a relation; carrying just those two fields keeps the
+/// write paths free of the statement's framing options, which are already
+/// resolved by the time rows reach them.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CopyIntoTarget<'a> {
+    pub(crate) name: &'a crabka_pgparser::ast::RelationRef,
+    pub(crate) columns: &'a Option<Vec<String>>,
+}
+
 pub(crate) async fn execute_copy_write(
     write_ctx: &WriteContext<'_>,
-    copy: &crabka_pgparser::ast::CopyStmt,
+    target: CopyIntoTarget<'_>,
     rows: &[Vec<Option<String>>],
 ) -> Result<(QueryResult, Vec<crabka_pgkv::WriteOp>), ExecError> {
     let catalog_kv = write_ctx.catalog_kv;
@@ -6096,7 +6054,7 @@ pub(crate) async fn execute_copy_write(
         &resolve_relation(
             catalog_kv,
             resolution,
-            &copy.table,
+            target.name,
             SchemaDisposition::Utility,
         )?,
     )?;
@@ -6116,7 +6074,7 @@ pub(crate) async fn execute_copy_write(
     let parent_fk = crate::fk::StatementFkContext::resolve(catalog_kv, &table)?;
     let mut leaf_fk: HashMap<TableId, crate::fk::StatementFkContext> = HashMap::new();
     let mut writes = StatementWrites::default();
-    let target_idx = resolve_targets(&table, &copy.columns)?;
+    let target_idx = resolve_targets(&table, target.columns)?;
     let n_rows = rows.len() as u64;
     crate::trigger::fire_statement(
         catalog_kv,
@@ -6235,7 +6193,7 @@ pub(crate) fn execute_timestamp_copy_write(
     catalog_kv: &dyn Kv,
     kv: &dyn Kv,
     seq: &crate::seq::SequenceManager,
-    copy: &crabka_pgparser::ast::CopyStmt,
+    target: CopyIntoTarget<'_>,
     rows: &[Vec<Option<String>>],
     ctx: &crate::clock::EvalCtx,
 ) -> Result<TimestampWritePlan, ExecError> {
@@ -6245,7 +6203,7 @@ pub(crate) fn execute_timestamp_copy_write(
         &resolve_relation(
             catalog_kv,
             resolution,
-            &copy.table,
+            target.name,
             SchemaDisposition::Utility,
         )?,
     )?;
@@ -6267,7 +6225,7 @@ pub(crate) fn execute_timestamp_copy_write(
         .iter()
         .filter(|index| index.placement == crabka_pgcatalog::IndexPlacement::Global)
         .collect::<Vec<_>>();
-    let target_idx = resolve_targets(&table, &copy.columns)?;
+    let target_idx = resolve_targets(&table, target.columns)?;
     let n_rows = rows.len() as u64;
     if n_rows == 0 {
         return Ok(TimestampWritePlan {
@@ -6364,14 +6322,14 @@ pub(crate) fn write_requires_unique_local_serialization(
 pub(crate) fn copy_requires_unique_local_serialization(
     catalog_kv: &dyn Kv,
     resolution: &crate::relname::ResolutionScope,
-    copy: &crabka_pgparser::ast::CopyStmt,
+    target: CopyIntoTarget<'_>,
 ) -> Result<UniqueLocalSerialization, ExecError> {
     table_requires_unique_local_serialization(
         catalog_kv,
         &resolve_relation(
             catalog_kv,
             resolution,
-            &copy.table,
+            target.name,
             SchemaDisposition::Utility,
         )?,
     )
@@ -26090,22 +26048,6 @@ mod tests {
                 .expect_err("table was dropped");
             assert!(err.code == "42P01");
         }
-    }
-
-    #[test]
-    fn copy_text_stops_at_the_end_of_data_marker() {
-        use assert2::assert;
-        // Old-API clients (PQputline/PQendcopy — pgbench -i) send a final
-        // `\.` line; it terminates the data and later lines are ignored.
-        let rows = super::decode_copy_text(b"1\t0\t\\N\n\\.\n").expect("decode");
-        assert!(rows == vec![vec![Some("1".into()), Some("0".into()), None]]);
-
-        let rows = super::decode_copy_text(b"1\ta\n\\.\nignored\tafter\n").expect("decode");
-        assert!(rows == vec![vec![Some("1".into()), Some("a".into())]]);
-
-        // Without the marker, behavior is unchanged.
-        let rows = super::decode_copy_text(b"1\ta\n2\tb\n").expect("decode");
-        assert!(rows.len() == 2);
     }
 
     #[tokio::test]

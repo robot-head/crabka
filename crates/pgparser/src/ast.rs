@@ -598,6 +598,10 @@ pub enum Statement {
     /// autonomous (adaptive background vacuum with idle drain), so the command
     /// carries no payload.
     Vacuum,
+    /// `COPY … FROM …` / `COPY … TO …`, in either the table or the
+    /// parenthesized-query spelling. Boxed because [`CopyStmt`] is by far the
+    /// widest variant and every other statement would otherwise carry its size.
+    Copy(Box<CopyStmt>),
     Truncate {
         /// One entry per name in `TRUNCATE a, b, c`; the statement is
         /// all-or-nothing across the list, matching `PostgreSQL`. `ONLY` is
@@ -2036,26 +2040,135 @@ pub struct IndexKey {
     pub nulls_first: Option<bool>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A `COPY` statement: rows moving between a [`CopyTarget`] and an endpoint
+/// outside the database, in the direction [`CopyDirection`] names.
+///
+/// Not `Eq`: the query form nests a whole [`Statement`], whose expressions may
+/// hold float literals.
+#[derive(Debug, Clone, PartialEq)]
 pub struct CopyStmt {
-    pub table: RelationRef,
-    pub columns: Option<Vec<String>>,
-    pub source: CopySource,
-    pub format: CopyFormat,
+    /// The rows the statement moves.
+    pub target: CopyTarget,
+    /// Which way they move, and the endpoint at the far side.
+    pub direction: CopyDirection,
+    /// The option list, already folded from whichever of `PostgreSQL`'s two
+    /// spellings it was written in.
+    pub options: CopyOptions,
 }
 
-pub const COPY_FROM_STDIN_SENTINEL: &str = "__copy_from_stdin";
+/// What a `COPY` reads from or writes out.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CopyTarget {
+    /// `COPY t [(a, b)] …` — a relation, optionally restricted to a column
+    /// list. `None` columns means every column, in attribute order.
+    Table {
+        name: RelationRef,
+        columns: Option<Vec<String>>,
+    },
+    /// `COPY ( <query> ) TO …` — a parenthesized `SELECT`/`VALUES`/`TABLE`, or
+    /// an `INSERT`/`UPDATE`/`DELETE`/`MERGE … RETURNING`. Only ever paired with
+    /// [`CopyDirection::To`]; `PostgreSQL`'s grammar has no `FROM` spelling for
+    /// it.
+    Query(Box<Statement>),
+}
 
+/// Which way a `COPY` moves rows, and the endpoint at the far side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CopyDirection {
+    From(CopySource),
+    To(CopyDestination),
+}
+
+/// Where `COPY … FROM` reads its rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CopySource {
     Stdin,
     File(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Where `COPY … TO` writes its rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CopyDestination {
+    Stdout,
+    File(String),
+}
+
+/// The `COPY` option list. `PostgreSQL` accepts two spellings — the modern
+/// `(name value, …)` list and the legacy bare-keyword tail (`WITH CSV HEADER`)
+/// — and both land here, so consumers never see the difference.
+///
+/// Every field is the option *as written*: defaults that depend on the format
+/// (a text `COPY`'s `\t` delimiter, a CSV one's `"` quote) are deliberately not
+/// filled in, because resolving them is the executor's job and `None` is what
+/// distinguishes "not given" from "given the default value".
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CopyOptions {
+    pub format: CopyFormat,
+    /// `FREEZE` — a load-time visibility hint, always false for `COPY TO`.
+    pub freeze: bool,
+    pub delimiter: Option<String>,
+    /// The `NULL 'str'` sentinel.
+    pub null: Option<String>,
+    /// The `DEFAULT 'str'` sentinel (`COPY FROM` only).
+    pub default: Option<String>,
+    pub header: Option<CopyHeader>,
+    pub quote: Option<String>,
+    pub escape: Option<String>,
+    pub force_quote: Option<CopyColumns>,
+    pub force_not_null: Option<CopyColumns>,
+    pub force_null: Option<CopyColumns>,
+    /// `PostgreSQL`'s undocumented `CONVERT_SELECTIVELY` filter — the columns a
+    /// binary `COPY FROM` converts, the rest arriving as nulls. Parsed so the
+    /// option list behaves the way `PostgreSQL`'s does; an empty list is the
+    /// bare spelling and is legal.
+    pub convert_selectively: Option<Vec<String>>,
+    /// The encoding *name* as written; validity is checked where encodings are
+    /// known, not in the parser.
+    pub encoding: Option<String>,
+    pub on_error: Option<CopyOnError>,
+    pub log_verbosity: Option<CopyLogVerbosity>,
+    pub reject_limit: Option<i64>,
+}
+
+/// The wire format a `COPY` reads or writes. `BINARY` is a `PostgreSQL` format
+/// this parser refuses outright, so it has no variant here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CopyFormat {
+    #[default]
     Text,
     Csv,
+}
+
+/// The `HEADER` option. `MATCH` — verify the incoming header against the column
+/// list — is `COPY FROM` only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyHeader {
+    False,
+    True,
+    Match,
+}
+
+/// The argument of a `FORCE_QUOTE` / `FORCE_NOT_NULL` / `FORCE_NULL` option:
+/// either a named column list or `*` for all of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CopyColumns {
+    All,
+    Named(Vec<String>),
+}
+
+/// The `ON_ERROR` option: what a `COPY FROM` does with a row it cannot convert.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyOnError {
+    Stop,
+    Ignore,
+}
+
+/// The `LOG_VERBOSITY` option: how loudly a `COPY FROM` reports skipped rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyLogVerbosity {
+    Silent,
+    Default,
+    Verbose,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

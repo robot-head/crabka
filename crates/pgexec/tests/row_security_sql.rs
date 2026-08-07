@@ -58,6 +58,20 @@ async fn error_of(session: &mut SqlSession, sql: &str) -> (String, String) {
     (error.code.clone(), error.message)
 }
 
+/// A `COPY … TO STDOUT`'s whole payload, as the client would receive it.
+async fn copied(session: &mut SqlSession, sql: &str) -> String {
+    let stream = session
+        .begin_copy_out(sql)
+        .await
+        .unwrap_or_else(|error| panic!("{sql} should succeed: {error:?}"))
+        .unwrap_or_else(|| panic!("{sql} should be a copy-out"));
+    let mut out = Vec::new();
+    for row in &stream.rows {
+        out.extend_from_slice(row);
+    }
+    String::from_utf8(out).expect("copy-out payload is utf8")
+}
+
 fn rows(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_string()).collect()
 }
@@ -570,6 +584,60 @@ async fn copy_from_is_refused_for_a_relation_under_row_security() {
     let (sqlstate, message) = error_of(&mut bootstrap, "COPY plain FROM STDIN").await;
     assert!(sqlstate == "0A000");
     assert!(message == "COPY FROM STDIN requires pgwire CopyData messages");
+}
+
+/// **A leak test for the `COPY … TO` read path.**
+///
+/// A `COPY` of a relation is a read, and one that wrote out rows the policy
+/// hides would be a total leak whatever the ordinary scan does. It sits apart
+/// from the optimizer-bypass table because a copy-out is not a result set: the
+/// rows come back as an encoded payload, so the assertion is on those bytes.
+///
+/// The relation form and the query form are both checked, because they are the
+/// same path only as long as nobody adds a shortcut for the first.
+#[tokio::test]
+async fn a_policy_hides_a_row_from_copy_to() {
+    let (engine, mut alice) = owned_engine().await;
+    run(
+        &mut alice,
+        "CREATE POLICY high ON document USING (id > 3);
+         ALTER TABLE document ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY high ON measure USING (bucket > 10);
+         ALTER TABLE measure ENABLE ROW LEVEL SECURITY",
+    )
+    .await;
+
+    let mut bob = as_bob(&engine).await;
+    for (sql, expected) in [
+        ("COPY document (id) TO STDOUT", "4\n5\n"),
+        (
+            "COPY (SELECT id FROM document ORDER BY id) TO STDOUT",
+            "4\n5\n",
+        ),
+        ("COPY measure (id) TO STDOUT", "2\n"),
+        ("COPY (SELECT count(*) FROM document) TO STDOUT", "2\n"),
+    ] {
+        assert!(copied(&mut bob, sql).await == expected, "{sql}");
+    }
+
+    // Alice owns `document` and does not FORCE, so she bypasses the policy —
+    // which is what proves the rows bob did not see are still there.
+    assert!(copied(&mut alice, "COPY document (id) TO STDOUT").await == "1\n2\n3\n4\n5\n");
+}
+
+/// A `COPY … TO` a role may not read at all is refused at the privilege gate,
+/// before any row is encoded.
+#[tokio::test]
+async fn copy_to_is_refused_without_the_select_privilege() {
+    let (engine, mut alice) = owned_engine().await;
+    run(&mut alice, "REVOKE ALL ON document FROM bob").await;
+
+    let mut bob = as_bob(&engine).await;
+    let error = bob
+        .begin_copy_out("COPY document TO STDOUT")
+        .await
+        .expect_err("bob may not read document");
+    assert!(error.code == "42501");
 }
 
 // ------------------------------------------------------------- the SQL surface

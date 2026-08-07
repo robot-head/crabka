@@ -20,8 +20,8 @@ use crabka_pgexec::SqlEngine;
 use crabka_pgkv::{FjallKv, FjallOptions, Kv, KvScan, MemKv, RestoreKv, SnapshotKv};
 use crabka_pgwire::{
     engine::{
-        BoundParam, CloseTarget, CopyInResponse, Engine, ExecuteOutcome, Notification,
-        PortalDescription, PreparedDescription, QueryResult, Session, TxStatus,
+        BoundParam, CloseTarget, CopyInResponse, CopyOutStream, Engine, ExecuteOutcome,
+        Notification, PortalDescription, PreparedDescription, QueryResult, Session, TxStatus,
     },
     session::{AuthMode, SessionConfig},
     telemetry::{DEFAULT_SAMPLE_RATIO, IngressTracePolicy},
@@ -2919,6 +2919,16 @@ impl Session for RuntimeSession {
         match self {
             Self::Single(session) => session.copy_in(sql, data).await,
             Self::Multi(session) => session.copy_in(sql, data).await,
+        }
+    }
+
+    async fn begin_copy_out(
+        &mut self,
+        sql: &str,
+    ) -> Result<Option<CopyOutStream>, crabka_pgwire::error::PgError> {
+        match self {
+            Self::Single(session) => session.begin_copy_out(sql).await,
+            Self::Multi(session) => session.begin_copy_out(sql).await,
         }
     }
 

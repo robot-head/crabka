@@ -1051,9 +1051,7 @@ fn statement_shape(statement: &Statement) -> &'static str {
         Statement::Rollback { .. } => "Rollback",
         Statement::Update { .. } => "Update",
         Statement::Delete { .. } => "Delete",
-        Statement::Set { name, .. } if name == crabka_pgparser::ast::COPY_FROM_STDIN_SENTINEL => {
-            "CopyFromStdin"
-        }
+        Statement::Copy(copy) => copy_shape(copy),
         Statement::Discard { .. } => "Discard",
         Statement::Savepoint { .. } => "Savepoint",
         Statement::RollbackToSavepoint { .. } => "RollbackToSavepoint",
@@ -1152,6 +1150,24 @@ fn statement_shape(statement: &Statement) -> &'static str {
     }
 }
 
+/// Classify a `COPY` by the two things that decide how a client must drive it:
+/// which way the rows move, and whether the far endpoint is the client (`STDIN`
+/// / `STDOUT`, needing the copy subprotocol) or a server-side file. The
+/// parenthesized-query source is called out separately because only `COPY … TO`
+/// can spell it.
+fn copy_shape(copy: &crabka_pgparser::ast::CopyStmt) -> &'static str {
+    use crabka_pgparser::ast::{CopyDestination, CopyDirection, CopySource, CopyTarget};
+
+    match (&copy.direction, &copy.target) {
+        (CopyDirection::From(CopySource::Stdin), _) => "CopyFromStdin",
+        (CopyDirection::From(CopySource::File(_)), _) => "CopyFromFile",
+        (CopyDirection::To(CopyDestination::Stdout), CopyTarget::Table { .. }) => "CopyToStdout",
+        (CopyDirection::To(CopyDestination::Stdout), CopyTarget::Query(_)) => "CopyQueryToStdout",
+        (CopyDirection::To(CopyDestination::File(_)), CopyTarget::Table { .. }) => "CopyToFile",
+        (CopyDirection::To(CopyDestination::File(_)), CopyTarget::Query(_)) => "CopyQueryToFile",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use assert2::assert;
@@ -1192,6 +1208,26 @@ mod tests {
         ] {
             let parsed = parse_with_command_identities(sql).expect(sql);
             assert!(parsed[0].1 == identity);
+        }
+    }
+
+    #[test]
+    fn copy_shapes_name_their_direction_endpoint_and_source() {
+        for (sql, shape) in [
+            ("COPY t FROM STDIN", "CopyFromStdin"),
+            (
+                "COPY t (a, b) FROM STDIN WITH (FORMAT csv)",
+                "CopyFromStdin",
+            ),
+            ("COPY t FROM '/tmp/t.csv'", "CopyFromFile"),
+            ("COPY t TO STDOUT", "CopyToStdout"),
+            ("COPY t TO '/tmp/t.csv'", "CopyToFile"),
+            ("COPY (SELECT 1) TO STDOUT", "CopyQueryToStdout"),
+            ("COPY (SELECT 1) TO '/tmp/t.csv'", "CopyQueryToFile"),
+        ] {
+            let parsed = parse(sql).expect(sql);
+            assert!(parsed.len() == 1);
+            assert!(statement_shape(&parsed[0]) == shape, "{sql}");
         }
     }
 

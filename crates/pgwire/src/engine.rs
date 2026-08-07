@@ -208,8 +208,32 @@ pub enum CloseTarget<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CopyOutResponse {
+    /// 0 = text, 1 = binary.
     pub overall_format: i16,
+    /// One format code per source column.
     pub column_formats: Vec<i16>,
+}
+
+/// A complete COPY TO STDOUT result: everything the wire layer needs to put the
+/// connection into copy-out mode, stream the payload, and complete the command.
+///
+/// The whole copy is carried at once rather than streamed because that is what
+/// `PostgreSQL` puts on the wire. A backend buffers its entire copy-out block
+/// and flushes it when the statement finishes — a `COPY` whose query fails
+/// partway sends only `ErrorResponse`, never a `CopyOutResponse` followed by the
+/// rows produced before the failure. Handing the wire layer a value that only
+/// exists once the copy has succeeded makes that indivisibility structural: an
+/// engine that fails returns `Err` and no copy-out message is ever encoded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CopyOutStream {
+    pub response: CopyOutResponse,
+    /// One already-encoded `CopyData` payload per row, in the format named by
+    /// `response`. A binary copy carries its `PGCOPY` file header on the first
+    /// payload and its trailer as a payload of its own, matching how
+    /// `PostgreSQL` frames them.
+    pub rows: Vec<Bytes>,
+    /// The `CommandComplete` tag that closes the copy, such as `COPY 3`.
+    pub tag: String,
 }
 
 /// One `NOTIFY` delivered asynchronously to a listening connection.
@@ -237,7 +261,7 @@ pub enum ExecuteOutcome {
         response: CopyInResponse,
     },
     CopyOut {
-        response: CopyOutResponse,
+        stream: CopyOutStream,
     },
     Notification {
         notification: Notification,
@@ -423,6 +447,22 @@ pub trait Session: Send {
                 "COPY FROM STDIN is not supported by this engine",
             ))
         }
+    }
+
+    /// Return `Some` when `sql` is a supported simple-query COPY TO STDOUT
+    /// command, having already run it to completion. The wire layer writes the
+    /// whole copy-out block — `CopyOutResponse`, the rows, `CopyDone`, and
+    /// `CommandComplete` — from the returned value. Non-COPY SQL returns `None`.
+    ///
+    /// Returning `Err` reports the failure as a plain `ErrorResponse` with no
+    /// copy-out messages at all, which is what `PostgreSQL` does when a COPY's
+    /// query fails partway through.
+    fn begin_copy_out(
+        &mut self,
+        sql: &str,
+    ) -> impl Future<Output = Result<Option<CopyOutStream>, PgError>> + Send {
+        let _ = sql;
+        async { Ok(None) }
     }
 
     /// Finish an extended-protocol COPY FROM STDIN after `CopyDone`. `portal`

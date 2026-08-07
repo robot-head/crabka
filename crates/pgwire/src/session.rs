@@ -14,8 +14,8 @@ use tracing::Instrument as _;
 
 use crate::{
     engine::{
-        BoundParam, CloseTarget, CopyInResponse, Engine, ExecuteOutcome, Notification, QueryResult,
-        ResultPage, ResultSink, Session, TxStatus,
+        BoundParam, CloseTarget, CopyInResponse, CopyOutStream, Engine, ExecuteOutcome,
+        Notification, QueryResult, ResultPage, ResultSink, Session, TxStatus,
     },
     error::{PgError, Severity, sqlstate},
     messages::{
@@ -400,7 +400,7 @@ async fn handle_execute<Sess: Session>(
     };
     write_notices(out, notices);
     if let ExecuteOutcome::CopyIn { response } = outcome {
-        write_copy_in_response(out, &response);
+        backend::copy_in_response(out, response.overall_format, &response.column_formats);
         return Ok(Some(CopyInState {
             target: CopyInTarget::Portal {
                 name: portal_name.to_string(),
@@ -416,6 +416,53 @@ async fn handle_execute<Sess: Session>(
     }
     encode_execute_outcome(out, outcome)?;
     Ok(None)
+}
+
+/// What a simple-protocol Query turned out to be, once the engine has been
+/// asked whether it is a COPY the wire layer must drive itself.
+enum SimpleCopy {
+    /// COPY FROM STDIN: the connection enters copy-in mode.
+    In(CopyInResponse),
+    /// COPY TO STDOUT, already run to completion by the engine.
+    Out(CopyOutStream),
+    /// Ordinary SQL, to be executed through [`Session::simple_query_into`].
+    None,
+}
+
+/// Ask the engine whether `sql` is a COPY, under the same cancellation
+/// discipline as any other engine call: a `CancelRequest` that arrives while
+/// the probe is in flight drops the future and reports `57014`.
+async fn begin_simple_copy<Sess: Session>(
+    session: &mut Sess,
+    sql: &str,
+    cancel: &SessionCancel,
+) -> Result<SimpleCopy, PgError> {
+    let token = cancel.begin_query();
+    let started = tokio::select! {
+        // biased + cancellation-first; see handle_execute.
+        biased;
+        () = token.cancelled() => None,
+        r = session.begin_copy_in(sql) => Some(r),
+    };
+    let Some(started) = started else {
+        session.cancel_current_query().await;
+        return Err(query_canceled());
+    };
+    if let Some(response) = started? {
+        return Ok(SimpleCopy::In(response));
+    }
+
+    let token = cancel.begin_query();
+    let started = tokio::select! {
+        biased;
+        () = token.cancelled() => None,
+        r = session.begin_copy_out(sql) => Some(r),
+    };
+    let Some(started) = started else {
+        session.cancel_current_query().await;
+        return Err(query_canceled());
+    };
+    Ok(started?.map_or(SimpleCopy::None, SimpleCopy::Out))
 }
 
 fn query_canceled() -> PgError {
@@ -439,9 +486,10 @@ fn encode_execute_outcome(out: &mut BytesMut, outcome: ExecuteOutcome) -> Result
         }
         ExecuteOutcome::CommandComplete { tag } => backend::command_complete(out, &tag),
         ExecuteOutcome::EmptyQuery => backend::empty_query_response(out),
-        ExecuteOutcome::CopyIn { .. }
-        | ExecuteOutcome::CopyOut { .. }
-        | ExecuteOutcome::Notification { .. } => {
+        ExecuteOutcome::CopyOut { stream } => write_copy_out(out, &stream),
+        // CopyIn is intercepted by `handle_execute`, which owns the copy-in
+        // state machine, so it never reaches the encoder.
+        ExecuteOutcome::CopyIn { .. } | ExecuteOutcome::Notification { .. } => {
             return Err(PgError::error(
                 sqlstate::FEATURE_NOT_SUPPORTED,
                 "execute outcome is reserved for a future protocol extension",
@@ -451,8 +499,22 @@ fn encode_execute_outcome(out: &mut BytesMut, outcome: ExecuteOutcome) -> Result
     Ok(())
 }
 
-fn write_copy_in_response(out: &mut BytesMut, response: &CopyInResponse) {
-    backend::copy_in_response(out, response.overall_format, &response.column_formats);
+/// Write a whole COPY TO STDOUT exchange: `CopyOutResponse`, one `CopyData` per
+/// row, `CopyDone`, then the `CommandComplete` that ends the command.
+///
+/// The caller owes whatever `ReadyForQuery` the protocol requires — the simple
+/// protocol one immediately, the extended protocol one at the client's Sync.
+fn write_copy_out(out: &mut BytesMut, copy: &CopyOutStream) {
+    backend::copy_out_response(
+        out,
+        copy.response.overall_format,
+        &copy.response.column_formats,
+    );
+    for row in &copy.rows {
+        backend::copy_data(out, row);
+    }
+    backend::copy_done(out);
+    backend::command_complete(out, &copy.tag);
 }
 
 // ── Authentication helpers ──────────────────────────────────────────────────
@@ -894,33 +956,14 @@ where
                 FrontendMessage::Terminate => return Ok(()),
                 FrontendMessage::Query { sql } => {
                     let _statement_activity = activity.begin_statement().await;
-                    let statement_span = telemetry::statement_span(StatementProtocol::Simple);
-                    // The simple protocol carries its SQL, so this is where a
-                    // sqlcommenter tag is read. The text itself is left alone:
-                    // the parser skips comments without emitting a token, and it
-                    // keeps the original string so a syntax error's byte offset
-                    // still points where the client expects.
-                    let _ingress = telemetry::ingress_from_sql(
-                        config.ingress_trace,
-                        &sql,
-                        &statement_span,
-                    );
-                    let token = cancel.begin_query();
-                    let copy_start = tokio::select! {
-                        biased;
-                        () = token.cancelled() => None,
-                        r = session.begin_copy_in(&sql).instrument(statement_span.clone()) => Some(r),
-                    };
-                    let copy_start = if let Some(copy_start) = copy_start {
-                        copy_start
-                    } else {
-                        session.cancel_current_query().await;
-                        Err(query_canceled())
-                    };
-                    match copy_start {
-                        Ok(Some(response)) => {
+                    match begin_simple_copy(&mut session, &sql, &cancel).await {
+                        Ok(SimpleCopy::In(response)) => {
                             write_notices(&mut out, notices.as_mut());
-                            write_copy_in_response(&mut out, &response);
+                            backend::copy_in_response(
+                                &mut out,
+                                response.overall_format,
+                                &response.column_formats,
+                            );
                             stream.write_all(&out).await?;
                             out.clear();
                             copy_in = Some(CopyInState {
@@ -929,7 +972,20 @@ where
                             });
                             continue;
                         }
-                        Ok(None) => {}
+                        Ok(SimpleCopy::Out(copy)) => {
+                            write_notices(&mut out, notices.as_mut());
+                            write_copy_out(&mut out, &copy);
+                            write_ready(
+                                &mut out,
+                                &session,
+                                notices.as_mut(),
+                                notifications.as_mut(),
+                            );
+                            stream.write_all(&out).await?;
+                            out.clear();
+                            continue;
+                        }
+                        Ok(SimpleCopy::None) => {}
                         Err(e) => {
                             telemetry::record_statement_error(&statement_span, &e);
                             write_notices(&mut out, notices.as_mut());
@@ -1154,14 +1210,13 @@ where
                     stream.write_all(&out).await?;
                     return Ok(());
                 }
+                // Accepted and ignored, as Postgres does: a COPY that failed
+                // leaves the frontend still streaming frames it had already
+                // queued, and killing the connection over them would strand a
+                // client that is about to recover on its own.
                 FrontendMessage::CopyData(_)
                 | FrontendMessage::CopyDone
-                | FrontendMessage::CopyFail(_) => {
-                    let e = PgError::protocol("COPY message received outside COPY mode");
-                    backend::error_response(&mut out, &e);
-                    stream.write_all(&out).await?;
-                    return Ok(());
-                }
+                | FrontendMessage::CopyFail(_) => {}
             }
         }
     }
@@ -1220,6 +1275,8 @@ impl ResultSink for WireResultSink<'_> {
 
 #[cfg(test)]
 mod execute_outcome_tests {
+    use assert2::assert;
+
     use super::*;
     use crate::engine::{CopyOutResponse, Notification};
 
@@ -1228,12 +1285,6 @@ mod execute_outcome_tests {
         let outcomes = [
             ExecuteOutcome::CopyIn {
                 response: CopyInResponse {
-                    overall_format: 0,
-                    column_formats: vec![],
-                },
-            },
-            ExecuteOutcome::CopyOut {
-                response: CopyOutResponse {
                     overall_format: 0,
                     column_formats: vec![],
                 },
@@ -1249,7 +1300,92 @@ mod execute_outcome_tests {
         for outcome in outcomes {
             let error = encode_execute_outcome(&mut BytesMut::new(), outcome)
                 .expect_err("reserved outcome must fail");
-            assert_eq!(error.code, sqlstate::FEATURE_NOT_SUPPORTED);
+            assert!(error.code == sqlstate::FEATURE_NOT_SUPPORTED);
         }
+    }
+
+    /// The bytes a pinned `PostgreSQL` 18.4 backend put on the wire for
+    /// `COPY t TO STDOUT` over a two-column table holding `(1, 'one')`,
+    /// `(2, NULL)` and `(3, 'th<tab>ree')`.
+    fn postgres_copy_out_block() -> &'static [u8] {
+        b"H\x00\x00\x00\x0b\x00\x00\x02\x00\x00\x00\x00\
+          d\x00\x00\x00\x0a1\tone\n\
+          d\x00\x00\x00\x092\t\\N\n\
+          d\x00\x00\x00\x0e3\tth\\tree\n\
+          c\x00\x00\x00\x04\
+          C\x00\x00\x00\x0bCOPY 3\0"
+    }
+
+    fn sample_copy_out() -> CopyOutStream {
+        CopyOutStream {
+            response: CopyOutResponse {
+                overall_format: 0,
+                column_formats: vec![0, 0],
+            },
+            rows: vec![
+                Bytes::from_static(b"1\tone\n"),
+                Bytes::from_static(b"2\t\\N\n"),
+                Bytes::from_static(b"3\tth\\tree\n"),
+            ],
+            tag: "COPY 3".into(),
+        }
+    }
+
+    #[test]
+    fn copy_out_execute_outcome_encodes_the_whole_postgres_block() {
+        let mut out = BytesMut::new();
+        encode_execute_outcome(
+            &mut out,
+            ExecuteOutcome::CopyOut {
+                stream: sample_copy_out(),
+            },
+        )
+        .expect("copy-out encodes");
+
+        assert!(&out[..] == postgres_copy_out_block());
+    }
+
+    #[test]
+    fn empty_copy_out_still_frames_a_response_terminator_and_tag() {
+        let mut out = BytesMut::new();
+        write_copy_out(
+            &mut out,
+            &CopyOutStream {
+                response: CopyOutResponse {
+                    overall_format: 0,
+                    column_formats: vec![0],
+                },
+                rows: Vec::new(),
+                tag: "COPY 0".into(),
+            },
+        );
+
+        // Postgres answers `COPY <empty table> TO STDOUT` with exactly these
+        // three messages and no CopyData at all.
+        assert!(
+            &out[..]
+                == &b"H\x00\x00\x00\x09\x00\x00\x01\x00\x00c\x00\x00\x00\x04C\x00\x00\x00\x0bCOPY 0\0"[..]
+        );
+    }
+
+    #[test]
+    fn binary_copy_out_marks_every_column_binary() {
+        let mut out = BytesMut::new();
+        write_copy_out(
+            &mut out,
+            &CopyOutStream {
+                response: CopyOutResponse {
+                    overall_format: 1,
+                    column_formats: vec![1, 1],
+                },
+                rows: vec![Bytes::from_static(b"\xff\xff")],
+                tag: "COPY 0".into(),
+            },
+        );
+
+        assert!(
+            &out[..]
+                == &b"H\x00\x00\x00\x0b\x01\x00\x02\x00\x01\x00\x01d\x00\x00\x00\x06\xff\xffc\x00\x00\x00\x04C\x00\x00\x00\x0bCOPY 0\0"[..]
+        );
     }
 }

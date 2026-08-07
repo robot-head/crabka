@@ -9394,104 +9394,27 @@ impl Parser {
         self.expr(0)
     }
 
+    /// `COPY` — both directions, both target forms, both option spellings.
+    ///
+    /// `PostgreSQL`'s grammar has two productions. The relation form,
+    /// `COPY [BINARY] t [(cols)] {FROM|TO} [PROGRAM] {STDIN|STDOUT|'file'}
+    /// [[USING] DELIMITERS 'c'] [WITH] <options> [WHERE …]`, and the query form,
+    /// `COPY ( <query> ) TO [PROGRAM] {STDOUT|'file'} [WITH] <options>`. The two
+    /// are told apart by the token after `COPY`: only the query form can open
+    /// with a parenthesis, because a relation name never does.
     fn copy_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
-        use crate::ast::{CopyFormat, CopySource, CopyStmt, Statement};
+        use crate::ast::{CopyStmt, CopyTarget, Statement};
 
         self.expect(&Token::Keyword(Keyword::Copy))?;
-        let table = self.relation_ref()?;
-        let columns = if *self.peek() == Token::LParen {
-            Some(self.parse_parenthesized_ident_list()?)
-        } else {
-            None
-        };
 
-        if self.eat_keyword(Keyword::To) {
-            return Err(ParseError::new_sqlstate(
-                "0A000",
-                "COPY TO is not supported",
-                self.peek_pos(),
-            ));
+        if *self.peek() == Token::LParen {
+            return self.copy_query_stmt();
         }
-        self.expect(&Token::Keyword(Keyword::From))?;
-        let source = if self.eat_ident_eq("stdin") {
-            CopySource::Stdin
-        } else if let Token::StringLit(path) = self.bump() {
-            CopySource::File(path)
-        } else {
-            return Err(ParseError::new(
-                "expected STDIN or a file name after COPY FROM",
-                self.peek_pos(),
-            ));
-        };
 
-        let mut format = CopyFormat::Text;
-        if self.eat_keyword(Keyword::With) {
-            self.expect(&Token::LParen)?;
-            loop {
-                let option = self.expect_ident()?.to_ascii_lowercase();
-                match option.as_str() {
-                    "format" => {
-                        let value = self.expect_ident()?.to_ascii_lowercase();
-                        format = match value.as_str() {
-                            "text" => CopyFormat::Text,
-                            "csv" => CopyFormat::Csv,
-                            "binary" => {
-                                return Err(ParseError::new_sqlstate(
-                                    "0A000",
-                                    "COPY BINARY is not supported",
-                                    self.peek_pos(),
-                                ));
-                            }
-                            _ => {
-                                return Err(ParseError::new(
-                                    format!("unsupported COPY format `{value}`"),
-                                    self.peek_pos(),
-                                ));
-                            }
-                        };
-                    }
-                    "binary" => {
-                        return Err(ParseError::new_sqlstate(
-                            "0A000",
-                            "COPY BINARY is not supported",
-                            self.peek_pos(),
-                        ));
-                    }
-                    // FREEZE is a performance hint (skip per-row visibility
-                    // bookkeeping on a freshly created/truncated table). Rows
-                    // load as ordinary MVCC rows regardless, so the hint is
-                    // accepted and ignored; pgbench -i sends `freeze on`.
-                    "freeze" => {
-                        if matches!(
-                            self.peek(),
-                            Token::Keyword(Keyword::On | Keyword::True | Keyword::False)
-                        ) {
-                            self.bump();
-                        } else if !matches!(self.peek(), Token::Comma | Token::RParen) {
-                            let value = self.expect_ident()?.to_ascii_lowercase();
-                            if value != "off" {
-                                return Err(ParseError::new(
-                                    format!("unsupported COPY FREEZE value `{value}`"),
-                                    self.peek_pos(),
-                                ));
-                            }
-                        }
-                    }
-                    _ => {
-                        return Err(ParseError::new_sqlstate(
-                            "0A000",
-                            format!("COPY option `{option}` is not supported"),
-                            self.peek_pos(),
-                        ));
-                    }
-                }
-                if self.eat_comma() {
-                    continue;
-                }
-                break;
-            }
-            self.expect(&Token::RParen)?;
-        } else if self.eat_ident_eq("binary") {
+        // `opt_binary` — the pre-relation `COPY BINARY t …` spelling, which is
+        // just `format binary` under another name. Quoted `"binary"` is a
+        // relation name, never the flag.
+        if !self.peek_is_quoted_ident() && self.peek_word_is("binary") {
             return Err(ParseError::new_sqlstate(
                 "0A000",
                 "COPY BINARY is not supported",
@@ -9499,16 +9422,450 @@ impl Parser {
             ));
         }
 
-        Ok(Statement::Set {
-            local: false,
-            name: crate::ast::COPY_FROM_STDIN_SENTINEL.into(),
-            value: crate::ast::SetValue::Value(vec![Self::encode_copy_stmt(&CopyStmt {
-                table,
-                columns,
-                source,
-                format,
-            })]),
-        })
+        let name = self.relation_ref()?;
+        let columns = if *self.peek() == Token::LParen {
+            Some(self.parse_parenthesized_ident_list()?)
+        } else {
+            None
+        };
+
+        let is_from = self.copy_direction_keyword()?;
+        let direction = self.copy_endpoint(is_from)?;
+
+        // `copy_delimiter` — `[USING] DELIMITERS 'c'`, which sits *before* the
+        // `WITH` in the grammar and is spelled `DELIMITERS`, not `DELIMITER`.
+        let mut written = Vec::new();
+        if let Some(delimiters) = self.copy_legacy_delimiters()? {
+            written.push(delimiters);
+        }
+        written.extend(self.copy_option_list()?);
+        let options = copy_options(&written, is_from)?;
+
+        // `where_clause` closes the relation form. It is a `COPY FROM` row
+        // filter; PostgreSQL rejects it outright on the `TO` side.
+        if *self.peek() == Token::Keyword(Keyword::Where) {
+            return Err(if is_from {
+                ParseError::new_sqlstate(
+                    "0A000",
+                    "WHERE clause in COPY FROM is not supported",
+                    self.peek_pos(),
+                )
+            } else {
+                ParseError::new_sqlstate(
+                    "42601",
+                    "WHERE clause not allowed with COPY TO",
+                    self.peek_pos(),
+                )
+            });
+        }
+
+        self.expect_end_of_copy()?;
+        Ok(Statement::Copy(Box::new(CopyStmt {
+            target: CopyTarget::Table { name, columns },
+            direction,
+            options,
+        })))
+    }
+
+    /// The `COPY ( <query> ) TO …` production, entered with the cursor on the
+    /// opening parenthesis. Neither a column list nor a `WHERE` clause nor a
+    /// `FROM` direction is part of this production, so each is the syntax error
+    /// `PostgreSQL` reports for it.
+    fn copy_query_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::{CopyStmt, CopyTarget, Statement};
+
+        self.expect(&Token::LParen)?;
+        let query_pos = self.peek_pos();
+        let query = self.copy_preparable_stmt(query_pos)?;
+        self.expect(&Token::RParen)?;
+
+        if *self.peek() != Token::Keyword(Keyword::To) {
+            return Err(self.syntax_error_here());
+        }
+        self.bump();
+        let direction = self.copy_endpoint(false)?;
+        let options = copy_options(&self.copy_option_list()?, false)?;
+
+        self.expect_end_of_copy()?;
+        Ok(Statement::Copy(Box::new(CopyStmt {
+            target: CopyTarget::Query(Box::new(query)),
+            direction,
+            options,
+        })))
+    }
+
+    /// `PreparableStmt` inside `COPY ( … )`: a query body, or a data-modifying
+    /// statement that must hand rows back through `RETURNING`.
+    fn copy_preparable_stmt(
+        &mut self,
+        query_pos: usize,
+    ) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::Statement;
+
+        let statement = if *self.peek() == Token::Keyword(Keyword::With) {
+            let with = self.parse_with_clause()?;
+            if self.starts_dml_statement() {
+                let mut statement = self.dml_statement()?;
+                match &mut statement {
+                    Statement::Insert { with: slot, .. }
+                    | Statement::Update { with: slot, .. }
+                    | Statement::Delete { with: slot, .. }
+                    | Statement::Merge { with: slot, .. } => *slot = with,
+                    _ => unreachable!("dml_statement only builds DML statements"),
+                }
+                statement
+            } else {
+                let query = self.query_expr_after_with(with)?;
+                self.finish_query_statement(query)
+            }
+        } else if self.starts_dml_statement() {
+            self.dml_statement()?
+        } else if self.starts_query_expr() {
+            self.query_statement()?
+        } else {
+            return Err(self.syntax_error_here());
+        };
+
+        // The grammar lets `SELECT … INTO t` through here; COPY does not run it.
+        if matches!(statement, Statement::CreateTableAs { .. }) {
+            return Err(ParseError::new_sqlstate(
+                "0A000",
+                "COPY (SELECT INTO) is not supported",
+                query_pos,
+            ));
+        }
+        let returning = match &statement {
+            Statement::Insert { returning, .. }
+            | Statement::Update { returning, .. }
+            | Statement::Delete { returning, .. }
+            | Statement::Merge { returning, .. } => Some(returning),
+            _ => None,
+        };
+        if returning.is_some_and(Option::is_none) {
+            return Err(ParseError::new_sqlstate(
+                "0A000",
+                "COPY query must have a RETURNING clause",
+                query_pos,
+            ));
+        }
+        Ok(statement)
+    }
+
+    /// `copy_from` — `FROM` (true) or `TO` (false).
+    fn copy_direction_keyword(&mut self) -> Result<bool, ParseError> {
+        if self.eat_keyword(Keyword::From) {
+            Ok(true)
+        } else if self.eat_keyword(Keyword::To) {
+            Ok(false)
+        } else {
+            Err(self.syntax_error_here())
+        }
+    }
+
+    /// `opt_program copy_file_name` — where the rows come from or go to.
+    ///
+    /// `STDIN` and `STDOUT` are interchangeable in the grammar: `copy_file_name`
+    /// yields "no file" for either word and the direction decides which stream
+    /// that is, so `COPY t TO STDIN` writes to the client exactly as `STDOUT`
+    /// would. `PROGRAM` runs a shell command as the server's operating-system
+    /// user, which this engine has no equivalent of.
+    fn copy_endpoint(&mut self, is_from: bool) -> Result<crate::ast::CopyDirection, ParseError> {
+        use crate::ast::{CopyDestination, CopyDirection, CopySource};
+
+        let pos = self.peek_pos();
+        if self.eat_ident_eq("program") {
+            return Err(ParseError::new_sqlstate(
+                "0A000",
+                if is_from {
+                    "COPY FROM PROGRAM is not supported"
+                } else {
+                    "COPY TO PROGRAM is not supported"
+                },
+                pos,
+            ));
+        }
+        if self.eat_ident_eq("stdin") || self.eat_ident_eq("stdout") {
+            return Ok(if is_from {
+                CopyDirection::From(CopySource::Stdin)
+            } else {
+                CopyDirection::To(CopyDestination::Stdout)
+            });
+        }
+        if let Token::StringLit(path) = self.peek().clone() {
+            self.bump();
+            return Ok(if is_from {
+                CopyDirection::From(CopySource::File(path))
+            } else {
+                CopyDirection::To(CopyDestination::File(path))
+            });
+        }
+        Err(self.syntax_error_here())
+    }
+
+    /// `copy_delimiter` — the pre-`WITH` `[USING] DELIMITERS 'c'` spelling,
+    /// which sets the same option `DELIMITER 'c'` does.
+    fn copy_legacy_delimiters(&mut self) -> Result<Option<CopyOption>, ParseError> {
+        let using = *self.peek() == Token::Keyword(Keyword::Using);
+        if !(self.peek_word_is("delimiters") || (using && self.peek2_word_is("delimiters"))) {
+            return Ok(None);
+        }
+        if using {
+            self.bump();
+        }
+        let pos = self.peek_pos();
+        self.bump();
+        Ok(Some(CopyOption {
+            name: "delimiter".into(),
+            arg: CopyOptionArg::Word(self.copy_string_lit()?),
+            pos,
+        }))
+    }
+
+    /// `opt_with copy_options` — the option tail in either spelling. `WITH` is
+    /// optional before both, and both may be empty.
+    fn copy_option_list(&mut self) -> Result<Vec<CopyOption>, ParseError> {
+        self.eat_keyword(Keyword::With);
+        if *self.peek() == Token::LParen {
+            self.copy_generic_option_list()
+        } else {
+            self.copy_legacy_option_list()
+        }
+    }
+
+    /// `'(' copy_generic_opt_list ')'` — the modern `(name value, …)` list. The
+    /// grammar names no option here: every entry is a label with an optional
+    /// argument, and which labels mean something is settled in [`copy_options`].
+    fn copy_generic_option_list(&mut self) -> Result<Vec<CopyOption>, ParseError> {
+        self.expect(&Token::LParen)?;
+        let mut written = Vec::new();
+        loop {
+            let pos = self.peek_pos();
+            let name = self.expect_col_label()?;
+            let arg = self.copy_generic_option_arg()?;
+            written.push(CopyOption { name, arg, pos });
+            if self.eat_comma() {
+                continue;
+            }
+            break;
+        }
+        self.expect(&Token::RParen)?;
+        Ok(written)
+    }
+
+    /// `copy_generic_opt_arg` — a word, a string, a number, `*`, a
+    /// parenthesized word list, or nothing at all.
+    fn copy_generic_option_arg(&mut self) -> Result<CopyOptionArg, ParseError> {
+        if matches!(self.peek(), Token::Comma | Token::RParen) {
+            return Ok(CopyOptionArg::Absent);
+        }
+        if *self.peek() == Token::Star {
+            self.bump();
+            return Ok(CopyOptionArg::Star);
+        }
+        if *self.peek() == Token::LParen {
+            self.bump();
+            let mut items = Vec::new();
+            loop {
+                items.push(self.copy_option_word()?);
+                if self.eat_comma() {
+                    continue;
+                }
+                break;
+            }
+            self.expect(&Token::RParen)?;
+            return Ok(CopyOptionArg::Columns(items));
+        }
+        let negated = match self.peek() {
+            Token::Minus => {
+                self.bump();
+                true
+            }
+            Token::Plus => {
+                self.bump();
+                false
+            }
+            _ => false,
+        };
+        match self.peek().clone() {
+            Token::IntLit(digits) => {
+                self.bump();
+                // An integer wider than `i64` is still a legal `NumericOnly`;
+                // it only fails where an option wants a number, so it keeps its
+                // written spelling until then.
+                Ok(match digits.parse::<i64>() {
+                    Ok(value) if negated => CopyOptionArg::Int(-value),
+                    Ok(value) => CopyOptionArg::Int(value),
+                    Err(_) if negated => CopyOptionArg::Word(format!("-{digits}")),
+                    Err(_) => CopyOptionArg::Word(digits),
+                })
+            }
+            Token::FloatLit(digits) => {
+                self.bump();
+                Ok(CopyOptionArg::Word(if negated {
+                    format!("-{digits}")
+                } else {
+                    digits
+                }))
+            }
+            _ if negated => Err(self.syntax_error_here()),
+            _ => Ok(CopyOptionArg::Word(self.copy_option_word()?)),
+        }
+    }
+
+    /// One `opt_boolean_or_string`: a quoted string, or a bare word.
+    fn copy_option_word(&mut self) -> Result<String, ParseError> {
+        if let Token::StringLit(text) = self.peek().clone() {
+            self.bump();
+            return Ok(text);
+        }
+        self.expect_col_label()
+    }
+
+    /// `copy_opt_list` — the legacy bare-keyword tail (`CSV HEADER QUOTE '"'`).
+    /// It is comma-free and may be empty, so it ends at the first word that is
+    /// not one of its options.
+    fn copy_legacy_option_list(&mut self) -> Result<Vec<CopyOption>, ParseError> {
+        let mut written = Vec::new();
+        loop {
+            let pos = self.peek_pos();
+            let Some(word) = self.peek_word() else { break };
+            let (name, arg) = match word.as_str() {
+                "binary" => {
+                    return Err(ParseError::new_sqlstate(
+                        "0A000",
+                        "COPY BINARY is not supported",
+                        pos,
+                    ));
+                }
+                "freeze" => {
+                    self.bump();
+                    ("freeze", CopyOptionArg::Absent)
+                }
+                "csv" => {
+                    self.bump();
+                    ("format", CopyOptionArg::Word("csv".into()))
+                }
+                "header" => {
+                    self.bump();
+                    ("header", CopyOptionArg::Absent)
+                }
+                "delimiter" | "null" | "quote" | "escape" => {
+                    self.bump();
+                    // `opt_as` — `DELIMITER AS '|'` is `DELIMITER '|'`.
+                    self.eat_keyword(Keyword::As);
+                    let canonical = match word.as_str() {
+                        "delimiter" => "delimiter",
+                        "null" => "null",
+                        "quote" => "quote",
+                        _ => "escape",
+                    };
+                    (canonical, CopyOptionArg::Word(self.copy_string_lit()?))
+                }
+                "encoding" => {
+                    self.bump();
+                    ("encoding", CopyOptionArg::Word(self.copy_string_lit()?))
+                }
+                "force" => {
+                    self.bump();
+                    let canonical = if self.eat_ident_eq("quote") {
+                        "force_quote"
+                    } else if self.eat_keyword(Keyword::Not) {
+                        self.expect(&Token::Keyword(Keyword::Null))?;
+                        "force_not_null"
+                    } else if self.eat_keyword(Keyword::Null) {
+                        "force_null"
+                    } else {
+                        return Err(self.syntax_error_here());
+                    };
+                    let arg = if *self.peek() == Token::Star {
+                        self.bump();
+                        CopyOptionArg::Star
+                    } else {
+                        CopyOptionArg::Columns(self.copy_bare_column_list()?)
+                    };
+                    (canonical, arg)
+                }
+                _ => break,
+            };
+            written.push(CopyOption {
+                name: name.into(),
+                arg,
+                pos,
+            });
+        }
+        Ok(written)
+    }
+
+    /// `columnList` — the legacy syntax's unparenthesized `a, b, c`.
+    fn copy_bare_column_list(&mut self) -> Result<Vec<String>, ParseError> {
+        let mut columns = vec![self.expect_col_id()?];
+        while self.eat_comma() {
+            columns.push(self.expect_col_id()?);
+        }
+        Ok(columns)
+    }
+
+    /// `Sconst` in a COPY option position, reported the way `PostgreSQL`
+    /// reports it — pointing at the offending token, not past it.
+    fn copy_string_lit(&mut self) -> Result<String, ParseError> {
+        if let Token::StringLit(text) = self.peek().clone() {
+            self.bump();
+            Ok(text)
+        } else {
+            Err(self.syntax_error_here())
+        }
+    }
+
+    /// The word at the cursor, lowercased, when it is spelled as an unquoted
+    /// identifier or as a keyword. `None` for a quoted name (which is a plain
+    /// identifier and never an option word) and for anything that is not a word.
+    fn peek_word(&self) -> Option<String> {
+        match self.peek() {
+            Token::Ident(word) if !self.peek_is_quoted_ident() => Some(word.to_ascii_lowercase()),
+            Token::Keyword(_) => Some(self.keyword_label()),
+            _ => None,
+        }
+    }
+
+    fn peek_word_is(&self, want: &str) -> bool {
+        self.peek_word().is_some_and(|word| word == want)
+    }
+
+    fn peek2_word_is(&self, want: &str) -> bool {
+        matches!(self.peek2(), Token::Ident(word) if word.eq_ignore_ascii_case(want))
+    }
+
+    /// `PostgreSQL`'s bare `syntax error at or near "…"` for the token at the
+    /// cursor, quoting the token as it was written: the message echoes source
+    /// text, so a keyword keeps the case it was typed in and a string literal
+    /// keeps its quotes.
+    fn syntax_error_here(&self) -> ParseError {
+        let pos = self.peek_pos();
+        if *self.peek() == Token::Eof {
+            return ParseError::new_sqlstate("42601", "syntax error at end of input", pos);
+        }
+        // The next token's offset bounds this one; only layout sits between them.
+        let end = self
+            .toks
+            .get(self.pos + 1)
+            .map_or(self.source.len(), |(_, next)| *next);
+        let lexeme = self.source[pos..end.min(self.source.len())].trim_end();
+        ParseError::new_sqlstate(
+            "42601",
+            format!("syntax error at or near \"{lexeme}\""),
+            pos,
+        )
+    }
+
+    /// Nothing may follow a `COPY` but the end of the statement. Reporting it
+    /// here names the offending token, where the statement splitter could only
+    /// say that the statement did not end.
+    fn expect_end_of_copy(&self) -> Result<(), ParseError> {
+        if matches!(self.peek(), Token::Semicolon | Token::Eof) {
+            Ok(())
+        } else {
+            Err(self.syntax_error_here())
+        }
     }
 
     fn parse_parenthesized_ident_list(&mut self) -> Result<Vec<String>, ParseError> {
@@ -9526,58 +9883,6 @@ impl Parser {
         }
         self.expect(&Token::RParen)?;
         Ok(cols)
-    }
-
-    fn encode_copy_stmt(copy: &crate::ast::CopyStmt) -> String {
-        let format = match copy.format {
-            crate::ast::CopyFormat::Text => "text",
-            crate::ast::CopyFormat::Csv => "csv",
-        };
-        let columns = copy
-            .columns
-            .as_ref()
-            .map(|columns| {
-                columns
-                    .iter()
-                    .map(|column| Self::encode_copy_part(column))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            })
-            .unwrap_or_default();
-        // The schema rides its own field: a qualifier is not part of the
-        // relation's name, and `"a.b"` is a name that legitimately holds a dot.
-        let schema = copy
-            .table
-            .schema
-            .as_deref()
-            .map(Self::encode_copy_part)
-            .unwrap_or_default();
-        let (source, path) = match &copy.source {
-            crate::ast::CopySource::Stdin => ("stdin", String::new()),
-            crate::ast::CopySource::File(path) => ("file", Self::encode_copy_part(path)),
-        };
-        [
-            format,
-            &Self::encode_copy_part(&copy.table.name),
-            &columns,
-            &schema,
-            source,
-            &path,
-        ]
-        .join("\t")
-    }
-
-    fn encode_copy_part(value: &str) -> String {
-        let mut out = String::with_capacity(value.len());
-        for ch in value.chars() {
-            match ch {
-                '\\' => out.push_str(r"\\"),
-                '\t' => out.push_str(r"\t"),
-                ',' => out.push_str(r"\,"),
-                other => out.push(other),
-            }
-        }
-        out
     }
 
     /// Parse projection → HAVING. Leaves `order_by` / `limit` / `offset` / `locking` empty;
@@ -14740,19 +15045,24 @@ mod tests {
         }
     }
 
+    /// `FREEZE` is a load-time visibility hint the executor is free to ignore,
+    /// but it still has to reach the AST — and in every spelling `pgbench -i`
+    /// and `PostgreSQL`'s own boolean grammar allow.
     #[test]
-    fn copy_accepts_and_ignores_the_freeze_hint() {
+    fn copy_records_the_freeze_hint_in_every_boolean_spelling() {
         use assert2::assert;
-        // pgbench -i's COPY statement verbatim, plus value-form variants; all
-        // parse identically to the un-hinted COPY.
-        let bare = one("copy pgbench_accounts from stdin");
-        for sql in [
-            "copy pgbench_accounts from stdin with (freeze on)",
-            "COPY pgbench_accounts FROM STDIN WITH (FREEZE)",
-            "COPY pgbench_accounts FROM STDIN WITH (freeze off)",
-            "COPY pgbench_accounts FROM STDIN WITH (freeze true)",
+        for (sql, freeze) in [
+            ("copy pgbench_accounts from stdin", false),
+            ("copy pgbench_accounts from stdin with (freeze on)", true),
+            ("COPY pgbench_accounts FROM STDIN WITH (FREEZE)", true),
+            ("COPY pgbench_accounts FROM STDIN WITH (freeze off)", false),
+            ("COPY pgbench_accounts FROM STDIN WITH (freeze true)", true),
+            ("COPY pgbench_accounts FROM STDIN WITH FREEZE", true),
         ] {
-            assert!(one(sql) == bare, "case: {sql}");
+            let crate::ast::Statement::Copy(copy) = one(sql) else {
+                panic!("case: {sql}");
+            };
+            assert!(copy.options.freeze == freeze, "case: {sql}");
         }
         assert!(crate::parse("COPY t FROM STDIN WITH (freeze maybe)").is_err());
     }
@@ -18341,46 +18651,27 @@ mod tests {
             .expect("DROP FOREIGN TABLE without IF EXISTS must parse");
     }
 
+    /// The parsed statement, not its rendering: `COPY` now lands as a typed
+    /// [`crate::ast::Statement::Copy`], and the wider grammar is exercised in
+    /// `tests/copy.rs`.
     #[test]
-    fn copy_from_stdin_parses_supported_text_subset() {
-        // The schema rides a field of its own, so a qualified target survives
-        // the round trip and an unqualified one leaves that field empty.
-        for (sql, encoded) in [
-            (
-                "COPY accounts (id, name) FROM STDIN WITH (FORMAT text)",
-                "text\taccounts\tid,name\t\tstdin\t",
-            ),
-            (
-                "COPY s1.accounts (id, name) FROM STDIN WITH (FORMAT text)",
-                "text\taccounts\tid,name\ts1\tstdin\t",
-            ),
-            (
-                "COPY accounts FROM '/tmp/accounts.tsv'",
-                "text\taccounts\t\t\tfile\t/tmp/accounts.tsv",
-            ),
-        ] {
-            let stmts = crate::parse(sql).expect("COPY FROM STDIN parses");
-            let [crate::ast::Statement::Set { name, value, .. }] = stmts.as_slice() else {
-                panic!("expected COPY sentinel statement, got {stmts:?}");
-            };
-            assert2::assert!(name == crate::ast::COPY_FROM_STDIN_SENTINEL);
-            assert!(
-                *value == crate::ast::SetValue::Value(vec![encoded.into()]),
-                "{sql}"
-            );
-        }
-    }
+    fn copy_from_stdin_parses_to_a_typed_statement() {
+        use crate::ast::{
+            CopyDirection, CopyOptions, CopySource, CopyStmt, CopyTarget, RelationRef, Statement,
+        };
 
-    #[test]
-    fn copy_unsupported_paths_are_feature_not_supported() {
-        for sql in [
-            "COPY accounts TO STDOUT",
-            "COPY accounts FROM STDIN WITH (FORMAT binary)",
-            "COPY accounts FROM STDIN WITH (DELIMITER ',')",
-        ] {
-            let err = crate::parse(sql).expect_err(sql);
-            assert_eq!(err.sqlstate(), "0A000", "{sql}");
-        }
+        let stmts = crate::parse("COPY s1.accounts (id, name) FROM STDIN").expect("COPY parses");
+        assert2::assert!(
+            stmts
+                == vec![Statement::Copy(Box::new(CopyStmt {
+                    target: CopyTarget::Table {
+                        name: RelationRef::qualified("s1", "accounts"),
+                        columns: Some(vec!["id".into(), "name".into()]),
+                    },
+                    direction: CopyDirection::From(CopySource::Stdin),
+                    options: CopyOptions::default(),
+                }))]
+        );
     }
 }
 #[test]
@@ -20293,6 +20584,387 @@ fn check_json_table_quotes(
 /// The lowercase spelling of the reserved keywords the SQL/JSON grammar also
 /// uses as ordinary option words. `None` for every other keyword, so a word
 /// match never accepts an unrelated reserved word.
+/// One `name [value]` entry of a `COPY` option list, in the shape
+/// `PostgreSQL` carries it between grammar and command: the argument stays
+/// untyped until the option that owns it says what it means, because the same
+/// spelling reads as a boolean to one option and as a column list to another.
+struct CopyOption {
+    /// The option's name exactly as written. Unquoted words arrive lowercased
+    /// and quoted ones do not, which is what makes `("FORMAT" csv)` an
+    /// unrecognized option in `PostgreSQL` while `(FORMAT csv)` is not.
+    name: String,
+    arg: CopyOptionArg,
+    /// Byte offset of the name, which is where `PostgreSQL` points when either
+    /// the option or its value is rejected.
+    pos: usize,
+}
+
+/// The argument of a [`CopyOption`], before any option-specific reading of it.
+enum CopyOptionArg {
+    /// Written bare (`(freeze)`), which every boolean option reads as true.
+    Absent,
+    Word(String),
+    Int(i64),
+    Star,
+    Columns(Vec<String>),
+}
+
+impl CopyOptionArg {
+    /// The argument as text, or the "requires a parameter" error a bare option
+    /// earns where a value was wanted.
+    fn text(&self, option: &CopyOption) -> Result<String, ParseError> {
+        match self {
+            CopyOptionArg::Absent => Err(ParseError::new_sqlstate(
+                "42601",
+                format!("{} requires a parameter", option.name),
+                option.pos,
+            )),
+            CopyOptionArg::Word(text) => Ok(text.clone()),
+            CopyOptionArg::Int(value) => Ok(value.to_string()),
+            CopyOptionArg::Star => Ok("*".into()),
+            // A name list renders the way PostgreSQL renders one: dotted.
+            CopyOptionArg::Columns(items) => Ok(items.join(".")),
+        }
+    }
+
+    /// The argument as a boolean: `0`/`1`, or `true`/`false`/`on`/`off` in any
+    /// case, or bare for true.
+    fn boolean(&self, option: &CopyOption) -> Result<bool, ParseError> {
+        match self {
+            CopyOptionArg::Int(0) => return Ok(false),
+            CopyOptionArg::Absent | CopyOptionArg::Int(1) => return Ok(true),
+            _ => {}
+        }
+        match self.text(option)?.to_ascii_lowercase().as_str() {
+            "true" | "on" => Ok(true),
+            "false" | "off" => Ok(false),
+            _ => Err(ParseError::new_sqlstate(
+                "42601",
+                format!("{} requires a Boolean value", option.name),
+                option.pos,
+            )),
+        }
+    }
+}
+
+/// Fold a written `COPY` option list into [`crate::ast::CopyOptions`],
+/// rejecting what `PostgreSQL` rejects while the statement alone can tell.
+///
+/// Options that only make sense in one direction, and those that only make
+/// sense in CSV mode, are caught here because nothing outside the statement is
+/// needed to see the conflict. Checks that need the *resolved* option set —
+/// whether the delimiter is a legal single character once the format's default
+/// has been filled in, whether an encoding name is one this build knows — are
+/// left to the executor, which is where those defaults live.
+fn copy_options(
+    written: &[CopyOption],
+    is_from: bool,
+) -> Result<crate::ast::CopyOptions, ParseError> {
+    use crate::ast::{CopyFormat, CopyLogVerbosity, CopyOnError};
+
+    let mut options = crate::ast::CopyOptions::default();
+    // Every option may be written at most once; the value doubles as the
+    // position to report a later conflict at.
+    let mut at: std::collections::HashMap<&'static str, usize> = std::collections::HashMap::new();
+
+    for option in written {
+        let canonical = match option.name.as_str() {
+            "format" => "format",
+            "freeze" => "freeze",
+            "delimiter" => "delimiter",
+            "null" => "null",
+            "default" => "default",
+            "header" => "header",
+            "quote" => "quote",
+            "escape" => "escape",
+            "force_quote" => "force_quote",
+            "force_not_null" => "force_not_null",
+            "force_null" => "force_null",
+            "convert_selectively" => "convert_selectively",
+            "encoding" => "encoding",
+            "on_error" => "on_error",
+            "log_verbosity" => "log_verbosity",
+            "reject_limit" => "reject_limit",
+            other => {
+                return Err(ParseError::new_sqlstate(
+                    "42601",
+                    format!("option \"{other}\" not recognized"),
+                    option.pos,
+                ));
+            }
+        };
+        if at.insert(canonical, option.pos).is_some() {
+            return Err(ParseError::new_sqlstate(
+                "42601",
+                "conflicting or redundant options",
+                option.pos,
+            ));
+        }
+
+        match canonical {
+            "format" => {
+                // Matched case-sensitively, as PostgreSQL matches it: a bare
+                // `CSV` folds to lowercase on the way in, a quoted `'CSV'` does
+                // not, and only the first is a format name.
+                let format = option.arg.text(option)?;
+                options.format = match format.as_str() {
+                    "text" => CopyFormat::Text,
+                    "csv" => CopyFormat::Csv,
+                    "binary" => {
+                        return Err(ParseError::new_sqlstate(
+                            "0A000",
+                            "COPY BINARY is not supported",
+                            option.pos,
+                        ));
+                    }
+                    _ => {
+                        return Err(ParseError::new_sqlstate(
+                            "22023",
+                            format!("COPY format \"{format}\" not recognized"),
+                            option.pos,
+                        ));
+                    }
+                };
+            }
+            "freeze" => options.freeze = option.arg.boolean(option)?,
+            "delimiter" => options.delimiter = Some(option.arg.text(option)?),
+            "null" => options.null = Some(option.arg.text(option)?),
+            "default" => options.default = Some(option.arg.text(option)?),
+            "header" => options.header = Some(copy_header(option, is_from)?),
+            "quote" => options.quote = Some(option.arg.text(option)?),
+            "escape" => options.escape = Some(option.arg.text(option)?),
+            "force_quote" => options.force_quote = Some(copy_option_columns(option)?),
+            "force_not_null" => options.force_not_null = Some(copy_option_columns(option)?),
+            "force_null" => options.force_null = Some(copy_option_columns(option)?),
+            "convert_selectively" => {
+                // Alone among the column-list options this one may be written
+                // bare, which selects nothing rather than everything.
+                options.convert_selectively = Some(match &option.arg {
+                    CopyOptionArg::Absent => Vec::new(),
+                    CopyOptionArg::Columns(columns) => columns.clone(),
+                    _ => {
+                        return Err(ParseError::new_sqlstate(
+                            "22023",
+                            format!(
+                                "argument to option \"{}\" must be a list of column names",
+                                option.name
+                            ),
+                            option.pos,
+                        ));
+                    }
+                });
+            }
+            "encoding" => options.encoding = Some(option.arg.text(option)?),
+            "on_error" => {
+                if !is_from {
+                    return Err(copy_wrong_direction("ON_ERROR", is_from, option.pos));
+                }
+                let choice = option.arg.text(option)?;
+                options.on_error = Some(match choice.to_ascii_lowercase().as_str() {
+                    "stop" => CopyOnError::Stop,
+                    "ignore" => CopyOnError::Ignore,
+                    _ => {
+                        return Err(ParseError::new_sqlstate(
+                            "22023",
+                            format!("COPY ON_ERROR \"{choice}\" not recognized"),
+                            option.pos,
+                        ));
+                    }
+                });
+            }
+            "log_verbosity" => {
+                let choice = option.arg.text(option)?;
+                options.log_verbosity = Some(match choice.to_ascii_lowercase().as_str() {
+                    "silent" => CopyLogVerbosity::Silent,
+                    "default" => CopyLogVerbosity::Default,
+                    "verbose" => CopyLogVerbosity::Verbose,
+                    _ => {
+                        return Err(ParseError::new_sqlstate(
+                            "22023",
+                            format!("COPY LOG_VERBOSITY \"{choice}\" not recognized"),
+                            option.pos,
+                        ));
+                    }
+                });
+            }
+            _ => options.reject_limit = Some(copy_reject_limit(option)?),
+        }
+    }
+
+    copy_options_are_consistent(&options, is_from, &at)?;
+    Ok(options)
+}
+
+/// The direction and format checks `PostgreSQL` runs once the whole option list
+/// is in hand, in its order — a `FORCE_NOT_NULL` outside CSV mode is reported as
+/// a mode error even when it is also on the wrong side of the copy.
+fn copy_options_are_consistent(
+    options: &crate::ast::CopyOptions,
+    is_from: bool,
+    at: &std::collections::HashMap<&'static str, usize>,
+) -> Result<(), ParseError> {
+    let pos_of = |option: &str| at.get(option).copied().unwrap_or_default();
+    let csv = options.format == crate::ast::CopyFormat::Csv;
+
+    if !csv && options.quote.is_some() {
+        return Err(copy_requires_csv("QUOTE", pos_of("quote")));
+    }
+    if !csv && options.escape.is_some() {
+        return Err(copy_requires_csv("ESCAPE", pos_of("escape")));
+    }
+    if options.force_quote.is_some() {
+        if !csv {
+            return Err(copy_requires_csv("FORCE_QUOTE", pos_of("force_quote")));
+        }
+        if is_from {
+            return Err(ParseError::new_sqlstate(
+                "0A000",
+                "COPY FORCE_QUOTE cannot be used with COPY FROM",
+                pos_of("force_quote"),
+            ));
+        }
+    }
+    if options.force_not_null.is_some() {
+        if !csv {
+            return Err(copy_requires_csv(
+                "FORCE_NOT_NULL",
+                pos_of("force_not_null"),
+            ));
+        }
+        if !is_from {
+            return Err(copy_wrong_direction(
+                "FORCE_NOT_NULL",
+                is_from,
+                pos_of("force_not_null"),
+            ));
+        }
+    }
+    if options.force_null.is_some() {
+        if !csv {
+            return Err(copy_requires_csv("FORCE_NULL", pos_of("force_null")));
+        }
+        if !is_from {
+            return Err(copy_wrong_direction(
+                "FORCE_NULL",
+                is_from,
+                pos_of("force_null"),
+            ));
+        }
+    }
+    if options.freeze && !is_from {
+        return Err(copy_wrong_direction("FREEZE", is_from, pos_of("freeze")));
+    }
+    if options.default.is_some() && !is_from {
+        return Err(ParseError::new_sqlstate(
+            "0A000",
+            "COPY DEFAULT cannot be used with COPY TO",
+            pos_of("default"),
+        ));
+    }
+    if options.reject_limit.is_some() && options.on_error != Some(crate::ast::CopyOnError::Ignore) {
+        return Err(ParseError::new_sqlstate(
+            "22023",
+            "COPY REJECT_LIMIT requires ON_ERROR to be set to IGNORE",
+            pos_of("reject_limit"),
+        ));
+    }
+    Ok(())
+}
+
+fn copy_requires_csv(option: &str, pos: usize) -> ParseError {
+    ParseError::new_sqlstate("0A000", format!("COPY {option} requires CSV mode"), pos)
+}
+
+fn copy_wrong_direction(option: &str, is_from: bool, pos: usize) -> ParseError {
+    let direction = if is_from { "COPY FROM" } else { "COPY TO" };
+    ParseError::new_sqlstate(
+        "22023",
+        format!("COPY {option} cannot be used with {direction}"),
+        pos,
+    )
+}
+
+/// The `HEADER` option: a boolean, or `MATCH` — which asks a `COPY FROM` to
+/// check the incoming header against the column list and so has no reading on
+/// the `TO` side.
+fn copy_header(option: &CopyOption, is_from: bool) -> Result<crate::ast::CopyHeader, ParseError> {
+    use crate::ast::CopyHeader;
+
+    match &option.arg {
+        CopyOptionArg::Int(0) => return Ok(CopyHeader::False),
+        CopyOptionArg::Absent | CopyOptionArg::Int(1) => return Ok(CopyHeader::True),
+        _ => {}
+    }
+    let choice = option.arg.text(option)?;
+    match choice.to_ascii_lowercase().as_str() {
+        "true" | "on" => Ok(CopyHeader::True),
+        "false" | "off" => Ok(CopyHeader::False),
+        "match" if is_from => Ok(CopyHeader::Match),
+        "match" => Err(ParseError::new_sqlstate(
+            "0A000",
+            format!("cannot use \"{choice}\" with HEADER in COPY TO"),
+            option.pos,
+        )),
+        _ => Err(ParseError::new_sqlstate(
+            "42601",
+            format!("{} requires a Boolean value or \"match\"", option.name),
+            option.pos,
+        )),
+    }
+}
+
+/// The argument of `FORCE_QUOTE` / `FORCE_NOT_NULL` / `FORCE_NULL`: a column
+/// list, or `*` for every column.
+fn copy_option_columns(option: &CopyOption) -> Result<crate::ast::CopyColumns, ParseError> {
+    use crate::ast::CopyColumns;
+
+    match &option.arg {
+        CopyOptionArg::Star => Ok(CopyColumns::All),
+        CopyOptionArg::Columns(columns) => Ok(CopyColumns::Named(columns.clone())),
+        _ => Err(ParseError::new_sqlstate(
+            "22023",
+            format!(
+                "argument to option \"{}\" must be a list of column names",
+                option.name
+            ),
+            option.pos,
+        )),
+    }
+}
+
+/// The `REJECT_LIMIT` option: a positive `bigint`, whether written as a number
+/// or as a string that reads as one.
+fn copy_reject_limit(option: &CopyOption) -> Result<i64, ParseError> {
+    let limit = match &option.arg {
+        CopyOptionArg::Absent => {
+            return Err(ParseError::new_sqlstate(
+                "42601",
+                format!("{} requires a numeric value", option.name),
+                option.pos,
+            ));
+        }
+        CopyOptionArg::Int(value) => *value,
+        arg => {
+            let written = arg.text(option)?;
+            written.trim().parse::<i64>().map_err(|_| {
+                ParseError::new_sqlstate(
+                    "22P02",
+                    format!("invalid input syntax for type bigint: \"{written}\""),
+                    option.pos,
+                )
+            })?
+        }
+    };
+    if limit <= 0 {
+        return Err(ParseError::new_sqlstate(
+            "22023",
+            format!("REJECT_LIMIT ({limit}) must be greater than zero"),
+            option.pos,
+        ));
+    }
+    Ok(limit)
+}
+
 fn keyword_word(kw: Keyword) -> Option<&'static str> {
     Some(match kw {
         Keyword::Array => "array",

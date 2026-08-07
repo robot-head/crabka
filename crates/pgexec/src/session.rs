@@ -23,16 +23,18 @@ use std::{
 use crabka_pgkv::{Kv, WriteOp};
 use crabka_pgmvcc::{clog::XidStatus, visibility::Snapshot};
 use crabka_pgparser::ast::{
-    BinaryOp, CopyFormat, CopySource, CopyStmt, CursorTarget, DiscardTarget, ExplainOptions, Expr,
-    FetchDirection, FuncArgs, IsolationLevel, JoinConstraint, OnConflict, OnConflictAction,
-    OnConflictTarget, QueryBody, QueryExpr, ResetTarget, SelectItem, SetExpr, Statement, TableExpr,
-    TableLockMode, UnaryOp, UnlistenTarget, UtilityStatement,
+    BinaryOp, CopyDestination, CopyDirection, CopyHeader, CopySource, CopyStmt, CopyTarget,
+    CursorTarget, DiscardTarget, ExplainOptions, Expr, FetchDirection, FuncArgs, IsolationLevel,
+    JoinConstraint, OnConflict, OnConflictAction, OnConflictTarget, QueryBody, QueryExpr,
+    ResetTarget, SelectItem, SetExpr, Statement, TableExpr, TableLockMode, UnaryOp, UnlistenTarget,
+    UtilityStatement,
 };
 use crabka_pgtypes::{ColumnType, Datum, ElemType};
 use crabka_pgwire::{
     engine::{
-        BoundParam, Cell, CloseTarget, CopyInResponse, ExecuteOutcome, FieldDescription,
-        Notification, PortalDescription, PreparedDescription, QueryResult, Session, TxStatus,
+        BoundParam, Cell, CloseTarget, CopyInResponse, CopyOutResponse, CopyOutStream,
+        ExecuteOutcome, FieldDescription, Notification, PortalDescription, PreparedDescription,
+        QueryResult, Session, TxStatus,
     },
     error::{PgError, Severity, sqlstate},
 };
@@ -2209,7 +2211,10 @@ fn establishes_transaction_activity(stmt: &Statement) -> bool {
             | UtilityStatement::AlterOperatorObject { .. }
             | UtilityStatement::DropOperatorObject { .. },
         ) => true,
-        Statement::Query(_)
+        // A COPY reads or writes rows, so it establishes transaction semantics
+        // exactly as the SELECT or INSERT it stands for would.
+        Statement::Copy(_)
+        | Statement::Query(_)
         | Statement::Insert { .. }
         | Statement::Update { .. }
         | Statement::Delete { .. }
@@ -2588,6 +2593,15 @@ pub struct SqlSession {
     /// messages (`RAISE NOTICE`, WARNING, and the other PL/pgSQL levels).
     notice_tx: mpsc::Sender<PgError>,
     notice_rx: Option<mpsc::Receiver<PgError>>,
+    /// The parse [`Session::begin_copy_in`] made, kept for
+    /// [`Session::begin_copy_out`] to reuse.
+    ///
+    /// The wire layer asks both questions about the same query string, back to
+    /// back, with nothing run in between — so without this every simple query,
+    /// COPY or not, would be parsed one extra time just to be told it is not a
+    /// copy-out. `begin_copy_in` always overwrites it and `begin_copy_out`
+    /// always takes it, so a stale parse can never be answered from.
+    copy_probe: Option<(String, Vec<Statement>)>,
     /// The open transaction's queued notification work. Shared (not owned)
     /// because the per-statement `EvalCtx` hands it to `pg_notify()`.
     notify_pending: Arc<Mutex<NotifyPending>>,
@@ -3071,6 +3085,7 @@ impl SqlSession {
             notify_rx: None,
             notice_tx,
             notice_rx: Some(notice_rx),
+            copy_probe: None,
             notify_pending: Arc::new(Mutex::new(NotifyPending::default())),
             notify_reserved: Mutex::new(None),
             deferred_fk: Arc::new(Mutex::new(crate::fk::DeferredConstraints::default())),
@@ -6155,12 +6170,7 @@ impl SqlSession {
                     tag: "VACUUM".into(),
                 })
             }
-            Statement::Set { name, value, .. }
-                if name == crabka_pgparser::ast::COPY_FROM_STDIN_SENTINEL =>
-            {
-                self.run_copy_from(decode_copy_stmt(value).map_err(ExecError::Remote)?)
-                    .await
-            }
+            Statement::Copy(copy) => self.run_copy(copy).await,
             Statement::Query(q) if q.locking.is_some() => self.run_query_locking(q).await,
             // A `WITH` list that modifies data makes the whole statement a
             // write, even though its outer body is a query.
@@ -8836,19 +8846,31 @@ impl SqlSession {
         }
     }
 
-    /// `COPY … FROM` reaching the executor rather than the wire's copy-in mode:
-    /// a file source, or a `STDIN` source on a path that cannot stream one.
+    /// A `COPY` reaching the executor rather than one of the wire's copy modes:
+    /// a file endpoint on either side, or a `STDIN`/`STDOUT` one on a path that
+    /// cannot stream it.
     ///
     /// Split out of `run_one` rather than written inline: `run_one`'s future is
     /// re-entered once per nested SQL function call, so every local it holds is
     /// paid for on each level of that recursion, and this arm's file buffer is
     /// the largest of them.
-    async fn run_copy_from(&mut self, copy: CopyStmt) -> Result<QueryResult, ExecError> {
+    async fn run_copy(&mut self, copy: &CopyStmt) -> Result<QueryResult, ExecError> {
+        match &copy.direction {
+            CopyDirection::From(source) => self.run_copy_from(copy, source).await,
+            CopyDirection::To(destination) => self.run_copy_to(copy, destination).await,
+        }
+    }
+
+    async fn run_copy_from(
+        &mut self,
+        copy: &CopyStmt,
+        source: &CopySource,
+    ) -> Result<QueryResult, ExecError> {
         // Before the source is even looked at: a `COPY … FROM STDIN` reaching
         // here came in over the simple-query path, and its refusal has to be
         // the one the wire path gives before announcing copy-in mode.
-        self.precheck_copy_from(&copy)?;
-        match &copy.source {
+        self.precheck_copy_from(copy)?;
+        match source {
             CopySource::Stdin => Err(ExecError::Unsupported(
                 "COPY FROM STDIN requires pgwire CopyData messages".into(),
             )),
@@ -8859,10 +8881,211 @@ impl SqlSession {
                         format!("could not open file \"{path}\" for reading: {error}"),
                     ))
                 })?;
-                self.run_copy_in(&copy, vec![bytes::Bytes::from(data)])
-                    .await
+                self.run_copy_in(copy, vec![bytes::Bytes::from(data)]).await
             }
         }
+    }
+
+    /// `COPY … TO` on the executor path: a server-side file, or a `STDOUT` that
+    /// reached here instead of [`Session::begin_copy_out`].
+    async fn run_copy_to(
+        &mut self,
+        copy: &CopyStmt,
+        destination: &CopyDestination,
+    ) -> Result<QueryResult, ExecError> {
+        let CopyDestination::File(path) = destination else {
+            // Copy-out mode is a wire state, not a result: only the paths that
+            // own the connection's framing can enter it.
+            return Err(ExecError::Unsupported(
+                "COPY TO STDOUT requires pgwire CopyOut messages".into(),
+            ));
+        };
+        let copied = self.copy_out_rows(copy).await?;
+        let mut payload = Vec::new();
+        for line in &copied.lines {
+            payload.extend_from_slice(line);
+        }
+        tokio::fs::write(path, payload).await.map_err(|error| {
+            ExecError::Remote(
+                PgError::error(
+                    "58P01",
+                    format!("could not open file \"{path}\" for writing: {error}"),
+                )
+                .with_hint(
+                    "COPY TO instructs the server process to write a file. \
+                     You may want a client-side facility such as psql's \\copy.",
+                ),
+            )
+        })?;
+        Ok(QueryResult::Command { tag: copied.tag })
+    }
+
+    /// The statement a `COPY … TO` reads its rows from, and the relation to
+    /// name in a `FORCE_QUOTE` complaint (`None` for the query form, which has
+    /// no relation to name).
+    ///
+    /// The relation form becomes a `SELECT`, which is the whole of this
+    /// engine's answer to "does `COPY` honour row-level security?": there is
+    /// only one read path, the one every query uses, so a policy, a column
+    /// privilege, a partition tree and an inheritance tree all reach a `COPY`
+    /// the way they reach the `SELECT` it is. `PostgreSQL` arrives at the same
+    /// place from the other side — `DoCopy` rewrites `COPY <rel> TO` into
+    /// `COPY (SELECT … FROM <rel>) TO` the moment the relation has a policy —
+    /// and rewriting unconditionally is what removes the second path that could
+    /// disagree with the first.
+    fn copy_out_source(&self, copy: &CopyStmt) -> Result<(Statement, Option<String>), ExecError> {
+        let (name, columns) = match &copy.target {
+            CopyTarget::Query(query) => return Ok(((**query).clone(), None)),
+            CopyTarget::Table { name, columns } => (name, columns),
+        };
+        let resolved = crate::relname::resolve_relation(
+            self.catalog_kv.as_ref(),
+            &self.resolution_scope(),
+            name,
+            crate::relname::SchemaDisposition::Utility,
+        )?;
+        let table = match crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &resolved) {
+            Ok(table) => table,
+            // A relation this copy cannot scan row by row. PostgreSQL names the
+            // kind and, for a view, points at the spelling that does work.
+            Err(error) => {
+                if crabka_pgcatalog::get_view(self.catalog_kv.as_ref(), &resolved).is_ok() {
+                    return Err(ExecError::Remote(
+                        PgError::error(
+                            "42809",
+                            format!("cannot copy from view \"{}\"", resolved.name),
+                        )
+                        .with_hint("Try the COPY (SELECT ...) TO variant."),
+                    ));
+                }
+                if crabka_pgcatalog::get_sequence(self.catalog_kv.as_ref(), &resolved).is_ok() {
+                    return Err(ExecError::Remote(PgError::error(
+                        "42809",
+                        format!("cannot copy from sequence \"{}\"", resolved.name),
+                    )));
+                }
+                return Err(error.into());
+            }
+        };
+        let projection = match columns {
+            // No column list is every column in attribute order, which is
+            // exactly what the wildcard projects.
+            None => vec![SelectItem::Wildcard],
+            Some(columns) => {
+                let mut seen = HashSet::new();
+                columns
+                    .iter()
+                    .map(|column| {
+                        if table.column_index(column).is_none() {
+                            return Err(ExecError::Remote(PgError::error(
+                                "42703",
+                                format!(
+                                    "column \"{column}\" of relation \"{}\" does not exist",
+                                    resolved.name
+                                ),
+                            )));
+                        }
+                        if !seen.insert(column.clone()) {
+                            return Err(ExecError::DuplicateOutputColumn(column.clone()));
+                        }
+                        Ok(SelectItem::Expr {
+                            expr: Expr::Column {
+                                table: None,
+                                name: column.clone(),
+                            },
+                            alias: None,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            }
+        };
+        let select = crabka_pgparser::ast::SelectStmt {
+            projection,
+            from: vec![TableExpr::Table {
+                name: name.clone(),
+                only: false,
+                alias: None,
+                columns: None,
+                sample: None,
+            }],
+            filter: None,
+            distinct: crabka_pgparser::ast::DistinctClause::All,
+            group_by: Vec::new(),
+            grouping: None,
+            having: None,
+            windows: Vec::new(),
+            window_calls: Vec::new(),
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            with_ties: false,
+            locking: None,
+        };
+        Ok((
+            Statement::Query(QueryExpr {
+                with: None,
+                body: SetExpr::Query(QueryBody::Select(Box::new(select))),
+                order_by: Vec::new(),
+                limit: None,
+                offset: None,
+                with_ties: false,
+                locking: None,
+            }),
+            Some(resolved.name.clone()),
+        ))
+    }
+
+    /// Run a `COPY … TO`'s source and encode every row it produced.
+    ///
+    /// The whole copy is materialised on purpose. `PostgreSQL` buffers a
+    /// copy-out block and flushes it when the statement finishes, so a copy
+    /// whose query fails partway emits an `ErrorResponse` and nothing else —
+    /// never a `CopyOutResponse` followed by the rows that came before the
+    /// failure. Building the payload before anything is framed makes that
+    /// indivisible rather than merely intended.
+    async fn copy_out_rows(&mut self, copy: &CopyStmt) -> Result<CopiedOut, ExecError> {
+        let format = crate::copyfmt::CopyOutFormat::resolve(&copy.options)?;
+        let (source, relation) = self.copy_out_source(copy)?;
+        // Boxed because this is `run_one` calling itself: a COPY of a query is
+        // a statement inside a statement.
+        let result = Box::pin(self.run_one(&source)).await?;
+        let QueryResult::Rows { fields, rows, .. } = result else {
+            // Every source the parser admits is row-producing — a query body,
+            // or a data-modifying statement it required a RETURNING clause of.
+            return Err(ExecError::Syntax(
+                "COPY query must have a result set".into(),
+            ));
+        };
+        let names: Vec<String> = fields.iter().map(|field| field.name.clone()).collect();
+        let forced = format.forced_columns(&names, relation.as_deref())?;
+        let mut lines = Vec::with_capacity(rows.len() + usize::from(format.header));
+        lines.extend(format.header_line(&names).map(bytes::Bytes::from));
+        let copied = rows.len();
+        for row in &rows {
+            let cells: Vec<Option<&[u8]>> = row
+                .iter()
+                .map(|cell| cell.as_ref().map(|cell| cell.text.as_ref()))
+                .collect();
+            lines.push(bytes::Bytes::from(format.row_line(&cells, &forced)));
+        }
+        Ok(CopiedOut {
+            lines,
+            columns: names.len(),
+            tag: format!("COPY {copied}"),
+        })
+    }
+
+    /// The copy-out block for a `COPY … TO STDOUT`, ready for the wire layer.
+    async fn copy_out_stream(&mut self, copy: &CopyStmt) -> Result<CopyOutStream, ExecError> {
+        let copied = self.copy_out_rows(copy).await?;
+        Ok(CopyOutStream {
+            response: CopyOutResponse {
+                overall_format: 0,
+                column_formats: vec![0; copied.columns],
+            },
+            rows: copied.lines,
+            tag: copied.tag,
+        })
     }
 
     async fn run_copy_in(
@@ -8873,9 +9096,8 @@ impl SqlSession {
         // Statement-duration garbage-horizon pin — see `run_one`.
         let _statement_pin = matches!(self.state, TxnState::Idle)
             .then(|| self.gc_horizon.pin(self.procarray.snapshot().xmin));
-        if matches!(copy.format, CopyFormat::Csv) {
-            return Err(ExecError::Unsupported("COPY CSV is not supported".into()));
-        }
+        let target = copy_into_target(copy)?;
+        let format = crate::copyfmt::CopyInFormat::resolve(&copy.options)?;
         // `COPY … FROM 'file'` never enters copy-in mode, so it reaches here
         // without passing `copy_in_start`. Both entry points must refuse, or
         // one of them loads rows past a policy.
@@ -8885,7 +9107,14 @@ impl SqlSession {
         for chunk in chunks {
             data.extend_from_slice(&chunk);
         }
-        let rows = crate::exec::decode_copy_text(&data)?;
+        // Only `HEADER MATCH` reads the names, and resolving them costs a
+        // catalog round trip, so the ordinary load does not pay for it.
+        let header_columns = if format.header == Some(CopyHeader::Match) {
+            self.copy_target_column_names(target)?
+        } else {
+            Vec::new()
+        };
+        let rows = crate::copyfmt::decode_copy_text(&data, &format, &header_columns)?;
         match &self.state {
             TxnState::InTransaction(_) => {
                 self.ensure_table_write_guard().await;
@@ -8894,7 +9123,7 @@ impl SqlSession {
                     &crate::relname::resolve_relation(
                         self.catalog_kv.as_ref(),
                         &self.resolution_scope(),
-                        &copy.table,
+                        target.name,
                         crate::relname::SchemaDisposition::Utility,
                     )?,
                 )?) {
@@ -8905,7 +9134,7 @@ impl SqlSession {
                 let unique_serialization = crate::exec::copy_requires_unique_local_serialization(
                     self.catalog_kv.as_ref(),
                     &self.resolution_scope(),
-                    copy,
+                    target,
                 )?;
                 self.ensure_unique_index_guard(unique_serialization).await?;
                 self.ensure_write_xid()?;
@@ -8928,7 +9157,7 @@ impl SqlSession {
                     ctes: &statement_ctes,
                 });
                 let (result, mut ops) =
-                    crate::exec::execute_copy_write(&write_ctx, copy, &rows).await?;
+                    crate::exec::execute_copy_write(&write_ctx, target, &rows).await?;
                 if self.persist_mode == crate::PersistMode::Replicated {
                     ops.push(self.procarray.next_xid_op());
                 }
@@ -8944,7 +9173,7 @@ impl SqlSession {
                     &crate::relname::resolve_relation(
                         self.catalog_kv.as_ref(),
                         &self.resolution_scope(),
-                        &copy.table,
+                        target.name,
                         crate::relname::SchemaDisposition::Utility,
                     )?,
                 )?;
@@ -8954,7 +9183,7 @@ impl SqlSession {
                         self.catalog_kv.as_ref(),
                         self.kv.as_ref(),
                         self.seq.as_ref(),
-                        copy,
+                        target,
                         &rows,
                         &ctx,
                     )?;
@@ -8975,7 +9204,7 @@ impl SqlSession {
                 let _unique_guard = match crate::exec::copy_requires_unique_local_serialization(
                     self.catalog_kv.as_ref(),
                     &self.resolution_scope(),
-                    copy,
+                    target,
                 )? {
                     UniqueLocalSerialization::None => None,
                     UniqueLocalSerialization::Shared(table) => Some(
@@ -9001,7 +9230,8 @@ impl SqlSession {
                 // Reserved before the batch is durable, as in `run_write`: a
                 // column default that calls `pg_notify()` must not be able to
                 // fail a COPY whose rows are already committed.
-                let outcome = match crate::exec::execute_copy_write(&write_ctx, copy, &rows).await {
+                let outcome = match crate::exec::execute_copy_write(&write_ctx, target, &rows).await
+                {
                     Ok(written) => self.reserve_autocommit_notifications().map(|()| written),
                     Err(error) => Err(error),
                 };
@@ -9489,6 +9719,16 @@ impl SqlSession {
     }
 }
 
+/// A finished `COPY … TO`: its encoded payload, and what closes it.
+struct CopiedOut {
+    /// One encoded line per row, its trailing newline included, preceded by the
+    /// header line when `HEADER` asked for one.
+    lines: Vec<bytes::Bytes>,
+    /// The width of the copied result, which the `CopyOutResponse` announces.
+    columns: usize,
+    tag: String,
+}
+
 impl Drop for SqlSession {
     /// A connection dropped mid-transaction (client disconnect) must not leak
     /// its xid in the ProcArray, nor leave its row locks held forever (which
@@ -9523,143 +9763,73 @@ fn parse_single_extended_statement(
     }
 }
 
-fn parse_single_copy_statement(
-    sql: &str,
-    type_schemas: &[String],
-) -> Result<Option<CopyStmt>, PgError> {
-    let statements = crabka_pgparser::parse_with_type_schemas(sql, type_schemas)
-        .map_err(|e| ExecError::from(e).into_pg())?;
-    match statements.as_slice() {
-        [stmt] => match copy_sentinel_stmt(stmt)? {
-            Some(copy) if matches!(copy.source, CopySource::Stdin) => Ok(Some(copy)),
-            _ => Ok(None),
-        },
+/// The single `COPY … FROM STDIN` a simple query may carry, if it carries one.
+///
+/// Copy-in is a connection *mode*, not a result: once it is entered the client
+/// sends data rather than SQL, so the statement that enters it cannot share a
+/// query string with anything else. A COPY FROM STDIN written alongside other
+/// statements is refused here rather than run, because running it would leave
+/// the two sides of the connection disagreeing about what the next bytes are.
+fn single_copy_from_stdin(statements: &[Statement]) -> Result<Option<CopyStmt>, PgError> {
+    match statements {
+        [stmt] => Ok(copy_from_stdin_stmt(stmt).cloned()),
         [] => Ok(None),
         statements => {
-            for stmt in statements {
-                if copy_sentinel_stmt(stmt)?
-                    .is_some_and(|copy| matches!(copy.source, CopySource::Stdin))
-                {
-                    return Err(PgError::error(
-                        sqlstate::SYNTAX_ERROR,
-                        "COPY FROM STDIN must be the only statement in a simple query",
-                    ));
-                }
+            if statements
+                .iter()
+                .any(|stmt| copy_from_stdin_stmt(stmt).is_some())
+            {
+                return Err(PgError::error(
+                    sqlstate::SYNTAX_ERROR,
+                    "COPY FROM STDIN must be the only statement in a simple query",
+                ));
             }
             Ok(None)
         }
     }
 }
 
-/// Decode the COPY statement carried by a parsed COPY FROM STDIN sentinel;
-/// `None` for any other statement.
-fn copy_sentinel_stmt(stmt: &Statement) -> Result<Option<CopyStmt>, PgError> {
+/// The statement as a `COPY … FROM STDIN`, or `None` for anything else — a
+/// `COPY` with a file endpoint included, which runs on the ordinary executor
+/// path and never touches copy-in mode.
+fn copy_from_stdin_stmt(stmt: &Statement) -> Option<&CopyStmt> {
     match stmt {
-        Statement::Set { name, value, .. }
-            if name == crabka_pgparser::ast::COPY_FROM_STDIN_SENTINEL =>
+        Statement::Copy(copy)
+            if matches!(copy.direction, CopyDirection::From(CopySource::Stdin)) =>
         {
-            decode_copy_stmt(value).map(Some)
+            Some(copy)
         }
-        _ => Ok(None),
+        _ => None,
     }
 }
 
-fn decode_copy_stmt(value: &crabka_pgparser::ast::SetValue) -> Result<CopyStmt, PgError> {
-    // The parser encodes the whole statement into a single item, so anything
-    // else reaching here is a hand-written `SET` wearing the sentinel's name
-    // rather than a real `COPY … FROM STDIN`.
-    let crabka_pgparser::ast::SetValue::Value(items) = value else {
-        return Err(PgError::error(
-            sqlstate::SYNTAX_ERROR,
-            "invalid COPY statement",
-        ));
-    };
-    let [encoded] = items.as_slice() else {
-        return Err(PgError::error(
-            sqlstate::SYNTAX_ERROR,
-            "invalid COPY statement",
-        ));
-    };
-    let mut parts = encoded.split('\t');
-    let format = match parts.next() {
-        Some("text") => CopyFormat::Text,
-        Some("csv") => CopyFormat::Csv,
-        _ => {
-            return Err(PgError::error(
-                sqlstate::SYNTAX_ERROR,
-                "invalid COPY format",
-            ));
+/// The single `COPY … TO STDOUT` a simple query may carry, if it carries one.
+///
+/// Copy-out is bounded by the same rule as copy-in for the same reason: the
+/// wire layer writes a whole `CopyOutResponse` … `CopyDone` block, and a second
+/// result in the same query string would have to interleave with it.
+fn copy_to_stdout_stmt(stmt: &Statement) -> Option<&CopyStmt> {
+    match stmt {
+        Statement::Copy(copy)
+            if matches!(copy.direction, CopyDirection::To(CopyDestination::Stdout)) =>
+        {
+            Some(copy)
         }
-    };
-    let table = parts
-        .next()
-        .map(decode_copy_part)
-        .transpose()?
-        .ok_or_else(|| PgError::error(sqlstate::SYNTAX_ERROR, "invalid COPY table"))?;
-    let columns = parts
-        .next()
-        .filter(|columns| !columns.is_empty())
-        .map(|columns| {
-            columns
-                .split(',')
-                .map(decode_copy_part)
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .transpose()?;
-    let schema = parts
-        .next()
-        .filter(|schema| !schema.is_empty())
-        .map(decode_copy_part)
-        .transpose()?;
-    let source = match (parts.next(), parts.next()) {
-        (Some("stdin"), Some("")) => CopySource::Stdin,
-        (Some("file"), Some(path)) => CopySource::File(decode_copy_part(path)?),
-        _ => {
-            return Err(PgError::error(
-                sqlstate::SYNTAX_ERROR,
-                "invalid COPY source",
-            ));
-        }
-    };
-    if parts.next().is_some() {
-        return Err(PgError::error(
-            sqlstate::SYNTAX_ERROR,
-            "invalid COPY statement",
-        ));
+        _ => None,
     }
-    Ok(CopyStmt {
-        table: crabka_pgparser::ast::RelationRef {
-            schema,
-            name: table,
-        },
-        columns,
-        source,
-        format,
-    })
 }
 
-fn decode_copy_part(value: &str) -> Result<String, PgError> {
-    let mut out = String::with_capacity(value.len());
-    let mut chars = value.chars();
-    while let Some(ch) = chars.next() {
-        if ch != '\\' {
-            out.push(ch);
-            continue;
-        }
-        let Some(escaped) = chars.next() else {
-            return Err(PgError::error(
-                sqlstate::SYNTAX_ERROR,
-                "invalid COPY escape",
-            ));
-        };
-        out.push(match escaped {
-            't' => '\t',
-            ',' => ',',
-            '\\' => '\\',
-            other => other,
-        });
+/// The relation a `COPY … FROM` loads into.
+///
+/// `PostgreSQL`'s grammar has no `COPY ( <query> ) FROM` spelling — the
+/// parenthesized form is `TO`-only — so a load always names a relation.
+fn copy_into_target(copy: &CopyStmt) -> Result<crate::exec::CopyIntoTarget<'_>, ExecError> {
+    match &copy.target {
+        CopyTarget::Table { name, columns } => Ok(crate::exec::CopyIntoTarget { name, columns }),
+        CopyTarget::Query(_) => Err(ExecError::Syntax(
+            "COPY FROM must name a relation, not a query".into(),
+        )),
     }
-    Ok(out)
 }
 
 struct ParamBinder<'a> {
@@ -11574,12 +11744,13 @@ impl SqlSession {
     /// `run_one`, whose future is re-entered once per nested SQL function call,
     /// and widening it costs stack on every level of that recursion.
     fn precheck_copy_from(&self, copy: &CopyStmt) -> Result<(), ExecError> {
+        let target = copy_into_target(copy)?;
         let table = crabka_pgcatalog::get_table(
             self.catalog_kv.as_ref(),
             &crate::relname::resolve_relation(
                 self.catalog_kv.as_ref(),
                 &self.resolution_scope(),
-                &copy.table,
+                target.name,
                 crate::relname::SchemaDisposition::Utility,
             )?,
         )?;
@@ -11629,40 +11800,59 @@ impl SqlSession {
         }
     }
 
+    /// The names of the columns a `COPY … FROM` fills, in the order its data
+    /// supplies them: the statement's own column list, or the relation's
+    /// columns in attribute order when it wrote none.
+    fn copy_target_column_names(
+        &self,
+        target: crate::exec::CopyIntoTarget<'_>,
+    ) -> Result<Vec<String>, ExecError> {
+        let table = crabka_pgcatalog::get_table(
+            self.catalog_kv.as_ref(),
+            &crate::relname::resolve_relation(
+                self.catalog_kv.as_ref(),
+                &self.resolution_scope(),
+                target.name,
+                crate::relname::SchemaDisposition::Utility,
+            )?,
+        )?;
+        match target.columns {
+            Some(columns) => columns
+                .iter()
+                .map(|column| {
+                    table
+                        .column_index(column)
+                        .map(|_| column.clone())
+                        .ok_or_else(|| ExecError::UndefinedColumn(column.clone()))
+                })
+                .collect(),
+            None => Ok(table
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect()),
+        }
+    }
+
     fn copy_in_start(&mut self, copy: &CopyStmt) -> Result<CopyInResponse, PgError> {
         if matches!(self.state, TxnState::Failed(_)) {
             return Err(ExecError::InFailedTransaction.into_pg());
         }
         self.reject_prepared_participant()
             .map_err(ExecError::into_pg)?;
-        if matches!(copy.format, CopyFormat::Csv) {
-            return Err(ExecError::Unsupported("COPY CSV is not supported".into()).into_pg());
-        }
-        let name = crate::relname::resolve_relation(
-            self.catalog_kv.as_ref(),
-            &self.resolution_scope(),
-            &copy.table,
-            crate::relname::SchemaDisposition::Utility,
-        )
-        .map_err(ExecError::into_pg)?;
-        let table = crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &name)
-            .map_err(ExecError::from)
-            .map_err(ExecError::into_pg)?;
+        let target = copy_into_target(copy).map_err(ExecError::into_pg)?;
+        // The framing is resolved here and thrown away — `run_copy_in` resolves
+        // it again once the data arrives. What matters is that an option this
+        // engine cannot honour is refused *before* copy-in mode is announced:
+        // afterwards psql reads the rest of the script as data.
+        crate::copyfmt::CopyInFormat::resolve(&copy.options).map_err(ExecError::into_pg)?;
         self.precheck_copy_from(copy).map_err(ExecError::into_pg)?;
-        let target_count = match &copy.columns {
-            Some(columns) => columns.len(),
-            None => table.columns.len(),
-        };
-        if let Some(columns) = &copy.columns {
-            for column in columns {
-                if table.column_index(column).is_none() {
-                    return Err(ExecError::UndefinedColumn(column.clone()).into_pg());
-                }
-            }
-        }
+        let columns = self
+            .copy_target_column_names(target)
+            .map_err(ExecError::into_pg)?;
         Ok(CopyInResponse {
             overall_format: 0,
-            column_formats: vec![0; target_count],
+            column_formats: vec![0; columns.len()],
         })
     }
 
@@ -12975,15 +13165,23 @@ impl Session for SqlSession {
         });
         if needs_run {
             let statement = self.portals.get(portal).and_then(|p| p.statement.clone());
-            if let Some(stmt) = &statement
-                && let Some(copy) = copy_sentinel_stmt(stmt)?
-                && matches!(copy.source, CopySource::Stdin)
-            {
+            if let Some(copy) = statement.as_ref().and_then(copy_from_stdin_stmt).cloned() {
                 // Extended-protocol COPY FROM STDIN: answer with a
                 // CopyInResponse; the buffered rows arrive via
                 // `copy_in_portal` after CopyDone.
                 let response = self.copy_in_start(&copy)?;
                 return Ok(ExecuteOutcome::CopyIn { response });
+            }
+            if let Some(copy) = statement.as_ref().and_then(copy_to_stdout_stmt).cloned() {
+                // Extended-protocol COPY TO STDOUT. The copy has already run by
+                // the time the outcome exists, so a failure is an ErrorResponse
+                // and no copy-out message is ever framed — which is what
+                // PostgreSQL does with a COPY whose query fails partway.
+                let stream = self
+                    .copy_out_stream(&copy)
+                    .await
+                    .map_err(ExecError::into_pg)?;
+                return Ok(ExecuteOutcome::CopyOut { stream });
             }
             let execution = match statement {
                 None => SqlPortalExecution::Empty,
@@ -13099,13 +13297,48 @@ impl Session for SqlSession {
         // parse failure here is the one the client sees — and PostgreSQL aborts
         // an open transaction block on a syntax error like any other.
         let type_schemas = self.type_search_schemas().map_err(ExecError::into_pg)?;
-        let parsed = parse_single_copy_statement(sql, &type_schemas).inspect_err(|_| {
-            self.mark_transaction_failed();
-        })?;
+        let statements =
+            crabka_pgparser::parse_with_type_schemas(sql, &type_schemas).map_err(|error| {
+                self.mark_transaction_failed();
+                ExecError::from(error).into_pg()
+            })?;
+        let parsed = single_copy_from_stdin(&statements)?;
+        self.copy_probe = Some((sql.to_string(), statements));
         let Some(copy) = parsed else {
             return Ok(None);
         };
         self.copy_in_start(&copy).map(Some)
+    }
+
+    async fn begin_copy_out(&mut self, sql: &str) -> Result<Option<CopyOutStream>, PgError> {
+        // `begin_copy_in` ran first on this same string and left its parse
+        // behind; re-parsing only happens if something ever calls this without
+        // it, and a failure there is reported the way that one reports it.
+        let statements = match self.copy_probe.take() {
+            Some((probed, statements)) if probed == sql => statements,
+            _ => {
+                let type_schemas = self.type_search_schemas().map_err(ExecError::into_pg)?;
+                crabka_pgparser::parse_with_type_schemas(sql, &type_schemas).map_err(|error| {
+                    self.mark_transaction_failed();
+                    ExecError::from(error).into_pg()
+                })?
+            }
+        };
+        let [statement] = statements.as_slice() else {
+            // A COPY TO STDOUT sharing its query string with another statement
+            // is left to the ordinary path, which refuses it: the copy-out
+            // block owns the connection's framing until it is complete, so
+            // there is nowhere for a second result to go.
+            return Ok(None);
+        };
+        let Some(copy) = copy_to_stdout_stmt(statement).cloned() else {
+            return Ok(None);
+        };
+        let result = self.copy_out_stream(&copy).await;
+        if result.is_err() {
+            self.mark_transaction_failed();
+        }
+        result.map(Some).map_err(ExecError::into_pg)
     }
 
     async fn copy_in(
@@ -13114,7 +13347,9 @@ impl Session for SqlSession {
         data: Vec<bytes::Bytes>,
     ) -> Result<QueryResult, PgError> {
         let type_schemas = self.type_search_schemas().map_err(ExecError::into_pg)?;
-        let Some(copy) = parse_single_copy_statement(sql, &type_schemas)? else {
+        let statements = crabka_pgparser::parse_with_type_schemas(sql, &type_schemas)
+            .map_err(|error| ExecError::from(error).into_pg())?;
+        let Some(copy) = single_copy_from_stdin(&statements)? else {
             return Err(PgError::error(
                 sqlstate::SYNTAX_ERROR,
                 "COPY data received for a non-COPY statement",
@@ -13147,9 +13382,8 @@ impl Session for SqlSession {
             .clone();
         let copy = statement
             .as_ref()
-            .map(copy_sentinel_stmt)
-            .transpose()?
-            .flatten()
+            .and_then(copy_from_stdin_stmt)
+            .cloned()
             .ok_or_else(|| {
                 PgError::error(
                     sqlstate::PROTOCOL_VIOLATION,
