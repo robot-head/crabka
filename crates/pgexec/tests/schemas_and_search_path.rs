@@ -418,3 +418,57 @@ async fn default_constraint_names_do_not_carry_the_schema() {
             ]
     );
 }
+
+/// A write statement's feeding query resolves names the same way a bare
+/// `SELECT` does.
+///
+/// `INSERT … SELECT` builds its source through the ordinary read path, which
+/// resolves an unqualified relation against the context's resolution scope. The
+/// write path handed that path a default scope rather than the session's, so a
+/// table the `search_path` reaches was found by `SELECT … FROM t` and not found
+/// by `INSERT INTO t SELECT … FROM t` in the same session — the sort of split
+/// that only shows up once a schema is involved.
+#[tokio::test]
+async fn a_write_statements_feeding_query_sees_the_search_path() {
+    let engine = SqlEngine::new();
+    let mut client = Client::new(&engine);
+    client.run("CREATE SCHEMA s1").await;
+    client.run("SET search_path = s1").await;
+    client.run("CREATE TABLE t3(x int)").await;
+    client.run("CREATE TABLE t4(x int)").await;
+    client.run("INSERT INTO t3 VALUES (1)").await;
+
+    // The control: the same name, same session, through a plain read.
+    assert!(client.rows("SELECT x FROM t3").await == one("1"));
+
+    // Self-referencing INSERT … SELECT: the case that failed.
+    client.run("INSERT INTO t3 SELECT x + 1 FROM t3").await;
+    assert!(
+        client.rows("SELECT x FROM t3 ORDER BY x").await
+            == vec![vec![Some("1".to_owned())], vec![Some("2".to_owned())]]
+    );
+
+    // A different source relation, also only reachable through the path.
+    client.run("INSERT INTO t4 SELECT x FROM t3").await;
+    assert!(client.scalar("SELECT count(*) FROM t4").await == Some("2".to_owned()));
+
+    // The same resolution feeds a subquery in an UPDATE and a DELETE
+    // predicate, which travel the same write context.
+    client
+        .run("UPDATE t3 SET x = x + 10 WHERE x IN (SELECT x FROM t4)")
+        .await;
+    assert!(
+        client.rows("SELECT x FROM t3 ORDER BY x").await
+            == vec![vec![Some("11".to_owned())], vec![Some("12".to_owned())]]
+    );
+    client
+        .run("DELETE FROM t4 WHERE x IN (SELECT x - 10 FROM t3)")
+        .await;
+    assert!(client.scalar("SELECT count(*) FROM t4").await == Some("0".to_owned()));
+
+    // And a name the path does not reach is still not found, so the fix widened
+    // resolution rather than disabling it.
+    client.run("RESET search_path").await;
+    let error = client.fails("INSERT INTO s1.t4 SELECT x FROM t3").await;
+    assert!(error.message.contains("t3"), "{error:?}");
+}

@@ -3333,6 +3333,15 @@ impl SqlSession {
                 // context with no scanner otherwise carries.
                 current_user: &self.current_role,
                 row_security: self.guc.row_security(),
+                // `INSERT … SELECT` builds its source relation through the
+                // ordinary read path, which resolves an unqualified name
+                // against `fctx.resolution`. `ForeignCtx::none()` carries the
+                // default scope, so without this the feeding query only ever
+                // saw the default schema: `INSERT INTO t SELECT … FROM t` was
+                // `relation "t" does not exist` for a table the session's
+                // `search_path` reaches, even though `SELECT … FROM t` alone
+                // resolved it.
+                resolution: statement.eval_ctx.resolution(),
                 ..crate::exec::ForeignCtx::none()
             },
             range_scanner: self.range_scanner.as_ref(),
@@ -8427,6 +8436,16 @@ impl SqlSession {
                 fctx: crate::exec::ForeignCtx {
                     current_user: &current_role,
                     row_security,
+                    // `INSERT … SELECT` builds its source relation through the
+                    // ordinary read path, which resolves an unqualified name
+                    // against `fctx.resolution`. `ForeignCtx::none()` carries
+                    // the default scope, so the feeding query only ever saw the
+                    // default schema: `INSERT INTO t SELECT … FROM t` was
+                    // `relation "t" does not exist` for a table the session's
+                    // `search_path` reaches, though `SELECT … FROM t` on its
+                    // own resolved it. The same applies to a subquery in an
+                    // `UPDATE`/`DELETE` predicate.
+                    resolution: eval_ctx.resolution(),
                     ..crate::exec::ForeignCtx::none()
                 },
                 range_scanner: range_scanner.as_ref(),
