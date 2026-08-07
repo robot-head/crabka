@@ -76,15 +76,22 @@ async fn views_store_schema_expand_current_rows_and_drop_atomically() {
         .expect("DROP VIEW IF EXISTS is a no-op for a missing view");
 }
 
+/// A multi-relation `FROM` is an ordinary view body, so what a missing relation
+/// in one reports is the missing relation — `PostgreSQL`'s 42P01, naming the
+/// first one it cannot resolve — rather than a refusal of the shape.
 #[tokio::test]
-async fn views_reject_comma_joins_and_drop_view_if_exists_rejects_tables() {
+async fn views_report_a_missing_relation_and_drop_view_if_exists_rejects_tables() {
     let client = connect(spawn().await).await;
 
     let comma_join = client
         .batch_execute("CREATE VIEW invalid_join AS SELECT * FROM missing_left, missing_right")
         .await
-        .expect_err("CREATE VIEW must reject comma joins before resolving relations");
-    assert_eq!(sqlstate(&comma_join), "0A000");
+        .expect_err("CREATE VIEW must report the relation it cannot resolve");
+    assert_eq!(sqlstate(&comma_join), "42P01");
+    assert_eq!(
+        comma_join.as_db_error().expect("db error").message(),
+        "relation \"missing_left\" does not exist"
+    );
 
     client
         .batch_execute("CREATE TABLE ordinary_table (id int4)")

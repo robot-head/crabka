@@ -968,14 +968,18 @@ pub(crate) fn execute_ddl(
                     // A view may itself be read by other views. PostgreSQL
                     // refuses the drop unless CASCADE is written, and then drops
                     // the dependents too.
-                    let dependents = dependent_view_names(kv, name, None)?;
+                    let dependents = dependent_view_chain(kv, name, None)?;
                     if !dependents.is_empty() {
                         if !*cascade {
-                            return Err(ExecError::DependentObjectsStillExist(format!(
-                                "cannot drop view {name} because other objects depend on it"
-                            )));
+                            return Err(dependent_objects_error(
+                                kv,
+                                &format!(
+                                    "cannot drop view {name} because other objects depend on it"
+                                ),
+                                &dependents,
+                            ));
                         }
-                        for view in &dependents {
+                        for (view, _) in &dependents {
                             ops.extend(drop_view_with_triggers_ops(kv, view)?);
                         }
                     }
@@ -1615,10 +1619,18 @@ fn check_view_columns_replaceable(
     }
     for (old, new) in existing.iter().zip(replacement) {
         if old.name != new.name {
-            return Err(ExecError::InvalidTableDefinition(format!(
-                "cannot change name of view column \"{}\" to \"{}\"",
-                old.name, new.name
-            )));
+            return Err(ExecError::Remote(
+                crabka_pgwire::error::PgError::error(
+                    "42P16",
+                    format!(
+                        "cannot change name of view column \"{}\" to \"{}\"",
+                        old.name, new.name
+                    ),
+                )
+                .with_hint(
+                    "Use ALTER VIEW ... RENAME COLUMN ... to change name of view column instead.",
+                ),
+            ));
         }
         if old.ty != new.ty {
             return Err(ExecError::InvalidTableDefinition(format!(
@@ -1647,176 +1659,72 @@ fn check_view_columns_replaceable(
 ///
 /// The caller needs those relations, not just the verdict: a view over a
 /// temporary relation is itself temporary, so where the view lands is decided
-/// by what its body names.
+/// by what its body names — and by `PostgreSQL`'s rule, *anywhere* it names
+/// them, join arm and subquery included.
+///
+/// The body's shape is not otherwise constrained. A view is stored as its SQL
+/// text and handed back to the ordinary query executor on every scan, so any
+/// query that executor can run is a body it can hold. What remains are the two
+/// things `PostgreSQL` itself refuses and one this engine cannot yet run:
+///
+/// * A query parameter has nothing to bind to once the text is stored —
+///   `PostgreSQL` reports `42P02 there is no parameter $n`.
+/// * A data-modifying `WITH` entry would write on every read (`0A000`).
+/// * A locking clause. `PostgreSQL` accepts one and locks the underlying rows
+///   when the view is read; this engine's read path has no way to take those
+///   locks (`query_to_relation` refuses a locking body outright), so storing
+///   one would build a view that cannot be selected from.
 fn validate_view_definition(
     catalog_kv: &dyn Kv,
     resolution: &crate::relname::ResolutionScope,
     query: &crabka_pgparser::ast::QueryExpr,
 ) -> Result<Vec<crabka_pgcatalog::RelationName>, ExecError> {
-    if query.with.is_some() {
-        return Err(ExecError::Unsupported(
-            "CREATE VIEW currently supports SELECT without WITH".into(),
-        ));
-    }
     if query.locking.is_some() {
         return Err(ExecError::Unsupported(
             "CREATE VIEW does not support locking SELECT".into(),
         ));
     }
-    let crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Select(select)) =
-        &query.body
-    else {
-        return Err(ExecError::Unsupported(
-            "CREATE VIEW currently supports a single SELECT query".into(),
-        ));
-    };
-    if select.from.len() > 1 {
-        return Err(ExecError::Unsupported(
-            "CREATE VIEW does not support joins or multiple FROM items".into(),
-        ));
-    }
-    let mut sources = Vec::with_capacity(select.from.len());
-    for table in &select.from {
-        // A `JSON_TABLE` item reads no relation, so it constrains neither where
-        // the view lands nor what it depends on — only its own expressions have
-        // to pass the same checks the select list does.
-        if let crabka_pgparser::ast::TableExpr::JsonTable(json_table) = table {
-            for expr in json_table.exprs() {
-                validate_view_expr(expr)?;
+    let mut references = Vec::new();
+    let mut refusal = None;
+    crate::viewdeps::walk_query(query, &mut |node| {
+        let found = match node {
+            crate::viewdeps::Node::Relation(source) => {
+                references.push(source.reference);
+                return;
             }
-            continue;
-        }
-        let crabka_pgparser::ast::TableExpr::Table { name, .. } = table else {
-            return Err(ExecError::Unsupported(
-                "CREATE VIEW does not support joins or derived tables".into(),
-            ));
+            crate::viewdeps::Node::Expr(Expr::Param(number)) => {
+                ExecError::Remote(crabka_pgwire::error::PgError::error(
+                    "42P02",
+                    format!("there is no parameter ${number}"),
+                ))
+            }
+            crate::viewdeps::Node::DataModifyingCte => ExecError::Unsupported(
+                "views must not contain data-modifying statements in WITH".into(),
+            ),
+            crate::viewdeps::Node::Expr(_) | crate::viewdeps::Node::ComputedFrom => return,
         };
-        let name = resolve_relation(catalog_kv, resolution, name, SchemaDisposition::Reference)?;
-        if crabka_pgcatalog::get_view(catalog_kv, &name).is_ok() {
-            return Err(ExecError::Unsupported(
-                "CREATE VIEW does not support references to other views".into(),
-            ));
+        // The first refusal in tree order is the one reported, which is the
+        // order PostgreSQL reports them in too.
+        if refusal.is_none() {
+            refusal = Some(found);
         }
-        sources.push(name);
+    });
+    if let Some(refusal) = refusal {
+        return Err(refusal);
     }
-    for item in &select.projection {
-        if let SelectItem::Expr { expr, .. } = item {
-            validate_view_expr(expr)?;
+    let mut sources: Vec<crabka_pgcatalog::RelationName> = Vec::new();
+    for reference in references {
+        let name = resolve_relation(
+            catalog_kv,
+            resolution,
+            reference,
+            SchemaDisposition::Reference,
+        )?;
+        if !sources.contains(&name) {
+            sources.push(name);
         }
-    }
-    for expression in select
-        .filter
-        .iter()
-        .chain(select.group_by.iter())
-        .chain(select.having.iter())
-        .chain(select.order_by.iter().map(|item| &item.expr))
-        .chain(query.order_by.iter().map(|item| &item.expr))
-    {
-        validate_view_expr(expression)?;
     }
     Ok(sources)
-}
-
-fn validate_view_expr(expr: &Expr) -> Result<(), ExecError> {
-    match expr {
-        Expr::Param(_) => Err(ExecError::Unsupported(
-            "CREATE VIEW does not support query parameters".into(),
-        )),
-        Expr::SqlJson(json) => json.children().into_iter().try_for_each(validate_view_expr),
-        Expr::FieldSelect { base, .. } | Expr::FieldSelectAll(base) => validate_view_expr(base),
-        Expr::Unary { expr, .. }
-        | Expr::Cast { expr, .. }
-        | Expr::Collate { expr, .. }
-        | Expr::IsNull { expr, .. } => validate_view_expr(expr),
-        Expr::Binary { left, right, .. } => {
-            validate_view_expr(left)?;
-            validate_view_expr(right)
-        }
-        Expr::Func(call) => match &call.args {
-            FuncArgs::Star => Ok(()),
-            FuncArgs::Exprs(args) => {
-                for argument in args {
-                    validate_view_expr(argument)?;
-                }
-                Ok(())
-            }
-        },
-        Expr::InList { expr, list, .. } => {
-            validate_view_expr(expr)?;
-            for item in list {
-                validate_view_expr(item)?;
-            }
-            Ok(())
-        }
-        // Array constructor / subscript / `= ANY(<array>)`: ordinary expression
-        // nodes (no subquery, no parameter of their own), so the walk simply
-        // recurses into their children.
-        Expr::ArrayLiteral(elements) | Expr::Row(elements) => {
-            for element in elements {
-                validate_view_expr(element)?;
-            }
-            Ok(())
-        }
-        Expr::Subscript { base, index } => {
-            validate_view_expr(base)?;
-            validate_view_expr(index)
-        }
-        Expr::ArrayRef { base, subscripts } => {
-            validate_view_expr(base)?;
-            for bound in subscripts.iter().flat_map(ArraySubscript::bounds) {
-                validate_view_expr(bound)?;
-            }
-            Ok(())
-        }
-        Expr::QuantifiedArray { expr, array, .. } => {
-            validate_view_expr(expr)?;
-            validate_view_expr(array)
-        }
-        Expr::Between {
-            expr, low, high, ..
-        } => {
-            validate_view_expr(expr)?;
-            validate_view_expr(low)?;
-            validate_view_expr(high)
-        }
-        Expr::Like { expr, pattern, .. } => {
-            validate_view_expr(expr)?;
-            validate_view_expr(pattern)
-        }
-        Expr::Case {
-            operand,
-            whens,
-            else_result,
-        } => {
-            if let Some(operand) = operand {
-                validate_view_expr(operand)?;
-            }
-            for (condition, result) in whens {
-                validate_view_expr(condition)?;
-                validate_view_expr(result)?;
-            }
-            if let Some(result) = else_result {
-                validate_view_expr(result)?;
-            }
-            Ok(())
-        }
-        Expr::ScalarSubquery(_)
-        | Expr::Exists(_)
-        | Expr::InSubquery { .. }
-        | Expr::ArraySubquery(_)
-        | Expr::Quantified { .. } => Err(ExecError::Unsupported(
-            "CREATE VIEW does not support subqueries".into(),
-        )),
-        Expr::IntLiteral(_)
-        | Expr::NumericLiteral(_)
-        | Expr::StringLiteral(_)
-        | Expr::BitStringLiteral(_)
-        | Expr::BoolLiteral(_)
-        | Expr::NullLiteral
-        | Expr::Column { .. }
-        | Expr::Default
-        | Expr::Const { .. } => Ok(()),
-    }
 }
 
 /// A `QueryResult::Command` with the given PostgreSQL completion tag.
@@ -6467,17 +6375,19 @@ fn drop_table_and_dependents_ops(
     let name = &table.name;
     let table_ops = crabka_pgcatalog::drop_table_ops(kv, name)?;
     let mut ops = Vec::new();
-    let dependents: Vec<_> = dependent_view_names(kv, name, None)?
+    let dependents: Vec<_> = dependent_view_chain(kv, name, None)?
         .into_iter()
-        .filter(|view| !dropping.contains(view))
+        .filter(|(view, _)| !dropping.contains(view))
         .collect();
     if !dependents.is_empty() {
         if !cascade {
-            return Err(ExecError::DependentObjectsStillExist(format!(
-                "cannot drop table {name} because other objects depend on it"
-            )));
+            return Err(dependent_objects_error(
+                kv,
+                &format!("cannot drop table {name} because other objects depend on it"),
+                &dependents,
+            ));
         }
-        for view in &dependents {
+        for (view, _) in &dependents {
             ops.extend(drop_view_with_triggers_ops(kv, view)?);
         }
     }
@@ -10350,6 +10260,21 @@ fn expr_children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
 }
 
 /// The query expressions directly under `expr` (its subqueries).
+///
+/// [`expr_children`] stops at a subquery, because an inner query is its own
+/// scope; a walk that has to see inside one — collecting the relations a view
+/// body reads, say — continues through here.
+pub(crate) fn query_children(expr: &Expr) -> Vec<&crabka_pgparser::ast::QueryExpr> {
+    match expr {
+        Expr::ScalarSubquery(query) | Expr::ArraySubquery(query) | Expr::Exists(query) => {
+            vec![query]
+        }
+        Expr::InSubquery { subquery, .. } | Expr::Quantified { subquery, .. } => vec![subquery],
+        _ => Vec::new(),
+    }
+}
+
+/// The mutable counterpart of [`query_children`].
 fn query_children_mut(expr: &mut Expr) -> Vec<&mut crabka_pgparser::ast::QueryExpr> {
     match expr {
         Expr::ScalarSubquery(query) | Expr::ArraySubquery(query) | Expr::Exists(query) => {
@@ -15798,6 +15723,29 @@ fn pg_attribute_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> 
             crate::catalog_rel::table_relation_oid(table.id)?,
             &table,
         )?);
+    }
+    // A view's columns are `pg_attribute` rows like any other relation's —
+    // that is where `\d+`, `information_schema.columns` and every driver's
+    // introspection read them from. They carry no default and no NOT NULL,
+    // which is what a `View`'s own column list already says.
+    let view_oids = crate::catalog_rel::view_oids(catalog_kv)?;
+    for view in crabka_pgcatalog::list_views(catalog_kv)? {
+        let Some(oid) = view_oids.get(&view.name).copied() else {
+            continue;
+        };
+        let table = crabka_pgcatalog::Table {
+            id: 0,
+            owner: view.owner.clone(),
+            name: view.name.clone(),
+            columns: view.columns,
+            sharded: false,
+            row_security: false,
+            force_row_security: false,
+            sharding: None,
+            foreign: None,
+            checks: Vec::new(),
+        };
+        rows.extend(attribute_rows_for_table(oid, &table)?);
     }
     for virtual_table in virtual_table_names() {
         let table = virtual_catalog_table(virtual_table);
@@ -21794,10 +21742,33 @@ fn alter_table_action_ops(
             let generated = generated_columns_reading(&state.table, column);
             if !dependents.is_empty() || !generated.is_empty() {
                 if !*cascade {
-                    return Err(ExecError::DependentObjectsStillExist(format!(
-                        "cannot drop column {column} of table {table_name} because other \
-                         objects depend on it"
-                    )));
+                    // PostgreSQL names each blocking object on its own DETAIL
+                    // line, in the order `performDeletion` reports them, and
+                    // ends with the CASCADE hint.
+                    let detail = generated
+                        .iter()
+                        .map(|name| {
+                            format!(
+                                "column {name} of table {table_name} depends on \
+                                 column {column} of table {table_name}"
+                            )
+                        })
+                        .chain(dependents.iter().map(|view| {
+                            format!("view {view} depends on column {column} of table {table_name}")
+                        }))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    return Err(ExecError::Remote(
+                        crabka_pgwire::error::PgError::error(
+                            "2BP01",
+                            format!(
+                                "cannot drop column {column} of table {table_name} because \
+                                 other objects depend on it"
+                            ),
+                        )
+                        .with_detail(detail)
+                        .with_hint("Use DROP ... CASCADE to drop the dependent objects too."),
+                    ));
                 }
                 for view in &dependents {
                     state.ops.extend(drop_view_with_triggers_ops(kv, view)?);
@@ -23338,67 +23309,6 @@ fn index_key_reads_column(table: &Table, key: &str, column: &str) -> bool {
     reads
 }
 
-/// Whether a stored view's definition reads `table` at all.
-///
-/// Views are stored as SQL text, so the binding is decided from the `FROM`
-/// list exactly as a rename decides it. When the catalog cannot resolve some
-/// relation in that list the answer is a plain token match, so a dependency is
-/// never missed.
-fn view_reads_relation(
-    kv: &dyn Kv,
-    definition: &str,
-    table: &crabka_pgcatalog::RelationName,
-) -> bool {
-    match view_relation_bindings(kv, definition, table) {
-        Some(bindings) => !bindings.qualifiers.is_empty(),
-        None => definition_mentions_identifier(definition, &table.name),
-    }
-}
-
-/// Whether a stored view's definition reads `column` of `table`.
-///
-/// A reference counts when it is a qualified `q.<column>` under one of the
-/// relation's qualifiers, or a bare `<column>` no other relation in the view's
-/// `FROM` could supply. `SELECT *` reads every column. An unresolvable `FROM`
-/// list answers "yes", so a dependency is never missed.
-fn view_reads_column(
-    kv: &dyn Kv,
-    definition: &str,
-    table: &crabka_pgcatalog::RelationName,
-    column: &str,
-) -> bool {
-    use crabka_pgparser::token::Token;
-
-    let Some(bindings) = view_relation_bindings(kv, definition, table) else {
-        return true;
-    };
-    if bindings.qualifiers.is_empty() {
-        return false;
-    }
-    let Ok(tokens) = crabka_pgparser::lexer::lex(definition) else {
-        return true;
-    };
-    if tokens.iter().any(|(token, _)| *token == Token::Star) {
-        return true;
-    }
-    tokens.iter().enumerate().any(|(index, (token, _))| {
-        let Token::Ident(word) = token else {
-            return false;
-        };
-        if word != column {
-            return false;
-        }
-        if index >= 2
-            && tokens[index - 1].0 == Token::Dot
-            && matches!(&tokens[index - 2].0, Token::Ident(q) if bindings.qualifiers.contains(q))
-        {
-            return true;
-        }
-        let bare = index == 0 || tokens[index - 1].0 != Token::Dot;
-        bare && !bindings.other_columns.iter().any(|other| other == column)
-    })
-}
-
 /// Rewrite every stored view's references to a renamed relation.
 ///
 /// `PostgreSQL` stores a view as a parsed rule over relation oids, so renaming
@@ -23605,31 +23515,249 @@ pub(crate) fn dependent_view_names(
     table: &crabka_pgcatalog::RelationName,
     column: Option<&str>,
 ) -> Result<Vec<crabka_pgcatalog::RelationName>, ExecError> {
-    Ok(crabka_pgcatalog::list_views(kv)?
+    Ok(dependent_view_chain(kv, table, column)?
         .into_iter()
-        .filter(|view| view_can_reach_schema(&view.name, &view.definition, &table.schema))
-        .filter(|view| match column {
-            Some(column) => view_reads_column(kv, &view.definition, table, column),
-            None => view_reads_relation(kv, &view.definition, table),
-        })
-        .map(|view| view.name)
+        .map(|(view, _)| view)
         .collect())
 }
 
-/// Whether a stored view could read anything in `schema` at all.
+/// The dependency closure, each view paired with the relation it reads to reach
+/// `table` — `table` itself for a direct dependent, an intermediate view for a
+/// transitive one, which is the pair `PostgreSQL` names in its DETAIL.
 ///
-/// A definition is matched by its identifiers, not by resolved dependencies, so
-/// an unqualified `FROM orders` matches every `orders` in the database. That is
-/// harmless within one schema and wrong across schemas: a session's temporary
-/// `orders` would otherwise carry off a permanent view over a different table of
-/// the same name when the namespace is emptied. A view outside `schema` reaches
-/// into it only by naming it, so requiring the qualifier confines the match.
-fn view_can_reach_schema(
-    view: &crabka_pgcatalog::RelationName,
-    definition: &str,
-    schema: &str,
-) -> bool {
-    view.schema == schema || definition_mentions_identifier(definition, schema)
+/// The closure has to be transitive now that a view may read another view: a
+/// `CASCADE` that removed only the direct dependents would leave the views
+/// *those* fed pointing at nothing.
+pub(crate) fn dependent_view_chain(
+    kv: &dyn Kv,
+    table: &crabka_pgcatalog::RelationName,
+    column: Option<&str>,
+) -> Result<
+    Vec<(
+        crabka_pgcatalog::RelationName,
+        crabka_pgcatalog::RelationName,
+    )>,
+    ExecError,
+> {
+    let mut views: Vec<ViewProbe> = crabka_pgcatalog::list_views(kv)?
+        .into_iter()
+        .map(ViewProbe::new)
+        .collect();
+    // A column restriction applies only to the direct step: once a view is a
+    // dependent, everything reading *it* depends on it whole.
+    let reads =
+        |probe: &mut ViewProbe, target: &crabka_pgcatalog::RelationName, direct: bool| match column
+            .filter(|_| direct)
+        {
+            Some(column) => probe.reads_column(kv, target, column),
+            None => probe.reads_relation(target),
+        };
+    let mut found: Vec<(
+        crabka_pgcatalog::RelationName,
+        crabka_pgcatalog::RelationName,
+    )> = Vec::new();
+    for probe in &mut views {
+        let name = probe.view.name.clone();
+        if probe.can_reach_schema(&table.schema) && reads(probe, table, true) {
+            found.push((name, table.clone()));
+        }
+    }
+    // Breadth-first from the direct dependents, which is the order PostgreSQL
+    // reports them in. A view cannot read itself, so the frontier only grows.
+    let mut frontier = 0;
+    while frontier < found.len() {
+        let via = found[frontier].0.clone();
+        frontier += 1;
+        for probe in &mut views {
+            let name = probe.view.name.clone();
+            if name == via
+                || name == *table
+                || found.iter().any(|(found, _)| *found == name)
+                || !probe.can_reach_schema(&via.schema)
+                || !reads(probe, &via, false)
+            {
+                continue;
+            }
+            found.push((name, via.clone()));
+        }
+    }
+    Ok(found)
+}
+
+/// One stored view, prepared for a walk that asks about several relations.
+///
+/// The definition is lexed once — every question starts by asking whether the
+/// text even names the relation, which a set lookup answers — and parsed at
+/// most once, only for a view that got past that filter. Without the memo a
+/// transitive closure over a catalog of `n` views would re-parse each of them
+/// once per dependent it finds.
+struct ViewProbe {
+    view: crabka_pgcatalog::View,
+    tokens: Option<Vec<(crabka_pgparser::token::Token, usize)>>,
+    identifiers: HashSet<String>,
+    body: ParsedBody,
+}
+
+/// A stored definition's parse, computed the first time a question needs it.
+enum ParsedBody {
+    Unread,
+    /// The definition is not one query this parser understands, which every
+    /// caller over-approximates rather than guessing about.
+    Unreadable,
+    Body(Box<crabka_pgparser::ast::QueryExpr>),
+}
+
+impl ViewProbe {
+    fn new(view: crabka_pgcatalog::View) -> Self {
+        let tokens = crabka_pgparser::lexer::lex(&view.definition).ok();
+        let identifiers = tokens
+            .iter()
+            .flatten()
+            .filter_map(|(token, _)| match token {
+                crabka_pgparser::token::Token::Ident(word) => Some(word.clone()),
+                _ => None,
+            })
+            .collect();
+        Self {
+            view,
+            tokens,
+            identifiers,
+            body: ParsedBody::Unread,
+        }
+    }
+
+    /// Whether this view could read anything in `schema` at all.
+    ///
+    /// A definition is matched by its identifiers, not by resolved
+    /// dependencies, so an unqualified `FROM orders` matches every `orders` in
+    /// the database. That is harmless within one schema and wrong across
+    /// schemas: a session's temporary `orders` would otherwise carry off a
+    /// permanent view over a different table of the same name when the
+    /// namespace is emptied. A view outside `schema` reaches into it only by
+    /// naming it, so requiring the qualifier confines the match.
+    fn can_reach_schema(&self, schema: &str) -> bool {
+        self.view.name.schema == schema || self.identifiers.contains(schema)
+    }
+
+    /// The parsed body, or `None` for a definition this parser cannot read.
+    fn body(&mut self) -> Option<&crabka_pgparser::ast::QueryExpr> {
+        if matches!(self.body, ParsedBody::Unread) {
+            self.body = match parse_view_body(&self.view.definition) {
+                Some(body) => ParsedBody::Body(Box::new(body)),
+                None => ParsedBody::Unreadable,
+            };
+        }
+        match &self.body {
+            ParsedBody::Body(body) => Some(body),
+            ParsedBody::Unread | ParsedBody::Unreadable => None,
+        }
+    }
+
+    /// Whether this view's body reads `target`.
+    ///
+    /// A definition that never writes the relation's name cannot read it,
+    /// whatever its shape, so that check comes first and keeps the parse off
+    /// the path for every view the drop does not concern.
+    fn reads_relation(&mut self, target: &crabka_pgcatalog::RelationName) -> bool {
+        if !self.identifiers.contains(&target.name) {
+            return false;
+        }
+        let Some(body) = self.body() else {
+            // Unparseable: the name is written somewhere, so it counts.
+            return true;
+        };
+        crate::viewdeps::query_sources(body)
+            .into_iter()
+            .any(|source| {
+                source.reference.name == target.name
+                    && source
+                        .reference
+                        .schema
+                        .as_deref()
+                        .is_none_or(|schema| schema == target.schema)
+            })
+    }
+
+    /// Whether this view's body reads `column` of `target`.
+    ///
+    /// The two coarse answers hold whatever shape the body has: a definition
+    /// that never writes the column's name and has no `*` cannot read it, and
+    /// one whose scopes cannot be flattened into a single `FROM` list might, so
+    /// it counts. That order matters now that a body may open several scopes —
+    /// a view over a derived table would otherwise pin every column of every
+    /// table in the schema.
+    fn reads_column(
+        &mut self,
+        kv: &dyn Kv,
+        target: &crabka_pgcatalog::RelationName,
+        column: &str,
+    ) -> bool {
+        use crabka_pgparser::token::Token;
+
+        let Some(tokens) = self.tokens.clone() else {
+            return true;
+        };
+        if tokens.iter().any(|(token, _)| *token == Token::Star) {
+            return true;
+        }
+        if !self.identifiers.contains(column) {
+            return false;
+        }
+        let Some(body) = self.body() else {
+            return true;
+        };
+        let Some(bindings) = view_relation_bindings(kv, body, target) else {
+            return true;
+        };
+        if bindings.qualifiers.is_empty() {
+            return false;
+        }
+        tokens.iter().enumerate().any(|(index, (token, _))| {
+            let Token::Ident(word) = token else {
+                return false;
+            };
+            if word != column {
+                return false;
+            }
+            if index >= 2
+                && tokens[index - 1].0 == Token::Dot
+                && matches!(&tokens[index - 2].0, Token::Ident(q) if bindings.qualifiers.contains(q))
+            {
+                return true;
+            }
+            let bare = index == 0 || tokens[index - 1].0 != Token::Dot;
+            bare && !bindings.other_columns.iter().any(|other| other == column)
+        })
+    }
+}
+
+/// The 2BP01 that refuses a drop, with the `DETAIL` line `PostgreSQL` writes
+/// per blocking object and the `CASCADE` hint that follows them.
+fn dependent_objects_error(
+    kv: &dyn Kv,
+    message: &str,
+    dependents: &[(
+        crabka_pgcatalog::RelationName,
+        crabka_pgcatalog::RelationName,
+    )],
+) -> ExecError {
+    let detail = dependents
+        .iter()
+        .map(|(view, via)| {
+            let kind = if crabka_pgcatalog::get_view(kv, via).is_ok() {
+                "view"
+            } else {
+                "table"
+            };
+            format!("view {view} depends on {kind} {via}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    ExecError::Remote(
+        crabka_pgwire::error::PgError::error("2BP01", message)
+            .with_detail(detail)
+            .with_hint("Use DROP ... CASCADE to drop the dependent objects too."),
+    )
 }
 
 /// How a stored view's `FROM` list binds the relation being renamed: the
@@ -23640,54 +23768,83 @@ struct ViewRelationBindings {
     other_columns: Vec<String>,
 }
 
+/// The stored view body of `definition`, or `None` when it is not one query
+/// this parser understands.
+fn parse_view_body(definition: &str) -> Option<crabka_pgparser::ast::QueryExpr> {
+    let mut statements = crabka_pgparser::parse(definition).ok()?;
+    if statements.len() != 1 {
+        return None;
+    }
+    match statements.pop()? {
+        Statement::Query(query) => Some(query),
+        _ => None,
+    }
+}
+
 /// The bindings for `table` inside `definition`. `None` means the definition
-/// references a relation the catalog cannot resolve, so no rewrite may be
-/// attempted.
+/// binds columns in a way this walk cannot flatten into one list, so no rewrite
+/// may be attempted and no column dependency may be ruled out.
+///
+/// Only the flat shape answers `Some`: one `SELECT` whose `FROM` is a join tree
+/// of plain relations the catalog can resolve. A derived table, a set
+/// operation, a `WITH`, a set-returning function or a subquery anywhere in the
+/// body opens a second scope, and a bare column reference in one scope says
+/// nothing about the columns of the other — so those all answer `None` and the
+/// caller over-approximates rather than guessing.
 fn view_relation_bindings(
     kv: &dyn Kv,
-    definition: &str,
+    query: &crabka_pgparser::ast::QueryExpr,
     table: &crabka_pgcatalog::RelationName,
 ) -> Option<ViewRelationBindings> {
-    use crabka_pgparser::token::{Keyword, Token};
-    let tokens = crabka_pgparser::lexer::lex(definition).ok()?;
+    if query.with.is_some()
+        || !matches!(
+            query.body,
+            crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Select(_))
+        )
+    {
+        return None;
+    }
+    let mut flat = true;
+    let mut sources = Vec::new();
+    crate::viewdeps::walk_query(query, &mut |node| match node {
+        crate::viewdeps::Node::Relation(source) => {
+            sources.push((source.reference.clone(), source.qualifier().to_string()));
+        }
+        crate::viewdeps::Node::Expr(expr) => flat &= query_children(expr).is_empty(),
+        crate::viewdeps::Node::ComputedFrom | crate::viewdeps::Node::DataModifyingCte => {
+            flat = false;
+        }
+    });
+    if !flat {
+        return None;
+    }
     let mut qualifiers = Vec::new();
     let mut other_columns = Vec::new();
-    let mut index = 0;
-    while index < tokens.len() {
-        let is_relation_lead_in =
-            matches!(
-                &tokens[index].0,
-                Token::Keyword(Keyword::From | Keyword::Join)
-            ) || (index > 0 && matches!(&tokens[index].0, Token::Comma) && !qualifiers.is_empty());
-        index += 1;
-        if !is_relation_lead_in {
+    for (reference, qualifier) in sources {
+        // An unqualified reference is taken to name this relation, which is the
+        // same over-approximation `view_can_reach_schema` already makes.
+        let matches_table = reference.name == table.name
+            && reference
+                .schema
+                .as_deref()
+                .is_none_or(|schema| schema == table.schema);
+        if matches_table {
+            qualifiers.push(reference.name.clone());
+            qualifiers.push(qualifier);
             continue;
         }
-        // A derived table or a function call in FROM: the catalog cannot
-        // resolve it, so the rename is not provably safe.
-        let Token::Ident(relation) = &tokens[index.min(tokens.len() - 1)].0 else {
-            return None;
+        let name = crabka_pgcatalog::RelationName::new(
+            reference
+                .schema
+                .clone()
+                .unwrap_or_else(|| table.schema.clone()),
+            reference.name.clone(),
+        );
+        let columns = match crabka_pgcatalog::get_table(kv, &name) {
+            Ok(other) => other.columns,
+            Err(_) => crabka_pgcatalog::get_view(kv, &name).ok()?.columns,
         };
-        let mut alias = relation.clone();
-        let mut next = index + 1;
-        if matches!(
-            tokens.get(next).map(|token| &token.0),
-            Some(Token::Keyword(Keyword::As))
-        ) {
-            next += 1;
-        }
-        if let Some((Token::Ident(candidate), _)) = tokens.get(next)
-            && !is_query_tail_keyword(candidate)
-        {
-            alias = candidate.clone();
-        }
-        if *relation == table.name {
-            qualifiers.push(relation.clone());
-            qualifiers.push(alias);
-        } else {
-            let other = crabka_pgcatalog::get_table(kv, &table.sibling(relation)).ok()?;
-            other_columns.extend(other.columns.into_iter().map(|column| column.name));
-        }
+        other_columns.extend(columns.into_iter().map(|column| column.name));
     }
     qualifiers.sort();
     qualifiers.dedup();
@@ -23723,7 +23880,10 @@ fn rewrite_view_definition(
     if !mentions_old {
         return Ok(None);
     }
-    let Some(bindings) = view_relation_bindings(kv, definition, table) else {
+    let Some(bindings) = parse_view_body(definition)
+        .as_ref()
+        .and_then(|body| view_relation_bindings(kv, body, table))
+    else {
         return Err(ExecError::Unsupported(format!(
             "cannot rename column \"{old_name}\" of relation \"{table}\": a stored view's \
              definition references a relation this catalog cannot resolve"

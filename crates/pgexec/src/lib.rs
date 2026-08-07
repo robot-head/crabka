@@ -120,6 +120,7 @@ pub mod ts_gc;
 mod usertype;
 mod values;
 mod viewdef;
+mod viewdeps;
 pub mod watchdog;
 mod window;
 mod xml_fn;

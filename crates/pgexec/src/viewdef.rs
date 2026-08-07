@@ -16,28 +16,36 @@
 //!  LIMIT 5
 //! ```
 //!
-//! Each clause keyword sits at its own fixed indent. Continuation lines of the
-//! select list have an indent of four. Two behaviors depend on the pretty flag.
-//! Without the flag, every operator expression is fully parenthesized and a
-//! join tree is wrapped in parentheses. With the flag, neither is.
-//! `pg_get_viewdef(oid)` is the un-pretty form. `pg_get_viewdef(oid, true)` and
-//! the wrap-column overload are the pretty one.
+//! Each clause keyword sits at its own offset from the indent the query was
+//! entered at; continuation lines of the select list are indented four. Two
+//! behaviors depend on the pretty flag: without it every operator expression is
+//! fully parenthesized and each join node is wrapped in parentheses, with it
+//! neither is. `pg_get_viewdef(oid)` is the un-pretty form;
+//! `pg_get_viewdef(oid, true)` and the wrap-column overload are the pretty one.
 //!
-//! This module reproduces two of PostgreSQL's rules exactly, because they
-//! decide whether the text round-trips:
+//! Three of PostgreSQL's rules are reproduced exactly because they are the ones
+//! that decide whether the text round-trips:
 //!
 //! * **Column qualification.** A reference is written `tbl.col` whenever the
 //!   query has other than exactly one range-table entry, or the query is nested
 //!   inside another. This matches `get_query_def`'s `varprefix`.
 //! * **Output naming.** A bare column reference whose name already equals the
-//!   view's column name is written without `AS`; everything else always carries
-//!   one.
+//!   view's column name is written without `AS`; everything else carries one
+//!   wherever the query's own column names are visible, and inside a sub-select
+//!   — where they are not — only when the label is something other than
+//!   `?column?`.
+//! * **Nesting indent.** Writing `SELECT` deepens `indentLevel` by one
+//!   eight-column step, so every query inside one — a `WITH` body, a derived
+//!   table, a sub-select — is laid out one step further in than the query
+//!   holding it, compounding with depth. `pg_get_expr` never enters a `SELECT`,
+//!   which is why the sub-selects in a stored qual start at column zero.
 
 use std::fmt::Write as _;
 
 use crabka_pgparser::ast::{
-    BinaryOp, DistinctClause, Expr, FuncArgs, FuncCall, JoinConstraint, JoinKind, OrderItem,
-    QueryBody, QueryExpr, SelectItem, SelectStmt, SetExpr, SetOp, TableExpr, UnaryOp, ValuesStmt,
+    BinaryOp, DistinctClause, Expr, FrameBound, FrameExclusion, FrameMode, FuncArgs, FuncCall,
+    GroupItem, JoinConstraint, JoinKind, OrderItem, QueryBody, QueryExpr, SelectItem, SelectStmt,
+    SetExpr, SetOp, TableExpr, UnaryOp, ValuesStmt, WindowCall, WindowRef, WindowSpec,
 };
 use crabka_pgtypes::{ColumnType, Datum};
 
@@ -58,7 +66,32 @@ struct Ctx<'a> {
     /// `pg_get_viewdef(oid, integer)` overload. `None`, which is every other
     /// overload, puts one output column per line.
     wrap: Option<usize>,
+    /// `ruleutils.c`'s `colNamesVisible`: whether this query's output column
+    /// names matter to whoever reads it. They do for a view body, a `WITH`
+    /// entry and a derived table, all of which are referenced by name; they do
+    /// not inside a sub-select or on the right of a set operation, where an
+    /// unnamed expression is left unlabelled rather than written out as
+    /// `AS "?column?"`.
+    colnames: bool,
+    /// The `SELECT`'s window calls. Each one is held outside the expression
+    /// tree, with a [`crabka_pgparser::ast::window_placeholder`] standing in
+    /// for it, so rendering a select list needs them alongside.
+    window_calls: &'a [crabka_pgparser::ast::WindowCall],
+    /// `ruleutils.c`'s `indentLevel` at this point in the tree. A query's
+    /// clause keywords sit at the level it was *entered* with; writing `SELECT`
+    /// deepens it by one step, which is why every sub-query — a derived table,
+    /// a sub-select, a `WITH` body — is laid out eight columns further in than
+    /// the query holding it, and `pg_get_expr`, which never enters a `SELECT`,
+    /// lays its sub-selects out at column zero.
+    indent: usize,
 }
+
+/// `ruleutils.c`'s `PRETTYINDENT_STD`: one nesting step.
+const INDENT_STEP: usize = 8;
+/// `ruleutils.c`'s `PRETTYINDENT_LIMIT`: past this the per-level step is
+/// divided down and wrapped, so a deeply nested tree cannot spend quadratic
+/// space on leading blanks.
+const INDENT_LIMIT: usize = 40;
 
 impl Ctx<'_> {
     /// Wrap `inner` in the parentheses PostgreSQL adds only in un-pretty mode.
@@ -69,6 +102,32 @@ impl Ctx<'_> {
             format!("({inner})")
         }
     }
+
+    /// The context a nested query is written in: one indent step deeper, and
+    /// column references always qualified, because a sub-query is by
+    /// definition not the outermost one.
+    fn nested(self) -> Self {
+        Self {
+            qualify: true,
+            qualifier: None,
+            ..self
+        }
+    }
+}
+
+/// `appendContextKeyword`: a newline, then this clause's own indent.
+///
+/// `level` is the indent the enclosing query was entered at and `plus` the
+/// keyword's `indentPlus` — 2 for `FROM`, 1 for `WHERE`/`GROUP BY`/`ORDER BY`,
+/// 0 for `HAVING`/`LIMIT`/`OFFSET` and a set-operation keyword, 4 for a
+/// continuation line of the select list.
+fn clause_break(level: usize, plus: usize) -> String {
+    let amount = if level < INDENT_LIMIT {
+        level
+    } else {
+        (INDENT_LIMIT + (level - INDENT_LIMIT) / (INDENT_STEP / 2)) % INDENT_LIMIT
+    };
+    format!("\n{:width$}", "", width = amount + plus)
 }
 
 /// Write a whole query expression, and name its output columns from `names`.
@@ -84,9 +143,82 @@ pub(crate) fn write_query(
         qualify: false,
         qualifier: None,
         wrap,
+        colnames: true,
+        window_calls: &[],
+        indent: 0,
     };
+    write_query_at(out, query, names, ctx);
+}
+
+/// One whole query at this context's indent — its `WITH` list, its body, and
+/// the `ORDER BY`/`LIMIT`/`OFFSET` that belong to the query rather than to any
+/// one set-operation arm.
+fn write_query_at(out: &mut String, query: &QueryExpr, names: &[String], ctx: Ctx<'_>) {
+    write_with_clause(out, query, ctx);
     write_set_expr(out, &query.body, names, ctx);
-    write_query_tail(out, query, ctx);
+    // `ORDER BY`/`LIMIT`/`OFFSET` belong to the same `Query` node as the select
+    // body, so they see the body's range table: a bare column there is
+    // qualified by the sole FROM item exactly as one in the select list is.
+    let tail = match &query.body {
+        SetExpr::Query(QueryBody::Select(select)) => Ctx {
+            qualify: ctx.qualify || range_table_len(&select.from) != 1,
+            qualifier: sole_from_name(&select.from),
+            ..ctx
+        },
+        _ => ctx,
+    };
+    write_query_tail(out, query, tail);
+}
+
+/// The `WITH` list, laid out as `ruleutils.c`'s `get_with_clause` does: each
+/// entry's body one indent step in, on its own lines, with the closing paren on
+/// a line of its own and the next entry continuing from it.
+fn write_with_clause(out: &mut String, query: &QueryExpr, ctx: Ctx<'_>) {
+    let Some(with) = &query.with else { return };
+    if with.ctes.is_empty() {
+        return;
+    }
+    let body = Ctx {
+        indent: ctx.indent + INDENT_STEP,
+        ..ctx.nested()
+    };
+    let mut separator = if with.recursive {
+        " WITH RECURSIVE "
+    } else {
+        " WITH "
+    };
+    for cte in &with.ctes {
+        out.push_str(separator);
+        separator = ", ";
+        out.push_str(&quote_identifier(&cte.name));
+        if let Some(columns) = &cte.columns {
+            let names = columns
+                .iter()
+                .map(|name| quote_identifier(name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = write!(out, "({names})");
+        }
+        out.push_str(" AS ");
+        match cte.materialized {
+            Some(true) => out.push_str("MATERIALIZED "),
+            Some(false) => out.push_str("NOT MATERIALIZED "),
+            None => {}
+        }
+        out.push('(');
+        out.push_str(&clause_break(body.indent, 0));
+        match &cte.body {
+            crabka_pgparser::ast::CteBody::Query(inner) => {
+                write_query_at(out, inner, &[], body);
+            }
+            // A data-modifying entry cannot reach a stored view — `CREATE VIEW`
+            // refuses one — so its text is echoed rather than deparsed.
+            crabka_pgparser::ast::CteBody::Dml(_) => out.push_str("..."),
+        }
+        out.push_str(&clause_break(body.indent, 0));
+        out.push(')');
+    }
+    out.push_str(&clause_break(ctx.indent, 0));
 }
 
 /// Deparse one stored expression, the way `pg_get_expr` renders a qual held in
@@ -107,19 +239,44 @@ pub(crate) fn expression_text(expr: &Expr) -> String {
             qualify: false,
             qualifier: None,
             wrap: None,
+            colnames: false,
+            window_calls: &[],
+            indent: 0,
         },
     )
 }
 
 fn write_query_tail(out: &mut String, query: &QueryExpr, ctx: Ctx<'_>) {
+    // These clauses belong to the query, so they sit at the indent it was
+    // entered with; the expressions in them are written one step deeper,
+    // because `get_select_query_def` has already stepped in by this point.
+    let inner = Ctx {
+        indent: ctx.indent + INDENT_STEP,
+        ..ctx
+    };
     if !query.order_by.is_empty() {
-        let _ = write!(out, "\n  ORDER BY {}", order_list(&query.order_by, ctx));
+        let _ = write!(
+            out,
+            "{} ORDER BY {}",
+            clause_break(ctx.indent, 1),
+            order_list(&query.order_by, inner)
+        );
     }
     if let Some(limit) = &query.limit {
-        let _ = write!(out, "\n LIMIT {}", expr_text(limit, ctx));
+        let _ = write!(
+            out,
+            "{} LIMIT {}",
+            clause_break(ctx.indent, 0),
+            expr_text(limit, inner)
+        );
     }
     if let Some(offset) = &query.offset {
-        let _ = write!(out, "\n OFFSET {}", expr_text(offset, ctx));
+        let _ = write!(
+            out,
+            "{} OFFSET {}",
+            clause_break(ctx.indent, 0),
+            expr_text(offset, inner)
+        );
     }
 }
 
@@ -128,12 +285,7 @@ fn write_set_expr(out: &mut String, body: &SetExpr, names: &[String], ctx: Ctx<'
         SetExpr::Query(QueryBody::Select(select)) => write_select(out, select, names, ctx),
         SetExpr::Query(QueryBody::Values(values)) => write_values(out, values, ctx),
         SetExpr::Query(QueryBody::Nested(query)) => {
-            let nested = Ctx {
-                qualify: true,
-                ..ctx
-            };
-            write_set_expr(out, &query.body, names, nested);
-            write_query_tail(out, query, nested);
+            write_query_at(out, query, names, ctx.nested());
         }
         SetExpr::SetOp {
             op,
@@ -143,24 +295,38 @@ fn write_set_expr(out: &mut String, body: &SetExpr, names: &[String], ctx: Ctx<'
         } => {
             // Every arm of a set operation is a sub-query, which is exactly the
             // condition PostgreSQL qualifies column references under.
-            let arm = Ctx {
-                qualify: true,
-                ..ctx
-            };
+            let arm = ctx.nested();
             write_set_expr(out, left, names, arm);
             let keyword = match op {
                 SetOp::Union => "UNION",
                 SetOp::Intersect => "INTERSECT",
                 SetOp::Except => "EXCEPT",
             };
-            let _ = write!(out, "\n{keyword}{}", if *all { " ALL" } else { "" });
-            out.push('\n');
-            write_set_expr(out, right, names, arm);
+            let _ = write!(
+                out,
+                "{}{keyword}{}{}",
+                clause_break(ctx.indent, 0),
+                if *all { " ALL" } else { "" },
+                clause_break(ctx.indent, 0)
+            );
+            // The right arm's own output names are never the ones anybody
+            // reads, which is `get_setop_query` clearing `colNamesVisible`.
+            write_set_expr(
+                out,
+                right,
+                names,
+                Ctx {
+                    colnames: false,
+                    ..arm
+                },
+            );
         }
     }
 }
 
 fn write_values(out: &mut String, values: &ValuesStmt, ctx: Ctx<'_>) {
+    // PostgreSQL separates the columns of one row with a bare comma and the
+    // rows themselves with a comma and a space.
     let rows = values
         .rows
         .iter()
@@ -169,7 +335,7 @@ fn write_values(out: &mut String, values: &ValuesStmt, ctx: Ctx<'_>) {
                 .iter()
                 .map(|cell| expr_text(cell, ctx))
                 .collect::<Vec<_>>()
-                .join(", ");
+                .join(",");
             format!("({cells})")
         })
         .collect::<Vec<_>>()
@@ -178,46 +344,242 @@ fn write_values(out: &mut String, values: &ValuesStmt, ctx: Ctx<'_>) {
 }
 
 fn write_select(out: &mut String, select: &SelectStmt, names: &[String], ctx: Ctx<'_>) {
+    // The clause keywords sit at the indent this query was entered with;
+    // everything they carry is written one step deeper, exactly as
+    // `get_basic_select_query` deepens `indentLevel` before writing SELECT.
+    let level = ctx.indent;
     let ctx = Ctx {
         qualify: ctx.qualify || range_table_len(&select.from) != 1,
         qualifier: sole_from_name(&select.from),
+        window_calls: &select.window_calls,
+        indent: level + INDENT_STEP,
         ..ctx
     };
     out.push_str(" SELECT");
     write_distinct(out, &select.distinct, ctx);
-    write_target_list(out, &target_list(select, names, ctx), ctx);
+    write_target_list(out, &target_list(select, names, ctx), level, ctx);
     if !select.from.is_empty() {
         let from = select
             .from
             .iter()
             .map(|item| from_text(item, ctx))
             .collect::<Vec<_>>()
-            .join(",\n     ");
-        let _ = write!(out, "\n   FROM {from}");
+            .join(&format!(",{}", clause_break(level, 4)));
+        let _ = write!(out, "{} FROM {from}", clause_break(level, 2));
     }
     if let Some(filter) = &select.filter {
-        let _ = write!(out, "\n  WHERE {}", expr_text(filter, ctx));
+        let _ = write!(
+            out,
+            "{} WHERE {}",
+            clause_break(level, 1),
+            expr_text(filter, ctx)
+        );
     }
     if !select.group_by.is_empty() {
+        let _ = write!(
+            out,
+            "{} GROUP BY {}",
+            clause_break(level, 1),
+            group_by_text(select, ctx)
+        );
+    }
+    if let Some(having) = &select.having {
+        let _ = write!(
+            out,
+            "{} HAVING {}",
+            clause_break(level, 0),
+            expr_text(having, ctx)
+        );
+    }
+    if !select.windows.is_empty() {
         let list = select
+            .windows
+            .iter()
+            .map(|window| {
+                format!(
+                    "{} AS ({})",
+                    quote_identifier(&window.name),
+                    window_spec_text(&window.spec, ctx)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = write!(out, "{} WINDOW {list}", clause_break(level, 1));
+    }
+    if !select.order_by.is_empty() {
+        let _ = write!(
+            out,
+            "{} ORDER BY {}",
+            clause_break(level, 1),
+            order_list(&select.order_by, ctx)
+        );
+    }
+    if let Some(limit) = &select.limit {
+        let _ = write!(
+            out,
+            "{} LIMIT {}",
+            clause_break(level, 0),
+            expr_text(limit, ctx)
+        );
+    }
+    if let Some(offset) = &select.offset {
+        let _ = write!(
+            out,
+            "{} OFFSET {}",
+            clause_break(level, 0),
+            expr_text(offset, ctx)
+        );
+    }
+}
+
+/// The `GROUP BY` list. A plain clause is its expressions; a grouping clause
+/// prints the structure `PostgreSQL` reconstructs from the expanded sets —
+/// `ROLLUP(a, b)`, `CUBE(a, b)`, `GROUPING SETS ((a, b), (a), ())` — over the
+/// same expression list.
+fn group_by_text(select: &SelectStmt, ctx: Ctx<'_>) -> String {
+    let expression = |index: &usize| {
+        select
+            .group_by
+            .get(*index)
+            .map_or_else(String::new, |expr| expr_text(expr, ctx))
+    };
+    let Some(grouping) = &select.grouping else {
+        return select
             .group_by
             .iter()
             .map(|expr| expr_text(expr, ctx))
             .collect::<Vec<_>>()
             .join(", ");
-        let _ = write!(out, "\n  GROUP BY {list}");
+    };
+    let items = grouping
+        .items
+        .iter()
+        .map(|item| group_item_text(item, true, &expression))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if grouping.distinct {
+        format!("DISTINCT {items}")
+    } else {
+        items
     }
-    if let Some(having) = &select.having {
-        let _ = write!(out, "\n HAVING {}", expr_text(having, ctx));
+}
+
+/// One `GROUP BY` element.
+///
+/// `omit_parens` is `get_rule_groupingset`'s: a one-column set keeps its
+/// parentheses only where they carry meaning. They are dropped at the top of
+/// the clause and inside `ROLLUP`/`CUBE`, where a bare column is unambiguous,
+/// and kept inside `GROUPING SETS`, where `(b)` is a set and `b` would not be.
+fn group_item_text(
+    item: &GroupItem,
+    omit_parens: bool,
+    expression: &impl Fn(&usize) -> String,
+) -> String {
+    let list = |items: &[GroupItem], omit: bool| {
+        items
+            .iter()
+            .map(|item| group_item_text(item, omit, expression))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let simple = |columns: String, count: usize| {
+        if omit_parens && count == 1 {
+            columns
+        } else {
+            format!("({columns})")
+        }
+    };
+    match item {
+        GroupItem::Expr(index) => simple(expression(index), 1),
+        GroupItem::Empty => "()".to_string(),
+        GroupItem::Composite(indexes) => simple(
+            indexes
+                .iter()
+                .map(expression)
+                .collect::<Vec<_>>()
+                .join(", "),
+            indexes.len(),
+        ),
+        GroupItem::Rollup(items) => format!("ROLLUP({})", list(items, true)),
+        GroupItem::Cube(items) => format!("CUBE({})", list(items, true)),
+        GroupItem::GroupingSets(items) => format!("GROUPING SETS ({})", list(items, false)),
     }
-    if !select.order_by.is_empty() {
-        let _ = write!(out, "\n  ORDER BY {}", order_list(&select.order_by, ctx));
+}
+
+/// One `f(…) OVER …` call, reconstructed from the placeholder that stands in
+/// for it in the expression tree.
+fn window_call_text(call: &WindowCall, ctx: Ctx<'_>) -> String {
+    let args = match &call.args {
+        FuncArgs::Star => "*".to_string(),
+        FuncArgs::Exprs(args) => args
+            .iter()
+            .map(|argument| expr_text(argument, ctx))
+            .collect::<Vec<_>>()
+            .join(", "),
+    };
+    let filter = call.filter.as_ref().map_or_else(String::new, |predicate| {
+        // `get_agg_expr` adds no parentheses of its own around the predicate;
+        // the operator node it holds brings whatever it needs.
+        format!(" FILTER (WHERE {})", expr_text(predicate, ctx))
+    });
+    let over = match &call.over {
+        WindowRef::Named(name) => quote_identifier(name),
+        WindowRef::Spec(spec) => format!("({})", window_spec_text(spec, ctx)),
+    };
+    format!(
+        "{}({}{args}){filter} OVER {over}",
+        call.name,
+        if call.distinct { "DISTINCT " } else { "" }
+    )
+}
+
+fn window_spec_text(spec: &WindowSpec, ctx: Ctx<'_>) -> String {
+    let mut parts = Vec::new();
+    if let Some(base) = &spec.base {
+        parts.push(quote_identifier(base));
     }
-    if let Some(limit) = &select.limit {
-        let _ = write!(out, "\n LIMIT {}", expr_text(limit, ctx));
+    if !spec.partition_by.is_empty() {
+        parts.push(format!(
+            "PARTITION BY {}",
+            spec.partition_by
+                .iter()
+                .map(|expr| expr_text(expr, ctx))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
-    if let Some(offset) = &select.offset {
-        let _ = write!(out, "\n OFFSET {}", expr_text(offset, ctx));
+    if !spec.order_by.is_empty() {
+        parts.push(format!("ORDER BY {}", order_list(&spec.order_by, ctx)));
+    }
+    if let Some(frame) = &spec.frame {
+        let mode = match frame.mode {
+            FrameMode::Rows => "ROWS",
+            FrameMode::Range => "RANGE",
+            FrameMode::Groups => "GROUPS",
+        };
+        let mut text = format!(
+            "{mode} BETWEEN {} AND {}",
+            frame_bound_text(&frame.start, ctx),
+            frame_bound_text(&frame.end, ctx)
+        );
+        match frame.exclusion {
+            FrameExclusion::NoOthers => {}
+            FrameExclusion::CurrentRow => text.push_str(" EXCLUDE CURRENT ROW"),
+            FrameExclusion::Group => text.push_str(" EXCLUDE GROUP"),
+            FrameExclusion::Ties => text.push_str(" EXCLUDE TIES"),
+        }
+        parts.push(text);
+    }
+    parts.join(" ")
+}
+
+fn frame_bound_text(bound: &FrameBound, ctx: Ctx<'_>) -> String {
+    match bound {
+        FrameBound::UnboundedPreceding => "UNBOUNDED PRECEDING".to_string(),
+        FrameBound::Preceding(offset) => format!("{} PRECEDING", expr_text(offset, ctx)),
+        FrameBound::CurrentRow => "CURRENT ROW".to_string(),
+        FrameBound::Following(offset) => format!("{} FOLLOWING", expr_text(offset, ctx)),
+        FrameBound::UnboundedFollowing => "UNBOUNDED FOLLOWING".to_string(),
     }
 }
 
@@ -276,9 +638,14 @@ fn target_list(select: &SelectStmt, names: &[String], ctx: Ctx<'_>) -> Vec<Strin
             SelectItem::Expr { expr, alias } => {
                 // The view's catalog column list names one output column per
                 // projected item, whether or not the item was written with an
-                // alias — so the cursor advances either way.
-                let catalog_name = next.next().cloned();
-                let target = alias.clone().or(catalog_name).unwrap_or_default();
+                // alias — so the cursor advances either way. It also *wins*
+                // over the alias, the way `resultDesc` wins over `resname` in
+                // `get_target_list`: a renamed view column, and the right arm
+                // of a set operation, are both named by the view.
+                let target = next.next().cloned().or_else(|| alias.clone());
+                // A query with no column list of its own labels each item the
+                // way the parser's `FigureColname` would.
+                let target = target.unwrap_or_else(|| crate::exec::derived_name(expr));
                 out.push(target_item(expr, &target, ctx));
             }
         }
@@ -289,13 +656,12 @@ fn target_list(select: &SelectStmt, names: &[String], ctx: Ctx<'_>) -> Vec<Strin
     out
 }
 
-/// Append the rendered select list.
-///
-/// Without a wrap column, each entry gets its own line at PostgreSQL's
-/// four-space continuation indent. With a wrap column, this function packs
-/// entries greedily and breaks a line before the entry that would cross it.
-fn write_target_list(out: &mut String, items: &[String], ctx: Ctx<'_>) {
+/// Append the rendered select list. Without a wrap column each entry gets its
+/// own line at PostgreSQL's four-space continuation indent; with one, entries
+/// are packed greedily and a line breaks before the entry that would cross it.
+fn write_target_list(out: &mut String, items: &[String], level: usize, ctx: Ctx<'_>) {
     let mut line_start = out.rfind('\n').map_or(0, |at| at + 1);
+    let continuation = clause_break(level, 4);
     for (index, item) in items.iter().enumerate() {
         if index > 0 {
             out.push(',');
@@ -304,8 +670,8 @@ fn write_target_list(out: &mut String, items: &[String], ctx: Ctx<'_>) {
             .wrap
             .is_some_and(|wrap| out.len() - line_start + 1 + item.len() <= wrap);
         if index > 0 && !fits {
-            out.push_str("\n    ");
-            line_start = out.len() - 4;
+            out.push_str(&continuation);
+            line_start = out.len() - continuation.len() + 1;
         } else if index > 0 {
             out.push(' ');
         }
@@ -313,16 +679,25 @@ fn write_target_list(out: &mut String, items: &[String], ctx: Ctx<'_>) {
     }
 }
 
-/// One select-list entry. A bare column reference that already carries the
-/// output name needs no `AS`. PostgreSQL writes one for everything else.
+/// One select-list entry.
+///
+/// `get_target_list` writes `AS` unless the label the reader would infer
+/// already matches. For a column reference that inferred label is the column's
+/// own name. For everything else it is nothing at all when the query's names
+/// are visible — so a view or a `WITH` entry labels every expression, even one
+/// whose label is `?column?` — and `?column?` when they are not, which is what
+/// leaves an unnamed expression inside a sub-select unlabelled.
 fn target_item(expr: &Expr, target: &str, ctx: Ctx<'_>) -> String {
     let text = expr_text(expr, ctx);
     if target.is_empty() {
         return text;
     }
-    if let Expr::Column { name, .. } = expr
-        && name == target
-    {
+    let inferred = match expr {
+        Expr::Column { name, .. } => Some(name.as_str()),
+        _ if ctx.colnames => None,
+        _ => Some("?column?"),
+    };
+    if inferred == Some(target) {
         return text;
     }
     format!("{text} AS {}", quote_identifier(target))
@@ -372,18 +747,21 @@ fn from_text(item: &TableExpr, ctx: Ctx<'_>) -> String {
         TableExpr::Derived {
             subquery,
             alias,
+            columns,
             lateral,
-            ..
         } => {
             let mut inner = String::new();
-            let nested = Ctx {
-                qualify: true,
-                ..ctx
-            };
-            write_set_expr(&mut inner, &subquery.body, &[], nested);
-            write_query_tail(&mut inner, subquery, nested);
+            write_query_at(&mut inner, subquery, &[], ctx.nested());
+            let columns = columns.as_ref().map_or_else(String::new, |columns| {
+                let names = columns
+                    .iter()
+                    .map(|name| quote_identifier(name))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("({names})")
+            });
             format!(
-                "{}({inner}) {}",
+                "{}({inner}) {}{columns}",
                 if *lateral { "LATERAL " } else { "" },
                 quote_identifier(alias)
             )
@@ -556,6 +934,10 @@ fn quote_json_path(path: &str) -> String {
 
 /// A join tree: the left side on the FROM line, each join on its own line at
 /// PostgreSQL's five-space indent.
+///
+/// In un-pretty mode `get_from_clause_item` parenthesizes *every* join node, so
+/// a three-way join reads `((a JOIN b ON …) JOIN c ON …)`. The caller wraps the
+/// outermost node; this wraps each nested one.
 fn join_text(item: &TableExpr, ctx: Ctx<'_>) -> String {
     let TableExpr::Join {
         left,
@@ -565,6 +947,14 @@ fn join_text(item: &TableExpr, ctx: Ctx<'_>) -> String {
     } = item
     else {
         return from_text(item, ctx);
+    };
+    let left = {
+        let text = join_text(left, ctx);
+        if ctx.pretty || !matches!(**left, TableExpr::Join { .. }) {
+            text
+        } else {
+            format!("({text})")
+        }
     };
     let keyword = match kind {
         JoinKind::Inner => "JOIN",
@@ -587,8 +977,8 @@ fn join_text(item: &TableExpr, ctx: Ctx<'_>) -> String {
     };
     let natural = matches!(constraint, JoinConstraint::Natural);
     format!(
-        "{}\n     {}{keyword} {}{tail}",
-        join_text(left, ctx),
+        "{left}{} {}{keyword} {}{tail}",
+        clause_break(ctx.indent.saturating_sub(INDENT_STEP), 4),
         if natural { "NATURAL " } else { "" },
         from_text(right, ctx)
     )
@@ -607,6 +997,16 @@ fn expr_text(expr: &Expr, ctx: Ctx<'_>) -> String {
         Expr::NullLiteral => "NULL::text".to_string(),
         Expr::Default => "DEFAULT".to_string(),
         Expr::Param(n) => format!("${n}"),
+        // A window call is held beside the select list rather than in it, so the
+        // placeholder standing in its place is written back as the call.
+        Expr::Column { .. }
+            if crabka_pgparser::ast::window_placeholder_index(expr)
+                .is_some_and(|index| index < ctx.window_calls.len()) =>
+        {
+            let index = crabka_pgparser::ast::window_placeholder_index(expr)
+                .expect("the guard already matched a placeholder");
+            window_call_text(&ctx.window_calls[index], ctx)
+        }
         Expr::Column { table, name } => match (table.as_deref().or(ctx.qualifier), ctx.qualify) {
             (Some(prefix), true) => {
                 format!("{}.{}", quote_identifier(prefix), quote_identifier(name))
@@ -617,9 +1017,9 @@ fn expr_text(expr: &Expr, ctx: Ctx<'_>) -> String {
         Expr::Unary { op, expr } => unary_text(*op, expr, ctx),
         Expr::Binary { op, left, right } => ctx.paren(format!(
             "{} {} {}",
-            expr_text(left, ctx),
+            operand_text(left, ctx),
             binary_op_text(*op),
-            expr_text(right, ctx)
+            operand_text(right, ctx)
         )),
         Expr::Func(call) => func_text(call, ctx),
         Expr::IsNull { expr, negated } => ctx.paren(format!(
@@ -701,29 +1101,45 @@ fn expr_text_rest(expr: &Expr, ctx: Ctx<'_>) -> String {
             format!("{}[{}]", expr_text(base, ctx), expr_text(index, ctx))
         }
         Expr::ScalarSubquery(query) => subquery_text(query, ctx),
-        Expr::Exists(query) => ctx.paren(format!("EXISTS {}", subquery_text(query, ctx))),
+        // `ARRAY(…)` is one node in PostgreSQL, printed with the keyword glued
+        // to the sub-select's own parenthesis.
+        Expr::ArraySubquery(query) => format!("ARRAY{}", subquery_text(query, ctx)),
+        // `get_sublink_expr` opens a parenthesis of its own before anything
+        // else and closes it after the sub-select, whatever the pretty flag
+        // says — so these three keep their parentheses in both forms.
+        Expr::Exists(query) => format!("(EXISTS {})", subquery_text(query, ctx)),
         Expr::InSubquery {
             expr,
             subquery,
             negated,
-        } => ctx.paren(format!(
-            "{} {}IN {}",
+        } => format!(
+            "({} {}IN {})",
             expr_text(expr, ctx),
             if *negated { "NOT " } else { "" },
             subquery_text(subquery, ctx)
-        )),
+        ),
+        // `get_sublink_expr` spells `= ANY (subquery)` as `IN`, which is the
+        // one quantified form that has a shorter equivalent; every other
+        // operator keeps `ANY`/`ALL`.
         Expr::Quantified {
             expr,
             op,
             all,
             subquery,
-        } => ctx.paren(format!(
-            "{} {} {} {}",
+        } => format!(
+            "({} {} {})",
             expr_text(expr, ctx),
-            binary_op_text(*op),
-            if *all { "ALL" } else { "ANY" },
+            if *all || *op != BinaryOp::Eq {
+                format!(
+                    "{} {}",
+                    binary_op_text(*op),
+                    if *all { "ALL" } else { "ANY" }
+                )
+            } else {
+                "IN".to_string()
+            },
             subquery_text(subquery, ctx)
-        )),
+        ),
         Expr::QuantifiedArray {
             expr,
             op,
@@ -740,14 +1156,31 @@ fn expr_text_rest(expr: &Expr, ctx: Ctx<'_>) -> String {
     }
 }
 
+/// One operand of a binary operator.
+///
+/// In pretty mode `get_rule_expr` asks `isSimpleNode` whether an argument needs
+/// parentheses of its own, and a sub-select under an operator always does — so
+/// `a > (SELECT …)` keeps a parenthesis the surrounding operator no longer
+/// supplies. In un-pretty mode the operator node parenthesizes everything and
+/// the question is never asked.
+fn operand_text(expr: &Expr, ctx: Ctx<'_>) -> String {
+    let text = expr_text(expr, ctx);
+    if ctx.pretty && matches!(expr, Expr::ScalarSubquery(_) | Expr::ArraySubquery(_)) {
+        format!("({text})")
+    } else {
+        text
+    }
+}
+
 fn subquery_text(query: &QueryExpr, ctx: Ctx<'_>) -> String {
     let mut inner = String::new();
+    // Nobody names the columns of a sub-select, so an expression that would
+    // only be labelled `?column?` is left bare.
     let nested = Ctx {
-        qualify: true,
-        ..ctx
+        colnames: false,
+        ..ctx.nested()
     };
-    write_set_expr(&mut inner, &query.body, &[], nested);
-    write_query_tail(&mut inner, query, nested);
+    write_query_at(&mut inner, query, &[], nested);
     format!("({inner})")
 }
 
@@ -1115,6 +1548,236 @@ mod tests {
             view_definition_text(&view, true)
                 == " SELECT t.a\n   FROM t\nUNION ALL\n SELECT u.a\n   FROM u;"
         );
+    }
+
+    /// Every shape a widened view body can take, and the exact text
+    /// `PostgreSQL` 18.4 answers for `pg_get_viewdef(oid)` over it.
+    ///
+    /// What these pin is the indentation rule: a nested query — a `WITH` body,
+    /// a derived table, a sub-select — is laid out one eight-column step
+    /// further in than the query holding it, and the step compounds with depth.
+    #[test]
+    fn deparses_the_nested_shapes_at_postgres_indents() {
+        let cases: [(&str, &[&str], &str); 12] = [
+            (
+                "WITH s AS (SELECT a FROM t WHERE a > 1) SELECT a FROM s",
+                &["a"],
+                " WITH s AS (\n         SELECT t.a\n           FROM t\n          WHERE (t.a > 1)\
+                 \n        )\n SELECT a\n   FROM s;",
+            ),
+            (
+                "WITH s AS (SELECT a FROM t), r AS (SELECT a FROM u) \
+                 SELECT s.a FROM s JOIN r ON s.a = r.a",
+                &["a"],
+                " WITH s AS (\n         SELECT t.a\n           FROM t\n        ), r AS (\
+                 \n         SELECT u.a\n           FROM u\n        )\n SELECT s.a\
+                 \n   FROM (s\n     JOIN r ON ((s.a = r.a)));",
+            ),
+            (
+                "WITH s AS MATERIALIZED (SELECT a FROM t) SELECT a FROM s",
+                &["a"],
+                " WITH s AS MATERIALIZED (\n         SELECT t.a\n           FROM t\n        )\
+                 \n SELECT a\n   FROM s;",
+            ),
+            (
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT 2) SELECT i FROM n",
+                &["i"],
+                " WITH RECURSIVE n(i) AS (\n         SELECT 1 AS \"?column?\"\n        UNION ALL\
+                 \n         SELECT 2\n        )\n SELECT i\n   FROM n;",
+            ),
+            (
+                "SELECT a, b FROM (SELECT a, b FROM t WHERE a > 1) s",
+                &["a", "b"],
+                " SELECT a,\n    b\n   FROM ( SELECT t.a,\n            t.b\n           FROM t\
+                 \n          WHERE (t.a > 1)) s;",
+            ),
+            (
+                "SELECT q.a FROM (SELECT p.a FROM (SELECT a FROM t) p) q",
+                &["a"],
+                " SELECT a\n   FROM ( SELECT p.a\n           FROM ( SELECT t.a\
+                 \n                   FROM t) p) q;",
+            ),
+            (
+                "SELECT a, (SELECT max(e) FROM w) AS mx FROM t",
+                &["a", "mx"],
+                " SELECT a,\n    ( SELECT max(w.e) AS max\n           FROM w) AS mx\n   FROM t;",
+            ),
+            (
+                "SELECT ARRAY(SELECT a FROM u ORDER BY a) AS arr",
+                &["arr"],
+                " SELECT ARRAY( SELECT u.a\n           FROM u\n          ORDER BY u.a) AS arr;",
+            ),
+            // `= ANY (subquery)` is the one quantified form PostgreSQL prints
+            // back as `IN`.
+            (
+                "SELECT a FROM t WHERE a = ANY (SELECT a FROM w)",
+                &["a"],
+                " SELECT a\n   FROM t\n  WHERE (a IN ( SELECT w.a\n           FROM w));",
+            ),
+            (
+                "SELECT a FROM t WHERE a > ALL (SELECT a FROM w)",
+                &["a"],
+                " SELECT a\n   FROM t\n  WHERE (a > ALL ( SELECT w.a\n           FROM w));",
+            ),
+            // Un-pretty mode parenthesizes every join node, so a three-way
+            // join nests its parentheses.
+            (
+                "SELECT t.a FROM t JOIN u ON t.a = u.a JOIN w ON w.a = t.a",
+                &["a"],
+                " SELECT t.a\n   FROM ((t\n     JOIN u ON ((t.a = u.a)))\
+                 \n     JOIN w ON ((w.a = t.a)));",
+            ),
+            (
+                "SELECT t.a, u.d FROM t, u WHERE t.a = u.a",
+                &["a", "d"],
+                " SELECT t.a,\n    u.d\n   FROM t,\n    u\n  WHERE (t.a = u.a);",
+            ),
+        ];
+        for (definition, columns, expected) in cases {
+            let view = view(definition, columns);
+            assert!(
+                view_definition_text(&view, false) == expected,
+                "{definition}"
+            );
+        }
+    }
+
+    /// A sub-select carries parentheses the pretty flag does not remove:
+    /// `get_sublink_expr` opens one unconditionally, and under an operator
+    /// `isSimpleNode` adds the one the operator itself no longer supplies.
+    #[test]
+    fn a_sublink_keeps_its_parentheses_in_both_forms() {
+        let cases: [(&str, &[&str], &str, &str); 4] = [
+            (
+                "SELECT a FROM t WHERE EXISTS (SELECT 1 FROM u)",
+                &["a"],
+                " SELECT a\n   FROM t\n  WHERE (EXISTS ( SELECT 1\n           FROM u));",
+                " SELECT a\n   FROM t\n  WHERE (EXISTS ( SELECT 1\n           FROM u));",
+            ),
+            (
+                "SELECT a FROM t WHERE a IN (SELECT a FROM u)",
+                &["a"],
+                " SELECT a\n   FROM t\n  WHERE (a IN ( SELECT u.a\n           FROM u));",
+                " SELECT a\n   FROM t\n  WHERE (a IN ( SELECT u.a\n           FROM u));",
+            ),
+            // Un-pretty, the operator node supplies the outer parenthesis;
+            // pretty, it does not, and the operand grows one of its own.
+            (
+                "SELECT b, count(*) FROM t GROUP BY b HAVING count(*) > (SELECT 0)",
+                &["b", "count"],
+                " SELECT b,\n    count(*) AS count\n   FROM t\n  GROUP BY b\
+                 \n HAVING (count(*) > ( SELECT 0));",
+                " SELECT b,\n    count(*) AS count\n   FROM t\n  GROUP BY b\
+                 \n HAVING count(*) > (( SELECT 0));",
+            ),
+            (
+                "SELECT a FROM t WHERE a > ALL (SELECT a FROM u)",
+                &["a"],
+                " SELECT a\n   FROM t\n  WHERE (a > ALL ( SELECT u.a\n           FROM u));",
+                " SELECT a\n   FROM t\n  WHERE (a > ALL ( SELECT u.a\n           FROM u));",
+            ),
+        ];
+        for (definition, columns, plain, pretty) in cases {
+            let view = view(definition, columns);
+            assert!(view_definition_text(&view, false) == plain, "{definition}");
+            assert!(view_definition_text(&view, true) == pretty, "{definition}");
+        }
+    }
+
+    /// A window call lives beside the select list rather than in it, and a
+    /// grouping clause keeps a structure the flat expression list cannot hold.
+    /// Both are written back from where they are actually stored.
+    #[test]
+    fn deparses_window_calls_and_grouping_clauses() {
+        let cases: [(&str, &[&str], &str); 7] = [
+            (
+                "SELECT a, sum(c) OVER (ORDER BY a) AS running FROM t",
+                &["a", "running"],
+                " SELECT a,\n    sum(c) OVER (ORDER BY a) AS running\n   FROM t;",
+            ),
+            (
+                "SELECT a, sum(c) OVER w AS s FROM t WINDOW w AS (PARTITION BY b ORDER BY a)",
+                &["a", "s"],
+                " SELECT a,\n    sum(c) OVER w AS s\n   FROM t\
+                 \n  WINDOW w AS (PARTITION BY b ORDER BY a);",
+            ),
+            (
+                "SELECT a, row_number() OVER (PARTITION BY b ORDER BY a \
+                 ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS r FROM t",
+                &["a", "r"],
+                " SELECT a,\n    row_number() OVER (PARTITION BY b ORDER BY a \
+                 ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS r\n   FROM t;",
+            ),
+            (
+                "SELECT a, count(*) FILTER (WHERE a > 1) OVER (ORDER BY a) AS n FROM t",
+                &["a", "n"],
+                " SELECT a,\n    count(*) FILTER (WHERE (a > 1)) OVER (ORDER BY a) AS n\
+                 \n   FROM t;",
+            ),
+            (
+                "SELECT b, count(*) FROM t GROUP BY ROLLUP (a, b)",
+                &["b", "count"],
+                " SELECT b,\n    count(*) AS count\n   FROM t\n  GROUP BY ROLLUP(a, b);",
+            ),
+            (
+                "SELECT b, count(*) FROM t GROUP BY GROUPING SETS ((a,b),(a),())",
+                &["b", "count"],
+                " SELECT b,\n    count(*) AS count\n   FROM t\
+                 \n  GROUP BY GROUPING SETS ((a, b), (a), ());",
+            ),
+            (
+                "SELECT b, count(*) FROM t GROUP BY DISTINCT ROLLUP(a), b",
+                &["b", "count"],
+                " SELECT b,\n    count(*) AS count\n   FROM t\
+                 \n  GROUP BY DISTINCT ROLLUP(a), b;",
+            ),
+        ];
+        for (definition, columns, expected) in cases {
+            let view = view(definition, columns);
+            assert!(
+                view_definition_text(&view, false) == expected,
+                "{definition}"
+            );
+        }
+    }
+
+    /// The view's own column list names its output, which is why the right arm
+    /// of a set operation is labelled by the left arm's name rather than its
+    /// own alias. A query nobody names labels each item the way the parser
+    /// would — and inside a sub-select, where the names are invisible, an
+    /// expression that would only be `?column?` is left bare.
+    #[test]
+    fn labels_output_columns_the_way_postgres_does() {
+        let cases: [(&str, &[&str], &str); 4] = [
+            (
+                "SELECT a AS ll FROM t UNION ALL SELECT a AS rr FROM u",
+                &["ll"],
+                " SELECT t.a AS ll\n   FROM t\nUNION ALL\n SELECT u.a AS ll\n   FROM u;",
+            ),
+            (
+                "SELECT (SELECT 1) AS one FROM t",
+                &["one"],
+                " SELECT ( SELECT 1) AS one\n   FROM t;",
+            ),
+            (
+                "SELECT s.n FROM (SELECT count(*) AS n FROM t) s",
+                &["n"],
+                " SELECT n\n   FROM ( SELECT count(*) AS n\n           FROM t) s;",
+            ),
+            (
+                "WITH s AS (SELECT 1) SELECT * FROM s",
+                &["c"],
+                " WITH s AS (\n         SELECT 1 AS \"?column?\"\n        )\n SELECT c\
+                 \n   FROM s;",
+            ),
+        ];
+        for (definition, columns, expected) in cases {
+            let view = view(definition, columns);
+            assert!(
+                view_definition_text(&view, false) == expected,
+                "{definition}"
+            );
+        }
     }
 
     /// The expression entry point `pg_get_expr` reaches for a qual stored in a
