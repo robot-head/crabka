@@ -28,7 +28,7 @@ gresActivatorImage:
 
 pgdogImage:
   repository: ghcr.io/pgdogdev/pgdog
-  tag: "0.1.51"
+  tag: "v0.1.52"
   pullPolicy: IfNotPresent
 
 # Optional durable store shared by Gres computes and the operator's final
