@@ -13293,6 +13293,7 @@ impl Session for SqlSession {
     }
 
     async fn begin_copy_in(&mut self, sql: &str) -> Result<Option<CopyInResponse>, PgError> {
+        let _tracked = self.track_statement(sql);
         // This is the wire loop's first look at a simple-query string, so a
         // parse failure here is the one the client sees — and PostgreSQL aborts
         // an open transaction block on a syntax error like any other.
@@ -13311,6 +13312,7 @@ impl Session for SqlSession {
     }
 
     async fn begin_copy_out(&mut self, sql: &str) -> Result<Option<CopyOutStream>, PgError> {
+        let _tracked = self.track_statement(sql);
         // `begin_copy_in` ran first on this same string and left its parse
         // behind; re-parsing only happens if something ever calls this without
         // it, and a failure there is reported the way that one reports it.
@@ -13346,6 +13348,7 @@ impl Session for SqlSession {
         sql: &str,
         data: Vec<bytes::Bytes>,
     ) -> Result<QueryResult, PgError> {
+        let _tracked = self.track_statement(sql);
         let type_schemas = self.type_search_schemas().map_err(ExecError::into_pg)?;
         let statements = crabka_pgparser::parse_with_type_schemas(sql, &type_schemas)
             .map_err(|error| ExecError::from(error).into_pg())?;
@@ -13392,6 +13395,7 @@ impl Session for SqlSession {
             })?;
         self.reject_prepared_participant()
             .map_err(ExecError::into_pg)?;
+        let _tracked = self.track_statement(&format!("COPY portal \"{portal}\""));
         let result = self.run_copy_in(&copy, data).await;
         if result.is_err() {
             self.mark_transaction_failed();

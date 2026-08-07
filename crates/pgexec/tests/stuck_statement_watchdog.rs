@@ -282,3 +282,100 @@ async fn an_extended_protocol_execute_registers_its_prepared_text() {
         .expect("join");
     assert!(engine.statement_registry().in_flight() == vec![]);
 }
+
+/// `COPY` reaches the engine through its own entry points rather than the
+/// ordinary query path, so a wedge inside one was invisible to the registry
+/// until those points were tracked too. A real certification run hung on a
+/// `COPY … FROM` and produced not one report, which is what this pins: the
+/// copy itself is what blocks, so an untracked entry point leaves the registry
+/// empty and fails the assertion below.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_blocked_copy_in_names_itself_in_the_registry() {
+    let engine = Arc::new(SqlEngine::new());
+    let mut setup = engine.connect();
+    setup
+        .simple_query("CREATE TABLE t (id int4 PRIMARY KEY, v text)")
+        .await
+        .expect("create");
+
+    // An uncommitted row the copy's own row collides with, so the copy parks on
+    // the unique-key decision rather than on anything that ran before it.
+    let mut holder = engine.connect();
+    holder.simple_query("BEGIN").await.expect("begin");
+    holder
+        .simple_query("INSERT INTO t VALUES (2,'held')")
+        .await
+        .expect("hold the key");
+
+    let blocked_engine = Arc::clone(&engine);
+    let blocked = tokio::spawn(async move {
+        let mut session = blocked_engine.connect_with_pid(BLOCKED_PID);
+        session
+            .copy_in(
+                "COPY t FROM STDIN",
+                vec![bytes::Bytes::from_static(b"2\tcopied\n")],
+            )
+            .await
+    });
+
+    until(&engine, |running| {
+        running
+            .iter()
+            .any(|entry| entry.statement == "COPY t FROM STDIN")
+    })
+    .await;
+
+    let stuck = reports(&engine, TINY);
+    assert!(stuck.len() == 1, "{stuck:?}");
+    assert!(stuck[0].backend_pid == BLOCKED_PID);
+    assert!(stuck[0].statement == "COPY t FROM STDIN");
+
+    // Releasing the key lets the copy finish, and it clears its own entry.
+    holder.simple_query("ROLLBACK").await.expect("release");
+    tokio::time::timeout(Duration::from_secs(10), blocked)
+        .await
+        .expect("the blocked copy was not cancelled")
+        .expect("join")
+        .expect("copy completes once the key is free");
+    assert!(engine.statement_registry().in_flight() == vec![]);
+}
+
+/// The probe entry points register too, and clear when they decline. A guard
+/// taken but never dropped would strand an entry here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_copy_entry_point_clears_its_entry() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    session
+        .simple_query("CREATE TABLE t (id int4, v text)")
+        .await
+        .expect("create");
+
+    assert!(session.begin_copy_in("SELECT 1").await.expect("probe") == None);
+    assert!(
+        session
+            .begin_copy_out("SELECT 1")
+            .await
+            .expect("probe")
+            .is_none()
+    );
+    session
+        .begin_copy_in("COPY t FROM STDIN")
+        .await
+        .expect("copy-in begins")
+        .expect("COPY FROM STDIN is a copy-in");
+    session
+        .copy_in(
+            "COPY t FROM STDIN",
+            vec![bytes::Bytes::from_static(b"2\ttwo\n")],
+        )
+        .await
+        .expect("copy-in completes");
+    session
+        .begin_copy_out("COPY t TO STDOUT")
+        .await
+        .expect("copy-out begins")
+        .expect("COPY TO STDOUT is a copy-out");
+
+    assert!(engine.statement_registry().in_flight() == vec![]);
+}
