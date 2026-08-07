@@ -1341,10 +1341,17 @@ impl SqlEngine {
             // collide with a writer's puts, but the index-entry survivor
             // computation must not race a concurrent writer re-adding the
             // same indexed values, and a freeze/clear rewrite must not race a
-            // writer stamping xmax on the same key. Holding at most this
-            // one lock, the sweep cannot close a wait-for cycle of its
-            // own; a transient deadlock verdict (a just-woken waiter's
-            // stale edge) simply skips the row until the next sweep.
+            // writer stamping xmax on the same key.
+            //
+            // Never wait for it. The lock manager's own wait-for graph cannot
+            // deadlock on a sweep holding one lock, but the graph is not the
+            // whole picture: the caller holds the maintenance gate exclusively
+            // for the length of this step, and that gate is what every
+            // statement takes to be admitted -- `COMMIT` and `ROLLBACK`
+            // included. Waiting here for a row an open transaction holds would
+            // wait for a lock only that transaction can release, through a
+            // statement this step is itself blocking. A contended row is
+            // skipped and swept on a later pass instead.
             if self
                 .lockmgr
                 .acquire(
@@ -1352,7 +1359,7 @@ impl SqlEngine {
                     rowid,
                     crate::lockmgr::LockMode::Exclusive,
                     owner_xid,
-                    None,
+                    Some(std::time::Duration::ZERO),
                 )
                 .await
                 .is_err()

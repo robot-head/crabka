@@ -608,3 +608,65 @@ async fn vacuum_advances_the_durable_clog_scan_floor() {
     );
     assert!(floor <= engine.checkpoint_garbage_horizon().expect("horizon"));
 }
+
+// ── the sweep never waits on a live transaction ──────────────────────────────
+
+/// A sweep step takes each row's exclusive lock, and its caller holds the
+/// maintenance gate for the whole step -- the same gate every statement takes
+/// to be admitted, `COMMIT` and `ROLLBACK` included. So a step that *waited*
+/// for a row an open transaction holds would be waiting for a lock only that
+/// transaction can release, through a statement the step is itself blocking.
+///
+/// That deadlock wedged a real `pg_regress` run: the server stopped answering
+/// anything, including new connections, with no statement in flight to report.
+/// The step must skip a contended row instead, so it returns while the writer
+/// still holds its lock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sweep_step_skips_a_row_an_open_transaction_holds_instead_of_waiting() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    exec(
+        &mut session,
+        "CREATE TABLE held (id INT PRIMARY KEY, v TEXT)",
+    )
+    .await;
+    exec(&mut session, "INSERT INTO held VALUES (1,'a'),(2,'b')").await;
+    // Dead versions for the sweep to find.
+    for i in 0..4 {
+        exec(
+            &mut session,
+            &format!("UPDATE held SET v='v{i}' WHERE id=1"),
+        )
+        .await;
+        exec(
+            &mut session,
+            &format!("UPDATE held SET v='w{i}' WHERE id=2"),
+        )
+        .await;
+    }
+
+    // An open transaction holding a row lock, exactly as the wedged run did.
+    let mut holder = engine.connect();
+    exec(&mut holder, "BEGIN").await;
+    exec(&mut holder, "UPDATE held SET v='locked' WHERE id=1").await;
+
+    // Before the fix this never returned.
+    let step = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        engine.vacuum_step_budgeted(1024),
+    )
+    .await
+    .expect("a sweep step must not wait for a live transaction's row lock")
+    .expect("vacuum step");
+
+    // It ran rather than bailing out.
+    assert!(step.keys_examined > 0);
+
+    // The holder is unaffected and can still finish, which is the property the
+    // deadlock destroyed.
+    exec(&mut holder, "ROLLBACK").await;
+    assert!(
+        select_rows(&mut session, "SELECT v FROM held WHERE id=1").await
+            == vec![vec![Some("v3".to_owned())]]
+    );
+}
