@@ -433,10 +433,10 @@
       "sha256": "91bdb37f62d44ccdfe7f119f9a415cddfce2129ff5e3e3b4c4d1090b5ac88a6d"
     },
     "horology": {
-      "changed_lines": 3654,
+      "changed_lines": 3642,
       "expected": "horology.out",
       "hunks": 51,
-      "sha256": "49b49e8eb7c6bc4ac4abc2b3da097c7c55ca3f8fd0d6c72ab2371b3b0468bf99"
+      "sha256": "8c3e26bf546525dd5c2c31fb8986ed67445cd3c4fa2ed204738a87c4be7a1b36"
     },
     "identity": {
       "changed_lines": 582,
@@ -1063,10 +1063,10 @@
       "sha256": "65cf1e0fa19077a0bd8cc67565b0149f32cd0123cc6d631d0c1c3cc4f1dcefae"
     },
     "timestamptz": {
-      "changed_lines": 3406,
+      "changed_lines": 3357,
       "expected": "timestamptz.out",
       "hunks": 50,
-      "sha256": "7c7274ec7ddf97945aa03c4caea40496b0fd920784fcb917d58388348986b9c5"
+      "sha256": "941bddd8d9b71857ec1d38347b087f097f499dd7baf54afadc40c1444d6bb836"
     },
     "timetz": {
       "changed_lines": 84,
