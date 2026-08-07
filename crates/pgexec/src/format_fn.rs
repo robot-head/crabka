@@ -651,8 +651,12 @@ fn interval_value(d: &Datum, name: &str) -> Result<Interval, ExecError> {
     }
 }
 
-/// Resolve a zone-name text value to a jiff `TimeZone`. jiff's tzdb handles
-/// `UTC` and the fixed-offset spellings. An unknown zone is 22023.
+/// Resolve a zone-name text value to a jiff `TimeZone`. An unknown zone is 22023.
+///
+/// This goes through the same resolver as `AT TIME ZONE` and the `TimeZone`
+/// setting, so the full `PostgreSQL` zone vocabulary — bundled database names,
+/// the default abbreviation set, `POSIX` specs and bare offsets — is accepted
+/// identically wherever a zone is named.
 fn zone_arg(d: &Datum, name: &str) -> Result<jiff::tz::TimeZone, ExecError> {
     let zone = match d {
         Datum::Text(s) => s.as_str(),
@@ -661,7 +665,7 @@ fn zone_arg(d: &Datum, name: &str) -> Result<jiff::tz::TimeZone, ExecError> {
     if zone.eq_ignore_ascii_case("utc") {
         return Ok(jiff::tz::TimeZone::UTC);
     }
-    jiff::tz::TimeZone::get(zone).map_err(|_| {
+    crabka_pgtypes::datetime::resolve_time_zone(zone).ok_or_else(|| {
         ExecError::InvalidParameterValue(format!("time zone \"{zone}\" not recognized"))
     })
 }

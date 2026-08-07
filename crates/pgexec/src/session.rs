@@ -3224,6 +3224,26 @@ impl SqlSession {
         result
     }
 
+    /// SP37: the session's effective zone, resolved the one way every caller
+    /// shares so that a value `SET TimeZone` accepted can never fail later at
+    /// bind or render time.
+    ///
+    /// `parse_timezone` validates the setting through the same resolver, so the
+    /// `unwrap_or` fallbacks are unreachable rather than lenient. `UTC` is
+    /// special-cased to the const so the common case never touches the zone
+    /// database.
+    fn effective_time_zone(&self) -> jiff::tz::TimeZone {
+        let name = self
+            .guc
+            .effective("timezone")
+            .unwrap_or_else(|_| "UTC".into());
+        if name.eq_ignore_ascii_case("UTC") {
+            jiff::tz::TimeZone::UTC
+        } else {
+            crabka_pgtypes::datetime::resolve_time_zone(&name).unwrap_or(jiff::tz::TimeZone::UTC)
+        }
+    }
+
     /// Build the per-statement evaluation context. `now` is the transaction-start
     /// instant (PG transaction-stable) inside a txn, else this statement's instant.
     fn eval_ctx(&self) -> crate::clock::EvalCtx {
@@ -3232,18 +3252,7 @@ impl SqlSession {
             TxnState::InTransaction(c) | TxnState::Prepared(c) | TxnState::Failed(c) => c.txn_now,
             TxnState::Idle => stmt_now,
         };
-        // SP37: the effective session zone (validated at SET time, so `get`
-        // succeeds; `unwrap_or(UTC)` is a defensive fallback). `UTC` is
-        // special-cased to the const so the common case never touches the tzdb.
-        let tzname = self
-            .guc
-            .effective("timezone")
-            .unwrap_or_else(|_| "UTC".into());
-        let time_zone = if tzname.eq_ignore_ascii_case("UTC") {
-            jiff::tz::TimeZone::UTC
-        } else {
-            crabka_pgtypes::datetime::resolve_time_zone(&tzname).unwrap_or(jiff::tz::TimeZone::UTC)
-        };
+        let time_zone = self.effective_time_zone();
         // `DateStyle` carries two independent settings: the field ordering that
         // decides how an ambiguous all-numeric literal is *read*, and the output
         // format that decides how a date/time value is *spelled*.
@@ -4499,17 +4508,7 @@ impl SqlSession {
                 value: None,
             })
             .collect::<Vec<_>>();
-        let timezone_name = self.guc.effective("timezone").map_err(ExecError::into_pg)?;
-        let time_zone = if timezone_name.eq_ignore_ascii_case("UTC") {
-            jiff::tz::TimeZone::UTC
-        } else {
-            jiff::tz::TimeZone::get(&timezone_name).map_err(|_| {
-                PgError::error(
-                    "22023",
-                    format!("invalid value for parameter: \"{timezone_name}\""),
-                )
-            })?
-        };
+        let time_zone = self.effective_time_zone();
         let scope = self.resolution_scope();
         let binder = ParamBinder {
             catalog_kv: &*self.catalog_kv,
@@ -5837,17 +5836,7 @@ impl SqlSession {
         stmt: &mut Statement,
         params: &[BoundParam],
     ) -> Result<(), PgError> {
-        let timezone_name = self.guc.effective("timezone").map_err(ExecError::into_pg)?;
-        let time_zone = if timezone_name.eq_ignore_ascii_case("UTC") {
-            jiff::tz::TimeZone::UTC
-        } else {
-            jiff::tz::TimeZone::get(&timezone_name).map_err(|_| {
-                PgError::error(
-                    "22023",
-                    format!("invalid value for parameter: \"{timezone_name}\""),
-                )
-            })?
-        };
+        let time_zone = self.effective_time_zone();
         let bind_result = ParamBinder {
             catalog_kv: &*self.catalog_kv,
             resolution: &self.resolution_scope(),
@@ -16174,6 +16163,162 @@ mod tests {
             .await
             .expect_err("bad zone");
         assert_eq!(bad.code, "22023");
+    }
+
+    /// Every expected string was read off `PostgreSQL` 18.4 under
+    /// `DateStyle = 'Postgres, MDY'`, the setting `pg_regress` runs with.
+    ///
+    /// The legacy IANA link names (`PST8PDT`, `US/Pacific`, `Navajo`, …) are the
+    /// point of the table: `PostgreSQL` carries them because it ships its own
+    /// copy of the zone database, and gres matches only because it resolves
+    /// through the bundled copy rather than the host's `/usr/share/zoneinfo`,
+    /// which many distributions trim.
+    #[tokio::test]
+    async fn timezone_setting_accepts_and_renders_the_postgresql_zone_vocabulary() {
+        let cases: &[(&str, &str, &str)] = &[
+            // zone, winter render, summer render
+            (
+                "UTC",
+                "Thu Jan 01 00:00:00 1970 UTC",
+                "Sun Jul 01 12:00:00 2001 UTC",
+            ),
+            (
+                "America/Los_Angeles",
+                "Wed Dec 31 16:00:00 1969 PST",
+                "Sun Jul 01 05:00:00 2001 PDT",
+            ),
+            (
+                "Europe/Rome",
+                "Thu Jan 01 01:00:00 1970 CET",
+                "Sun Jul 01 14:00:00 2001 CEST",
+            ),
+            (
+                "EST",
+                "Wed Dec 31 19:00:00 1969 EST",
+                "Sun Jul 01 07:00:00 2001 EST",
+            ),
+            (
+                "PST8PDT",
+                "Wed Dec 31 16:00:00 1969 PST",
+                "Sun Jul 01 05:00:00 2001 PDT",
+            ),
+            (
+                "EST5EDT",
+                "Wed Dec 31 19:00:00 1969 EST",
+                "Sun Jul 01 08:00:00 2001 EDT",
+            ),
+            (
+                "CST6CDT",
+                "Wed Dec 31 18:00:00 1969 CST",
+                "Sun Jul 01 07:00:00 2001 CDT",
+            ),
+            (
+                "MST7MDT",
+                "Wed Dec 31 17:00:00 1969 MST",
+                "Sun Jul 01 06:00:00 2001 MDT",
+            ),
+            (
+                "US/Pacific",
+                "Wed Dec 31 16:00:00 1969 PST",
+                "Sun Jul 01 05:00:00 2001 PDT",
+            ),
+            (
+                "US/Eastern",
+                "Wed Dec 31 19:00:00 1969 EST",
+                "Sun Jul 01 08:00:00 2001 EDT",
+            ),
+            (
+                "Navajo",
+                "Wed Dec 31 17:00:00 1969 MST",
+                "Sun Jul 01 06:00:00 2001 MDT",
+            ),
+            (
+                "Japan",
+                "Thu Jan 01 09:00:00 1970 JST",
+                "Sun Jul 01 21:00:00 2001 JST",
+            ),
+            (
+                "GB",
+                "Thu Jan 01 01:00:00 1970 BST",
+                "Sun Jul 01 13:00:00 2001 BST",
+            ),
+        ];
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        s.simple_query("SET DateStyle = 'Postgres, MDY'")
+            .await
+            .expect("datestyle");
+
+        for &(zone, winter, summer) in cases {
+            s.simple_query(&format!("SET timezone = '{zone}'"))
+                .await
+                .unwrap_or_else(|e| panic!("SET timezone = '{zone}': {e:?}"));
+            let shown = s.simple_query("SHOW timezone").await.expect("show");
+            assert!(single_text(&shown) == zone, "SHOW timezone for {zone}");
+
+            let rendered = s
+                .simple_query("SELECT timestamptz '1970-01-01 00:00:00+00'")
+                .await
+                .expect("winter render");
+            assert!(single_text(&rendered) == winter, "winter render for {zone}");
+
+            let rendered = s
+                .simple_query("SELECT timestamptz '2001-07-01 12:00:00+00'")
+                .await
+                .expect("summer render");
+            assert!(single_text(&rendered) == summer, "summer render for {zone}");
+        }
+    }
+
+    /// A zone-bearing literal reaches the decoder lowercased, so the legacy link
+    /// names have to resolve case-insensitively there too — and a name the
+    /// bundled database does not carry stays an error.
+    #[tokio::test]
+    async fn zone_bearing_literals_resolve_legacy_link_names() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        s.simple_query("SET DateStyle = 'Postgres, MDY'")
+            .await
+            .expect("datestyle");
+        s.simple_query("SET timezone = 'UTC'")
+            .await
+            .expect("timezone");
+
+        // Every expectation is `PostgreSQL` 18.4's rendering of the same literal.
+        for (literal, expected) in [
+            ("PST8PDT", "Sun Jul 01 19:00:00 2001 UTC"),
+            ("us/pacific", "Sun Jul 01 19:00:00 2001 UTC"),
+            ("America/Los_Angeles", "Sun Jul 01 19:00:00 2001 UTC"),
+            ("Navajo", "Sun Jul 01 18:00:00 2001 UTC"),
+            ("navajo", "Sun Jul 01 18:00:00 2001 UTC"),
+            ("Japan", "Sun Jul 01 03:00:00 2001 UTC"),
+            ("Turkey", "Sun Jul 01 09:00:00 2001 UTC"),
+            // A default-set abbreviation still wins over the same-spelled zone.
+            ("EST", "Sun Jul 01 17:00:00 2001 UTC"),
+        ] {
+            let rendered = s
+                .simple_query(&format!(
+                    "SELECT timestamptz '2001-07-01 12:00:00 {literal}'"
+                ))
+                .await
+                .unwrap_or_else(|e| panic!("literal in {literal}: {e:?}"));
+            assert!(single_text(&rendered) == expected, "literal in {literal}");
+        }
+
+        // A punctuated name the database does not carry is 22023; an unknown
+        // bare word never became a zone at all, so it stays 22007. Both codes
+        // are PostgreSQL 18.4's.
+        let bad = s
+            .simple_query("SELECT timestamptz '2001-07-01 12:00:00 Not/AZone'")
+            .await
+            .expect_err("unknown punctuated zone");
+        assert!(bad.code == "22023");
+        let bad = s
+            .simple_query("SELECT timestamptz '2001-07-01 12:00:00 Navajoo'")
+            .await
+            .expect_err("unknown bare word");
+        assert!(bad.code == "22007");
     }
 
     #[tokio::test]

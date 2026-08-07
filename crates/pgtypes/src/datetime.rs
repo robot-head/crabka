@@ -17,9 +17,11 @@ use jiff::{
 use crate::TypeError;
 
 mod parse;
+mod tzdb;
 
-pub use self::parse::{
-    DateOrder, DecodeError, Decoded, Parts, Special, Zone, decode, resolve_time_zone,
+pub use self::{
+    parse::{DateOrder, DecodeError, Decoded, Parts, Special, Zone, decode, resolve_time_zone},
+    tzdb::zone_by_name,
 };
 
 // ---------------------------------------------------------------------------

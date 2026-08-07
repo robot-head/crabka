@@ -18,6 +18,8 @@ use jiff::{
     tz::{Offset, TimeZone},
 };
 
+use super::tzdb::zone_by_name;
+
 /// The field-order component of `DateStyle`, which decides how an all-numeric
 /// date with no unambiguous field is read (`01/02/03`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -422,7 +424,14 @@ pub fn decode(text: &str, order: DateOrder) -> Result<Decoded, DecodeError> {
                     } else if is_weekday(word) {
                         // Day-of-week names are decoration; PostgreSQL does not
                         // cross-check them against the date.
-                    } else if let Some(found) = lookup_abbrev(word) {
+                    } else if let Some(found) =
+                        lookup_abbrev(word).or_else(|| lookup_zone_name(word))
+                    {
+                        // An abbreviation wins over a same-spelled database
+                        // name, as in PostgreSQL: `EST` is the fixed -05 of the
+                        // default abbreviation set, not the `EST` zone. Whole
+                        // single-word zone names (`Japan`, `Navajo`, `Turkey`)
+                        // fall through to the database.
                         zone = Some(found);
                     } else {
                         return Err(DecodeError::Syntax);
@@ -815,50 +824,28 @@ fn lookup_zone_spec(text: &str) -> Result<Zone, DecodeError> {
     Err(DecodeError::UnknownZone(text.to_string()))
 }
 
-/// Look a name up in the zone database. Literals reach here lowercased, so this
-/// function reconstructs the database's own capitalization before it gives up.
+/// Look a name up in the zone database. Literals reach here lowercased, which
+/// costs nothing: the bundled database matches without regard to ASCII case.
 fn lookup_zone_name(name: &str) -> Option<Zone> {
     if name.eq_ignore_ascii_case("utc") || name.eq_ignore_ascii_case("gmt") {
         return Some(Zone::Offset(Offset::UTC));
     }
-    for candidate in [
-        name.to_string(),
-        name.to_ascii_uppercase(),
-        title_case_zone(name),
-    ] {
-        if let Ok(tz) = TimeZone::get(&candidate) {
-            return Some(Zone::Named(tz));
-        }
-    }
-    None
-}
-
-/// Rebuild `Area/City_Name` capitalization from a lowercased zone name.
-fn title_case_zone(name: &str) -> String {
-    name.split('/')
-        .map(|component| {
-            component
-                .split('_')
-                .map(|word| {
-                    let mut chars = word.chars();
-                    match chars.next() {
-                        Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
-                        None => String::new(),
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("_")
-        })
-        .collect::<Vec<_>>()
-        .join("/")
+    zone_by_name(name).map(Zone::Named)
 }
 
 /// Resolve a zone the way `AT TIME ZONE`, the `timezone()` function and the
 /// `TimeZone` setting do: a zone-database name, one of `PostgreSQL`'s
 /// abbreviations, a `POSIX` `STD±offset` spec, or a bare signed UTC offset.
 ///
-/// A bare offset follows the ISO sign convention here (`'-05:00'` is five hours
-/// *behind* UTC). That matches what `PostgreSQL` accepts for `AT TIME ZONE`.
+/// Database names come from the bundled database (see [`super::tzdb`]), so the
+/// vocabulary is the server build's, not the host's.
+///
+/// A bare offset follows the ISO sign convention here — `'-05:00'` is five hours
+/// *behind* UTC. That does **not** match `PostgreSQL`, which reads a bare offset
+/// in this position as a `POSIX` zone spec and so counts it *west* of Greenwich:
+/// `SET TimeZone = '-08:00'` puts a session on UTC+8 there, and `AT TIME ZONE
+/// '-08:00'` shifts the same way. Zone-bearing *literals* are unaffected — those
+/// go through [`decode`], which is ISO in both systems.
 #[must_use]
 pub fn resolve_time_zone(name: &str) -> Option<TimeZone> {
     let trimmed = name.trim();
@@ -891,7 +878,7 @@ fn lookup_abbrev(word: &str) -> Option<Zone> {
     if let Some(zone) = DYNAMIC_ABBREVS
         .iter()
         .find(|(abbrev, _)| *abbrev == word)
-        .and_then(|(_, name)| TimeZone::get(name).ok())
+        .and_then(|(_, name)| zone_by_name(name))
     {
         return Some(Zone::Named(zone));
     }
@@ -1184,3 +1171,94 @@ const FIXED_ABBREVS: &[(&str, i32)] = &[
     ("z", 0),
     ("zulu", 0),
 ];
+
+#[cfg(test)]
+mod zone_resolution_tests {
+    use assert2::assert;
+    use jiff::Timestamp;
+
+    use super::resolve_time_zone;
+
+    /// `1970-01-01T00:00:00Z` — northern-hemisphere winter, standard time.
+    fn winter() -> Timestamp {
+        Timestamp::from_second(0).expect("epoch")
+    }
+
+    /// `2001-07-01T12:00:00Z` — northern-hemisphere summer, daylight time.
+    fn summer() -> Timestamp {
+        Timestamp::from_second(993_988_800).expect("summer instant")
+    }
+
+    /// The offset in seconds and the zone abbreviation a resolved zone reports.
+    fn rendered(name: &str, at: Timestamp) -> (i32, String) {
+        let tz = resolve_time_zone(name).unwrap_or_else(|| panic!("{name} should resolve"));
+        let info = tz.to_offset_info(at);
+        (info.offset().seconds(), info.abbreviation().to_string())
+    }
+
+    /// Every row was read off `PostgreSQL` 18.4, which resolves against the copy
+    /// of the IANA database it ships. The legacy "backward" link names in the
+    /// second half are the ones a trimmed host `tzdata` does not carry, so they
+    /// only resolve because gres goes through the bundled database.
+    #[test]
+    fn zone_names_render_the_offsets_postgresql_renders() {
+        let cases: &[(&str, i32, &str, i32, &str)] = &[
+            // name, winter offset/abbrev, summer offset/abbrev
+            ("UTC", 0, "UTC", 0, "UTC"),
+            ("America/Los_Angeles", -8 * 3600, "PST", -7 * 3600, "PDT"),
+            ("America/Denver", -7 * 3600, "MST", -6 * 3600, "MDT"),
+            ("Europe/Rome", 3600, "CET", 2 * 3600, "CEST"),
+            ("EST", -5 * 3600, "EST", -5 * 3600, "EST"),
+            ("PST8PDT", -8 * 3600, "PST", -7 * 3600, "PDT"),
+            ("EST5EDT", -5 * 3600, "EST", -4 * 3600, "EDT"),
+            ("CST6CDT", -6 * 3600, "CST", -5 * 3600, "CDT"),
+            ("MST7MDT", -7 * 3600, "MST", -6 * 3600, "MDT"),
+            ("US/Pacific", -8 * 3600, "PST", -7 * 3600, "PDT"),
+            ("US/Eastern", -5 * 3600, "EST", -4 * 3600, "EDT"),
+            ("Navajo", -7 * 3600, "MST", -6 * 3600, "MDT"),
+            ("Japan", 9 * 3600, "JST", 9 * 3600, "JST"),
+            // Britain kept `BST` right through the 1968-1971 winters, so the
+            // 1970 sample is *not* `GMT`.
+            ("GB", 3600, "BST", 3600, "BST"),
+        ];
+        for &(name, winter_offset, winter_abbrev, summer_offset, summer_abbrev) in cases {
+            assert!(
+                rendered(name, winter()) == (winter_offset, winter_abbrev.to_string()),
+                "{name} in winter"
+            );
+            assert!(
+                rendered(name, summer()) == (summer_offset, summer_abbrev.to_string()),
+                "{name} in summer"
+            );
+        }
+    }
+
+    /// Zone names are matched without regard to ASCII case, exactly as
+    /// `PostgreSQL` matches them against its own database.
+    #[test]
+    fn zone_names_resolve_without_regard_to_case() {
+        for (spelling, canonical) in [
+            ("america/los_angeles", "America/Los_Angeles"),
+            ("AMERICA/LOS_ANGELES", "America/Los_Angeles"),
+            ("us/pacific", "US/Pacific"),
+            ("pst8pdt", "PST8PDT"),
+            ("Europe/rome", "Europe/Rome"),
+        ] {
+            let tz =
+                resolve_time_zone(spelling).unwrap_or_else(|| panic!("{spelling} should resolve"));
+            assert!(tz.iana_name() == Some(canonical), "{spelling}");
+        }
+    }
+
+    /// Resolution must stay a property of the binary, so a name the bundled
+    /// database does not carry is rejected however the host is configured.
+    #[test]
+    fn unknown_zone_names_are_rejected() {
+        for name in ["Not/AZone", "posixrules", "America/Nowhere", "  "] {
+            assert!(
+                resolve_time_zone(name).is_none(),
+                "{name} should not resolve"
+            );
+        }
+    }
+}
