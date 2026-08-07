@@ -121,6 +121,11 @@ fn column_hash(value: &Datum, seed: u64) -> Result<Option<u64>, ExecError> {
         Datum::Enum(_) => return Err(unsupported("enum")),
         Datum::TsVector(_) => return Err(unsupported("tsvector")),
         Datum::TsQuery(_) => return Err(unsupported("tsquery")),
+        Datum::Inet(value) => {
+            return Err(unsupported(if value.is_cidr { "cidr" } else { "inet" }));
+        }
+        Datum::MacAddr(_) => return Err(unsupported("macaddr")),
+        Datum::MacAddr8(_) => return Err(unsupported("macaddr8")),
         Datum::Range(range) => return Err(unsupported(range.ty.name)),
         Datum::Multirange(multirange) => return Err(unsupported(multirange.ty.name)),
     };

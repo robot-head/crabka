@@ -3794,7 +3794,13 @@ pub enum BinaryOp {
     Shl,
     /// `>>`: bitwise (arithmetic) right shift.
     Shr,
-    /// `^`: exponentiation. `float8` unless an operand is `numeric`, and
+    /// `<<=` — the `inet`/`cidr` network on the left is contained by or equals
+    /// the one on the right.
+    ContainedByOrEq,
+    /// `>>=` — the `inet`/`cidr` network on the left contains or equals the one
+    /// on the right.
+    ContainsOrEq,
+    /// `^` — exponentiation. `float8` unless an operand is `numeric`, and
     /// LEFT-associative in `PostgreSQL` (`2^3^2` is 64, not 512).
     Pow,
     /// `%`: modulo. Integer and `numeric` only; `float8` has no `%`.

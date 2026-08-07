@@ -933,6 +933,8 @@ impl Parser {
             Token::Hash => (BinaryOp::BitXor, 7, 8),
             Token::Shl => (BinaryOp::Shl, 7, 8),
             Token::Shr => (BinaryOp::Shr, 7, 8),
+            Token::ContainedByOrEq => (BinaryOp::ContainedByOrEq, 7, 8),
+            Token::ContainsOrEq => (BinaryOp::ContainsOrEq, 7, 8),
             Token::Plus => (BinaryOp::Add, 9, 10),
             Token::Minus => (BinaryOp::Sub, 9, 10),
             Token::Star => (BinaryOp::Mul, 11, 12),
@@ -13045,6 +13047,8 @@ fn operator_spelling(token: &Token) -> Option<&'static str> {
         Token::Hash => "#",
         Token::Shl => "<<",
         Token::Shr => ">>",
+        Token::ContainedByOrEq => "<<=",
+        Token::ContainsOrEq => ">>=",
         _ => return None,
     })
 }
@@ -19113,6 +19117,10 @@ mod json_array_conflict_notify_tests {
             ("a # b", BinaryOp::BitXor),
             ("a << b", BinaryOp::Shl),
             ("a >> b", BinaryOp::Shr),
+            // The inet/cidr containment operators, whose shorter prefixes are
+            // the shift operators just above.
+            ("a <<= b", BinaryOp::ContainedByOrEq),
+            ("a >>= b", BinaryOp::ContainsOrEq),
             ("a ^ b", BinaryOp::Pow),
             ("a % b", BinaryOp::Mod),
             // `!=` is PostgreSQL's alternative spelling of `<>`.

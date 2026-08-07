@@ -834,6 +834,11 @@ fn apply_prefix_op(op: UnaryOp, v: &Datum) -> Result<Datum, ExecError> {
             Datum::Int2(x) => Ok(Datum::Int2(!x)),
             Datum::Int4(x) => Ok(Datum::Int4(!x)),
             Datum::Int8(x) => Ok(Datum::Int8(!x)),
+            // `~inet` inverts every address bit and keeps the netmask; a `cidr`
+            // widens to `inet` first, so the result is always an `inet`.
+            Datum::Inet(value) => Ok(Datum::Inet(value.not())),
+            Datum::MacAddr(value) => Ok(Datum::MacAddr(value.not())),
+            Datum::MacAddr8(value) => Ok(Datum::MacAddr8(value.not())),
             other => Err(undefined_prefix_operator(op, other)),
         },
         UnaryOp::Abs => match v {
@@ -1128,6 +1133,8 @@ pub(crate) fn apply_binary_of(
             | BinaryOp::Adjacent
             | BinaryOp::Shl
             | BinaryOp::Shr
+            | BinaryOp::ContainedByOrEq
+            | BinaryOp::ContainsOrEq
             | BinaryOp::Add
             | BinaryOp::Sub
             | BinaryOp::Mul
@@ -1261,6 +1268,39 @@ fn coerce_untyped_literal_operands(
                 | BinaryOp::Le
                 | BinaryOp::Gt
                 | BinaryOp::Ge => Some(multirange.column_type()),
+                _ => None,
+            };
+        }
+        // A network counterpart resolves the literal to its own type, which is
+        // how `b < '08:00:2b:01:02:04'` compares two `macaddr`s and
+        // `i <<= '192.168.1.0/24'` is a containment test. An `inet`/`cidr`
+        // counterpart resolves the literal to `inet`, the category's preferred
+        // type, exactly as PostgreSQL's operator resolution does.
+        let network_type = match other {
+            Datum::Inet(_) => Some(ColumnType::Inet),
+            Datum::MacAddr(_) => Some(ColumnType::MacAddr),
+            Datum::MacAddr8(_) => Some(ColumnType::MacAddr8),
+            _ => None,
+        };
+        if let Some(network_type) = network_type {
+            return match op {
+                BinaryOp::Shl
+                | BinaryOp::Shr
+                | BinaryOp::ContainedByOrEq
+                | BinaryOp::ContainsOrEq
+                | BinaryOp::Overlaps
+                | BinaryOp::BitAnd
+                | BinaryOp::BitOr
+                | BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge
+                | BinaryOp::IsDistinctFrom
+                | BinaryOp::IsNotDistinctFrom => Some(network_type),
+                // `inet - inet` is a difference, but `inet - bigint` is an
+                // offset, so the literal's meaning is not decidable here.
                 _ => None,
             };
         }
@@ -1419,7 +1459,22 @@ pub(crate) fn apply_binary(
     if let Some(result) = apply_geometric_position(op, l, r) {
         return Ok(result);
     }
+    // `<<`, `>>`, `&&`, `&`, `|`, `+` and `-` are shared with the bitwise,
+    // range and arithmetic families; a network operand is what selects the
+    // inet/cidr meaning, so this must run before the `match` below claims them.
+    if let Some(result) = crate::network_fn::apply_network_operator(op, l, r)? {
+        return Ok(result);
+    }
     match op {
+        // `<<=` / `>>=` exist only for the network family, so anything that
+        // reaches here is a type error rather than another overload.
+        BinaryOp::ContainedByOrEq | BinaryOp::ContainsOrEq => {
+            if l.is_null() || r.is_null() {
+                Ok(Datum::Null)
+            } else {
+                Err(undefined_operator_for(op, l, r))
+            }
+        }
         BinaryOp::Add if matches!((l, r), (Datum::Range(_), Datum::Range(_))) => {
             let (Datum::Range(a), Datum::Range(b)) = (l, r) else {
                 unreachable!()
@@ -2348,7 +2403,7 @@ fn apply_geometric_position(op: BinaryOp, left: &Datum, right: &Datum) -> Option
 }
 
 /// A binary operator's SQL spelling, for error messages.
-fn op_spelling(op: BinaryOp) -> &'static str {
+pub(crate) fn op_spelling(op: BinaryOp) -> &'static str {
     match op {
         BinaryOp::Same => "~=",
         BinaryOp::DoesNotExtendAbove => "&<|",
@@ -2385,6 +2440,8 @@ fn op_spelling(op: BinaryOp) -> &'static str {
         BinaryOp::BitXor => "#",
         BinaryOp::Shl => "<<",
         BinaryOp::Shr => ">>",
+        BinaryOp::ContainedByOrEq => "<<=",
+        BinaryOp::ContainsOrEq => ">>=",
         BinaryOp::Pow => "^",
         BinaryOp::Mod => "%",
         BinaryOp::Eq => "=",
@@ -2400,7 +2457,7 @@ fn op_spelling(op: BinaryOp) -> &'static str {
     }
 }
 
-fn undefined_operator(op: &str, lt: ColumnType, rt: ColumnType) -> ExecError {
+pub(crate) fn undefined_operator(op: &str, lt: ColumnType, rt: ColumnType) -> ExecError {
     ExecError::UndefinedFunction(format!(
         "operator does not exist: {} {op} {}",
         lt.name(),
@@ -2508,7 +2565,7 @@ pub(crate) fn require_ordering_operator(ty: ColumnType) -> Result<(), ExecError>
 
 /// The same 42883, reported from the runtime values (an untyped SQL NULL has no
 /// type to name).
-fn undefined_operator_for(op: BinaryOp, l: &Datum, r: &Datum) -> ExecError {
+pub(crate) fn undefined_operator_for(op: BinaryOp, l: &Datum, r: &Datum) -> ExecError {
     let name = |d: &Datum| d.column_type().map_or("unknown", ColumnType::name);
     ExecError::UndefinedFunction(format!(
         "operator does not exist: {} {} {}",
@@ -2718,7 +2775,14 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
             // `float8`-only `dsqrt`/`dcbrt`, so they report `float8` whatever
             // the operand is.
             UnaryOp::Plus | UnaryOp::Neg | UnaryOp::BitNot | UnaryOp::Abs => {
-                infer_type(expr, scope)
+                let operand = infer_type(expr, scope)?;
+                // `~cidr` is `~inet` after the implicit widening, so it reports
+                // `inet` rather than the operand's own type.
+                if *op == UnaryOp::BitNot && matches!(operand, ColumnType::Inet | ColumnType::Cidr)
+                {
+                    return Ok(ColumnType::Inet);
+                }
+                Ok(operand)
             }
             UnaryOp::Sqrt | UnaryOp::Cbrt => Ok(ColumnType::Float8),
             // The boolean tests are boolean-valued, but only over a boolean
@@ -2936,7 +3000,16 @@ fn infer_binary_type(
     if let Some(resolved) = geometric_literal_operator(op, left, right, scope)? {
         return Ok(resolved);
     }
+    if let Some(resolved) = crate::network_fn::network_operator_result_type(op, left, right, scope)?
+    {
+        return Ok(resolved);
+    }
     match op {
+        // `<<=` and `>>=` have no non-network overload.
+        BinaryOp::ContainedByOrEq | BinaryOp::ContainsOrEq => {
+            let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
+            Err(undefined_operator(op_spelling(op), lt, rt))
+        }
         BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div => {
             if is_unknown_literal(left) && is_unknown_literal(right) {
                 return Err(ambiguous_operator(op_spelling(op)));

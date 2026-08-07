@@ -704,8 +704,12 @@ impl ExecError {
             }
             ExecError::Type(e) => {
                 let rendered = PgError::error(e.sqlstate(), e.to_string());
-                match e.detail() {
+                let rendered = match e.detail() {
                     Some(detail) => rendered.with_detail(detail),
+                    None => rendered,
+                };
+                match e.hint() {
+                    Some(hint) => rendered.with_hint(hint),
                     None => rendered,
                 }
             }

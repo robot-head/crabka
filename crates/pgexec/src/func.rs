@@ -305,6 +305,7 @@ pub(crate) fn is_scalar(name: &str) -> bool {
         || crate::string_fn::is_string_func(name)
         || crate::regexp_fn::is_regexp_func(name)
         || crate::text_search_fn::is_text_search_func(name)
+        || crate::network_fn::is_network_func(name)
 }
 
 /// The call a bare, unparenthesised `name` denotes, when `PostgreSQL` reserves
@@ -379,6 +380,9 @@ pub(crate) fn checked_args(fc: &FuncCall) -> Result<&[Expr], ExecError> {
 pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType, ExecError> {
     if crate::text_search_fn::is_text_search_func(&fc.name) {
         return crate::text_search_fn::text_search_result_type(fc, scope);
+    }
+    if crate::network_fn::is_network_func(&fc.name) {
+        return crate::network_fn::network_func_result_type(fc, scope);
     }
     if crate::math_fn::is_math_func(&fc.name) {
         return crate::math_fn::math_func_result_type(fc, scope);
@@ -553,6 +557,14 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
                 return Err(ambiguous_function(&fc.name, n));
             }
             if n == 1 {
+                // `trunc(macaddr)` / `trunc(macaddr8)` zero the device part of
+                // a hardware address, keeping the manufacturer prefix.
+                if f == ScalarFunc::Trunc
+                    && let ty @ (ColumnType::MacAddr | ColumnType::MacAddr8) =
+                        crate::eval::infer_type(&args[0], scope)?
+                {
+                    return Ok(ty);
+                }
                 let t = require_numeric(&args[0], scope)?;
                 Ok(float4_widens(t))
             } else {
@@ -847,6 +859,9 @@ pub(crate) fn eval_scalar(
 ) -> Result<Datum, ExecError> {
     if crate::text_search_fn::is_text_search_func(&fc.name) {
         return crate::text_search_fn::eval_text_search(fc, ctx, eval_child);
+    }
+    if crate::network_fn::is_network_func(&fc.name) {
+        return crate::network_fn::eval_network(fc, ctx, eval_child);
     }
     if crate::math_fn::is_math_func(&fc.name) {
         return crate::math_fn::eval_math(fc, ctx, eval_child);
@@ -1330,6 +1345,13 @@ fn eval_eager(
         }
         ScalarFunc::Round | ScalarFunc::Trunc => {
             require_arity(fc, vals.len() == 1 || vals.len() == 2)?;
+            if f == ScalarFunc::Trunc && vals.len() == 1 {
+                match &vals[0] {
+                    Datum::MacAddr(value) => return Ok(Datum::MacAddr(value.trunc())),
+                    Datum::MacAddr8(value) => return Ok(Datum::MacAddr8(value.trunc())),
+                    _ => {}
+                }
+            }
             let scale = match vals.get(1) {
                 None => None,
                 Some(s) => Some(int_arg(s)?),

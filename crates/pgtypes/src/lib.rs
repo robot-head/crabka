@@ -13,6 +13,7 @@ pub mod error;
 pub mod geometry;
 pub mod jsonb;
 pub mod multirange;
+pub mod network;
 pub mod numeric;
 pub mod ops;
 pub mod range;
@@ -28,4 +29,5 @@ pub use datum::{
 pub use error::TypeError;
 pub use geometry::{Path, Point};
 pub use jsonb::JsonbValue;
+pub use network::{Inet, InetFamily, MacAddr, MacAddr8};
 pub use text_search::{Lexeme, Position, QueryTerm, TsQuery, TsVector, Weight};

@@ -10627,6 +10627,10 @@ fn binary_param_type(
         | BinaryOp::BitXor
         | BinaryOp::Shl
         | BinaryOp::Shr
+        // The network containment operators take `inet` on both sides, so a
+        // parameter beside one adopts its sibling's type.
+        | BinaryOp::ContainedByOrEq
+        | BinaryOp::ContainsOrEq
         | BinaryOp::Pow
         | BinaryOp::Mod
         | BinaryOp::And
@@ -11107,6 +11111,10 @@ fn param_column_type(param: &BoundParam) -> Result<Option<ColumnType>, PgError> 
         Some(crabka_pgtypes::oids::JSONPATH) => Ok(Some(ColumnType::JsonPath)),
         Some(crabka_pgtypes::oids::TSVECTOR) => Ok(Some(ColumnType::TsVector)),
         Some(crabka_pgtypes::oids::TSQUERY) => Ok(Some(ColumnType::TsQuery)),
+        Some(crabka_pgtypes::oids::INET) => Ok(Some(ColumnType::Inet)),
+        Some(crabka_pgtypes::oids::CIDR) => Ok(Some(ColumnType::Cidr)),
+        Some(crabka_pgtypes::oids::MACADDR) => Ok(Some(ColumnType::MacAddr)),
+        Some(crabka_pgtypes::oids::MACADDR8) => Ok(Some(ColumnType::MacAddr8)),
         Some(0) | None => Ok(None),
         // Every array OID crabka has an element type for (`_int4`, `_text`, …);
         // `_json` folds onto `jsonb[]` the same way `json` folds onto `jsonb`.
@@ -11273,6 +11281,30 @@ fn decode_binary_value(
             .map(Datum::Numeric)
             .ok_or_else(malformed_binary_parameter),
         ColumnType::Bytea => Ok(Datum::Bytea(value.to_vec())),
+        // `inet_recv` / `cidr_recv`: family, netmask, an ignored is_cidr byte,
+        // the address length, then the address.
+        ColumnType::Inet | ColumnType::Cidr => {
+            crabka_pgtypes::Inet::from_binary(value, ty == ColumnType::Cidr)
+                .map(Datum::Inet)
+                .map_err(ExecError::from)
+                .map_err(ExecError::into_pg)
+        }
+        // `macaddr_recv` / `macaddr8_recv`: the raw bytes. A six-byte
+        // `macaddr8` widens to EUI-64, as PostgreSQL's `macaddr8_recv` does.
+        ColumnType::MacAddr => Ok(Datum::MacAddr(crabka_pgtypes::MacAddr(binary_array(
+            value,
+        )?))),
+        ColumnType::MacAddr8 => match value.len() {
+            6 => {
+                let bytes: [u8; 6] = binary_array(value)?;
+                Ok(Datum::MacAddr8(
+                    crabka_pgtypes::MacAddr(bytes).to_macaddr8(),
+                ))
+            }
+            _ => Ok(Datum::MacAddr8(crabka_pgtypes::MacAddr8(binary_array(
+                value,
+            )?))),
+        },
         ColumnType::Uuid => {
             let bytes: [u8; 16] = binary_array(value)?;
             Ok(Datum::Text(

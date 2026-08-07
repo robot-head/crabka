@@ -155,6 +155,22 @@ pub mod oids {
     /// PostgreSQL `tsquery` and its array type.
     pub const TSQUERY: u32 = 3615;
     pub const TSQUERYARRAY: u32 = 3645;
+    /// PostgreSQL `inet` — a host address with an optional netmask.
+    pub const INET: u32 = 869;
+    /// `inet[]`.
+    pub const INETARRAY: u32 = 1041;
+    /// PostgreSQL `cidr` — a network address, sharing `inet`'s representation.
+    pub const CIDR: u32 = 650;
+    /// `cidr[]`.
+    pub const CIDRARRAY: u32 = 651;
+    /// PostgreSQL `macaddr` — a six-byte EUI-48 hardware address.
+    pub const MACADDR: u32 = 829;
+    /// `macaddr[]`.
+    pub const MACADDRARRAY: u32 = 1040;
+    /// PostgreSQL `macaddr8` — an eight-byte EUI-64 hardware address.
+    pub const MACADDR8: u32 = 774;
+    /// `macaddr8[]`.
+    pub const MACADDR8ARRAY: u32 = 775;
 }
 
 /// The element type of a SQL array.
@@ -293,6 +309,13 @@ impl ElemType {
             | ColumnType::Int2Vector
             | ColumnType::TsVector
             | ColumnType::TsQuery
+            // The network types have no array element form here for the same
+            // reason the geometric ones do not: their array oids would need an
+            // `ElemType` the array encoder cannot name.
+            | ColumnType::Inet
+            | ColumnType::Cidr
+            | ColumnType::MacAddr
+            | ColumnType::MacAddr8
             | ColumnType::Array(_)
             | ColumnType::Record(_)
             | ColumnType::Enum(_)
@@ -647,7 +670,17 @@ pub enum ColumnType {
     /// PostgreSQL's normalized full-text document and query types.
     TsVector,
     TsQuery,
-    /// PostgreSQL `jsonb` (OID 3802): decomposed JSON. `json` (114) is accepted
+    /// PostgreSQL `inet` (OID 869) — a host address plus an optional netmask.
+    Inet,
+    /// PostgreSQL `cidr` (OID 650) — a network address. Shares `inet`'s
+    /// representation and values; what differs is the input check (no bits set
+    /// to the right of the netmask) and the output function.
+    Cidr,
+    /// PostgreSQL `macaddr` (OID 829) — a six-byte EUI-48 address.
+    MacAddr,
+    /// PostgreSQL `macaddr8` (OID 774) — an eight-byte EUI-64 address.
+    MacAddr8,
+    /// PostgreSQL `jsonb` (OID 3802) — decomposed JSON. `json` (114) is accepted
     /// on input as an alias but never reported.
     Jsonb,
     /// PostgreSQL `jsonpath` (OID 4072). Values use the existing canonical text
@@ -786,6 +819,10 @@ impl ColumnType {
             "int2vector" => Some(ColumnType::Int2Vector),
             "tsvector" => Some(ColumnType::TsVector),
             "tsquery" => Some(ColumnType::TsQuery),
+            "inet" => Some(ColumnType::Inet),
+            "cidr" => Some(ColumnType::Cidr),
+            "macaddr" => Some(ColumnType::MacAddr),
+            "macaddr8" => Some(ColumnType::MacAddr8),
             // `json` is an input alias for `jsonb`: values are stored decomposed
             // and always report OID 3802 (a documented divergence).
             "jsonb" | "json" => Some(ColumnType::Jsonb),
@@ -884,6 +921,10 @@ impl ColumnType {
             ColumnType::Int2Vector => oids::INT2VECTOR,
             ColumnType::TsVector => oids::TSVECTOR,
             ColumnType::TsQuery => oids::TSQUERY,
+            ColumnType::Inet => oids::INET,
+            ColumnType::Cidr => oids::CIDR,
+            ColumnType::MacAddr => oids::MACADDR,
+            ColumnType::MacAddr8 => oids::MACADDR8,
             ColumnType::Jsonb => oids::JSONB,
             ColumnType::JsonPath => oids::JSONPATH,
             ColumnType::Array(elem) => elem.array_oid(),
@@ -930,6 +971,10 @@ impl ColumnType {
             ColumnType::Int2Vector => "int2vector",
             ColumnType::TsVector => "tsvector",
             ColumnType::TsQuery => "tsquery",
+            ColumnType::Inet => "inet",
+            ColumnType::Cidr => "cidr",
+            ColumnType::MacAddr => "macaddr",
+            ColumnType::MacAddr8 => "macaddr8",
             ColumnType::Jsonb => "jsonb",
             ColumnType::JsonPath => "jsonpath",
             ColumnType::Array(elem) => elem.array_name(),
@@ -971,6 +1016,10 @@ impl ColumnType {
             ColumnType::Regprocedure | ColumnType::Regnamespace => 4,
             ColumnType::OidVector | ColumnType::Int2Vector => -1,
             ColumnType::TsVector | ColumnType::TsQuery => -1,
+            // `inet`/`cidr` are varlena; the two MAC types are fixed-width.
+            ColumnType::Inet | ColumnType::Cidr => -1,
+            ColumnType::MacAddr => 6,
+            ColumnType::MacAddr8 => 8,
             // jsonb, jsonpath, arrays and composites are variable-length.
             ColumnType::Jsonb
             | ColumnType::JsonPath
@@ -1092,6 +1141,15 @@ pub enum Datum {
     /// PostgreSQL full-text document/query values.
     TsVector(crate::text_search::TsVector),
     TsQuery(crate::text_search::TsQuery),
+    /// PostgreSQL `inet` or `cidr`. One variant for both, because PostgreSQL
+    /// stores both in one struct and compares them with one function; the
+    /// value's `is_cidr` flag decides only how it renders and which SQL type
+    /// it reports.
+    Inet(crate::network::Inet),
+    /// PostgreSQL `macaddr` — six bytes.
+    MacAddr(crate::network::MacAddr),
+    /// PostgreSQL `macaddr8` — eight bytes.
+    MacAddr8(crate::network::MacAddr8),
 }
 
 /// A PostgreSQL range value.
@@ -1479,6 +1537,12 @@ impl PartialEq for Datum {
             (Datum::Regclass(a), Datum::Regclass(b)) => a.oid == b.oid,
             (Datum::TsVector(a), Datum::TsVector(b)) => a == b,
             (Datum::TsQuery(a), Datum::TsQuery(b)) => a == b,
+            // `Inet`'s own `PartialEq` ignores `is_cidr`, so a `cidr` and an
+            // `inet` naming the same address are one value — which is what
+            // PostgreSQL's shared `network_cmp` gives `'x'::cidr = 'x'::inet`.
+            (Datum::Inet(a), Datum::Inet(b)) => a == b,
+            (Datum::MacAddr(a), Datum::MacAddr(b)) => a == b,
+            (Datum::MacAddr8(a), Datum::MacAddr8(b)) => a == b,
             (Datum::Range(a), Datum::Range(b)) => a == b,
             (Datum::Multirange(a), Datum::Multirange(b)) => a == b,
             _ => false,
@@ -1555,6 +1619,9 @@ impl std::hash::Hash for Datum {
             Datum::Regclass(r) => r.oid.hash(state),
             Datum::TsVector(v) => v.hash(state),
             Datum::TsQuery(q) => q.hash(state),
+            Datum::Inet(value) => value.hash(state),
+            Datum::MacAddr(value) => value.hash(state),
+            Datum::MacAddr8(value) => value.hash(state),
             Datum::Range(range) => range.hash(state),
             Datum::Multirange(multirange) => multirange.hash(state),
         }
@@ -1597,6 +1664,13 @@ impl Datum {
             Datum::Regclass(_) => Some(ColumnType::Regclass),
             Datum::TsVector(_) => Some(ColumnType::TsVector),
             Datum::TsQuery(_) => Some(ColumnType::TsQuery),
+            Datum::Inet(value) => Some(if value.is_cidr {
+                ColumnType::Cidr
+            } else {
+                ColumnType::Inet
+            }),
+            Datum::MacAddr(_) => Some(ColumnType::MacAddr),
+            Datum::MacAddr8(_) => Some(ColumnType::MacAddr8),
             Datum::Range(range) => Some(range.column_type()),
             Datum::Multirange(multirange) => Some(multirange.column_type()),
         }

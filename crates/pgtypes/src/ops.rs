@@ -622,6 +622,11 @@ pub fn compare(a: &Datum, b: &Datum) -> Result<Option<Ordering>, TypeError> {
         (Datum::Jsonb(x), Datum::Jsonb(y)) => x.cmp(y),
         (Datum::TsVector(x), Datum::TsVector(y)) => x.cmp(y),
         (Datum::TsQuery(x), Datum::TsQuery(y)) => x.cmp(y),
+        // `network_cmp`: one comparison for `inet` and `cidr` alike, so a
+        // `cidr` and an `inet` naming the same address compare equal.
+        (Datum::Inet(x), Datum::Inet(y)) => x.cmp(y),
+        (Datum::MacAddr(x), Datum::MacAddr(y)) => x.cmp(y),
+        (Datum::MacAddr8(x), Datum::MacAddr8(y)) => x.cmp(y),
         // SQL arrays compare element-wise, shorter first on a common prefix.
         (Datum::Array(x), Datum::Array(y)) => compare_arrays(x, y)?,
         (Datum::OidVector(x), Datum::OidVector(y)) => compare_arrays(x, y)?,

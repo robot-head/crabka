@@ -1697,6 +1697,9 @@ pub(crate) fn to_jsonb(d: &Datum, ctx: &EvalCtx) -> Result<JsonbValue, ExecError
         | Datum::Regclass(_)
         | Datum::TsVector(_)
         | Datum::TsQuery(_)
+        | Datum::Inet(_)
+        | Datum::MacAddr(_)
+        | Datum::MacAddr8(_)
         | Datum::Range(_)
         | Datum::Multirange(_)
         | Datum::Bytea(_) => JsonbValue::String(datum_text(d, ctx)),

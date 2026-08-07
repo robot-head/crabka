@@ -63,6 +63,14 @@ mod tag {
     pub const CIRCLE: u8 = 29;
     /// `PostgreSQL` `box`. Append-only — no version bump.
     pub const BOX: u8 = 30;
+    /// `PostgreSQL` `inet`/`cidr` (`[31][is_cidr][family][bits][16 address
+    /// bytes]`). One tag for both SQL types, as one datum holds both.
+    /// Append-only — no version bump.
+    pub const INET: u8 = 31;
+    /// `PostgreSQL` `macaddr` (`[32][6 bytes]`). Append-only.
+    pub const MACADDR: u8 = 32;
+    /// `PostgreSQL` `macaddr8` (`[33][8 bytes]`). Append-only.
+    pub const MACADDR8: u8 = 33;
 }
 
 /// Encodes one row in the current storage format.
@@ -245,6 +253,9 @@ fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
             }
             Datum::TsVector(vector) => encode_search(tag::TSVECTOR, &vector.to_string(), out),
             Datum::TsQuery(query) => encode_search(tag::TSQUERY, &query.to_string(), out),
+            Datum::Inet(_) | Datum::MacAddr(_) | Datum::MacAddr8(_) => {
+                encode_network(d, out);
+            }
             Datum::Range(range) => {
                 out.push(tag::RANGE);
                 out.extend_from_slice(&range.ty.oid.to_be_bytes());
@@ -274,6 +285,29 @@ fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
                 }
             }
         }
+    }
+}
+
+/// Append one network address: `inet`/`cidr` as its `is_cidr` flag, family,
+/// netmask and 16 address bytes; the two MAC widths as their raw bytes.
+fn encode_network(value: &Datum, out: &mut Vec<u8>) {
+    match value {
+        Datum::Inet(value) => {
+            out.push(tag::INET);
+            out.push(u8::from(value.is_cidr));
+            out.push(value.family.wire_code());
+            out.push(value.bits);
+            out.extend_from_slice(&value.addr);
+        }
+        Datum::MacAddr(value) => {
+            out.push(tag::MACADDR);
+            out.extend_from_slice(&value.0);
+        }
+        Datum::MacAddr8(value) => {
+            out.push(tag::MACADDR8);
+            out.extend_from_slice(&value.0);
+        }
+        _ => unreachable!("encode_network is reached only for a network address"),
     }
 }
 
@@ -565,6 +599,23 @@ fn decode_field(cur: &mut &[u8]) -> Result<Datum, KvError> {
             .parse()
             .map(Datum::TsQuery)
             .map_err(|error| KvError::CorruptRow(format!("corrupt tsquery: {error}")))?,
+        tag::INET => {
+            let is_cidr = take_u8(cur)? != 0;
+            let family = crabka_pgtypes::InetFamily::from_wire_code(take_u8(cur)?)
+                .ok_or_else(|| KvError::CorruptRow("unknown inet address family".into()))?;
+            let bits = take_u8(cur)?;
+            if bits > family.max_bits() {
+                return Err(KvError::CorruptRow("inet netmask out of range".into()));
+            }
+            let addr: [u8; 16] = take_n(cur, 16)?.try_into().expect("16");
+            Datum::Inet(crabka_pgtypes::Inet::new(is_cidr, family, bits, addr))
+        }
+        tag::MACADDR => Datum::MacAddr(crabka_pgtypes::MacAddr(
+            take_n(cur, 6)?.try_into().expect("6"),
+        )),
+        tag::MACADDR8 => Datum::MacAddr8(crabka_pgtypes::MacAddr8(
+            take_n(cur, 8)?.try_into().expect("8"),
+        )),
         tag::RANGE => {
             let oid = u32::try_from(take_u32_len(cur)?)
                 .map_err(|_| KvError::CorruptRow("range type oid out of range".into()))?;

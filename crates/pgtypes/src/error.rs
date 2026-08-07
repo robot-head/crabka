@@ -94,6 +94,20 @@ pub enum TypeError {
     },
     #[error("malformed range literal: \"{value}\"")]
     RangeMalformed { value: String, detail: &'static str },
+    /// `cidr_in`'s own rejection (22P02): the text parses as an address, but a
+    /// bit is set to the right of the netmask, which no `cidr` may have. Its
+    /// message and DETAIL differ from the generic `invalid input syntax`.
+    #[error("invalid cidr value: \"{value}\"")]
+    InvalidCidr { value: String },
+    /// Like [`TypeError::Coded`], but carrying `PostgreSQL`'s HINT as well —
+    /// the `macaddr8` → `macaddr` narrowing is the one type-layer error that
+    /// spells out which values are eligible.
+    #[error("{message}")]
+    CodedWithHint {
+        sqlstate: &'static str,
+        message: String,
+        hint: &'static str,
+    },
 }
 
 impl TypeError {
@@ -118,6 +132,8 @@ impl TypeError {
             TypeError::OutOfRange { .. } => "22003",
             TypeError::Coded { sqlstate, .. } => sqlstate,
             TypeError::RangeMalformed { .. } => "22P02",
+            TypeError::InvalidCidr { .. } => "22P02",
+            TypeError::CodedWithHint { sqlstate, .. } => sqlstate,
         }
     }
 
@@ -125,6 +141,16 @@ impl TypeError {
     pub fn detail(&self) -> Option<&'static str> {
         match self {
             TypeError::RangeMalformed { detail, .. } => Some(detail),
+            TypeError::InvalidCidr { .. } => Some("Value has bits set to right of mask."),
+            _ => None,
+        }
+    }
+
+    /// `PostgreSQL`'s HINT for this error, when it has one.
+    #[must_use]
+    pub fn hint(&self) -> Option<&'static str> {
+        match self {
+            TypeError::CodedWithHint { hint, .. } => Some(hint),
             _ => None,
         }
     }

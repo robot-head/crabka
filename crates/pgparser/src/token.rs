@@ -93,7 +93,11 @@ pub enum Token {
     Shl,
     /// `>>`: bitwise right shift.
     Shr,
-    /// `^`: exponentiation (`2^3` is 8). Left-associative in `PostgreSQL`.
+    /// `<<=` — `inet`/`cidr` "is contained by or equals".
+    ContainedByOrEq,
+    /// `>>=` — `inet`/`cidr` "contains or equals".
+    ContainsOrEq,
+    /// `^` — exponentiation (`2^3` is 8). Left-associative in `PostgreSQL`.
     Caret,
     /// `%`: modulo (integer/numeric remainder).
     Percent,

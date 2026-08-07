@@ -81,6 +81,7 @@ mod jsontable;
 mod local_sequence;
 mod lockmgr;
 mod math_fn;
+mod network_fn;
 pub mod notify;
 mod partition;
 mod pattern;

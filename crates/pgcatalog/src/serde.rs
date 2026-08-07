@@ -118,6 +118,11 @@ mod datum_tag {
     pub const RANGE: u8 = 14;
     pub const MULTIRANGE: u8 = 15;
     pub const JSONPATH: u8 = 16;
+    /// A network address — `inet`, `cidr`, `macaddr` or `macaddr8` — stored as
+    /// a one-column `crabka_pgkv::rowenc` row (u32 length + bytes), which
+    /// already tags the variant and holds the `is_cidr` flag. Append-only — no
+    /// version bump.
+    pub const NETWORK: u8 = 17;
 }
 
 mod type_tag {
@@ -195,6 +200,14 @@ mod type_tag {
     pub const BOX: u8 = 34;
     /// `PostgreSQL` `regnamespace`. Append-only — no version bump.
     pub const REGNAMESPACE: u8 = 35;
+    /// `PostgreSQL` `inet`. Append-only — no version bump.
+    pub const INET: u8 = 36;
+    /// `PostgreSQL` `cidr`. Append-only — no version bump.
+    pub const CIDR: u8 = 37;
+    /// `PostgreSQL` `macaddr`. Append-only — no version bump.
+    pub const MACADDR: u8 = 38;
+    /// `PostgreSQL` `macaddr8`. Append-only — no version bump.
+    pub const MACADDR8: u8 = 39;
 }
 
 #[derive(Debug)]
@@ -280,6 +293,10 @@ pub(crate) fn write_type(out: &mut Vec<u8>, ty: ColumnType) {
         ColumnType::Int2Vector => out.push(type_tag::INT2VECTOR),
         ColumnType::TsVector => out.push(type_tag::TSVECTOR),
         ColumnType::TsQuery => out.push(type_tag::TSQUERY),
+        ColumnType::Inet => out.push(type_tag::INET),
+        ColumnType::Cidr => out.push(type_tag::CIDR),
+        ColumnType::MacAddr => out.push(type_tag::MACADDR),
+        ColumnType::MacAddr8 => out.push(type_tag::MACADDR8),
         ColumnType::Jsonb => out.push(type_tag::JSONB),
         ColumnType::JsonPath => out.push(type_tag::JSONPATH),
         ColumnType::Array(elem) => {
@@ -399,6 +416,10 @@ fn read_type_with(
         type_tag::INT2VECTOR => ColumnType::Int2Vector,
         type_tag::TSVECTOR => ColumnType::TsVector,
         type_tag::TSQUERY => ColumnType::TsQuery,
+        type_tag::INET => ColumnType::Inet,
+        type_tag::CIDR => ColumnType::Cidr,
+        type_tag::MACADDR => ColumnType::MacAddr,
+        type_tag::MACADDR8 => ColumnType::MacAddr8,
         type_tag::JSONB => ColumnType::Jsonb,
         type_tag::JSONPATH => ColumnType::JsonPath,
         type_tag::ARRAY => ColumnType::Array(read_elem_type_with(cur, resolve_user_type)?),
@@ -558,6 +579,15 @@ fn write_default_value(out: &mut Vec<u8>, default: &Datum) {
             out.push(datum_tag::TSQUERY);
             write_str(out, &value.to_string());
         }
+        // The row encoder already distinguishes the four network types and
+        // keeps `inet`'s `is_cidr` flag, so a default round-trips through it.
+        Datum::Inet(_) | Datum::MacAddr(_) | Datum::MacAddr8(_) => {
+            out.push(datum_tag::NETWORK);
+            write_bytes(
+                out,
+                &crabka_pgkv::rowenc::encode_row(std::slice::from_ref(default)),
+            );
+        }
         Datum::Range(_) => {
             out.push(datum_tag::RANGE);
             write_bytes(
@@ -666,6 +696,20 @@ fn read_default_value(cur: &mut &[u8]) -> Result<Datum, KvError> {
             Datum::TsQuery(read_string(cur)?.parse().map_err(|error| {
                 KvError::CorruptRow(format!("invalid tsquery default: {error}"))
             })?)
+        }
+        datum_tag::NETWORK => {
+            let mut values = crabka_pgkv::rowenc::decode_row(read_str(cur)?)?;
+            if values.len() != 1
+                || !matches!(
+                    values.first(),
+                    Some(Datum::Inet(_) | Datum::MacAddr(_) | Datum::MacAddr8(_))
+                )
+            {
+                return Err(KvError::CorruptRow(
+                    "invalid network address default".into(),
+                ));
+            }
+            values.pop().expect("length checked")
         }
         datum_tag::RANGE => {
             let mut values = crabka_pgkv::rowenc::decode_row(read_str(cur)?)?;

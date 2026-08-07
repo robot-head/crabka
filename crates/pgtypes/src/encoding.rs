@@ -195,6 +195,10 @@ pub fn encode_text_in(d: &Datum, style: OutputStyle<'_>) -> Vec<u8> {
         Datum::Regclass(r) => r.name.as_bytes().to_vec(),
         Datum::TsVector(vector) => vector.to_string().into_bytes(),
         Datum::TsQuery(query) => query.to_string().into_bytes(),
+        // `inet_out` / `cidr_out`: the value's own `is_cidr` picks which.
+        Datum::Inet(value) => value.to_text().into_bytes(),
+        Datum::MacAddr(value) => value.to_text().into_bytes(),
+        Datum::MacAddr8(value) => value.to_text().into_bytes(),
         Datum::Range(range) => crate::range::to_text(range, |bound| {
             String::from_utf8(encode_text_in(bound, style))
                 .expect("a Datum's text encoding is always valid UTF-8")
@@ -476,6 +480,12 @@ pub fn encode_binary(d: &Datum) -> Vec<u8> {
         // layouts are implemented. Their OIDs and text format are exact.
         Datum::TsVector(vector) => vector.to_string().into_bytes(),
         Datum::TsQuery(query) => query.to_string().into_bytes(),
+        // `inet_send` / `cidr_send`: family, netmask, is_cidr, length, address.
+        Datum::Inet(value) => value.to_binary(),
+        // `macaddr_send` / `macaddr8_send`: the raw bytes, most significant
+        // first.
+        Datum::MacAddr(value) => value.0.to_vec(),
+        Datum::MacAddr8(value) => value.0.to_vec(),
     }
 }
 

@@ -16057,7 +16057,10 @@ fn format_default_value(value: &Datum, ty: ColumnType) -> String {
         | Datum::Range(_)
         | Datum::Multirange(_)
         | Datum::TsVector(_)
-        | Datum::TsQuery(_) => {
+        | Datum::TsQuery(_)
+        | Datum::Inet(_)
+        | Datum::MacAddr(_)
+        | Datum::MacAddr8(_) => {
             match zone_independent_text(value) {
                 Some(literal) => {
                     let mut out = String::new();
@@ -17485,6 +17488,38 @@ fn scalar_type_rows() -> &'static [BuiltinTypeRow] {
             array: crabka_pgtypes::oids::TSQUERYARRAY as i32,
         },
         BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::INET as i32,
+            name: "inet",
+            len: -1,
+            category: "I",
+            elem: 0,
+            array: crabka_pgtypes::oids::INETARRAY as i32,
+        },
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::CIDR as i32,
+            name: "cidr",
+            len: -1,
+            category: "I",
+            elem: 0,
+            array: crabka_pgtypes::oids::CIDRARRAY as i32,
+        },
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::MACADDR as i32,
+            name: "macaddr",
+            len: 6,
+            category: "U",
+            elem: 0,
+            array: crabka_pgtypes::oids::MACADDRARRAY as i32,
+        },
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::MACADDR8 as i32,
+            name: "macaddr8",
+            len: 8,
+            category: "U",
+            elem: 0,
+            array: crabka_pgtypes::oids::MACADDR8ARRAY as i32,
+        },
+        BuiltinTypeRow {
             oid: crabka_pgtypes::oids::INT4RANGE as i32,
             name: "int4range",
             len: -1,
@@ -17679,6 +17714,41 @@ fn builtin_type_rows() -> &'static [BuiltinTypeRow] {
             elem: crabka_pgtypes::oids::TSQUERY as i32,
             array: 0,
         });
+        // The network types' array rows exist so `pg_type.typarray` resolves
+        // and a driver's typeinfo query finds them, exactly as PostgreSQL's do.
+        // Building a value of one is a separate matter — `ElemType` has no
+        // network variant, the same position the geometric types are in.
+        for (oid, name, elem) in [
+            (
+                crabka_pgtypes::oids::INETARRAY,
+                "_inet",
+                crabka_pgtypes::oids::INET,
+            ),
+            (
+                crabka_pgtypes::oids::CIDRARRAY,
+                "_cidr",
+                crabka_pgtypes::oids::CIDR,
+            ),
+            (
+                crabka_pgtypes::oids::MACADDRARRAY,
+                "_macaddr",
+                crabka_pgtypes::oids::MACADDR,
+            ),
+            (
+                crabka_pgtypes::oids::MACADDR8ARRAY,
+                "_macaddr8",
+                crabka_pgtypes::oids::MACADDR8,
+            ),
+        ] {
+            rows.push(BuiltinTypeRow {
+                oid: oid as i32,
+                name,
+                len: -1,
+                category: "A",
+                elem: elem as i32,
+                array: 0,
+            });
+        }
         for (oid, name, elem) in [
             (
                 crabka_pgtypes::oids::INT4RANGEARRAY,
@@ -24683,6 +24753,126 @@ mod tests {
     fn text(cell: &Option<Cell>) -> Option<String> {
         cell.as_ref()
             .map(|c| String::from_utf8(c.text.to_vec()).expect("cell text is valid UTF-8"))
+    }
+
+    /// The network address types end to end: a table of them stores and reads
+    /// back, the operators and support functions resolve through the executor,
+    /// and the row description carries PostgreSQL's own OIDs.
+    #[tokio::test]
+    async fn network_address_types_round_trip_through_the_engine() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        run_s(
+            &mut s,
+            "CREATE TABLE net (c cidr, i inet, m macaddr, m8 macaddr8)",
+        )
+        .await;
+        run_s(
+            &mut s,
+            "INSERT INTO net VALUES ('192.168.1', '192.168.1.226/24', \
+             '08:00:2b:01:02:03', '08:00:2b:01:02:03:04:05'), \
+             ('10:23::8000/113', '10:23::ffff', '08-00-2b-01-02-04', '0800.2b01.0203')",
+        )
+        .await;
+
+        // Storage round trip: `cidr` and `inet` render differently, and a
+        // six-byte `macaddr8` input widened to EUI-64 on the way in.
+        assert!(
+            text_rows_of(&mut s, "SELECT c, i, m, m8 FROM net ORDER BY i").await
+                == vec![
+                    text_row(&[
+                        "192.168.1.0/24",
+                        "192.168.1.226/24",
+                        "08:00:2b:01:02:03",
+                        "08:00:2b:01:02:03:04:05",
+                    ]),
+                    text_row(&[
+                        "10:23::8000/113",
+                        "10:23::ffff",
+                        "08:00:2b:01:02:04",
+                        "08:00:2b:ff:fe:01:02:03",
+                    ]),
+                ]
+        );
+
+        // (expression, expected text) — the support functions and the operators
+        // the regression suite exercises, through the whole executor.
+        let cases: &[(&str, &str)] = &[
+            ("host(i)", "192.168.1.226"),
+            ("text(i)", "192.168.1.226/24"),
+            ("text(c)", "192.168.1.0/24"),
+            ("family(i)::text", "4"),
+            ("abbrev(c)", "192.168.1/24"),
+            ("abbrev(i)", "192.168.1.226/24"),
+            ("broadcast(i)::text", "192.168.1.255/24"),
+            ("network(i)::text", "192.168.1.0/24"),
+            ("masklen(c)::text", "24"),
+            ("netmask(i)::text", "255.255.255.0/32"),
+            ("hostmask(i)::text", "0.0.0.255/32"),
+            ("set_masklen(i, 16)::text", "192.168.1.226/16"),
+            ("set_masklen(c, 16)::text", "192.168.0.0/16"),
+            ("inet_merge(c, i)::text", "192.168.1.0/24"),
+            ("inet_same_family(c, i)::text", "true"),
+            ("(i << c)::text", "false"),
+            ("(i <<= c)::text", "true"),
+            ("(c >>= i)::text", "true"),
+            ("(c >> i)::text", "false"),
+            ("(i && c)::text", "true"),
+            ("(i = c)::text", "false"),
+            ("(~i)::text", "63.87.254.29/24"),
+            ("(i & c)::text", "192.168.1.0/24"),
+            ("(i | c)::text", "192.168.1.226/24"),
+            ("(i + 1)::text", "192.168.1.227/24"),
+            ("(i - 1)::text", "192.168.1.225/24"),
+            ("(i - c)::text", "226"),
+            ("(cidr(text(c)))::text", "192.168.1.0/24"),
+            ("(inet(text(i)))::text", "192.168.1.226/24"),
+            ("trunc(m)::text", "08:00:2b:00:00:00"),
+            ("(~m)::text", "f7:ff:d4:fe:fd:fc"),
+            ("(m & '00:00:00:ff:ff:ff')::text", "00:00:00:01:02:03"),
+            ("(m | '01:02:03:04:05:06')::text", "09:02:2b:05:07:07"),
+            ("(m < '08:00:2b:01:02:04')::text", "true"),
+            ("m::macaddr8::text", "08:00:2b:ff:fe:01:02:03"),
+            ("trunc(m8)::text", "08:00:2b:00:00:00:00:00"),
+            ("macaddr8_set7bit(m8)::text", "0a:00:2b:01:02:03:04:05"),
+        ];
+        for (expression, expected) in cases {
+            let sql = format!("SELECT ({expression})::text FROM net WHERE family(i) = 4");
+            assert!(
+                text_rows_of(&mut s, &sql).await == vec![text_row(&[expected])],
+                "{expression}"
+            );
+        }
+
+        // PostgreSQL's own OIDs, so `pg_typeof`, `format_type` and `\d` agree.
+        assert!(
+            fields_of(&run_s(&mut s, "SELECT c, i, m, m8 FROM net").await[0])
+                .iter()
+                .map(|field| field.type_oid)
+                .collect::<Vec<_>>()
+                == vec![
+                    crabka_pgtypes::oids::CIDR,
+                    crabka_pgtypes::oids::INET,
+                    crabka_pgtypes::oids::MACADDR,
+                    crabka_pgtypes::oids::MACADDR8,
+                ]
+        );
+
+        // A `cidr` with a bit set to the right of its mask is 22P02; the same
+        // text is a perfectly good `inet`.
+        assert!(sqlstate_of(&mut s, "SELECT '192.168.1.2/30'::cidr").await == "22P02");
+        assert!(sqlstate_of(&mut s, "SELECT set_masklen(i, 33) FROM net").await == "22023");
+        assert!(sqlstate_of(&mut s, "SELECT i + 10000000000 FROM net").await == "22003");
+        assert!(
+            sqlstate_of(
+                &mut s,
+                "SELECT '08:00:2b:01:02:03:04:05'::macaddr8::macaddr"
+            )
+            .await
+                == "22003"
+        );
     }
 
     #[tokio::test]

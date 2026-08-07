@@ -916,6 +916,8 @@ fn binary_op_text_rest(op: BinaryOp) -> &'static str {
         BinaryOp::BitXor => "#",
         BinaryOp::Shl => "<<",
         BinaryOp::Shr => ">>",
+        BinaryOp::ContainedByOrEq => "<<=",
+        BinaryOp::ContainsOrEq => ">>=",
         _ => "?",
     }
 }

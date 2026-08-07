@@ -79,6 +79,14 @@ pub fn cast_allowed(from: ColumnType, to: ColumnType) -> bool {
             cast_allowed(a.column_type(), b.column_type())
         }
         (ColumnType::OidVector, ColumnType::Array(crate::ElemType::Regtype)) => true,
+        // The network family's own casts (`pg_cast`): `cidr → inet` is
+        // binary-coercible, `inet → cidr` runs `inet_to_cidr`, and the two MAC
+        // widths convert both ways. Everything else in the family reaches
+        // another type only through its text form, via the string rules below.
+        (ColumnType::Cidr, ColumnType::Inet)
+        | (ColumnType::Inet, ColumnType::Cidr)
+        | (ColumnType::MacAddr, ColumnType::MacAddr8)
+        | (ColumnType::MacAddr8, ColumnType::MacAddr) => true,
         // `jsonb` and arrays otherwise interconvert ONLY with the string family
         // (the rule below): PostgreSQL has no jsonb/array ↔ number/bool/temporal
         // cast, and this arm keeps the permissive numeric rules from claiming one.
@@ -175,6 +183,13 @@ pub fn assignment_cast_allowed(from: ColumnType, to: ColumnType) -> bool {
         (Date, Timestamp | Timestamptz) | (Timestamp, Timestamptz) | (Timestamptz, Timestamp) => {
             true
         }
+        // `pg_cast` marks `cidr → inet` and both MAC conversions implicit and
+        // `inet → cidr` assignment-level, so `INSERT` into a column of the
+        // other type converts without an explicit cast.
+        (ColumnType::Cidr, ColumnType::Inet)
+        | (ColumnType::Inet, ColumnType::Cidr)
+        | (ColumnType::MacAddr, ColumnType::MacAddr8)
+        | (ColumnType::MacAddr8, ColumnType::MacAddr) => true,
         _ => false,
     }
 }
@@ -298,6 +313,14 @@ pub fn cast_in(
         (Datum::Line(line), ColumnType::Line) => Ok(Datum::Line(*line)),
         (Datum::Circle(circle), ColumnType::Circle) => Ok(Datum::Circle(*circle)),
         (Datum::Box(value), ColumnType::Box) => Ok(Datum::Box(*value)),
+        // The network family. `inet → cidr` is `inet_to_cidr`, which zeroes
+        // every bit to the right of the netmask; `cidr → inet` only re-labels.
+        (Datum::Inet(value), ColumnType::Inet) => Ok(Datum::Inet(value.as_inet())),
+        (Datum::Inet(value), ColumnType::Cidr) => Ok(Datum::Inet(value.to_cidr())),
+        (Datum::MacAddr(value), ColumnType::MacAddr) => Ok(Datum::MacAddr(*value)),
+        (Datum::MacAddr8(value), ColumnType::MacAddr8) => Ok(Datum::MacAddr8(*value)),
+        (Datum::MacAddr(value), ColumnType::MacAddr8) => Ok(Datum::MacAddr8(value.to_macaddr8())),
+        (Datum::MacAddr8(value), ColumnType::MacAddr) => value.to_macaddr().map(Datum::MacAddr),
         (Datum::Text(s), Text) => Ok(Datum::Text(s.clone())),
         // The executor owns jsonpath parsing/canonicalization. Keeping only
         // identity here makes it impossible for a raw string to masquerade as
@@ -443,6 +466,10 @@ pub fn cast_in(
         // → text. `bool` renders as PostgreSQL's `booltext` cast (`true`/`false`),
         // NOT the `t`/`f` of `boolout`; the others reuse the wire text encoding.
         (Datum::Bool(b), Text) => Ok(Datum::Text((if *b { "true" } else { "false" }).into())),
+        // `inet`/`cidr` → `text` is `network_show`, NOT the output function:
+        // it prints the whole host address and always appends the netmask, so
+        // `'192.168.1.226'::inet::text` is `192.168.1.226/32`.
+        (Datum::Inet(value), Text) => Ok(Datum::Text(value.show())),
         (d, Text) => Ok(Datum::Text(text_of(d, style))),
         (d, ColumnType::Varchar(n)) => {
             crate::string::apply_varchar_typmod(&string_cast_input(d, style), n, Coercion::Explicit)
@@ -546,6 +573,17 @@ pub fn cast_in(
             }),
         (Datum::Text(s), ColumnType::TsVector) => s.parse().map(Datum::TsVector),
         (Datum::Text(s), ColumnType::TsQuery) => s.parse().map(Datum::TsQuery),
+        // `inet_in` / `cidr_in` / `macaddr_in` / `macaddr8_in`.
+        (Datum::Text(s), ColumnType::Inet) => {
+            crate::network::Inet::parse(s, false).map(Datum::Inet)
+        }
+        (Datum::Text(s), ColumnType::Cidr) => crate::network::Inet::parse(s, true).map(Datum::Inet),
+        (Datum::Text(s), ColumnType::MacAddr) => {
+            crate::network::MacAddr::parse(s).map(Datum::MacAddr)
+        }
+        (Datum::Text(s), ColumnType::MacAddr8) => {
+            crate::network::MacAddr8::parse(s).map(Datum::MacAddr8)
+        }
         (Datum::Text(s), Numeric(tm)) => {
             let d = crate::numeric::parse(s).ok_or_else(|| TypeError::InvalidText {
                 type_name: "numeric",

@@ -596,10 +596,10 @@ fn skip_block_comment(bytes: &[u8], i: usize) -> (usize, bool) {
 /// MAXIMAL MUNCH is the whole contract of this function. Every spelling whose
 /// first byte also begins a shorter spelling is listed longest-first: `->>`
 /// before `->` before `-`, `#>>` before `#>` before `#`, `?|`/`?&` before `?`,
-/// `!~*` before `!~`, `||/` before `||` before `|/` before `|`, `<@`/`<=`/`<>`/
-/// `<<` before `<`, `::` before `:`. A slip re-reads `a->>'k'` as `a -> >'k'`,
-/// whose tail still lexes. So the lexer tests pin each neighbouring shorter
-/// spelling explicitly.
+/// `!~*` before `!~`, `||/` before `||` before `|/` before `|`, `<<=` before
+/// `<<`, `>>=` before `>>`, `<@`/`<=`/`<>`/`<<` before `<`, `::` before `:`. A
+/// slip re-reads `a->>'k'` as `a -> >'k'`, whose tail still lexes, so the lexer
+/// tests pin each neighbouring shorter spelling explicitly.
 ///
 /// The comment arms in [`lex`] claim `--` and `/*` before this function runs,
 /// so a `-` or `/` that reaches here is always the operator. The one place that
@@ -639,9 +639,11 @@ fn punctuation(bytes: &[u8], i: usize) -> Option<(Token, usize)> {
         b'>' if next_is(b'=') => (Token::Ge, 2),
         b'<' if next_is(b'>') => (Token::Ne, 2),
         b'<' if next_two_are(b'<', b'|') => (Token::StrictlyBelow, 3),
+        b'<' if next_two_are(b'<', b'=') => (Token::ContainedByOrEq, 3),
         b'<' if next_is(b'<') => (Token::Shl, 2),
         b'|' if next_two_are(b'&', b'>') => (Token::DoesNotExtendBelow, 3),
         b'|' if next_two_are(b'>', b'>') => (Token::StrictlyAbove, 3),
+        b'>' if next_two_are(b'>', b'=') => (Token::ContainsOrEq, 3),
         b'>' if next_is(b'>') => (Token::Shr, 2),
         b'|' if next_two_are(b'|', b'/') && !comment_at(i + 3) => (Token::CubeRoot, 3),
         b'|' if next_is(b'|') => (Token::Concat, 2),
@@ -1131,6 +1133,8 @@ mod tests {
             ("a!=b", &[Token::Ne, Token::Ident("b".into())]),
             ("a<<b", &[Token::Shl, Token::Ident("b".into())]),
             ("a>>b", &[Token::Shr, Token::Ident("b".into())]),
+            ("a<<=b", &[Token::ContainedByOrEq, Token::Ident("b".into())]),
+            ("a>>=b", &[Token::ContainsOrEq, Token::Ident("b".into())]),
             ("a<=b", &[Token::Le, Token::Ident("b".into())]),
             ("a>=b", &[Token::Ge, Token::Ident("b".into())]),
             ("a<@b", &[Token::ContainedBy, Token::Ident("b".into())]),

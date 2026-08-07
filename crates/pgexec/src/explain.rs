@@ -591,6 +591,15 @@ const fn binary_op_text(op: BinaryOp) -> &'static str {
         BinaryOp::Div => "/",
         BinaryOp::Mod => "%",
         BinaryOp::Concat => "||",
+        // The network family's operator spellings, several of which it shares
+        // with the bitwise, range and array families.
+        BinaryOp::Shl => "<<",
+        BinaryOp::Shr => ">>",
+        BinaryOp::ContainedByOrEq => "<<=",
+        BinaryOp::ContainsOrEq => ">>=",
+        BinaryOp::Overlaps => "&&",
+        BinaryOp::BitAnd => "&",
+        BinaryOp::BitOr => "|",
         _ => "?",
     }
 }
