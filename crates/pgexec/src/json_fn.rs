@@ -1902,7 +1902,11 @@ pub(crate) fn to_jsonb(d: &Datum, ctx: &EvalCtx) -> Result<JsonbValue, ExecError
         }
         // `regclass` joins the stringly group, not the numbers: PostgreSQL's
         // `to_jsonb('pp'::regclass)` is `"pp"`, its output function's text.
+        // `xml` is there too — `to_jsonb('<a/>'::xml)` is the document as a
+        // JSON string, because `xml` is not one of the types `to_jsonb`
+        // special-cases by oid.
         Datum::Text(_)
+        | Datum::Xml(_)
         | Datum::JsonPath(_)
         | Datum::Point(_)
         | Datum::Path(_)

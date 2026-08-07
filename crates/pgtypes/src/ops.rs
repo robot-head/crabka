@@ -632,6 +632,16 @@ pub fn compare(a: &Datum, b: &Datum) -> Result<Option<Ordering>, TypeError> {
                 message: "could not identify an equality operator for type json".to_string(),
             });
         }
+        // `xml` is the other type with no equality operator and no btree
+        // opclass. Two documents can differ byte for byte and mean the same
+        // thing, so PostgreSQL declines to pick a comparison rather than
+        // pretending text order is one.
+        (Datum::Xml(_), Datum::Xml(_)) => {
+            return Err(TypeError::Coded {
+                sqlstate: "42883",
+                message: "could not identify an equality operator for type xml".to_string(),
+            });
+        }
         (Datum::TsVector(x), Datum::TsVector(y)) => x.cmp(y),
         (Datum::TsQuery(x), Datum::TsQuery(y)) => x.cmp(y),
         // `network_cmp`: one comparison for `inet` and `cidr` alike, so a

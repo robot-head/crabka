@@ -767,6 +767,12 @@ fn unary_text(op: UnaryOp, expr: &Expr, ctx: Ctx<'_>) -> String {
         UnaryOp::IsNotUnknown => ctx.paren(format!("{} IS NOT UNKNOWN", expr_text(expr, ctx))),
         UnaryOp::BitNot => ctx.paren(format!("~ {}", expr_text(expr, ctx))),
         UnaryOp::TsNot => ctx.paren(format!("!! {}", expr_text(expr, ctx))),
+        // Alone among the postfix predicates, `IS DOCUMENT` is an `XmlExpr` in
+        // PostgreSQL rather than a `BooleanTest`, and `get_rule_expr` adds no
+        // parentheses around it — `SELECT data IS DOCUMENT AS d`, where the
+        // same view over `IS TRUE` would print `((…) IS TRUE)`.
+        UnaryOp::IsDocument => format!("{} IS DOCUMENT", expr_text(expr, ctx)),
+        UnaryOp::IsNotDocument => format!("{} IS NOT DOCUMENT", expr_text(expr, ctx)),
     }
 }
 
@@ -789,6 +795,11 @@ const SQL_VALUE_FUNCTIONS: [(&str, &str); 7] = [
 ];
 
 fn func_text(call: &FuncCall, ctx: Ctx<'_>) -> String {
+    if let FuncArgs::Exprs(args) = &call.args
+        && let Some(text) = xml_construct_text(&call.name, args, ColumnType::Text, ctx)
+    {
+        return text;
+    }
     if matches!(&call.args, FuncArgs::Exprs(args) if args.is_empty())
         && let Some((_, keyword)) = SQL_VALUE_FUNCTIONS
             .iter()
@@ -811,9 +822,92 @@ fn func_text(call: &FuncCall, ctx: Ctx<'_>) -> String {
     )
 }
 
+/// `XMLPARSE`, `XMLSERIALIZE` and `XMLCONCAT` reach the executor as ordinary
+/// calls (the parser lowers their keyword grammar onto one), but `ruleutils.c`
+/// holds them as `XmlExpr` nodes and prints the grammar back in upper case.
+/// `xmlcomment` and `xmltext` are real `pg_proc` entries and print like any
+/// other function, which is why they are absent here.
+///
+/// The mode words come out of the literals the parser planted, so a view over
+/// `XMLSERIALIZE(DOCUMENT …)` reads back as one. `XMLPARSE` always prints
+/// `STRIP WHITESPACE`: `PostgreSQL` stores the flag rather than the spelling,
+/// and the grammar's default is to strip.
+fn xml_construct_text(
+    name: &str,
+    args: &[Expr],
+    serialize_type: ColumnType,
+    ctx: Ctx<'_>,
+) -> Option<String> {
+    // The parser's coercion of an untyped literal is a *resolution*, not a
+    // second cast: PostgreSQL holds one `Const` of type xml and prints
+    // `'good'::xml`, never `('good'::text)::xml`.
+    let text = |expr: &Expr| match expr {
+        Expr::Cast { expr, ty } => match (&**expr, ty) {
+            (Expr::StringLiteral(literal), ColumnType::Xml) => {
+                format!("'{}'::xml", literal.replace('\'', "''"))
+            }
+            _ => expr_text(
+                &Expr::Cast {
+                    expr: expr.clone(),
+                    ty: *ty,
+                },
+                ctx,
+            ),
+        },
+        _ => expr_text(expr, ctx),
+    };
+    let mode = |expr: &Expr| match expr {
+        Expr::StringLiteral(word) => Some(word.to_ascii_uppercase()),
+        _ => None,
+    };
+    match (name, args) {
+        ("xmlconcat", args) if !args.is_empty() => Some(format!(
+            "XMLCONCAT({})",
+            args.iter().map(text).collect::<Vec<_>>().join(", ")
+        )),
+        ("xmlparse", [option, value]) => Some(format!(
+            "XMLPARSE({} {} STRIP WHITESPACE)",
+            mode(option)?,
+            text(value)
+        )),
+        ("xmlserialize", [option, value, indent]) => Some(format!(
+            "XMLSERIALIZE({} {} AS {} {})",
+            mode(option)?,
+            text(value),
+            crate::func::format_type(
+                i64::from(serialize_type.oid()),
+                i64::from(serialize_type.typmod())
+            ),
+            if matches!(indent, Expr::BoolLiteral(true)) {
+                "INDENT"
+            } else {
+                "NO INDENT"
+            }
+        )),
+        _ => None,
+    }
+}
+
 /// A cast. PostgreSQL parenthesizes the operand in un-pretty mode (`(a)::text`)
 /// and leaves it bare in pretty mode (`a::text`).
 fn cast_text(expr: &Expr, ty: ColumnType, ctx: Ctx<'_>) -> String {
+    // `XMLSERIALIZE` names its own target type, so the cast the parser wrapped
+    // around it is redundant when that type is `text` -- and PostgreSQL prints
+    // it only when it is not, which is why `xmlview9` has no `::text` and
+    // `xmlview8` has a `::character(10)`.
+    if let Expr::Func(call) = expr
+        && let FuncArgs::Exprs(args) = &call.args
+        && let Some(text) = xml_construct_text(&call.name, args, ty, ctx)
+    {
+        return if ty == ColumnType::Text {
+            text
+        } else {
+            format!(
+                "({text})::{}",
+                crate::func::format_type(i64::from(ty.oid()), i64::from(ty.typmod()))
+            )
+        };
+    }
     let inner = expr_text(expr, ctx);
     let operand = if ctx.pretty || inner.starts_with('(') {
         inner

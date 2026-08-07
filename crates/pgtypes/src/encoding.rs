@@ -151,6 +151,10 @@ pub fn encode_text_in(d: &Datum, style: OutputStyle<'_>) -> Vec<u8> {
         }
         // `json_out`: the bytes `json_in` accepted, unchanged.
         Datum::Json(text) => text.clone().into_bytes(),
+        // `xml_out` is *not* the identity: it re-renders the XML declaration,
+        // dropping a redundant one. The `xml → text` cast bypasses this,
+        // because `pg_cast` declares it binary-coercible.
+        Datum::Xml(text) => crate::xml::output_text(text).into_bytes(),
         // `jsonb_out`: the canonical re-rendering of the decomposed value.
         Datum::Jsonb(j) => j.to_text().into_bytes(),
         // `array_out`: `{...}` with each element rendered by its own output
@@ -474,6 +478,9 @@ pub fn encode_binary(d: &Datum) -> Vec<u8> {
         // `json_send` is `text`'s: the document as written, with no version
         // byte. Only `jsonb_send` prefixes one.
         Datum::Json(text) => text.clone().into_bytes(),
+        // `xml_send` is `xml_out_internal` too, not `textsend`: the declaration
+        // is re-rendered on the binary path exactly as on the text one.
+        Datum::Xml(text) => crate::xml::output_text(text).into_bytes(),
         // `jsonb_send`: a version byte then the canonical JSON text.
         Datum::Jsonb(j) => {
             let text = j.to_text();

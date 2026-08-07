@@ -1663,6 +1663,7 @@ fn render_type_oid_array(oids: &[u32]) -> String {
         ColumnType::Regclass,
         ColumnType::Json,
         ColumnType::Jsonb,
+        ColumnType::Xml,
     ];
     let names = oids
         .iter()
@@ -10390,6 +10391,10 @@ impl ParamBinder<'_> {
                     UnaryOp::Plus | UnaryOp::Neg | UnaryOp::BitNot | UnaryOp::Abs => expected,
                     UnaryOp::Sqrt | UnaryOp::Cbrt => Some(ColumnType::Float8),
                     UnaryOp::TsNot => Some(ColumnType::TsQuery),
+                    // `IS DOCUMENT` takes `xml`, so a bare `$1 IS DOCUMENT`
+                    // infers the parameter as `xml` rather than leaving it
+                    // unknown.
+                    UnaryOp::IsDocument | UnaryOp::IsNotDocument => Some(ColumnType::Xml),
                 };
                 self.bind_expr_with_scope_and_ctes(expr, child_expected, scope, ctes)?;
             }
@@ -11122,6 +11127,7 @@ fn param_column_type(param: &BoundParam) -> Result<Option<ColumnType>, PgError> 
         Some(crabka_pgtypes::oids::TIMESTAMP) => Ok(Some(ColumnType::Timestamp)),
         Some(crabka_pgtypes::oids::TIMESTAMPTZ) => Ok(Some(ColumnType::Timestamptz)),
         Some(crabka_pgtypes::oids::INTERVAL) => Ok(Some(ColumnType::Interval)),
+        Some(crabka_pgtypes::oids::XML) => Ok(Some(ColumnType::Xml)),
         Some(crabka_pgtypes::oids::JSON) => Ok(Some(ColumnType::Json)),
         Some(crabka_pgtypes::oids::JSONB) => Ok(Some(ColumnType::Jsonb)),
         Some(crabka_pgtypes::oids::JSONPATH) => Ok(Some(ColumnType::JsonPath)),
@@ -11428,6 +11434,15 @@ fn decode_binary_value(
             let text = std::str::from_utf8(value).map_err(invalid_parameter_encoding)?;
             crabka_pgtypes::json::validate(text)
                 .map(|()| Datum::Json(text.to_string()))
+                .map_err(ExecError::from)
+                .map_err(ExecError::into_pg)
+        }
+        // `xml_recv` parses to validate and then keeps the bytes, so like
+        // `json_recv` it is `textrecv` with a check bolted on.
+        ColumnType::Xml => {
+            let text = std::str::from_utf8(value).map_err(invalid_parameter_encoding)?;
+            crabka_pgtypes::xml::validate(text, crabka_pgtypes::xml::XmlOption::Content)
+                .map(|()| Datum::Xml(text.to_string()))
                 .map_err(ExecError::from)
                 .map_err(ExecError::into_pg)
         }

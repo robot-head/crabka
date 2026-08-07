@@ -56,6 +56,16 @@ thiserror = "2"
 derive_more = { version = "2", features = ["display", "from", "into", "deref", "as_ref", "constructor", "from_str", "add", "add_assign", "mul", "sum"] }
 refined_type = "0.6"
 jsonpath-rust = "1.0"
+# XML tokenizer behind the `xml` type (crabka-pgtypes). Chosen because it is
+# pure safe Rust (`#![forbid(unsafe_code)]`, so it can live under this
+# workspace's `unsafe_code = "forbid"`) and because it performs no I/O and
+# resolves no entities: a reference is surfaced as an event for the caller to
+# resolve, so there is no code path from a SQL string to a file handle and XXE
+# is structurally impossible rather than switched off. Pinned to >= 0.41, the
+# first release carrying the fixes for RUSTSEC-2026-0194/0195 — unlike the
+# transitive 0.39 copy under `object_store`, this one parses attacker-supplied
+# documents straight off the wire.
+quick-xml = { version = "0.41", default-features = false }
 jfrs = "0.2.5"
 proptest = "1"
 # Expressive test assertions: `assert!(a == b)` / `check!(..)` with

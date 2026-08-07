@@ -306,6 +306,7 @@ pub(crate) fn is_scalar(name: &str) -> bool {
         || crate::regexp_fn::is_regexp_func(name)
         || crate::text_search_fn::is_text_search_func(name)
         || crate::network_fn::is_network_func(name)
+        || crate::xml_fn::is_xml_func(name)
         || crate::bit_fn::is_bit_func(name)
         || crate::money_fn::is_money_func(name)
         || crate::sysid_fn::is_sysid_func(name)
@@ -386,6 +387,9 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
     }
     if crate::network_fn::is_network_func(&fc.name) {
         return crate::network_fn::network_func_result_type(fc, scope);
+    }
+    if crate::xml_fn::is_xml_func(&fc.name) {
+        return crate::xml_fn::xml_func_result_type(fc, scope);
     }
     if crate::bit_fn::is_bit_func(&fc.name) {
         return crate::bit_fn::bit_func_result_type(fc, scope);
@@ -554,21 +558,25 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
                         "operator does not exist: jsonpath = jsonpath".into(),
                     ));
                 }
-                // `NULLIF` is `=` in disguise, and `json` has no `=`. The
-                // wording is the operator's, not the function's, which is why
-                // this cannot fall through to the generic arity check.
-                ScalarFunc::NullIf if is_scalar_json(ty) => {
-                    return Err(ExecError::UndefinedFunction(
-                        "operator does not exist: json = json".into(),
-                    ));
+                // `NULLIF` is `=` in disguise, and neither `json` nor `xml`
+                // has an `=`. The wording is the operator's, not the
+                // function's, which is why this cannot fall through to the
+                // generic arity check.
+                ScalarFunc::NullIf if crate::eval::is_uncomparable_scalar(ty) => {
+                    let name = ty.name();
+                    return Err(ExecError::UndefinedFunction(format!(
+                        "operator does not exist: {name} = {name}"
+                    )));
                 }
                 ScalarFunc::Greatest | ScalarFunc::Least => {
                     if matches!(
                         ty.storage_type(),
                         ColumnType::JsonPath
                             | ColumnType::Json
+                            | ColumnType::Xml
                             | ColumnType::Array(ElemType::JsonPath)
                             | ColumnType::Array(ElemType::Json)
+                            | ColumnType::Array(ElemType::Xml)
                     ) {
                         return Err(ExecError::UndefinedFunction(format!(
                             "could not identify a comparison function for type {}",
@@ -919,6 +927,9 @@ pub(crate) fn eval_scalar(
     if crate::network_fn::is_network_func(&fc.name) {
         return crate::network_fn::eval_network(fc, ctx, eval_child);
     }
+    if crate::xml_fn::is_xml_func(&fc.name) {
+        return crate::xml_fn::eval_xml(fc, ctx, eval_child);
+    }
     if crate::bit_fn::is_bit_func(&fc.name) {
         return crate::bit_fn::eval_bit(fc, ctx, eval_child);
     }
@@ -1009,10 +1020,11 @@ pub(crate) fn eval_scalar(
                         "operator does not exist: jsonpath = jsonpath".into(),
                     ));
                 }
-                if is_scalar_json(ty) {
-                    return Err(ExecError::UndefinedFunction(
-                        "operator does not exist: json = json".into(),
-                    ));
+                if crate::eval::is_uncomparable_scalar(ty) {
+                    let name = ty.name();
+                    return Err(ExecError::UndefinedFunction(format!(
+                        "operator does not exist: {name} = {name}"
+                    )));
                 }
             }
             let vals = resolved_args(f, args, scope, ctx, &mut eval_child)?;
@@ -2315,6 +2327,7 @@ fn builtin_format_type(oid: u32) -> Option<(&'static str, TypmodKind)> {
         2278 => ("void", NoMod),
         2950 => ("uuid", NoMod),
         2951 => ("uuid[]", NoMod),
+        143 => ("xml[]", NoMod),
         3802 => ("jsonb", NoMod),
         3807 => ("jsonb[]", NoMod),
         3614 => ("tsvector", NoMod),
@@ -2721,13 +2734,6 @@ fn eval_range_constructor(
 }
 
 // ---- string helpers ----
-
-/// Is this a bare `json`? `json` has no equality operator in `PostgreSQL`, so
-/// every construct that reaches for one — `NULLIF`, `GREATEST`, `LEAST` — has to
-/// refuse it, and each with its own wording.
-fn is_scalar_json(ty: ColumnType) -> bool {
-    ty.storage_type() == ColumnType::Json
-}
 
 fn trim_ws(f: ScalarFunc, s: &str) -> String {
     match f {

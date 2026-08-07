@@ -2262,11 +2262,11 @@ fn validate_default_index_opclass(
     ty: ColumnType,
     method: crabka_pgcatalog::IndexMethod,
 ) -> Result<(), ExecError> {
-    // `json` has no operator class for ANY access method — it has no equality
-    // operator to build one on — so unlike `jsonpath` it is not limited to
-    // btree and hash. This is also what makes `j json UNIQUE` and
-    // `j json PRIMARY KEY` fail, since both build a btree index.
-    if ty.storage_type() == ColumnType::Json {
+    // `json` and `xml` have no operator class for ANY access method — neither
+    // has an equality operator to build one on — so unlike `jsonpath` they are
+    // not limited to btree and hash. This is also what makes `j json UNIQUE`
+    // and `j json PRIMARY KEY` fail, since both build a btree index.
+    if matches!(ty.storage_type(), ColumnType::Json | ColumnType::Xml) {
         return Err(ExecError::UndefinedObject(format!(
             "data type {} has no default operator class for access method \"{}\"",
             ty.name(),
@@ -2370,6 +2370,7 @@ fn ensure_default_can_be_persisted(value: &Datum) -> Result<(), ExecError> {
             | Datum::Float8(_)
             | Datum::Numeric(_)
             | Datum::Json(_)
+            | Datum::Xml(_)
             | Datum::Jsonb(_)
             | Datum::TsVector(_)
             | Datum::TsQuery(_)
@@ -16115,9 +16116,11 @@ fn format_default_value(value: &Datum, ty: ColumnType) -> String {
             let _ = write!(out, "'{}'::{}", escape_sql_string(value), ty.name());
             out
         }
-        // A json/jsonb/array default renders like PostgreSQL's `pg_get_expr`
-        // output: the value's own text, quoted and cast to the column type.
+        // A json/jsonb/xml/array default renders like PostgreSQL's
+        // `pg_get_expr` output: the value's own text, quoted and cast to the
+        // column type.
         Datum::Json(_)
+        | Datum::Xml(_)
         | Datum::Jsonb(_)
         | Datum::Array(_)
         | Datum::OidVector(_)
@@ -17508,6 +17511,17 @@ fn scalar_type_rows() -> &'static [BuiltinTypeRow] {
             elem: 0,
             array: crabka_pgtypes::oids::JSONARRAY as i32,
         },
+        // `typcategory` U, like `json` and `jsonb`: `xml` belongs to no family
+        // with a preferred type, which is one reason nothing implicitly coerces
+        // to it.
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::XML as i32,
+            name: "xml",
+            len: -1,
+            category: "U",
+            elem: 0,
+            array: crabka_pgtypes::oids::XMLARRAY as i32,
+        },
         BuiltinTypeRow {
             oid: crabka_pgtypes::oids::JSONB as i32,
             name: "jsonb",
@@ -17654,6 +17668,7 @@ fn array_typname(elem: crabka_pgtypes::ElemType) -> &'static str {
     match elem {
         ElemType::Bool => "_bool",
         ElemType::Json => "_json",
+        ElemType::Xml => "_xml",
         ElemType::Int4 => "_int4",
         ElemType::Int8 => "_int8",
         ElemType::Text => "_text",
@@ -19252,6 +19267,7 @@ pub(crate) fn column_type_from_oid(oid: u32) -> Result<ColumnType, ExecError> {
         crabka_pgtypes::oids::TIMESTAMPTZ => ColumnType::Timestamptz,
         crabka_pgtypes::oids::INTERVAL => ColumnType::Interval,
         crabka_pgtypes::oids::UUID => ColumnType::Uuid,
+        crabka_pgtypes::oids::XML => ColumnType::Xml,
         crabka_pgtypes::oids::JSON => ColumnType::Json,
         crabka_pgtypes::oids::JSONB => ColumnType::Jsonb,
         crabka_pgtypes::oids::JSONPATH => ColumnType::JsonPath,

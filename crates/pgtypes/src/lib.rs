@@ -25,6 +25,7 @@ pub mod sysid;
 pub mod text_search;
 pub mod usertype;
 pub mod uuid;
+pub mod xml;
 
 pub use bitstring::{BitString, BitwiseOp};
 pub use datum::{

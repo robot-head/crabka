@@ -121,6 +121,17 @@ pub enum TypeError {
         detail: String,
         context: String,
     },
+    /// `xml_in` / `XMLPARSE`'s rejection of a malformed value (`2200M` for a
+    /// document, `2200N` for content). The DETAIL is multi-line — libxml's
+    /// complaint, the offending input line and a caret under the column, once
+    /// per fault — because libxml keeps parsing after a recoverable error and
+    /// `PostgreSQL` prints everything it reported.
+    #[error("{message}")]
+    XmlSyntax {
+        sqlstate: &'static str,
+        message: &'static str,
+        detail: String,
+    },
 }
 
 impl TypeError {
@@ -148,6 +159,7 @@ impl TypeError {
             TypeError::InvalidCidr { .. } => "22P02",
             TypeError::CodedWithHint { sqlstate, .. } => sqlstate,
             TypeError::JsonSyntax { sqlstate, .. } => sqlstate,
+            TypeError::XmlSyntax { sqlstate, .. } => sqlstate,
         }
     }
 
@@ -161,7 +173,7 @@ impl TypeError {
             TypeError::InvalidCidr { .. } => Some(std::borrow::Cow::Borrowed(
                 "Value has bits set to right of mask.",
             )),
-            TypeError::JsonSyntax { detail, .. } => {
+            TypeError::JsonSyntax { detail, .. } | TypeError::XmlSyntax { detail, .. } => {
                 Some(std::borrow::Cow::Borrowed(detail.as_str()))
             }
             _ => None,

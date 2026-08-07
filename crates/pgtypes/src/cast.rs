@@ -141,6 +141,12 @@ pub fn cast_allowed(from: ColumnType, to: ColumnType) -> bool {
         // form, so it must not fall into the numeric rules further down.
         (ColumnType::Bit(_) | ColumnType::VarBit(_), _)
         | (_, ColumnType::Bit(_) | ColumnType::VarBit(_)) => from.is_string() || to.is_string(),
+        // `pg_cast` gives `xml` six entries and no more: `text`, `varchar` and
+        // `bpchar` each convert to it explicitly (via `xml(text)`, which is
+        // `xml_in`) and back from it at assignment level, binary-coercibly.
+        // There is deliberately no `xml → int`, no `xml → json`, and no
+        // `xml → xml[]` — nothing outside the string family.
+        (ColumnType::Xml, _) | (_, ColumnType::Xml) => from.is_string() || to.is_string(),
         // `pg_cast` has exactly two entries between the JSON types, both at
         // assignment level and both running the target's input function over the
         // source's output — which is why `'{"b":1,  "a":2}'::json::jsonb`
@@ -499,6 +505,26 @@ pub fn cast_in(
         // `json` identity keeps the text; the type carries no modifier that
         // could make a re-coercion do anything.
         (Datum::Json(text), ColumnType::Json) => Ok(Datum::Json(text.clone())),
+        // `xml` the same, and for the same reason.
+        (Datum::Xml(text), ColumnType::Xml) => Ok(Datum::Xml(text.clone())),
+        // `xml → text` is `castmethod = 'b'`: the stored bytes, reinterpreted.
+        // It must NOT go through the generic `(d, Text)` arm below, because
+        // that runs the output function — and `xml_out` rewrites the XML
+        // declaration, which a binary coercion cannot.
+        (Datum::Xml(text), Text) => Ok(Datum::Text(text.clone())),
+        (Datum::Xml(text), ColumnType::Varchar(n)) => {
+            crate::string::apply_varchar_typmod(text, n, Coercion::Explicit).map(Datum::Text)
+        }
+        (Datum::Xml(text), ColumnType::Char(n)) => {
+            crate::string::apply_char_typmod(text, n, Coercion::Explicit).map(Datum::Text)
+        }
+        // text → xml is `xml(text)`, i.e. `xml_in` under the session's
+        // `xmloption`. The type layer has no session, so it validates under the
+        // default, CONTENT; `XMLPARSE(DOCUMENT …)` is the spelling that reaches
+        // the other grammar.
+        (Datum::Text(s), ColumnType::Xml) => {
+            crate::xml::validate(s, crate::xml::XmlOption::Content).map(|()| Datum::Xml(s.clone()))
+        }
         // The two `pg_cast` entries, both `castmethod = 'i'`: each runs the
         // other type's input function over this one's output text.
         (Datum::Json(text), ColumnType::Jsonb) => crate::jsonb::parse(text).map(Datum::Jsonb),

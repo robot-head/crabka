@@ -78,6 +78,11 @@ mod tag {
     /// `PostgreSQL` `money` (`[35][8 big-endian bytes]`). Append-only — no
     /// version bump.
     pub const MONEY: u8 = 35;
+    /// `PostgreSQL` `xml` (`[43][u32 length][UTF-8 document]`). Like [`JSON`]
+    /// the stored bytes are the input text, and for the same reason: re-parsing
+    /// them on the way out would normalise a value the type exists to preserve.
+    /// Append-only — no version bump.
+    pub const XML: u8 = 43;
     /// `PostgreSQL` `json` (`[36][u32 length][UTF-8 document]`). Its own tag
     /// rather than [`JSONB`]'s, because the stored bytes are the *input* text:
     /// decoding through the `jsonb` tag would normalise them and lose exactly
@@ -229,6 +234,8 @@ fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
             Datum::Json(text) => {
                 push_tagged_bytes(out, tag::JSON, text.as_bytes(), "json column");
             }
+            // `xml` likewise stores what it was given.
+            Datum::Xml(text) => push_tagged_bytes(out, tag::XML, text.as_bytes(), "xml column"),
             Datum::Array(a) | Datum::OidVector(a) => {
                 out.push(tag::ARRAY);
                 a.elem.write_code(out);
@@ -633,6 +640,13 @@ fn decode_field(cur: &mut &[u8]) -> Result<Datum, KvError> {
             // Stored verbatim and returned verbatim: no re-parse, because a
             // re-parse is precisely what would normalise it.
             Datum::Json(text.to_string())
+        }
+        tag::XML => {
+            let len = take_u32_len(cur)?;
+            let raw = take_n(cur, len)?;
+            let text = std::str::from_utf8(raw)
+                .map_err(|_| KvError::CorruptRow("xml text is not valid UTF-8".into()))?;
+            Datum::Xml(text.to_string())
         }
         tag::ARRAY => {
             let elem = crabka_pgtypes::ElemType::read_code(cur)

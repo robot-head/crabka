@@ -758,6 +758,11 @@ pub(crate) fn apply_unary(op: UnaryOp, v: &Datum, _ctx: &EvalCtx) -> Result<Datu
         UnaryOp::Plus | UnaryOp::BitNot | UnaryOp::Abs | UnaryOp::Sqrt | UnaryOp::Cbrt => {
             apply_prefix_op(op, v)
         }
+        // `IS [NOT] DOCUMENT` is the one postfix test that is NOT total: a
+        // NULL `xml` yields NULL, because unlike the boolean tests it asks a
+        // question about a value rather than about its definedness.
+        UnaryOp::IsDocument => crate::xml_fn::is_document(v, false),
+        UnaryOp::IsNotDocument => crate::xml_fn::is_document(v, true),
         // The postfix boolean tests. Each is total over its operand — the whole
         // point of `IS TRUE` over `= TRUE` is that a NULL operand yields FALSE
         // rather than NULL — so none of them can return NULL.
@@ -899,6 +904,8 @@ fn apply_prefix_op(op: UnaryOp, v: &Datum) -> Result<Datum, ExecError> {
         | UnaryOp::IsNotFalse
         | UnaryOp::IsUnknown
         | UnaryOp::IsNotUnknown
+        | UnaryOp::IsDocument
+        | UnaryOp::IsNotDocument
         | UnaryOp::TsNot => Err(undefined_prefix_operator(op, v)),
     }
 }
@@ -2695,6 +2702,8 @@ fn has_no_operator_class(ty: ColumnType) -> bool {
             | ColumnType::Array(ElemType::JsonPath)
             | ColumnType::Json
             | ColumnType::Array(ElemType::Json)
+            | ColumnType::Xml
+            | ColumnType::Array(ElemType::Xml)
     )
 }
 
@@ -2722,13 +2731,16 @@ pub(crate) fn is_scalar_jsonpath(ty: ColumnType) -> bool {
     ty.storage_type() == ColumnType::JsonPath
 }
 
-/// Is this the `json` type itself (through any domain over it)? An ARRAY of
-/// `json` is deliberately not: `json[] = json[]` resolves `array_eq` at parse
+/// Is this `json` or `xml` itself (through any domain over either)? An ARRAY of
+/// one is deliberately not: `json[] = json[]` resolves `array_eq` at parse
 /// analysis and only fails when it looks for the ELEMENT operator, so its error
 /// is `could not identify an equality operator for type json`, not
 /// `operator does not exist`.
-pub(crate) fn is_scalar_json(ty: ColumnType) -> bool {
-    ty.storage_type() == ColumnType::Json
+/// `json` and `xml` are the two types `PostgreSQL` declares with no comparison
+/// operator of any kind, so every construct that reaches for one has to refuse
+/// them both and name whichever it was given.
+pub(crate) fn is_uncomparable_scalar(ty: ColumnType) -> bool {
+    matches!(ty.storage_type(), ColumnType::Json | ColumnType::Xml)
 }
 
 pub(crate) fn require_runtime_equality(left: &Datum, right: &Datum) -> Result<(), ExecError> {
@@ -3063,6 +3075,16 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
                 Ok(operand)
             }
             UnaryOp::Sqrt | UnaryOp::Cbrt => Ok(ColumnType::Float8),
+            // `IS DOCUMENT` is boolean-valued over an `xml` operand, and
+            // PostgreSQL rejects any other operand type right here.
+            UnaryOp::IsDocument | UnaryOp::IsNotDocument => {
+                crate::xml_fn::check_is_document_operand(
+                    expr,
+                    scope,
+                    *op == UnaryOp::IsNotDocument,
+                )?;
+                Ok(ColumnType::Bool)
+            }
             // The boolean tests are boolean-valued, but only over a boolean
             // operand: PostgreSQL rejects `1 IS TRUE` at parse analysis, which
             // is here. A bare literal is still `unknown` and adopts `boolean`,
@@ -3538,10 +3560,11 @@ fn reject_uncomparable_comparison(
     } else {
         op_spelling(op)
     };
-    // `json` has no comparison operator at ANY width, so an `unknown` literal
-    // beside one adopts nothing — PostgreSQL leaves it `unknown` and names it
-    // that way (`operator does not exist: json = unknown`).
-    if is_scalar_json(left_type) || is_scalar_json(right_type) {
+    // `json` and `xml` have no comparison operator at ANY width, so an
+    // `unknown` literal beside one adopts nothing — PostgreSQL leaves it
+    // `unknown` and names it that way (`operator does not exist: xml =
+    // unknown`).
+    if is_uncomparable_scalar(left_type) || is_uncomparable_scalar(right_type) {
         let name = |e: &Expr, t: ColumnType| {
             if is_unknown_literal(e) {
                 "unknown"

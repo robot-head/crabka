@@ -128,6 +128,10 @@ pub mod oids {
     pub const JSONPATH: u32 = 4072;
     /// PostgreSQL `jsonpath[]`.
     pub const JSONPATHARRAY: u32 = 4073;
+    /// PostgreSQL `xml` — a document or fragment kept as the text it was given.
+    pub const XML: u32 = 142;
+    /// `xml[]`.
+    pub const XMLARRAY: u32 = 143;
     pub const INT4RANGE: u32 = 3904;
     pub const INT4RANGEARRAY: u32 = 3905;
     pub const NUMRANGE: u32 = 3906;
@@ -252,6 +256,7 @@ pub enum ElemType {
     Json,
     Jsonb,
     JsonPath,
+    Xml,
     Int2,
     Float4,
     Regtype,
@@ -268,7 +273,7 @@ impl ElemType {
     /// Every supported array element type, in `code()` order. The two
     /// length-modified entries stand for their whole family — `from_code`
     /// reconstructs the modifier, and neither the OID nor the name depends on it.
-    pub const ALL: [ElemType; 21] = [
+    pub const ALL: [ElemType; 22] = [
         ElemType::Bool,
         ElemType::Int4,
         ElemType::Int8,
@@ -290,6 +295,7 @@ impl ElemType {
         ElemType::Regtype,
         ElemType::JsonPath,
         ElemType::Json,
+        ElemType::Xml,
     ];
 
     /// The element type as a column type (`numeric` is unconstrained, because an
@@ -310,6 +316,7 @@ impl ElemType {
             ElemType::Bytea => ColumnType::Bytea,
             ElemType::Uuid => ColumnType::Uuid,
             ElemType::Json => ColumnType::Json,
+            ElemType::Xml => ColumnType::Xml,
             ElemType::Jsonb => ColumnType::Jsonb,
             ElemType::JsonPath => ColumnType::JsonPath,
             ElemType::Int2 => ColumnType::Int2,
@@ -344,6 +351,7 @@ impl ElemType {
             ColumnType::Bytea => ElemType::Bytea,
             ColumnType::Uuid => ElemType::Uuid,
             ColumnType::Json => ElemType::Json,
+            ColumnType::Xml => ElemType::Xml,
             ColumnType::Jsonb => ElemType::Jsonb,
             ColumnType::JsonPath => ElemType::JsonPath,
             ColumnType::Int2 => ElemType::Int2,
@@ -430,6 +438,7 @@ impl ElemType {
             ElemType::Bytea => oids::BYTEAARRAY,
             ElemType::Uuid => oids::UUIDARRAY,
             ElemType::Json => oids::JSONARRAY,
+            ElemType::Xml => oids::XMLARRAY,
             ElemType::Jsonb => oids::JSONBARRAY,
             ElemType::JsonPath => oids::JSONPATHARRAY,
             ElemType::Int2 => oids::INT2ARRAY,
@@ -480,6 +489,7 @@ impl ElemType {
             ElemType::Bytea => "bytea[]",
             ElemType::Uuid => "uuid[]",
             ElemType::Json => "json[]",
+            ElemType::Xml => "xml[]",
             ElemType::Jsonb => "jsonb[]",
             ElemType::JsonPath => "jsonpath[]",
             ElemType::Int2 => "smallint[]",
@@ -546,6 +556,7 @@ impl ElemType {
             ElemType::Regtype => 20,
             ElemType::JsonPath => 21,
             ElemType::Json => 22,
+            ElemType::Xml => 23,
         }
     }
 
@@ -814,6 +825,11 @@ pub enum ColumnType {
     /// PostgreSQL `jsonb` (OID 3802) — decomposed JSON: whitespace dropped,
     /// numbers held as `numeric`, object keys sorted and de-duplicated.
     Jsonb,
+    /// PostgreSQL `xml` (OID 142) — a document or fragment, validated on input
+    /// and then kept byte for byte, the way [`ColumnType::Json`] keeps its text.
+    /// `pg_cast` declares `xml` binary-coercible to `text`, which is only
+    /// possible because the two really are the same bytes.
+    Xml,
     /// PostgreSQL `jsonpath` (OID 4072). Values use the existing canonical text
     /// datum; the executor validates and normalizes them at input boundaries.
     JsonPath,
@@ -963,6 +979,7 @@ impl ColumnType {
             "macaddr" => Some(ColumnType::MacAddr),
             "macaddr8" => Some(ColumnType::MacAddr8),
             "json" => Some(ColumnType::Json),
+            "xml" => Some(ColumnType::Xml),
             "jsonb" => Some(ColumnType::Jsonb),
             "jsonpath" => Some(ColumnType::JsonPath),
             // The anonymous composite type. `SELECT ROW(1,2)` has it, and it is
@@ -1080,6 +1097,7 @@ impl ColumnType {
             ColumnType::Bit(_) => oids::BIT,
             ColumnType::VarBit(_) => oids::VARBIT,
             ColumnType::Json => oids::JSON,
+            ColumnType::Xml => oids::XML,
             ColumnType::Jsonb => oids::JSONB,
             ColumnType::JsonPath => oids::JSONPATH,
             ColumnType::Array(elem) => elem.array_oid(),
@@ -1147,6 +1165,7 @@ impl ColumnType {
             ColumnType::Bit(_) => "bit",
             ColumnType::VarBit(_) => "bit varying",
             ColumnType::Json => "json",
+            ColumnType::Xml => "xml",
             ColumnType::Jsonb => "jsonb",
             ColumnType::JsonPath => "jsonpath",
             ColumnType::Array(elem) => elem.array_name(),
@@ -1209,8 +1228,10 @@ impl ColumnType {
             // `money` is a pass-by-value int64; the two bit types are varlena.
             ColumnType::Money => 8,
             ColumnType::Bit(_) | ColumnType::VarBit(_) => -1,
-            // json, jsonb, jsonpath, arrays and composites are variable-length.
-            ColumnType::Json
+            // xml, json, jsonb, jsonpath, arrays and composites are
+            // variable-length.
+            ColumnType::Xml
+            | ColumnType::Json
             | ColumnType::Jsonb
             | ColumnType::JsonPath
             | ColumnType::Array(_)
@@ -1339,6 +1360,11 @@ pub enum Datum {
     /// then left exactly as written. Holding the text rather than a parse tree
     /// is what makes `'{"b":1,   "a":2}'::json` print back unchanged.
     Json(String),
+    /// PostgreSQL `xml` — the document or fragment exactly as `xml_in`
+    /// received it. Holding the text rather than a tree is what lets
+    /// `'<a  b = "1" />'::xml` print back with its spacing intact, and is why
+    /// `xml → text` can be binary-coercible.
+    Xml(String),
     /// PostgreSQL `jsonb` — a decomposed JSON value in canonical form.
     Jsonb(crate::jsonb::JsonbValue),
     /// A one-dimensional PostgreSQL array.
@@ -1774,6 +1800,11 @@ impl PartialEq for Datum {
             // detection, default comparison), where two `json` values are the
             // same only when their text is.
             (Datum::Json(a), Datum::Json(b)) => a == b,
+            // `xml` has no equality operator either, for the same reason: two
+            // documents can differ in bytes and mean the same thing, and
+            // PostgreSQL declines to choose. This arm serves the executor's own
+            // bookkeeping only.
+            (Datum::Xml(a), Datum::Xml(b)) => a == b,
             (Datum::Jsonb(a), Datum::Jsonb(b)) => a == b,
             // Arrays are equal when their element type and every element are.
             (Datum::Array(a), Datum::Array(b)) => a == b,
@@ -1867,7 +1898,7 @@ impl std::hash::Hash for Datum {
             // SP40: bytea hashes its bytes.
             Datum::Bytea(b) => b.hash(state),
             // Both hash scale-normalized numbers internally, matching `Eq`.
-            Datum::Json(text) => text.hash(state),
+            Datum::Json(text) | Datum::Xml(text) => text.hash(state),
             Datum::Jsonb(j) => j.hash(state),
             Datum::Array(a) => a.hash(state),
             Datum::OidVector(a) => a.hash(state),
@@ -1920,6 +1951,7 @@ impl Datum {
             Datum::Interval(_) => Some(ColumnType::Interval),
             Datum::Bytea(_) => Some(ColumnType::Bytea),
             Datum::Json(_) => Some(ColumnType::Json),
+            Datum::Xml(_) => Some(ColumnType::Xml),
             Datum::Jsonb(_) => Some(ColumnType::Jsonb),
             Datum::Array(a) => Some(a.column_type()),
             Datum::OidVector(_) => Some(ColumnType::OidVector),
@@ -2618,6 +2650,7 @@ mod tests {
             (ElemType::Interval, 1186, 1187, "interval[]"),
             (ElemType::Uuid, 2950, 2951, "uuid[]"),
             (ElemType::Json, 114, 199, "json[]"),
+            (ElemType::Xml, 142, 143, "xml[]"),
             (ElemType::Jsonb, 3802, 3807, "jsonb[]"),
             (ElemType::JsonPath, 4072, 4073, "jsonpath[]"),
             (ElemType::Int2, 21, 1005, "smallint[]"),

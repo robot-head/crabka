@@ -1259,7 +1259,9 @@ impl Parser {
                 Keyword::Not | Keyword::Null | Keyword::Distinct | Keyword::True | Keyword::False,
             ) => true,
             Token::Ident(word) => {
-                word.eq_ignore_ascii_case("unknown") || word.eq_ignore_ascii_case("json")
+                word.eq_ignore_ascii_case("unknown")
+                    || word.eq_ignore_ascii_case("json")
+                    || word.eq_ignore_ascii_case("document")
             }
             _ => false,
         }
@@ -2522,8 +2524,137 @@ impl Parser {
             "trim" => self.trim_expr(),
             "position" => self.position_expr(),
             "overlay" => self.overlay_expr(),
+            "xmlparse" => self.xmlparse_expr(),
+            "xmlserialize" => self.xmlserialize_expr(),
+            "xmlconcat" => self.xmlconcat_expr(),
             _ => Ok(None),
         }
+    }
+
+    /// `XMLPARSE ( {DOCUMENT | CONTENT} value [{PRESERVE | STRIP} WHITESPACE] )`.
+    ///
+    /// Lowers onto `xmlparse('document'|'content', value)`, the way `EXTRACT`
+    /// lowers onto `extract('field', src)`: the mode is grammar, not a value, so
+    /// it can only arrive as a literal.
+    ///
+    /// The whitespace option is parsed and discarded. It selects whether libxml
+    /// keeps ignorable whitespace in the *tree*, and `XMLPARSE` returns the
+    /// input text rather than the tree, so nothing downstream can observe it.
+    fn xmlparse_expr(&mut self) -> Result<Option<Expr>, ParseError> {
+        self.expect(&Token::LParen)?;
+        let mode = self.xml_option_word()?;
+        let value = self.expr(0)?;
+        if self.eat_word_eq("preserve") || self.eat_word_eq("strip") {
+            self.expect_ident_eq("whitespace")?;
+        }
+        self.expect(&Token::RParen)?;
+        Ok(Some(Self::call(
+            "xmlparse",
+            vec![Expr::StringLiteral(mode.to_string()), value],
+        )))
+    }
+
+    /// `XMLSERIALIZE ( {DOCUMENT | CONTENT} value AS type [[NO] INDENT] )`.
+    ///
+    /// Lowers onto `xmlserialize('document'|'content', value, indent)` wrapped
+    /// in a cast to the target type — which is `PostgreSQL`'s own shape, not an
+    /// approximation of it: `pg_get_viewdef` prints
+    /// `(XMLSERIALIZE(...))::character varying` for a non-`text` target because
+    /// the parse tree really does carry that cast.
+    fn xmlserialize_expr(&mut self) -> Result<Option<Expr>, ParseError> {
+        let start = self.peek_pos();
+        self.expect(&Token::LParen)?;
+        let mode = self.xml_option_word()?;
+        let value = Self::coerce_to_xml(self.expr(0)?);
+        self.expect(&Token::Keyword(Keyword::As))?;
+        let ty = self.parse_type_name()?;
+        // `NO INDENT` is the default, so both spellings are accepted and only
+        // `INDENT` alone turns formatting on.
+        let indent = if self.eat_word_eq("no") {
+            self.expect_ident_eq("indent")?;
+            false
+        } else {
+            self.eat_word_eq("indent")
+        };
+        self.expect(&Token::RParen)?;
+        // The target must be a character string type. PostgreSQL checks this in
+        // the parser, pointing at the construct rather than the type name.
+        if !matches!(
+            ty,
+            crabka_pgtypes::ColumnType::Text
+                | crabka_pgtypes::ColumnType::Varchar(_)
+                | crabka_pgtypes::ColumnType::Char(_)
+        ) {
+            return Err(ParseError::new_sqlstate(
+                "42846",
+                format!("cannot cast XMLSERIALIZE result to {}", ty.name()),
+                start,
+            ));
+        }
+        let serialized = Self::call(
+            "xmlserialize",
+            vec![
+                Expr::StringLiteral(mode.to_string()),
+                value,
+                Expr::BoolLiteral(indent),
+            ],
+        );
+        Ok(Some(Expr::Cast {
+            expr: Box::new(serialized),
+            ty,
+        }))
+    }
+
+    /// `XMLCONCAT ( xml, … )`.
+    ///
+    /// Lowers onto `xmlconcat(…)` with each argument coerced to `xml`, which is
+    /// what `PostgreSQL`'s parse analysis does — and the reason a view over it
+    /// deparses as `XMLCONCAT('hello'::xml, 'you'::xml)` rather than naming the
+    /// literals' own type.
+    fn xmlconcat_expr(&mut self) -> Result<Option<Expr>, ParseError> {
+        self.expect(&Token::LParen)?;
+        let mut args = Vec::new();
+        loop {
+            args.push(Self::coerce_to_xml(self.expr(0)?));
+            if !self.eat_comma() {
+                break;
+            }
+        }
+        self.expect(&Token::RParen)?;
+        Ok(Some(Self::call("xmlconcat", args)))
+    }
+
+    /// Resolve an untyped literal argument to `xml`, as `PostgreSQL`'s parse
+    /// analysis does — which is why a view over `XMLCONCAT('hello', 'you')`
+    /// deparses as `XMLCONCAT('hello'::xml, 'you'::xml)`.
+    ///
+    /// Only an `unknown` literal is coerced. An argument that already has a
+    /// type must arrive at the executor with it, so `XMLCONCAT(1, 2)` reports
+    /// `argument of XMLCONCAT must be type xml, not type integer` rather than a
+    /// cast failure.
+    fn coerce_to_xml(expr: Expr) -> Expr {
+        if !matches!(expr, Expr::StringLiteral(_)) {
+            return expr;
+        }
+        Expr::Cast {
+            expr: Box::new(expr),
+            ty: crabka_pgtypes::ColumnType::Xml,
+        }
+    }
+
+    /// The mandatory `DOCUMENT` / `CONTENT` word that opens `XMLPARSE` and
+    /// `XMLSERIALIZE`. Neither is a keyword, so both arrive as identifiers.
+    fn xml_option_word(&mut self) -> Result<&'static str, ParseError> {
+        if self.eat_word_eq("document") {
+            return Ok("document");
+        }
+        if self.eat_word_eq("content") {
+            return Ok("content");
+        }
+        Err(ParseError::new(
+            format!("expected DOCUMENT or CONTENT, found {:?}", self.peek()),
+            self.peek_pos(),
+        ))
     }
 
     /// `SUBSTRING(s FROM start FOR count)` and its shorter spellings. `FOR`
@@ -2783,6 +2914,20 @@ impl Parser {
                 op,
                 left: Box::new(lhs),
                 right: Box::new(right),
+            });
+        }
+        // `expr IS [NOT] DOCUMENT` — the XML predicate, which needs the
+        // two-token lookahead above because `document` is unreserved and stays
+        // a legal column name and alias.
+        if self.peek_ident_eq("document") {
+            self.bump();
+            return Ok(Expr::Unary {
+                op: if negated {
+                    UnaryOp::IsNotDocument
+                } else {
+                    UnaryOp::IsDocument
+                },
+                expr: Box::new(lhs),
             });
         }
         // `expr IS [NOT] JSON [VALUE | SCALAR | ARRAY | OBJECT]

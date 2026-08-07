@@ -122,6 +122,7 @@ mod values;
 mod viewdef;
 pub mod watchdog;
 mod window;
+mod xml_fn;
 
 use std::{
     collections::HashMap,

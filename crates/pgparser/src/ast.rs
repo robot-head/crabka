@@ -2945,9 +2945,7 @@ impl JsonTableValueColumn {
 #[must_use]
 pub fn json_table_composite_type(ty: ColumnType) -> bool {
     match ty {
-        ColumnType::Json | ColumnType::Jsonb | ColumnType::Record(_) | ColumnType::Array(_) => {
-            true
-        }
+        ColumnType::Json | ColumnType::Jsonb | ColumnType::Record(_) | ColumnType::Array(_) => true,
         ColumnType::Domain(domain) => json_table_composite_type(*domain.base),
         _ => false,
     }
@@ -3722,6 +3720,12 @@ pub enum UnaryOp {
     IsNotFalse,
     /// `expr IS UNKNOWN`: `IS NULL` restricted to a boolean operand.
     IsUnknown,
+    /// `expr IS DOCUMENT` — is this `xml` value a single-rooted document?
+    /// Never raises on a malformed value: anything that fails the document
+    /// grammar is simply not a document.
+    IsDocument,
+    /// `expr IS NOT DOCUMENT`
+    IsNotDocument,
     /// `expr IS NOT UNKNOWN`
     IsNotUnknown,
     /// Prefix `~`: bitwise NOT. Spelled like the infix regex-match operator;

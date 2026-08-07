@@ -335,7 +335,10 @@ pub(crate) fn func_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnTyp
             // `min`/`max` need a btree opclass, and `xid`/`cid` have none, so
             // PostgreSQL simply declares no `min(xid)` aggregate — the error is
             // the missing *function*, not a missing operator.
-            if crate::eval::is_scalar_jsonpath(ty) || crate::eval::has_no_btree_opclass(ty) {
+            if crate::eval::is_scalar_jsonpath(ty)
+                || crate::eval::is_uncomparable_scalar(ty)
+                || crate::eval::has_no_btree_opclass(ty)
+            {
                 return Err(undefined_for_arg(&fc.name, ty));
             }
             Ok(ty)
