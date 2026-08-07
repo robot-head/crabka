@@ -2945,7 +2945,9 @@ impl JsonTableValueColumn {
 #[must_use]
 pub fn json_table_composite_type(ty: ColumnType) -> bool {
     match ty {
-        ColumnType::Jsonb | ColumnType::Record(_) | ColumnType::Array(_) => true,
+        ColumnType::Json | ColumnType::Jsonb | ColumnType::Record(_) | ColumnType::Array(_) => {
+            true
+        }
         ColumnType::Domain(domain) => json_table_composite_type(*domain.base),
         _ => false,
     }
@@ -3424,10 +3426,14 @@ impl SqlJsonExpr {
     pub fn result_type(&self) -> ColumnType {
         match self {
             SqlJsonExpr::IsJson { .. } => ColumnType::Bool,
+            // The SQL/JSON constructors default to `json`, not `jsonb`:
+            // `JSON_OBJECT('a': 1)` is `{"a" : 1}` of type json, and
+            // `JSON('{"b":1,  "a":2}')` keeps its spacing. Only `JSON_QUERY`
+            // below defaults to `jsonb`.
             SqlJsonExpr::Object { returning, .. } | SqlJsonExpr::Array { returning, .. } => {
-                returning.unwrap_or(ColumnType::Jsonb)
+                returning.unwrap_or(ColumnType::Json)
             }
-            SqlJsonExpr::Scalar(_) | SqlJsonExpr::Parse { .. } => ColumnType::Jsonb,
+            SqlJsonExpr::Scalar(_) | SqlJsonExpr::Parse { .. } => ColumnType::Json,
             SqlJsonExpr::Serialize { returning, .. } => returning.unwrap_or(ColumnType::Text),
             SqlJsonExpr::Query(q) => match q.op {
                 JsonQueryOp::Exists => q.returning.unwrap_or(ColumnType::Bool),

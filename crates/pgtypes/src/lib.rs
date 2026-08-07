@@ -12,6 +12,7 @@ pub mod datum;
 pub mod encoding;
 pub mod error;
 pub mod geometry;
+pub mod json;
 pub mod jsonb;
 pub mod money;
 pub mod multirange;

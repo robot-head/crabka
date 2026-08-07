@@ -452,7 +452,12 @@ impl Plan<'_> {
     /// goes through the same populate path a formatted column uses — where a
     /// boolean spells itself `false`.
     fn scalar_item(&self, item: &JsonbValue, ty: ColumnType) -> Result<Datum, ExecError> {
-        if ty == ColumnType::Jsonb {
+        // `json` and `jsonb` alike take the item's JSON rendering. The item
+        // has already been through a jsonpath evaluation, which is a `jsonb`
+        // operation, so a `json` column here reports the canonical spelling —
+        // exactly as PostgreSQL does, whose JSON_QUERY returns `jsonb` and then
+        // casts.
+        if ty == ColumnType::Jsonb || ty == ColumnType::Json {
             return self.convert(&item.to_text(), ty);
         }
         if let ColumnType::Domain(domain) = ty

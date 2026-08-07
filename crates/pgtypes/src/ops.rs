@@ -620,6 +620,18 @@ pub fn compare(a: &Datum, b: &Datum) -> Result<Option<Ordering>, TypeError> {
         // Placed before the numeric fall-throughs, which would otherwise try to
         // promote these to f64 and fail.
         (Datum::Jsonb(x), Datum::Jsonb(y)) => x.cmp(y),
+        // `json` has no btree opclass and no equality operator in PostgreSQL, so
+        // there is nothing to compare it *with*. GROUP BY, DISTINCT and the set
+        // operations all reach this arm and must report what PostgreSQL reports
+        // rather than inventing a text order — text order would make
+        // `'{"a":1}'` and `'{"a": 1}'` two groups on one side and one on the
+        // other, silently.
+        (Datum::Json(_), Datum::Json(_)) => {
+            return Err(TypeError::Coded {
+                sqlstate: "42883",
+                message: "could not identify an equality operator for type json".to_string(),
+            });
+        }
         (Datum::TsVector(x), Datum::TsVector(y)) => x.cmp(y),
         (Datum::TsQuery(x), Datum::TsQuery(y)) => x.cmp(y),
         // `network_cmp`: one comparison for `inet` and `cidr` alike, so a

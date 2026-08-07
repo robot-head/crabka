@@ -18,7 +18,9 @@ use std::{
 };
 
 use crabka_pgparser::ast::{Expr, FuncArgs, FuncCall, SelectItem, SelectStmt};
-use crabka_pgtypes::{ColumnType, Datum, ElemType, TypeError, numeric::NumericValue, ops};
+use crabka_pgtypes::{
+    ColumnType, Datum, ElemType, TypeError, json::Layout, numeric::NumericValue, ops,
+};
 use crabka_pgwire::engine::QueryResult;
 
 use crate::{clock::EvalCtx, error::ExecError, scope::Scope};
@@ -49,7 +51,15 @@ enum AggFunc {
     JsonbAgg,
     /// `jsonb_object_agg(key, value)`, the inputs as a JSON object.
     JsonbObjectAgg,
-    /// `string_agg(value, delimiter)`, the values joined by the delimiter.
+    /// `json_agg(x)` — [`JsonbAgg`](AggFunc::JsonbAgg)'s `json` twin. Not an
+    /// alias: the result is `json`, so it keeps input order, keeps duplicate
+    /// keys, and inlines a `json` input verbatim.
+    JsonAgg,
+    /// `json_object_agg(key, value)` — [`JsonbObjectAgg`](AggFunc::JsonbObjectAgg)'s
+    /// `json` twin. `jsonb` collapses a repeated key last-wins; this emits every
+    /// pair it was given, in fold order.
+    JsonObjectAgg,
+    /// `string_agg(value, delimiter)` — the values joined by the delimiter.
     StringAgg,
     /// `bool_and(b)` / `every(b)`, true when no input is false.
     BoolAnd,
@@ -124,8 +134,19 @@ impl AggFunc {
     fn keeps_nulls(self) -> bool {
         matches!(
             self,
-            AggFunc::ArrayAgg | AggFunc::JsonbAgg | AggFunc::JsonbObjectAgg
+            AggFunc::ArrayAgg
+                | AggFunc::JsonbAgg
+                | AggFunc::JsonbObjectAgg
+                | AggFunc::JsonAgg
+                | AggFunc::JsonObjectAgg
         )
+    }
+
+    /// Does this aggregate build `json` rather than `jsonb`? The two families
+    /// share every arity, argument and NULL rule and differ only in the type
+    /// they return and therefore in how they render.
+    fn is_json(self) -> bool {
+        matches!(self, AggFunc::JsonAgg | AggFunc::JsonObjectAgg)
     }
 }
 
@@ -153,6 +174,8 @@ fn aggregate_func(name: &str) -> Option<AggFunc> {
         "array_agg" => Some(AggFunc::ArrayAgg),
         "jsonb_agg" => Some(AggFunc::JsonbAgg),
         "jsonb_object_agg" => Some(AggFunc::JsonbObjectAgg),
+        "json_agg" => Some(AggFunc::JsonAgg),
+        "json_object_agg" => Some(AggFunc::JsonObjectAgg),
         "string_agg" => Some(AggFunc::StringAgg),
         // `every` is SQL's spelling of `bool_and`; `variance`/`stddev` are
         // PostgreSQL's historical aliases for the SAMPLE forms.
@@ -326,14 +349,14 @@ pub(crate) fn func_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnTyp
                 array_of(t)
             }
         }
-        AggFunc::JsonbAgg => {
+        AggFunc::JsonbAgg | AggFunc::JsonAgg => {
             single_value_arg(fc)?;
-            Ok(ColumnType::Jsonb)
+            Ok(json_result_type(func))
         }
-        AggFunc::JsonbObjectAgg => {
+        AggFunc::JsonbObjectAgg | AggFunc::JsonObjectAgg => {
             let (key, _) = two_value_args(fc)?;
             crate::eval::infer_type(key, scope)?;
-            Ok(ColumnType::Jsonb)
+            Ok(json_result_type(func))
         }
         // `string_agg(text, text)` and `string_agg(bytea, bytea)`; the value
         // argument picks the overload and is also the result type.
@@ -457,8 +480,18 @@ fn single_value_arg(fc: &FuncCall) -> Result<&Expr, ExecError> {
     }
 }
 
-/// The `(key, value)` arguments of `jsonb_object_agg`. Any other arity is
-/// 42883.
+/// The type a JSON-building aggregate returns — the ONLY thing that separates
+/// `json_agg` from `jsonb_agg` at plan time, since the two share their arity and
+/// accept the same arguments.
+fn json_result_type(func: AggFunc) -> ColumnType {
+    if func.is_json() {
+        ColumnType::Json
+    } else {
+        ColumnType::Jsonb
+    }
+}
+
+/// The `(key, value)` arguments of `jsonb_object_agg`; 42883 for any other arity.
 fn two_value_args(fc: &FuncCall) -> Result<(&Expr, &Expr), ExecError> {
     match &fc.args {
         FuncArgs::Exprs(args) if args.len() == 2 => Ok((&args[0], &args[1])),
@@ -549,7 +582,7 @@ fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
         },
         // The collecting aggregates: one value argument, any type array_agg has
         // an array type for (jsonb_agg accepts every type).
-        AggFunc::ArrayAgg | AggFunc::JsonbAgg => {
+        AggFunc::ArrayAgg | AggFunc::JsonbAgg | AggFunc::JsonAgg => {
             let arg = single_value_arg(fc)?;
             reject_nested_aggregate(arg)?;
             let arg_type = crate::eval::infer_type(arg, scope)?;
@@ -567,7 +600,7 @@ fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
                 filter: fc.filter.as_deref().cloned(),
             })
         }
-        AggFunc::JsonbObjectAgg => {
+        AggFunc::JsonbObjectAgg | AggFunc::JsonObjectAgg => {
             let (key, value) = two_value_args(fc)?;
             reject_nested_aggregate(key)?;
             reject_nested_aggregate(value)?;
@@ -1444,14 +1477,16 @@ enum AccState {
         elem: ElemType,
         elems: Vec<Datum>,
     },
-    /// `jsonb_agg`, the values in fold order, converted to JSON at `finish`.
-    JsonbAgg {
+    /// `jsonb_agg` / `json_agg` — the values in fold order, converted to JSON at
+    /// `finish`. Both families accumulate identically and diverge only in how
+    /// `finish` renders them, so `spec.func` — not the state — picks the type.
+    JsonItems {
         items: Vec<Datum>,
     },
-    /// `jsonb_object_agg`, the (key, value) pairs in fold order, built into one
-    /// object at `finish`. A duplicate key takes the last value, and a NULL key
-    /// is 22023.
-    JsonbObjectAgg {
+    /// `jsonb_object_agg` / `json_object_agg` — the (key, value) pairs in fold
+    /// order, built into one object at `finish`. `jsonb` then collapses a
+    /// repeated key last-wins; `json` keeps every pair.
+    JsonPairs {
         pairs: Vec<(Datum, Datum)>,
     },
     /// `string_agg`, the joined value so far.
@@ -1667,8 +1702,10 @@ impl AccState {
                     .unwrap_or(ElemType::Text),
                 elems: Vec::new(),
             },
-            AggFunc::JsonbAgg => AccState::JsonbAgg { items: Vec::new() },
-            AggFunc::JsonbObjectAgg => AccState::JsonbObjectAgg { pairs: Vec::new() },
+            AggFunc::JsonbAgg | AggFunc::JsonAgg => AccState::JsonItems { items: Vec::new() },
+            AggFunc::JsonbObjectAgg | AggFunc::JsonObjectAgg => {
+                AccState::JsonPairs { pairs: Vec::new() }
+            }
             AggFunc::StringAgg => AccState::StringAgg { acc: None },
             AggFunc::BoolAnd | AggFunc::BoolOr => AccState::BoolAgg {
                 any_true: false,
@@ -1815,12 +1852,12 @@ impl AccState {
                     crabka_pgtypes::cast::cast(&v, elem.column_type(), &ctx.time_zone)?
                 });
             }
-            AccState::JsonbAgg { items } => items.push(v),
-            AccState::JsonbObjectAgg { pairs } => {
+            AccState::JsonItems { items } => items.push(v),
+            AccState::JsonPairs { pairs } => {
                 let value = args
                     .get(1)
                     .cloned()
-                    .expect("jsonb_object_agg has a value argument");
+                    .expect("an object aggregate has a value argument");
                 pairs.push((v, value));
             }
             AccState::StringAgg { acc } => {
@@ -2058,16 +2095,23 @@ impl AccState {
                     crate::array_fn::build_constructor(*elem, elems.clone())?
                 }
             }
-            AccState::JsonbAgg { items } => {
+            // Zero rows is SQL NULL, not an empty array/object — and it is NULL
+            // even when a row WOULD have failed, so the run-time key checks below
+            // are never reached for an empty group.
+            AccState::JsonItems { items } => {
                 if items.is_empty() {
                     Datum::Null
+                } else if spec.func.is_json() {
+                    build_json_array(items, ctx)?
                 } else {
                     build_jsonb("jsonb_build_array", items.clone(), ctx)?
                 }
             }
-            AccState::JsonbObjectAgg { pairs } => {
+            AccState::JsonPairs { pairs } => {
                 if pairs.is_empty() {
                     Datum::Null
+                } else if spec.func.is_json() {
+                    build_json_object(pairs, ctx)?
                 } else {
                     let mut flat = Vec::with_capacity(pairs.len() * 2);
                     for (key, value) in pairs {
@@ -2287,6 +2331,101 @@ fn build_jsonb(builder: &str, args: Vec<Datum>, ctx: &EvalCtx) -> Result<Datum, 
             "internal: a jsonb aggregate builds only from constants".into(),
         )),
     })
+}
+
+/// `json_agg`'s array.
+///
+/// The `json` family cannot route through a [`JsonbValue`](crabka_pgtypes::jsonb::JsonbValue)
+/// the way [`build_jsonb`] does, because building one is exactly what `json_agg`
+/// must not do: `jsonb` would sort an object element's keys, collapse its
+/// duplicates and rewrite its spacing, and preserving all three is the whole
+/// difference between the two types. Each element is rendered on its own through
+/// `to_json` and the pieces are joined under `PostgreSQL`'s layout instead.
+fn build_json_array(items: &[Datum], ctx: &EvalCtx) -> Result<Datum, ExecError> {
+    let mut out = String::from("[");
+    for (i, item) in items.iter().enumerate() {
+        if i > 0 {
+            out.push_str(Layout::Spaced.comma());
+            // `json_agg_transfn`'s "add some whitespace if structured type and
+            // not first item": an array or composite element — and only one of
+            // those, and only after a separator — is preceded by a line feed.
+            // `jsonb_agg` has no such rule, so this is a `json`-only wart.
+            if matches!(item, Datum::Array(_) | Datum::Record(_)) {
+                out.push_str("\n ");
+            }
+        }
+        out.push_str(&element_json(item, ctx)?);
+    }
+    out.push(']');
+    Ok(Datum::Json(out))
+}
+
+/// `json_object_agg`'s object — the one constructor that pads its braces.
+///
+/// Every pair the fold collected is emitted, in fold order: `json` has no notion
+/// of a duplicate key, so `json_object_agg(k, v)` over `('a',1),('a',2)` is
+/// `{ "a" : 1, "a" : 2 }` where `jsonb_object_agg` keeps only the last.
+fn build_json_object(pairs: &[(Datum, Datum)], ctx: &EvalCtx) -> Result<Datum, ExecError> {
+    let layout = Layout::Padded;
+    let mut out = String::from("{");
+    out.push_str(layout.pad());
+    for (i, (key, value)) in pairs.iter().enumerate() {
+        if i > 0 {
+            out.push_str(layout.comma());
+        }
+        out.push_str(&json_object_key(key, ctx)?);
+        out.push_str(layout.colon());
+        out.push_str(&element_json(value, ctx)?);
+    }
+    out.push_str(layout.pad());
+    out.push('}');
+    Ok(Datum::Json(out))
+}
+
+/// One value nested inside a `json` aggregate's result.
+///
+/// Always [`Layout::Compact`]: a constructor's spacing describes the document it
+/// is building and never reaches inside a value, which is why
+/// `json_agg(ROW(1,2))` is `[{"f1":1,"f2":2}]` and not `[{"f1" : 1, "f2" : 2}]`.
+fn element_json(d: &Datum, ctx: &EvalCtx) -> Result<String, ExecError> {
+    crate::json_fn::to_json_text(d, Layout::Compact, ctx)
+}
+
+/// `json_object_agg`'s KEY, as the quoted JSON string `PostgreSQL` writes.
+///
+/// `datum_to_json_internal` renders a key exactly as it renders a value and then
+/// quotes whatever was not already a string, so a key follows the JSON spelling
+/// rather than the SQL one: `true` not `t`, `2020-01-02T03:04:05` not the
+/// space-separated form, and `1.50` keeping its scale.
+///
+/// Both rejections happen at RUN time — which is why a zero-row
+/// `json_object_agg(json_col, v)` is NULL rather than an error — and the NULL one
+/// does NOT share the `jsonb` family's SQLSTATE: `json_object_agg` raises 22004
+/// where `jsonb_object_agg` raises 22023.
+fn json_object_key(key: &Datum, ctx: &EvalCtx) -> Result<String, ExecError> {
+    match key {
+        Datum::Null => {
+            return Err(ExecError::FunctionError {
+                sqlstate: "22004",
+                message: "null value not allowed for object key".into(),
+            });
+        }
+        Datum::Json(_) | Datum::Jsonb(_) | Datum::Array(_) | Datum::Record(_) => {
+            return Err(ExecError::FunctionError {
+                sqlstate: "22023",
+                message: "key value must be scalar, not array, composite, or json".into(),
+            });
+        }
+        _ => {}
+    }
+    let rendered = element_json(key, ctx)?;
+    // A key that rendered as a JSON string already carries its quotes and its
+    // escapes; anything else is a bare literal whose text becomes the key.
+    if rendered.starts_with('"') {
+        Ok(rendered)
+    } else {
+        Ok(crabka_pgtypes::json::quote(&rendered))
+    }
 }
 
 fn as_i64(d: &Datum) -> Option<i64> {
@@ -3814,8 +3953,405 @@ mod tests {
         }
     }
 
-    /// One statistical-aggregate case. It holds the SQL, the input rows, and
-    /// the text of each expected output column.
+    // ---- json_agg / json_object_agg: the `json` twins of the jsonb pair ----
+
+    /// A relation carrying one `json` document and the same text as `jsonb`, so
+    /// a single fold shows both what `json` preserves and what `jsonb` discards.
+    fn json_doc_table() -> Table {
+        Table {
+            id: 4,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
+            name: RelationName::public("t"),
+            columns: vec![
+                Column::new("k", ColumnType::Int4),
+                Column::new("doc", ColumnType::Json),
+                Column::new("jb", ColumnType::Jsonb),
+            ],
+            sharded: false,
+            row_security: false,
+            force_row_security: false,
+            sharding: None,
+            foreign: None,
+            checks: Vec::new(),
+        }
+    }
+
+    /// The same two documents as `json` and as `jsonb`. Both have insignificant
+    /// spacing and one has its keys out of order, which is the whole point.
+    fn json_doc_rows() -> Vec<Vec<Datum>> {
+        [r#"{"b":1,  "a":2}"#, "[3,   4]"]
+            .into_iter()
+            .map(|text| {
+                r(&[
+                    Datum::Int4(1),
+                    Datum::Json(text.to_string()),
+                    Datum::Jsonb(crabka_pgtypes::jsonb::parse(text).expect("jsonb literal")),
+                ])
+            })
+            .collect()
+    }
+
+    /// `json_agg`/`json_object_agg` return `json`, and their `jsonb` twins are
+    /// untouched. The result type is what RowDescription reports, so getting it
+    /// wrong would send `jsonb`'s OID for a `json` column.
+    #[test]
+    fn json_aggregates_return_json_and_jsonb_ones_still_return_jsonb() {
+        let t = collect_table();
+        let scope = scope_of(Some(&t));
+        let infer = |sql: &str| {
+            let s = parsed_select(sql);
+            let SelectItem::Expr { expr, .. } = &s.projection[0] else {
+                panic!("expected an expression projection")
+            };
+            crate::eval::infer_type(expr, &scope)
+        };
+        for (sql, want) in [
+            ("SELECT json_agg(v) FROM t", ColumnType::Json),
+            ("SELECT json_agg(s) FROM t", ColumnType::Json),
+            ("SELECT json_object_agg(s, v) FROM t", ColumnType::Json),
+            // A scalar key of any type sits on PostgreSQL's `"any"` parameter.
+            ("SELECT json_object_agg(v, s) FROM t", ColumnType::Json),
+            ("SELECT jsonb_agg(v) FROM t", ColumnType::Jsonb),
+            ("SELECT jsonb_object_agg(s, v) FROM t", ColumnType::Jsonb),
+        ] {
+            assert2::assert!(infer(sql).expect(sql) == want, "{sql}");
+        }
+    }
+
+    /// Every argument shape PostgreSQL 18.4 answers with 42883 (`function
+    /// json_agg(…) does not exist`) — including the bare `json_agg()` and the
+    /// `json_agg(*)` that parses into the same zero-argument call.
+    #[test]
+    fn json_aggregates_reject_the_wrong_arity_at_plan_time() {
+        let t = collect_table();
+        let scope = scope_of(Some(&t));
+        let infer = |sql: &str| {
+            let s = parsed_select(sql);
+            let SelectItem::Expr { expr, .. } = &s.projection[0] else {
+                panic!("expected an expression projection")
+            };
+            crate::eval::infer_type(expr, &scope)
+        };
+        for sql in [
+            "SELECT json_agg() FROM t",
+            "SELECT json_agg(*) FROM t",
+            "SELECT json_agg(v, s) FROM t",
+            "SELECT json_object_agg(s) FROM t",
+            "SELECT json_object_agg() FROM t",
+            "SELECT json_object_agg(k, s, v) FROM t",
+        ] {
+            let err = infer(sql).expect_err(sql).into_pg();
+            assert2::assert!(err.code == "42883", "{sql}: {err:?}");
+        }
+    }
+
+    /// `json_agg` is `jsonb_agg`'s twin in everything but rendering: same input
+    /// order, same JSON `null` for a NULL input, same NULL over zero rows — and a
+    /// different spacing, which for `json_object_agg` alone pads its braces.
+    /// Every expected string is PostgreSQL 18.4's output over the same rows.
+    #[test]
+    fn json_aggregates_render_postgres_json_spacing() {
+        let t = collect_table();
+        for (sql, want) in [
+            ("SELECT json_agg(v) FROM t", "[30, 10, null]"),
+            ("SELECT json_agg(s) FROM t", r#"["c", "a", "b"]"#),
+            (
+                "SELECT json_object_agg(s, v) FROM t",
+                r#"{ "c" : 30, "a" : 10, "b" : null }"#,
+            ),
+            // The `jsonb` pair keeps sorting its keys and tightening its spacing.
+            ("SELECT jsonb_agg(v) FROM t", "[30, 10, null]"),
+            (
+                "SELECT jsonb_object_agg(s, v) FROM t",
+                r#"{"a": 10, "b": null, "c": 30}"#,
+            ),
+        ] {
+            assert2::assert!(
+                agg_text(sql, Some(&t), collect_rows()).expect(sql)
+                    == vec![vec![Some(want.to_string())]],
+                "{sql}"
+            );
+        }
+    }
+
+    /// Over zero rows both are SQL NULL, not an empty `[]`/`{}` — and NULL even
+    /// when a row would have raised, so the key checks never run for an empty
+    /// group.
+    #[test]
+    fn json_aggregates_over_zero_rows_are_null() {
+        let t = collect_table();
+        for sql in [
+            "SELECT json_agg(v) FROM t",
+            "SELECT json_object_agg(s, v) FROM t",
+            "SELECT json_object_agg(ARRAY[v], s) FROM t",
+        ] {
+            assert2::assert!(
+                agg_text(sql, Some(&t), Vec::new()).expect(sql) == vec![vec![None]],
+                "{sql}"
+            );
+        }
+    }
+
+    /// A `json` element is INLINED verbatim — spacing, key order and all — where
+    /// the same text as `jsonb` comes back sorted and re-spaced. This is the one
+    /// behaviour that makes `json_agg` more than a differently-typed alias.
+    #[test]
+    fn json_agg_inlines_a_json_element_verbatim() {
+        let t = json_doc_table();
+        for (sql, want) in [
+            (
+                "SELECT json_agg(doc) FROM t",
+                r#"[{"b":1,  "a":2}, [3,   4]]"#,
+            ),
+            (
+                "SELECT jsonb_agg(jb) FROM t",
+                r#"[{"a": 2, "b": 1}, [3, 4]]"#,
+            ),
+            (
+                "SELECT json_object_agg(k, doc) FROM t",
+                r#"{ "1" : {"b":1,  "a":2}, "1" : [3,   4] }"#,
+            ),
+        ] {
+            assert2::assert!(
+                agg_text(sql, Some(&t), json_doc_rows()).expect(sql)
+                    == vec![vec![Some(want.to_string())]],
+                "{sql}"
+            );
+        }
+    }
+
+    /// `json_agg_transfn`'s "add some whitespace if structured type and not
+    /// first item": an ARRAY or composite element is preceded by a line feed,
+    /// and nothing else is — not a scalar, and not a `json` element that merely
+    /// happens to hold an array. `jsonb_agg` and `json_object_agg` never do it.
+    #[test]
+    fn json_agg_line_feeds_before_a_structured_element_only() {
+        let t = collect_table();
+        assert2::assert!(
+            agg_text("SELECT json_agg(ARRAY[v]) FROM t", Some(&t), collect_rows())
+                .expect("array elements")
+                == vec![vec![Some("[[30], \n [10], \n [null]]".to_string())]]
+        );
+        // A `json` element holding an array is JSONTYPE_JSON, not an array, so
+        // it gets the plain separator.
+        let j = json_doc_table();
+        assert2::assert!(
+            agg_text("SELECT json_agg(doc) FROM t", Some(&j), json_doc_rows())
+                .expect("json elements")
+                == vec![vec![Some(r#"[{"b":1,  "a":2}, [3,   4]]"#.to_string())]]
+        );
+        // Neither the jsonb twin nor the object form wraps anything.
+        assert2::assert!(
+            agg_text(
+                "SELECT jsonb_agg(ARRAY[v]) FROM t",
+                Some(&t),
+                collect_rows()
+            )
+            .expect("jsonb arrays")
+                == vec![vec![Some("[[30], [10], [null]]".to_string())]]
+        );
+        assert2::assert!(
+            agg_text(
+                "SELECT json_object_agg(s, ARRAY[v]) FROM t",
+                Some(&t),
+                collect_rows()
+            )
+            .expect("object arrays")
+                == vec![vec![Some(
+                    r#"{ "c" : [30], "a" : [10], "b" : [null] }"#.to_string()
+                )]]
+        );
+    }
+
+    /// `json` has no notion of a duplicate key, so `json_object_agg` emits every
+    /// pair it folded; `jsonb_object_agg` over the same rows keeps only the last
+    /// value for each key. `DISTINCT` still sorts and dedups the whole PAIR, so
+    /// a key with two values survives twice.
+    #[test]
+    fn json_object_agg_keeps_duplicate_keys_where_jsonb_collapses_them() {
+        let t = collect_table();
+        let rows = || {
+            vec![
+                r(&[Datum::Int4(1), Datum::Int4(30), Datum::Text("c".into())]),
+                r(&[Datum::Int4(1), Datum::Int4(10), Datum::Text("a".into())]),
+                r(&[Datum::Int4(1), Datum::Int4(20), Datum::Text("a".into())]),
+                r(&[Datum::Int4(1), Datum::Int4(30), Datum::Text("c".into())]),
+            ]
+        };
+        for (sql, want) in [
+            (
+                "SELECT json_object_agg(s, v) FROM t",
+                r#"{ "c" : 30, "a" : 10, "a" : 20, "c" : 30 }"#,
+            ),
+            (
+                "SELECT json_object_agg(DISTINCT s, v) FROM t",
+                r#"{ "a" : 10, "a" : 20, "c" : 30 }"#,
+            ),
+            ("SELECT json_agg(s) FROM t", r#"["c", "a", "a", "c"]"#),
+            ("SELECT json_agg(DISTINCT s) FROM t", r#"["a", "c"]"#),
+            // The jsonb twin still collapses to one value per key.
+            (
+                "SELECT jsonb_object_agg(s, v) FROM t",
+                r#"{"a": 20, "c": 30}"#,
+            ),
+        ] {
+            assert2::assert!(
+                agg_text(sql, Some(&t), rows()).expect(sql) == vec![vec![Some(want.to_string())]],
+                "{sql}"
+            );
+        }
+    }
+
+    /// `json_object_agg`'s key is rendered through the JSON conversion and then
+    /// quoted, so it follows the JSON spelling rather than the SQL one — `true`
+    /// not `t`, and a numeric keeping its scale. Each expected object is
+    /// PostgreSQL 18.4's output over the same key.
+    #[test]
+    fn json_object_agg_quotes_any_scalar_key() {
+        let t = collect_table();
+        for (key, want) in [
+            (Datum::Int4(7), r#"{ "7" : 30 }"#),
+            (Datum::Int8(7), r#"{ "7" : 30 }"#),
+            (Datum::Float8(1.5), r#"{ "1.5" : 30 }"#),
+            (Datum::Float8(f64::NAN), r#"{ "NaN" : 30 }"#),
+            (Datum::Bool(true), r#"{ "true" : 30 }"#),
+            (
+                Datum::Numeric(crabka_pgtypes::numeric::parse("1.50").expect("numeric")),
+                r#"{ "1.50" : 30 }"#,
+            ),
+            (
+                Datum::Date(jiff::civil::date(2020, 1, 2)),
+                r#"{ "2020-01-02" : 30 }"#,
+            ),
+            // A quote inside the key is escaped, not dropped.
+            (Datum::Text(r#"a"b"#.into()), r#"{ "a\"b" : 30 }"#),
+            (Datum::Text(String::new()), r#"{ "" : 30 }"#),
+        ] {
+            let rows = vec![r(&[Datum::Int4(1), Datum::Int4(30), key.clone()])];
+            // `s` is the text column; a non-text key rides in as a constant.
+            let sql = "SELECT json_object_agg(s, v) FROM t";
+            let mut t2 = t.clone();
+            t2.columns[2].ty = key.column_type().expect("a typed key");
+            assert2::assert!(
+                agg_text(sql, Some(&t2), rows).expect(sql) == vec![vec![Some(want.to_string())]],
+                "{key:?}"
+            );
+        }
+    }
+
+    /// The two run-time key rejections, and the SQLSTATE that is NOT shared with
+    /// the `jsonb` twin: a NULL `json_object_agg` key is 22004 where
+    /// `jsonb_object_agg` raises 22023. A container key is 22023 for both.
+    #[test]
+    fn json_object_agg_rejects_null_and_container_keys() {
+        let t = collect_table();
+        let with_null_key = || vec![r(&[Datum::Int4(1), Datum::Int4(10), Datum::Null])];
+        let err = agg_text(
+            "SELECT json_object_agg(s, v) FROM t",
+            Some(&t),
+            with_null_key(),
+        )
+        .expect_err("null key")
+        .into_pg();
+        assert2::assert!(
+            (err.code.as_str(), err.message.as_str())
+                == ("22004", "null value not allowed for object key"),
+            "{err:?}"
+        );
+        // The jsonb twin keeps its own (different) SQLSTATE.
+        assert2::assert!(
+            agg_text(
+                "SELECT jsonb_object_agg(s, v) FROM t",
+                Some(&t),
+                with_null_key()
+            )
+            .expect_err("null key")
+            .into_pg()
+            .code
+                == "22023"
+        );
+        // A container key is 22023 with PostgreSQL's wording, for both families.
+        let container = "key value must be scalar, not array, composite, or json";
+        for sql in [
+            "SELECT json_object_agg(ARRAY[v], s) FROM t",
+            "SELECT json_object_agg(to_jsonb(v), s) FROM t",
+            "SELECT jsonb_object_agg(ARRAY[v], s) FROM t",
+        ] {
+            let err = agg_text(sql, Some(&t), collect_rows())
+                .expect_err(sql)
+                .into_pg();
+            assert2::assert!(
+                (err.code.as_str(), err.message.as_str()) == ("22023", container),
+                "{sql}: {err:?}"
+            );
+        }
+        // A `json` document is a container key too, not a scalar that happens to
+        // hold text.
+        let j = json_doc_table();
+        let err = agg_text(
+            "SELECT json_object_agg(doc, k) FROM t",
+            Some(&j),
+            json_doc_rows(),
+        )
+        .expect_err("json key")
+        .into_pg();
+        assert2::assert!(
+            (err.code.as_str(), err.message.as_str()) == ("22023", container),
+            "{err:?}"
+        );
+    }
+
+    /// `FILTER` runs before the fold, so a rejected row never reaches the JSON
+    /// document at all. Both expected strings are PostgreSQL 18.4's.
+    #[test]
+    fn json_aggregates_respect_filter() {
+        let t = collect_table();
+        for (sql, want) in [
+            ("SELECT json_agg(v) FILTER (WHERE v > 15) FROM t", "[30]"),
+            (
+                "SELECT json_object_agg(s, v) FILTER (WHERE v > 15) FROM t",
+                r#"{ "c" : 30 }"#,
+            ),
+        ] {
+            assert2::assert!(
+                agg_text(sql, Some(&t), collect_rows()).expect(sql)
+                    == vec![vec![Some(want.to_string())]],
+                "{sql}"
+            );
+        }
+    }
+
+    /// PostgreSQL accepts `json_agg(x) OVER ()` — an aggregate used as a window
+    /// function is legal, and it is `is_aggregate_name` that tells the window
+    /// planner so. Without the name registered the call would be 42883.
+    #[test]
+    fn json_aggregate_names_are_known_to_the_window_planner() {
+        for name in [
+            "json_agg",
+            "json_object_agg",
+            "jsonb_agg",
+            "jsonb_object_agg",
+        ] {
+            assert2::assert!(is_aggregate_name(name), "{name}");
+        }
+        // The `_strict`/`_unique` variants PostgreSQL also has are NOT
+        // implemented, so they stay 42883 rather than silently aggregating.
+        for name in [
+            "json_agg_strict",
+            "json_object_agg_strict",
+            "json_object_agg_unique",
+            "json_object_agg_unique_strict",
+            "jsonb_agg_strict",
+            "jsonb_object_agg_strict",
+            "jsonb_object_agg_unique",
+            "jsonb_object_agg_unique_strict",
+        ] {
+            assert2::assert!(!is_aggregate_name(name), "{name}");
+        }
+    }
+
+    /// One statistical-aggregate case: the SQL, the input rows, and the text of
+    /// each expected output column.
     type StatCase<'a> = (&'a str, Vec<Vec<Datum>>, &'a [&'a str]);
 
     /// A table shaped for the aggregate families added beside the scalar

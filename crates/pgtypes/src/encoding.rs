@@ -149,6 +149,8 @@ pub fn encode_text_in(d: &Datum, style: OutputStyle<'_>) -> Vec<u8> {
             }
             out
         }
+        // `json_out`: the bytes `json_in` accepted, unchanged.
+        Datum::Json(text) => text.clone().into_bytes(),
         // `jsonb_out`: the canonical re-rendering of the decomposed value.
         Datum::Jsonb(j) => j.to_text().into_bytes(),
         // `array_out`: `{...}` with each element rendered by its own output
@@ -461,6 +463,9 @@ pub fn encode_binary(d: &Datum) -> Vec<u8> {
         Datum::Interval(i) => crate::datetime::interval_to_binary(*i).to_vec(),
         // SP40: `byteasend` — raw bytes (no transformation).
         Datum::Bytea(b) => b.clone(),
+        // `json_send` is `text`'s: the document as written, with no version
+        // byte. Only `jsonb_send` prefixes one.
+        Datum::Json(text) => text.clone().into_bytes(),
         // `jsonb_send`: a version byte then the canonical JSON text.
         Datum::Jsonb(j) => {
             let text = j.to_text();

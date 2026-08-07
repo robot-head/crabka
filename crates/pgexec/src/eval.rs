@@ -255,7 +255,7 @@ fn eval_depth_inner(
             list,
             negated,
         } => {
-            reject_jsonpath_in_list(expr, list, scope)?;
+            reject_uncomparable_in_list(expr, list, scope)?;
             if let Some(result) = rowexpr::eval_in_list(expr, list, *negated, |e| {
                 eval_depth(e, scope, values, ctx, d)
             })? {
@@ -272,8 +272,8 @@ fn eval_depth_inner(
             high,
             negated,
         } => {
-            reject_jsonpath_comparison(BinaryOp::Ge, expr, low, scope)?;
-            reject_jsonpath_comparison(BinaryOp::Le, expr, high, scope)?;
+            reject_uncomparable_comparison(BinaryOp::Ge, expr, low, scope)?;
+            reject_uncomparable_comparison(BinaryOp::Le, expr, high, scope)?;
             let x = eval_depth(expr, scope, values, ctx, d)?;
             let lo = eval_depth(low, scope, values, ctx, d)?;
             let hi = eval_depth(high, scope, values, ctx, d)?;
@@ -299,7 +299,7 @@ fn eval_depth_inner(
             whens,
             else_result,
         } => {
-            reject_jsonpath_simple_case(operand.as_deref(), whens, scope)?;
+            reject_uncomparable_simple_case(operand.as_deref(), whens, scope)?;
             eval_case(
                 operand.as_deref(),
                 whens,
@@ -410,10 +410,11 @@ fn eval_depth_inner(
         Expr::Subscript { base, index } => {
             let b = eval_depth(base, scope, values, ctx, d)?;
             let i = eval_depth(index, scope, values, ctx, d)?;
-            if matches!(b, Datum::Jsonb(_)) || infer_type(base, scope)? == ColumnType::Jsonb {
-                return json_fn::jsonb_subscript(&b, &i);
+            match subscript_kind(&b, base, scope)? {
+                SubscriptKind::Json => Err(cannot_subscript(ColumnType::Json)),
+                SubscriptKind::Jsonb => json_fn::jsonb_subscript(&b, &i),
+                SubscriptKind::Array => array_fn::array_subscript(&b, &i),
             }
-            array_fn::array_subscript(&b, &i)
         }
         // `base[s1][s2]…` — a multi-subscript or sliced reference, which
         // PostgreSQL resolves as ONE array reference rather than a chain.
@@ -428,7 +429,7 @@ fn eval_depth_inner(
             all,
             array,
         } => {
-            reject_jsonpath_quantified(*op, expr, array, scope)?;
+            reject_uncomparable_quantified(*op, expr, array, scope)?;
             let x = eval_depth(expr, scope, values, ctx, d)?;
             let a = eval_depth(array, scope, values, ctx, d)?;
             // `33 = ANY('{1,2,3}')`: a bare literal on the array side is
@@ -1131,7 +1132,7 @@ pub(crate) fn apply_binary_of(
     scope: &Scope,
     ctx: &EvalCtx,
 ) -> Result<Datum, ExecError> {
-    reject_jsonpath_comparison(op, left, right, scope)?;
+    reject_uncomparable_comparison(op, left, right, scope)?;
     // These overloaded strict operators must still be resolved before value-
     // time NULL handling. Keep the runtime fast paths from accepting an invalid
     // typed pair such as `int4range @> NULL::text` in a predicate that did not
@@ -1453,6 +1454,18 @@ fn coerce_untyped_literal_operands(
                 };
             return resolves.then_some(scalar_type);
         }
+        // A `json` counterpart resolves a literal for the two PATH operators
+        // only. PostgreSQL gives `json` six operators and no more; of those,
+        // `->` and `->>` take `text` (which the literal already is) or
+        // `integer`, and `#>`/`#>>` take `text[]`, which a `Datum::Text` is not.
+        if matches!(other, Datum::Json(_)) {
+            return match op {
+                BinaryOp::JsonGetPath | BinaryOp::JsonGetPathText => {
+                    ColumnType::array_of(ColumnType::Text)
+                }
+                _ => None,
+            };
+        }
         if !matches!(other, Datum::Jsonb(_)) {
             return match (op, other) {
                 (BinaryOp::JsonPathMatch, Datum::TsVector(_)) => Some(ColumnType::TsQuery),
@@ -1534,6 +1547,12 @@ pub(crate) fn apply_binary(
     // division, which the numeric rules would otherwise round.
     if let Some(result) = crate::money_fn::apply_money_operator(op, l, r)? {
         return Ok(result);
+    }
+    // A `json` operand has to be turned away from every family below before one
+    // of them claims it: `ops::compare` would order two documents as text and
+    // `ops::sub` would report a 42804 where PostgreSQL reports a 42883.
+    if let Some(error) = json_operator_rejection(op, l, r) {
+        return Err(error);
     }
     match op {
         // `<<=` / `>>=` exist only for the network family, so anything that
@@ -1910,12 +1929,11 @@ fn resolve_concat(
 }
 
 /// This codebase types a bare `NULL` literal as `text`, but PostgreSQL resolves
-/// the literal's `unknown` type against the other operand.
-///
-/// That matters for `||`. `ARRAY[1,2] || NULL` must pick `array_cat`, which
-/// gives `{1,2}`, and must not pick `array_append`, which would give
-/// `{1,2,NULL}`. Only jsonb and arrays adopt, because they are the two families
-/// whose `||` a text fallback would take.
+/// the literal's `unknown` type against the other operand. That matters for `||`:
+/// `ARRAY[1,2] || NULL` must pick `array_cat` (yielding `{1,2}`), not
+/// `array_append` (which would yield `{1,2,NULL}`). Only the two families whose
+/// `||` a text fallback would silently steal — jsonb and arrays — are adopted.
+/// `json` has no `||`, so there is nothing for a literal beside one to steal.
 fn adopt_null_literal_type(
     left: &Expr,
     right: &Expr,
@@ -1941,14 +1959,11 @@ fn adopt_null_literal_type(
 /// PostgreSQL leaves a bare string literal `unknown` and resolves it against the
 /// other operand. This codebase types it `text` at once.
 ///
-/// Adopt it into `jsonb` when the other side is jsonb, so `j @> '{"a":1}'` and
-/// `j || '{"b":2}'` mean what they do in PostgreSQL. Without this, `||` is the
-/// dangerous case. A jsonb/text pair falls through to *string* concatenation
-/// and returns a plausible-looking wrong answer instead of a merge.
-///
-/// This adoption is deliberately jsonb-only. An array must NOT adopt, because
-/// PostgreSQL's `anyarray || anyelement` is what makes `ARRAY['a'] || 'b'`
-/// append `'b'` as an element instead of concatenating two arrays.
+/// Deliberately jsonb-only. An array must NOT adopt, because PostgreSQL's
+/// `anyarray || anyelement` is what makes `ARRAY['a'] || 'b'` append `'b'` as an
+/// element rather than concatenating two arrays. `json` must not adopt either,
+/// and for the opposite reason: it has no `||` of its own, so `j || 'b'` is
+/// `anynonarray || text` and really does concatenate the document's text.
 fn adopt_string_literal_type(
     left: &Expr,
     right: &Expr,
@@ -2028,6 +2043,20 @@ fn adopt_json_operand_types(
         {
             return (rt, rt);
         }
+    }
+    // `json` resolves a literal for its two PATH operators only. Its `->` and
+    // `->>` take `text` (which the literal already is) or `integer`, and it has
+    // no `@>`, `?|`, `?&`, `@?` or `@@` for a literal to adopt a type for — so
+    // the literal stays `text` and the operator does not resolve, which is
+    // exactly PostgreSQL's outcome.
+    if matches!(right, Expr::StringLiteral(_)) && lt == ColumnType::Json {
+        let expected = match op {
+            BinaryOp::JsonGetPath | BinaryOp::JsonGetPathText => {
+                ColumnType::array_of(ColumnType::Text)
+            }
+            _ => None,
+        };
+        return (lt, expected.unwrap_or(rt));
     }
     if !matches!(right, Expr::StringLiteral(_)) || lt != ColumnType::Jsonb {
         return adopt_string_literal_type(left, right, lt, rt);
@@ -2255,6 +2284,10 @@ fn comparison_category(ty: ColumnType) -> Option<ComparisonFamily> {
         ColumnType::Time | ColumnType::Timetz => Some(ComparisonFamily::TimeOfDay),
         ColumnType::Bool => Some(ComparisonFamily::Boolean),
         ColumnType::Jsonb => Some(ComparisonFamily::Json),
+        // `json` is deliberately absent — it is not a *family* of one, it has
+        // no comparison operator at all. Putting it here would say
+        // `json = jsonb` resolves; [`reject_uncomparable_comparison`] turns
+        // every comparison over it away before this is consulted.
         _ => None,
     }
 }
@@ -2543,11 +2576,61 @@ pub(crate) fn op_spelling(op: BinaryOp) -> &'static str {
 }
 
 pub(crate) fn undefined_operator(op: &str, lt: ColumnType, rt: ColumnType) -> ExecError {
-    ExecError::UndefinedFunction(format!(
-        "operator does not exist: {} {op} {}",
-        lt.name(),
-        rt.name()
-    ))
+    undefined_operator_named(op, lt.name(), rt.name())
+}
+
+/// The same 42883 with the operand types already spelled. The `json` rejections
+/// need it because PostgreSQL names an unresolved literal operand `unknown`
+/// (`json = unknown`), and this codebase has no `ColumnType` for that.
+fn undefined_operator_named(op: &str, lt: &str, rt: &str) -> ExecError {
+    ExecError::UndefinedFunction(format!("operator does not exist: {lt} {op} {rt}"))
+}
+
+/// The 42883 for an operator `json` does not have.
+///
+/// PostgreSQL gives `json` exactly six operators — `->` and `->>` (by object
+/// key and by array index) and `#>` / `#>>` — and nothing else: no `=`, no
+/// ordering, no `@>`/`<@`, no `?`/`?|`/`?&`, no `||`, no `-`, no `@?`/`@@`.
+/// Every one of those spellings is `jsonb`'s alone. Without this, a `json`
+/// operand reaching the value-time families below would be *answered* rather
+/// than rejected: `ops::compare` renders both sides as text and would order
+/// `'{"a":1}'` against `'{"a": 1}'`, and `ops::sub` reports 42804 where
+/// PostgreSQL reports 42883.
+///
+/// `||` is deliberately absent: `json || 'x'` is PostgreSQL's
+/// `anynonarray || text`, which renders the document and really does apply.
+fn json_operator_rejection(op: BinaryOp, l: &Datum, r: &Datum) -> Option<ExecError> {
+    if !matches!(l, Datum::Json(_)) && !matches!(r, Datum::Json(_)) {
+        return None;
+    }
+    let spelled = match op {
+        // `IS DISTINCT FROM` is resolved through the type's `=` operator, so
+        // that is the spelling PostgreSQL names when there is none.
+        BinaryOp::IsDistinctFrom | BinaryOp::IsNotDistinctFrom => "=",
+        BinaryOp::Eq
+        | BinaryOp::Ne
+        | BinaryOp::Lt
+        | BinaryOp::Le
+        | BinaryOp::Gt
+        | BinaryOp::Ge
+        | BinaryOp::Add
+        | BinaryOp::Sub
+        | BinaryOp::Mul
+        | BinaryOp::Div
+        | BinaryOp::Mod
+        | BinaryOp::Pow
+        | BinaryOp::Contains
+        | BinaryOp::ContainedBy
+        | BinaryOp::Overlaps
+        | BinaryOp::KeyExists
+        | BinaryOp::KeyExistsAny
+        | BinaryOp::KeyExistsAll
+        | BinaryOp::JsonPathExists
+        | BinaryOp::JsonPathMatch => op_spelling(op),
+        _ => return None,
+    };
+    let name = |d: &Datum| d.column_type().map_or("unknown", ColumnType::name);
+    Some(undefined_operator_named(spelled, name(l), name(r)))
 }
 
 fn ambiguous_operator(op: &str) -> ExecError {
@@ -2557,15 +2640,36 @@ fn ambiguous_operator(op: &str) -> ExecError {
     }
 }
 
-fn jsonpath_has_no_operator_class(ty: ColumnType) -> bool {
+/// The types crabka supports that PostgreSQL gives no default btree operator
+/// class — `jsonpath` and `json`, and the array type over each.
+///
+/// `json` is in the list for the reason the type exists at all: it stores the
+/// document's original text, so two values that differ only in whitespace or
+/// key order are the same document but not the same bytes, and PostgreSQL
+/// refuses to say which of `GROUP BY`, `DISTINCT`, `ORDER BY`, `UNION` and the
+/// quantified comparisons meant. `jsonb`, which normalizes on input, has the
+/// opclass.
+fn has_no_operator_class(ty: ColumnType) -> bool {
     matches!(
         ty.storage_type(),
-        ColumnType::JsonPath | ColumnType::Array(ElemType::JsonPath)
+        ColumnType::JsonPath
+            | ColumnType::Array(ElemType::JsonPath)
+            | ColumnType::Json
+            | ColumnType::Array(ElemType::Json)
     )
 }
 
 pub(crate) fn is_scalar_jsonpath(ty: ColumnType) -> bool {
     ty.storage_type() == ColumnType::JsonPath
+}
+
+/// Is this the `json` type itself (through any domain over it)? An ARRAY of
+/// `json` is deliberately not: `json[] = json[]` resolves `array_eq` at parse
+/// analysis and only fails when it looks for the ELEMENT operator, so its error
+/// is `could not identify an equality operator for type json`, not
+/// `operator does not exist`.
+pub(crate) fn is_scalar_json(ty: ColumnType) -> bool {
+    ty.storage_type() == ColumnType::Json
 }
 
 pub(crate) fn require_runtime_equality(left: &Datum, right: &Datum) -> Result<(), ExecError> {
@@ -2628,7 +2732,7 @@ pub(crate) fn require_runtime_comparison(left: &Datum, right: &Datum) -> Result<
 /// operator class. `Datum` still implements Rust equality for storage
 /// invariants; SQL must not accidentally expose that internal relation.
 pub(crate) fn require_equality_operator(ty: ColumnType) -> Result<(), ExecError> {
-    if jsonpath_has_no_operator_class(ty) {
+    if has_no_operator_class(ty) {
         return Err(ExecError::UndefinedFunction(format!(
             "could not identify an equality operator for type {}",
             ty.name()
@@ -2637,9 +2741,10 @@ pub(crate) fn require_equality_operator(ty: ColumnType) -> Result<(), ExecError>
     Ok(())
 }
 
-/// Reject ORDER BY and other btree-dependent operations for jsonpath values.
+/// Reject ORDER BY and other btree-dependent operations for the types with no
+/// btree opclass ([`has_no_operator_class`]).
 pub(crate) fn require_ordering_operator(ty: ColumnType) -> Result<(), ExecError> {
-    if jsonpath_has_no_operator_class(ty) {
+    if has_no_operator_class(ty) {
         return Err(ExecError::UndefinedFunction(format!(
             "could not identify an ordering operator for type {}",
             ty.name()
@@ -2652,12 +2757,7 @@ pub(crate) fn require_ordering_operator(ty: ColumnType) -> Result<(), ExecError>
 /// type to name).
 pub(crate) fn undefined_operator_for(op: BinaryOp, l: &Datum, r: &Datum) -> ExecError {
     let name = |d: &Datum| d.column_type().map_or("unknown", ColumnType::name);
-    ExecError::UndefinedFunction(format!(
-        "operator does not exist: {} {} {}",
-        name(l),
-        op_spelling(op),
-        name(r)
-    ))
+    undefined_operator_named(op_spelling(op), name(l), name(r))
 }
 
 pub(crate) fn quantifier_of(all: bool) -> Quantifier {
@@ -2954,14 +3054,14 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
         // SP28: predicates are boolean; CASE unifies its branch result types.
         Expr::IsNull { .. } | Expr::Like { .. } => Ok(ColumnType::Bool),
         Expr::InList { expr, list, .. } => {
-            reject_jsonpath_in_list(expr, list, scope)?;
+            reject_uncomparable_in_list(expr, list, scope)?;
             Ok(ColumnType::Bool)
         }
         Expr::Between {
             expr, low, high, ..
         } => {
-            reject_jsonpath_comparison(BinaryOp::Ge, expr, low, scope)?;
-            reject_jsonpath_comparison(BinaryOp::Le, expr, high, scope)?;
+            reject_uncomparable_comparison(BinaryOp::Ge, expr, low, scope)?;
+            reject_uncomparable_comparison(BinaryOp::Le, expr, high, scope)?;
             Ok(ColumnType::Bool)
         }
         Expr::Case {
@@ -2969,7 +3069,7 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
             whens,
             else_result,
         } => {
-            reject_jsonpath_simple_case(operand.as_deref(), whens, scope)?;
+            reject_uncomparable_simple_case(operand.as_deref(), whens, scope)?;
             infer_case_type(whens, else_result.as_deref(), scope)
         }
         // SP31: a cast's static result type is the target type — but only if the
@@ -3002,7 +3102,7 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
         Expr::QuantifiedArray {
             expr, op, array, ..
         } => {
-            reject_jsonpath_quantified(*op, expr, array, scope)?;
+            reject_uncomparable_quantified(*op, expr, array, scope)?;
             Ok(ColumnType::Bool)
         }
         // `ARRAY[…]` types as an array of its unified element type.
@@ -3035,18 +3135,15 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
         Expr::Subscript { base, .. } => {
             let bt = infer_type(base, scope)?;
             // PostgreSQL's jsonb subscripting yields jsonb at every level, so
-            // `j['a']['b']` type-checks without the base being an array.
+            // `j['a']['b']` type-checks without the base being an array. `json`
+            // deliberately does NOT follow it here: the subscript handler is
+            // jsonb's alone, so a `json` base falls through to the error below.
             if bt == ColumnType::Jsonb {
                 return Ok(ColumnType::Jsonb);
             }
             bt.array_element()
                 .map(ElemType::column_type)
-                .ok_or_else(|| {
-                    ExecError::TypeMismatch(format!(
-                        "cannot subscript type {} because it does not support subscripting",
-                        bt.name()
-                    ))
-                })
+                .ok_or_else(|| cannot_subscript(bt))
         }
         // A subscript chain containing a slice yields the ARRAY type; one made
         // only of indexes reaches an element.
@@ -3055,12 +3152,7 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
             if bt == ColumnType::Jsonb {
                 return Ok(ColumnType::Jsonb);
             }
-            let elem = bt.array_element().ok_or_else(|| {
-                ExecError::TypeMismatch(format!(
-                    "cannot subscript type {} because it does not support subscripting",
-                    bt.name()
-                ))
-            })?;
+            let elem = bt.array_element().ok_or_else(|| cannot_subscript(bt))?;
             if subscripts
                 .iter()
                 .any(crabka_pgparser::ast::ArraySubscript::is_slice)
@@ -3086,7 +3178,7 @@ fn infer_binary_type(
     right: &Expr,
     scope: &Scope,
 ) -> Result<ColumnType, ExecError> {
-    reject_jsonpath_comparison(op, left, right, scope)?;
+    reject_uncomparable_comparison(op, left, right, scope)?;
     if let Some(resolved) = geometric_literal_operator(op, left, right, scope)? {
         return Ok(resolved);
     }
@@ -3317,7 +3409,14 @@ fn infer_binary_type(
     }
 }
 
-fn reject_jsonpath_comparison(
+/// PLAN-time 42883 for a comparison over a type that has no comparison
+/// operator: `jsonpath`, and `json` (see [`has_no_operator_class`]).
+///
+/// Both reach here through every syntax that resolves to one — `=`, the
+/// ordering operators, `IS DISTINCT FROM`, `IN (…)`, `BETWEEN` and the simple
+/// `CASE` — because PostgreSQL rejects them all at parse analysis, before a
+/// single row is fetched.
+fn reject_uncomparable_comparison(
     op: BinaryOp,
     left: &Expr,
     right: &Expr,
@@ -3338,6 +3437,30 @@ fn reject_jsonpath_comparison(
     }
     crate::rowexpr::validate_comparison(op, left, right, scope)?;
     let (mut left_type, mut right_type) = (infer_type(left, scope)?, infer_type(right, scope)?);
+    // `IS DISTINCT FROM` is resolved through the type's `=`, so that is the
+    // spelling PostgreSQL names when the type has none.
+    let spelled = if matches!(op, BinaryOp::IsDistinctFrom | BinaryOp::IsNotDistinctFrom) {
+        "="
+    } else {
+        op_spelling(op)
+    };
+    // `json` has no comparison operator at ANY width, so an `unknown` literal
+    // beside one adopts nothing — PostgreSQL leaves it `unknown` and names it
+    // that way (`operator does not exist: json = unknown`).
+    if is_scalar_json(left_type) || is_scalar_json(right_type) {
+        let name = |e: &Expr, t: ColumnType| {
+            if is_unknown_literal(e) {
+                "unknown"
+            } else {
+                t.name()
+            }
+        };
+        return Err(undefined_operator_named(
+            spelled,
+            name(left, left_type),
+            name(right, right_type),
+        ));
+    }
     if !is_scalar_jsonpath(left_type) && !is_scalar_jsonpath(right_type) {
         return Ok(());
     }
@@ -3347,25 +3470,17 @@ fn reject_jsonpath_comparison(
     if is_unknown_literal(right) {
         right_type = left_type;
     }
-    Err(undefined_operator(
-        if matches!(op, BinaryOp::IsDistinctFrom | BinaryOp::IsNotDistinctFrom) {
-            "="
-        } else {
-            op_spelling(op)
-        },
-        left_type,
-        right_type,
-    ))
+    Err(undefined_operator(spelled, left_type, right_type))
 }
 
-fn reject_jsonpath_in_list(expr: &Expr, list: &[Expr], scope: &Scope) -> Result<(), ExecError> {
+fn reject_uncomparable_in_list(expr: &Expr, list: &[Expr], scope: &Scope) -> Result<(), ExecError> {
     for item in list {
-        reject_jsonpath_comparison(BinaryOp::Eq, expr, item, scope)?;
+        reject_uncomparable_comparison(BinaryOp::Eq, expr, item, scope)?;
     }
     Ok(())
 }
 
-fn reject_jsonpath_simple_case(
+fn reject_uncomparable_simple_case(
     operand: Option<&Expr>,
     whens: &[(Expr, Expr)],
     scope: &Scope,
@@ -3374,12 +3489,14 @@ fn reject_jsonpath_simple_case(
         return Ok(());
     };
     for (when, _) in whens {
-        reject_jsonpath_comparison(BinaryOp::Eq, operand, when, scope)?;
+        reject_uncomparable_comparison(BinaryOp::Eq, operand, when, scope)?;
     }
     Ok(())
 }
 
-fn reject_jsonpath_quantified(
+/// `x <op> ANY|ALL (array)` over an element type with no comparison operator —
+/// `'{}'::json = ANY(ARRAY['{}'::json])` is `operator does not exist: json = json`.
+fn reject_uncomparable_quantified(
     op: BinaryOp,
     expr: &Expr,
     array: &Expr,
@@ -3397,7 +3514,7 @@ fn reject_jsonpath_quantified(
     if is_unknown_literal(array) {
         right = left;
     }
-    if jsonpath_has_no_operator_class(left) || jsonpath_has_no_operator_class(right) {
+    if has_no_operator_class(left) || has_no_operator_class(right) {
         return Err(undefined_operator(op_spelling(op), left, right));
     }
     Ok(())
@@ -3570,10 +3687,47 @@ fn eval_array_ref(
 ) -> Result<Datum, ExecError> {
     let evaluated = eval_depth(base, scope, values, ctx, depth)?;
     let args = eval_subscripts(subscripts, scope, values, ctx, depth)?;
-    if matches!(evaluated, Datum::Jsonb(_)) || infer_type(base, scope)? == ColumnType::Jsonb {
-        return eval_jsonb_subscript_chain(&evaluated, subscripts, &args);
+    match subscript_kind(&evaluated, base, scope)? {
+        SubscriptKind::Json => Err(cannot_subscript(ColumnType::Json)),
+        SubscriptKind::Jsonb => eval_jsonb_subscript_chain(&evaluated, subscripts, &args),
+        SubscriptKind::Array => array_fn::array_ref(&evaluated, &args),
     }
-    array_fn::array_ref(&evaluated, &args)
+}
+
+/// Which subscripting rule `base[…]` follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubscriptKind {
+    /// The SQL array rule: 1-based, sliceable, out-of-range is SQL NULL.
+    Array,
+    /// `jsonb`'s `subscript_handler`: by key or by 0-based index.
+    Jsonb,
+    /// `json`, which has NO subscript handler at all — the reference is an
+    /// error rather than a different rule.
+    Json,
+}
+
+/// The rule a base value (or, when the value carries no type of its own, the
+/// base expression's static type) selects.
+fn subscript_kind(value: &Datum, base: &Expr, scope: &Scope) -> Result<SubscriptKind, ExecError> {
+    Ok(match value {
+        Datum::Jsonb(_) => SubscriptKind::Jsonb,
+        Datum::Json(_) => SubscriptKind::Json,
+        _ => match infer_type(base, scope)? {
+            ColumnType::Jsonb => SubscriptKind::Jsonb,
+            ColumnType::Json => SubscriptKind::Json,
+            _ => SubscriptKind::Array,
+        },
+    })
+}
+
+/// PostgreSQL's 42804 for a base type with no subscripting operator. `json` is
+/// one: only `jsonb` has a `subscript_handler`, so `('{"a":1}'::json)['a']` is
+/// this error rather than a field lookup.
+fn cannot_subscript(ty: ColumnType) -> ExecError {
+    ExecError::TypeMismatch(format!(
+        "cannot subscript type {} because it does not support subscripting",
+        ty.name()
+    ))
 }
 
 /// [`eval_subscripts`] for an assignment target, whose bounds are evaluated
@@ -4889,6 +5043,7 @@ mod tests {
                 Column::new("ta", ColumnType::Array(ElemType::Text)),
                 Column::new("i", ColumnType::Int4),
                 Column::new("s", ColumnType::Text),
+                Column::new("jn", ColumnType::Json),
             ],
             sharded: false,
             row_security: false,
@@ -4902,6 +5057,17 @@ mod tests {
     fn jb(text: &str) -> Datum {
         Datum::Jsonb(crabka_pgtypes::jsonb::parse(text).expect("jsonb literal"))
     }
+
+    /// A `json` value, which is its input text and nothing else.
+    fn jn(text: &str) -> Datum {
+        crabka_pgtypes::json::validate(text).expect("json literal");
+        Datum::Json(text.to_string())
+    }
+
+    /// The `json` document bound to `jt.jn`. Its spacing, key order and escape
+    /// are all load-bearing: `jsonb` would erase every one of them, so a `json`
+    /// operator that answered from a re-serialized document would show up here.
+    const JSON_ROW: &str = r#"{"a":{"b":  1}, "c": [1,  2], "s": "x\ty"}"#;
 
     fn int_array(elems: &[i32]) -> Datum {
         Datum::Array(ArrayValue::new(
@@ -4921,6 +5087,7 @@ mod tests {
             )),
             Datum::Int4(2),
             Datum::Text("a".into()),
+            jn(JSON_ROW),
         ]
     }
 
@@ -5040,11 +5207,288 @@ mod tests {
         }
     }
 
-    /// `||` resolves to five different operators. The operands' STATIC types
-    /// make the choice. That is the only way `ARRAY[1,2] || NULL`, a
-    /// concatenation that gives `{1,2}`, can differ from
-    /// `ARRAY[1,2] || NULL::int`, an append that gives `{1,2,NULL}`, once both
-    /// right sides have evaluated to SQL NULL.
+    // ---- `json`, which is a different type from `jsonb` ----
+
+    /// The 42883 every `json` rejection carries, verbatim from PostgreSQL 18.4.
+    const NO_OPERATOR_HINT: &str = "No operator matches the given name and argument types. \
+                                    You might need to add explicit type casts.";
+
+    /// The SQLSTATE, message and HINT a plan-time failure reports.
+    fn plan_failure(sql: &str) -> (String, String, Option<String>) {
+        let error = infer_jt(sql).expect_err("must not resolve").into_pg();
+        let hint = error.diagnostics.as_ref().and_then(|d| d.hint.clone());
+        (error.code, error.message, hint)
+    }
+
+    /// PostgreSQL gives `json` six operators and no more: `->` and `->>` by
+    /// object key and by array index, and `#>` / `#>>` by path. `->`/`#>` yield
+    /// `json`; `->>`/`#>>` yield `text`.
+    #[test]
+    fn json_infers_the_result_types_of_its_six_operators() {
+        let cases: &[(&str, ColumnType)] = &[
+            ("jn -> 'a'", ColumnType::Json),
+            ("jn -> 0", ColumnType::Json),
+            ("jn ->> 'a'", ColumnType::Text),
+            ("jn ->> 0", ColumnType::Text),
+            ("jn #> ARRAY['a']", ColumnType::Json),
+            ("jn #>> ARRAY['a']", ColumnType::Text),
+            // An `unknown` literal beside `#>`/`#>>` adopts `text[]` — the only
+            // adoption `json` makes, since its other two operators take the
+            // `text` the literal already is.
+            ("jn #> '{a}'", ColumnType::Json),
+            ("jn #>> '{a}'", ColumnType::Text),
+            // `json` has NO `||`; `anynonarray || text` renders the document.
+            ("jn || s", ColumnType::Text),
+            ("s || jn", ColumnType::Text),
+            // The `jsonb` column in the same table still resolves to `jsonb`,
+            // so neither type is answering for the other.
+            ("j -> 'a'", ColumnType::Jsonb),
+            ("j ->> 'a'", ColumnType::Text),
+        ];
+        for (sql, want) in cases {
+            assert2::assert!(infer_jt(sql).expect("infer") == *want, "for {sql}");
+        }
+    }
+
+    /// `json` returns the ORIGINAL text of the sub-document, spacing and escapes
+    /// intact — the one property that makes it a different type from `jsonb`,
+    /// which would return `{"b": 1}` for every one of these.
+    #[test]
+    fn json_operators_return_the_original_sub_text() {
+        let cases: &[(&str, Datum)] = &[
+            ("jn -> 'a'", jn(r#"{"b":  1}"#)),
+            ("jn ->> 'a'", Datum::Text(r#"{"b":  1}"#.into())),
+            ("jn -> 'c' -> 0", jn("1")),
+            // A negative array index counts from the end.
+            ("jn -> 'c' -> -1", jn("2")),
+            // `->` keeps a JSON string quoted and escaped; `->>` de-escapes it.
+            ("jn -> 's'", jn(r#""x\ty""#)),
+            ("jn ->> 's'", Datum::Text("x\ty".into())),
+            ("jn #> ARRAY['a', 'b']", jn("1")),
+            ("jn #>> ARRAY['a', 'b']", Datum::Text("1".into())),
+            ("jn #> '{a,b}'", jn("1")),
+            // A missing key, and an array index into an object, are SQL NULL
+            // rather than an error.
+            ("jn -> 'zz'", Datum::Null),
+            ("jn ->> 0", Datum::Null),
+            // All six are strict.
+            ("null::json -> 'a'", Datum::Null),
+            ("jn -> null", Datum::Null),
+            ("jn #> null", Datum::Null),
+            // `json || text` renders the document, which is `anynonarray || text`.
+            ("jn || s", Datum::Text(format!("{JSON_ROW}a"))),
+        ];
+        for (sql, want) in cases {
+            assert2::assert!(eval_jt(sql).expect("eval") == *want, "for {sql}");
+        }
+    }
+
+    /// Every operator PostgreSQL does NOT give `json`, with its exact message
+    /// and HINT. Without this the fall-throughs are silent rather than wrong:
+    /// `=` would order two documents as text and `-` would report a 42804.
+    #[test]
+    fn json_reports_42883_for_every_operator_it_does_not_have() {
+        let cases: &[(&str, &str)] = &[
+            // No equality and no ordering, at any spelling that resolves one.
+            ("jn = jn", "operator does not exist: json = json"),
+            ("jn <> jn", "operator does not exist: json <> json"),
+            ("jn < jn", "operator does not exist: json < json"),
+            ("jn <= jn", "operator does not exist: json <= json"),
+            ("jn > jn", "operator does not exist: json > json"),
+            ("jn >= jn", "operator does not exist: json >= json"),
+            (
+                "jn IS DISTINCT FROM jn",
+                "operator does not exist: json = json",
+            ),
+            (
+                "jn IS NOT DISTINCT FROM jn",
+                "operator does not exist: json = json",
+            ),
+            ("jn IN (jn)", "operator does not exist: json = json"),
+            (
+                "jn BETWEEN jn AND jn",
+                "operator does not exist: json >= json",
+            ),
+            (
+                "CASE jn WHEN jn THEN 1 END",
+                "operator does not exist: json = json",
+            ),
+            (
+                "jn = ANY(ARRAY[jn])",
+                "operator does not exist: json = json",
+            ),
+            // `json` is not `jsonb` and not `text`, in either direction.
+            ("jn = j", "operator does not exist: json = jsonb"),
+            ("jn = s", "operator does not exist: json = text"),
+            ("jn @> j", "operator does not exist: json @> jsonb"),
+            ("j @> jn", "operator does not exist: jsonb @> json"),
+            // PostgreSQL leaves a literal beside a `json` operand `unknown`,
+            // because there is no operator for it to adopt a type from.
+            ("jn = '{}'", "operator does not exist: json = unknown"),
+            ("'{}' = jn", "operator does not exist: unknown = json"),
+            // The jsonb-only containment, existence and jsonpath operators.
+            ("jn @> jn", "operator does not exist: json @> json"),
+            ("jn <@ jn", "operator does not exist: json <@ json"),
+            ("jn && jn", "operator does not exist: json && json"),
+            ("jn ? s", "operator does not exist: json ? text"),
+            (
+                "jn ?| ARRAY['a']",
+                "operator does not exist: json ?| text[]",
+            ),
+            (
+                "jn ?& ARRAY['a']",
+                "operator does not exist: json ?& text[]",
+            ),
+            // `||` and `-` resolve for `jsonb` and for nothing about `json`.
+            ("jn || jn", "operator does not exist: json || json"),
+            ("jn - s", "operator does not exist: json - text"),
+            ("jn - 1", "operator does not exist: json - integer"),
+            // The six that DO exist still reject an operand they have no
+            // overload for.
+            ("jn -> true", "operator does not exist: json -> boolean"),
+            (
+                "jn #> ARRAY[1]",
+                "operator does not exist: json #> integer[]",
+            ),
+            // …and no other left operand acquires them.
+            ("s -> s", "operator does not exist: text -> text"),
+            ("i #> ta", "operator does not exist: integer #> text[]"),
+            ("s #>> ta", "operator does not exist: text #>> text[]"),
+        ];
+        for (sql, message) in cases {
+            assert2::assert!(
+                plan_failure(sql)
+                    == (
+                        "42883".to_string(),
+                        (*message).to_string(),
+                        Some(NO_OPERATOR_HINT.to_string())
+                    ),
+                "for {sql}"
+            );
+        }
+    }
+
+    /// Only `jsonb` has a subscript handler, so a `json` base is 42804 — at
+    /// plan time and at value time, for a single subscript and for a chain.
+    #[test]
+    fn json_does_not_support_subscripting() {
+        let want = (
+            "42804".to_string(),
+            "cannot subscript type json because it does not support subscripting".to_string(),
+        );
+        for sql in ["jn['a']", "jn[1]", "jn['a']['b']"] {
+            let planned = infer_jt(sql).expect_err("no subscripting").into_pg();
+            assert2::assert!((planned.code, planned.message) == want, "planning {sql}");
+            let evaluated = eval_jt(sql).expect_err("no subscripting").into_pg();
+            assert2::assert!(
+                (evaluated.code, evaluated.message) == want,
+                "evaluating {sql}"
+            );
+        }
+        // `jsonb`'s subscripting is untouched.
+        assert2::assert!(eval_jt("j['a']").expect("jsonb subscript") == jb("1"));
+    }
+
+    /// `json` has no default btree operator class, so everything that needs one
+    /// — GROUP BY, DISTINCT, ORDER BY, the set operations, a window PARTITION —
+    /// names the missing operator rather than inventing a text order.
+    #[test]
+    fn json_has_no_btree_operator_class() {
+        let cases: &[(ColumnType, &str)] = &[
+            (ColumnType::Json, "json"),
+            (ColumnType::Array(ElemType::Json), "json[]"),
+        ];
+        for (ty, name) in cases {
+            let equality = require_equality_operator(*ty)
+                .expect_err("no equality operator")
+                .into_pg();
+            assert2::assert!(
+                (equality.code.as_str(), equality.message.as_str())
+                    == (
+                        "42883",
+                        format!("could not identify an equality operator for type {name}").as_str()
+                    ),
+                "for {name}"
+            );
+            let ordering = require_ordering_operator(*ty)
+                .expect_err("no ordering operator")
+                .into_pg();
+            assert2::assert!(
+                (ordering.code.as_str(), ordering.message.as_str())
+                    == (
+                        "42883",
+                        format!("could not identify an ordering operator for type {name}").as_str()
+                    ),
+                "for {name}"
+            );
+        }
+        // `jsonb` normalizes on input and therefore HAS the opclass.
+        assert2::assert!(require_equality_operator(ColumnType::Jsonb).is_ok());
+        assert2::assert!(require_ordering_operator(ColumnType::Jsonb).is_ok());
+    }
+
+    /// The same rejections from the VALUES alone — the path `agg`'s grouped
+    /// evaluator takes, which has no operand expressions to type first.
+    #[test]
+    fn json_values_reject_the_operators_json_does_not_have() {
+        let ctx = crate::clock::EvalCtx::test_default();
+        let doc = jn("{}");
+        let text = Datum::Text("a".into());
+        let cases: &[(BinaryOp, &Datum, &str)] = &[
+            (BinaryOp::Eq, &doc, "operator does not exist: json = json"),
+            (BinaryOp::Ne, &doc, "operator does not exist: json <> json"),
+            (BinaryOp::Lt, &doc, "operator does not exist: json < json"),
+            (BinaryOp::Ge, &doc, "operator does not exist: json >= json"),
+            (
+                BinaryOp::IsDistinctFrom,
+                &doc,
+                "operator does not exist: json = json",
+            ),
+            (
+                BinaryOp::Contains,
+                &doc,
+                "operator does not exist: json @> json",
+            ),
+            (
+                BinaryOp::ContainedBy,
+                &doc,
+                "operator does not exist: json <@ json",
+            ),
+            (BinaryOp::Sub, &text, "operator does not exist: json - text"),
+            (BinaryOp::Add, &text, "operator does not exist: json + text"),
+            (
+                BinaryOp::KeyExists,
+                &text,
+                "operator does not exist: json ? text",
+            ),
+            (
+                BinaryOp::JsonPathMatch,
+                &doc,
+                "operator does not exist: json @@ json",
+            ),
+        ];
+        for (op, right, message) in cases {
+            let error = apply_binary(*op, &doc, right, &ctx)
+                .expect_err("no operator")
+                .into_pg();
+            assert2::assert!(
+                (error.code.as_str(), error.message.as_str()) == ("42883", *message),
+                "for {}",
+                op_spelling(*op)
+            );
+        }
+        // `||` is the one shared spelling `json` really resolves, and it must
+        // NOT be turned away with the rest.
+        assert2::assert!(
+            apply_binary(BinaryOp::Concat, &doc, &text, &ctx).expect("concat")
+                == Datum::Text("{}a".into())
+        );
+    }
+
+    /// `||` resolves to five different operators; the choice is made from the
+    /// operands' STATIC types, which is the only way `ARRAY[1,2] || NULL` (a
+    /// concatenation, `{1,2}`) can differ from `ARRAY[1,2] || NULL::int` (an
+    /// append, `{1,2,NULL}`) once both right sides have evaluated to SQL NULL.
     #[test]
     fn concat_resolves_text_jsonb_and_the_three_array_forms() {
         let with_null = Datum::Array(ArrayValue::new(

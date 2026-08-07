@@ -208,6 +208,7 @@ pub enum ElemType {
     Interval,
     Bytea,
     Uuid,
+    Json,
     Jsonb,
     JsonPath,
     Int2,
@@ -226,7 +227,7 @@ impl ElemType {
     /// Every supported array element type, in `code()` order. The two
     /// length-modified entries stand for their whole family — `from_code`
     /// reconstructs the modifier, and neither the OID nor the name depends on it.
-    pub const ALL: [ElemType; 20] = [
+    pub const ALL: [ElemType; 21] = [
         ElemType::Bool,
         ElemType::Int4,
         ElemType::Int8,
@@ -247,6 +248,7 @@ impl ElemType {
         ElemType::Char(None),
         ElemType::Regtype,
         ElemType::JsonPath,
+        ElemType::Json,
     ];
 
     /// The element type as a column type (`numeric` is unconstrained, because an
@@ -266,6 +268,7 @@ impl ElemType {
             ElemType::Interval => ColumnType::Interval,
             ElemType::Bytea => ColumnType::Bytea,
             ElemType::Uuid => ColumnType::Uuid,
+            ElemType::Json => ColumnType::Json,
             ElemType::Jsonb => ColumnType::Jsonb,
             ElemType::JsonPath => ColumnType::JsonPath,
             ElemType::Int2 => ColumnType::Int2,
@@ -299,6 +302,7 @@ impl ElemType {
             ColumnType::Interval => ElemType::Interval,
             ColumnType::Bytea => ElemType::Bytea,
             ColumnType::Uuid => ElemType::Uuid,
+            ColumnType::Json => ElemType::Json,
             ColumnType::Jsonb => ElemType::Jsonb,
             ColumnType::JsonPath => ElemType::JsonPath,
             ColumnType::Int2 => ElemType::Int2,
@@ -368,6 +372,7 @@ impl ElemType {
             ElemType::Interval => oids::INTERVALARRAY,
             ElemType::Bytea => oids::BYTEAARRAY,
             ElemType::Uuid => oids::UUIDARRAY,
+            ElemType::Json => oids::JSONARRAY,
             ElemType::Jsonb => oids::JSONBARRAY,
             ElemType::JsonPath => oids::JSONPATHARRAY,
             ElemType::Int2 => oids::INT2ARRAY,
@@ -417,6 +422,7 @@ impl ElemType {
             ElemType::Interval => "interval[]",
             ElemType::Bytea => "bytea[]",
             ElemType::Uuid => "uuid[]",
+            ElemType::Json => "json[]",
             ElemType::Jsonb => "jsonb[]",
             ElemType::JsonPath => "jsonpath[]",
             ElemType::Int2 => "smallint[]",
@@ -482,6 +488,7 @@ impl ElemType {
             ElemType::Multirange(_) => 19,
             ElemType::Regtype => 20,
             ElemType::JsonPath => 21,
+            ElemType::Json => 22,
         }
     }
 
@@ -559,11 +566,8 @@ impl ElemType {
     }
 
     /// The element type of an array OID (`pg_type.typelem`), for parameter
-    /// binding. `json[]` maps onto `jsonb[]` like `json` maps onto `jsonb`.
+    /// binding.
     pub fn from_array_oid(oid: u32) -> Option<Self> {
-        if oid == oids::JSONARRAY {
-            return Some(ElemType::Jsonb);
-        }
         for range_oid in [
             oids::INT4RANGE,
             oids::NUMRANGE,
@@ -707,8 +711,13 @@ pub enum ColumnType {
     /// maximum length. Shares `bit`'s values: the two are binary-coercible in
     /// both directions.
     VarBit(Option<i32>),
-    /// PostgreSQL `jsonb` (OID 3802) — decomposed JSON. `json` (114) is accepted
-    /// on input as an alias but never reported.
+    /// PostgreSQL `json` (OID 114) — the input text, validated and otherwise
+    /// untouched, so whitespace, object key order and duplicate keys all survive
+    /// a round trip. `jsonb` is the decomposed sibling; the two are different
+    /// types, not two spellings of one.
+    Json,
+    /// PostgreSQL `jsonb` (OID 3802) — decomposed JSON: whitespace dropped,
+    /// numbers held as `numeric`, object keys sorted and de-duplicated.
     Jsonb,
     /// PostgreSQL `jsonpath` (OID 4072). Values use the existing canonical text
     /// datum; the executor validates and normalizes them at input boundaries.
@@ -851,9 +860,8 @@ impl ColumnType {
             "cidr" => Some(ColumnType::Cidr),
             "macaddr" => Some(ColumnType::MacAddr),
             "macaddr8" => Some(ColumnType::MacAddr8),
-            // `json` is an input alias for `jsonb`: values are stored decomposed
-            // and always report OID 3802 (a documented divergence).
-            "jsonb" | "json" => Some(ColumnType::Jsonb),
+            "json" => Some(ColumnType::Json),
+            "jsonb" => Some(ColumnType::Jsonb),
             "jsonpath" => Some(ColumnType::JsonPath),
             // The anonymous composite type. `SELECT ROW(1,2)` has it, and it is
             // the declared parameter type of `json_populate_record(record, …)`.
@@ -956,6 +964,7 @@ impl ColumnType {
             ColumnType::Money => oids::MONEY,
             ColumnType::Bit(_) => oids::BIT,
             ColumnType::VarBit(_) => oids::VARBIT,
+            ColumnType::Json => oids::JSON,
             ColumnType::Jsonb => oids::JSONB,
             ColumnType::JsonPath => oids::JSONPATH,
             ColumnType::Array(elem) => elem.array_oid(),
@@ -1009,6 +1018,7 @@ impl ColumnType {
             ColumnType::Money => "money",
             ColumnType::Bit(_) => "bit",
             ColumnType::VarBit(_) => "bit varying",
+            ColumnType::Json => "json",
             ColumnType::Jsonb => "jsonb",
             ColumnType::JsonPath => "jsonpath",
             ColumnType::Array(elem) => elem.array_name(),
@@ -1057,8 +1067,9 @@ impl ColumnType {
             // `money` is a pass-by-value int64; the two bit types are varlena.
             ColumnType::Money => 8,
             ColumnType::Bit(_) | ColumnType::VarBit(_) => -1,
-            // jsonb, jsonpath, arrays and composites are variable-length.
-            ColumnType::Jsonb
+            // json, jsonb, jsonpath, arrays and composites are variable-length.
+            ColumnType::Json
+            | ColumnType::Jsonb
             | ColumnType::JsonPath
             | ColumnType::Array(_)
             | ColumnType::Record(_) => -1,
@@ -1160,7 +1171,11 @@ pub enum Datum {
     Interval(crate::datetime::Interval),
     /// SP40: PostgreSQL `bytea`: variable-length binary string (raw bytes).
     Bytea(Vec<u8>),
-    /// PostgreSQL `jsonb`: a decomposed JSON value in canonical form.
+    /// PostgreSQL `json` — the original input text, validated by `json_in` and
+    /// then left exactly as written. Holding the text rather than a parse tree
+    /// is what makes `'{"b":1,   "a":2}'::json` print back unchanged.
+    Json(String),
+    /// PostgreSQL `jsonb` — a decomposed JSON value in canonical form.
     Jsonb(crate::jsonb::JsonbValue),
     /// A one-dimensional PostgreSQL array.
     Array(ArrayValue),
@@ -1573,6 +1588,12 @@ impl PartialEq for Datum {
             (Datum::Bytea(a), Datum::Bytea(b)) => a == b,
             // jsonb equality is structural over the canonical form (key order is
             // already normalized; number scale is ignored, as in `numeric`).
+            // `PostgreSQL` declares no equality operator for `json`, so nothing
+            // in SQL can reach this arm through `=`. It exists because `Datum`
+            // is `PartialEq` for the executor's own bookkeeping (unchanged-row
+            // detection, default comparison), where two `json` values are the
+            // same only when their text is.
+            (Datum::Json(a), Datum::Json(b)) => a == b,
             (Datum::Jsonb(a), Datum::Jsonb(b)) => a == b,
             // Arrays are equal when their element type and every element are.
             (Datum::Array(a), Datum::Array(b)) => a == b,
@@ -1661,6 +1682,7 @@ impl std::hash::Hash for Datum {
             // SP40: bytea hashes its bytes.
             Datum::Bytea(b) => b.hash(state),
             // Both hash scale-normalized numbers internally, matching `Eq`.
+            Datum::Json(text) => text.hash(state),
             Datum::Jsonb(j) => j.hash(state),
             Datum::Array(a) => a.hash(state),
             Datum::OidVector(a) => a.hash(state),
@@ -1709,6 +1731,7 @@ impl Datum {
             Datum::Timetz(_) => Some(ColumnType::Timetz),
             Datum::Interval(_) => Some(ColumnType::Interval),
             Datum::Bytea(_) => Some(ColumnType::Bytea),
+            Datum::Json(_) => Some(ColumnType::Json),
             Datum::Jsonb(_) => Some(ColumnType::Jsonb),
             Datum::Array(a) => Some(a.column_type()),
             Datum::OidVector(_) => Some(ColumnType::OidVector),
@@ -2318,7 +2341,7 @@ mod tests {
         assert!(ColumnType::Jsonb.typmod() == -1);
         assert!(ColumnType::from_sql_name("jsonb") == Some(ColumnType::Jsonb));
         // `json` is an input alias that reports as jsonb.
-        assert!(ColumnType::from_sql_name("JSON") == Some(ColumnType::Jsonb));
+        assert!(ColumnType::from_sql_name("JSON") == Some(ColumnType::Json));
         assert!(jsonb("1").column_type() == Some(ColumnType::Jsonb));
     }
 
@@ -2360,6 +2383,7 @@ mod tests {
             ),
             (ElemType::Interval, 1186, 1187, "interval[]"),
             (ElemType::Uuid, 2950, 2951, "uuid[]"),
+            (ElemType::Json, 114, 199, "json[]"),
             (ElemType::Jsonb, 3802, 3807, "jsonb[]"),
             (ElemType::JsonPath, 4072, 4073, "jsonpath[]"),
             (ElemType::Int2, 21, 1005, "smallint[]"),
@@ -2380,8 +2404,7 @@ mod tests {
             assert!(ty.array_element() == Some(*elem));
             assert!(ElemType::from_array_oid(*array_oid) == Some(*elem));
         }
-        // `json[]` binds onto `jsonb[]`, like `json` onto `jsonb`.
-        assert!(ElemType::from_array_oid(oids::JSONARRAY) == Some(ElemType::Jsonb));
+        assert!(ElemType::from_array_oid(oids::JSONARRAY) == Some(ElemType::Json));
         assert!(ElemType::from_array_oid(9999) == None);
     }
 

@@ -130,6 +130,10 @@ mod datum_tag {
     /// A `money` value, stored as its `i64` minor-unit count. Append-only — no
     /// version bump.
     pub const MONEY: u8 = 19;
+    /// `json` — followed by the input text (u32 length + bytes), stored and
+    /// returned verbatim. Distinct from [`JSONB`] because a `jsonb` round trip
+    /// would normalise it. Append-only — no version bump.
+    pub const JSON: u8 = 20;
 }
 
 mod type_tag {
@@ -223,6 +227,8 @@ mod type_tag {
     pub const VARBIT: u8 = 41;
     /// `PostgreSQL` `money`. Append-only — no version bump.
     pub const MONEY: u8 = 42;
+    /// `json`. Append-only — no version bump.
+    pub const JSON: u8 = 43;
 }
 
 #[derive(Debug)]
@@ -315,6 +321,7 @@ pub(crate) fn write_type(out: &mut Vec<u8>, ty: ColumnType) {
         ColumnType::Money => out.push(type_tag::MONEY),
         ColumnType::Bit(len) => write_optional_i32_type(out, type_tag::BIT, len),
         ColumnType::VarBit(len) => write_optional_i32_type(out, type_tag::VARBIT, len),
+        ColumnType::Json => out.push(type_tag::JSON),
         ColumnType::Jsonb => out.push(type_tag::JSONB),
         ColumnType::JsonPath => out.push(type_tag::JSONPATH),
         ColumnType::Array(elem) => {
@@ -441,6 +448,7 @@ fn read_type_with(
         type_tag::MONEY => ColumnType::Money,
         type_tag::BIT => ColumnType::Bit(read_optional_i32_type(cur)?),
         type_tag::VARBIT => ColumnType::VarBit(read_optional_i32_type(cur)?),
+        type_tag::JSON => ColumnType::Json,
         type_tag::JSONB => ColumnType::Jsonb,
         type_tag::JSONPATH => ColumnType::JsonPath,
         type_tag::ARRAY => ColumnType::Array(read_elem_type_with(cur, resolve_user_type)?),
@@ -607,6 +615,10 @@ fn write_default_value(out: &mut Vec<u8>, default: &Datum) {
             out.push(datum_tag::JSONB);
             write_str(out, &value.to_text());
         }
+        Datum::Json(text) => {
+            out.push(datum_tag::JSON);
+            write_str(out, text);
+        }
         Datum::Array(array) => {
             out.push(datum_tag::ARRAY);
             array.elem.write_code(out);
@@ -735,6 +747,7 @@ fn read_default_value(cur: &mut &[u8]) -> Result<Datum, KvError> {
                     .map_err(|_| KvError::CorruptRow(format!("invalid jsonb default {raw:?}")))?,
             )
         }
+        datum_tag::JSON => Datum::Json(read_string(cur)?),
         datum_tag::ARRAY => {
             let elem = crabka_pgtypes::ElemType::read_code(cur)
                 .ok_or_else(|| KvError::CorruptRow("unknown array element type code".into()))?;

@@ -1661,6 +1661,7 @@ fn render_type_oid_array(oids: &[u32]) -> String {
         ColumnType::Bytea,
         ColumnType::Uuid,
         ColumnType::Regclass,
+        ColumnType::Json,
         ColumnType::Jsonb,
     ];
     let names = oids
@@ -11105,11 +11106,8 @@ fn param_column_type(param: &BoundParam) -> Result<Option<ColumnType>, PgError> 
         Some(crabka_pgtypes::oids::TIMESTAMP) => Ok(Some(ColumnType::Timestamp)),
         Some(crabka_pgtypes::oids::TIMESTAMPTZ) => Ok(Some(ColumnType::Timestamptz)),
         Some(crabka_pgtypes::oids::INTERVAL) => Ok(Some(ColumnType::Interval)),
-        // `json` (114) is an input alias for `jsonb`: a value bound as either is
-        // decomposed on input, and the type is always reported back as 3802.
-        Some(crabka_pgtypes::oids::JSON | crabka_pgtypes::oids::JSONB) => {
-            Ok(Some(ColumnType::Jsonb))
-        }
+        Some(crabka_pgtypes::oids::JSON) => Ok(Some(ColumnType::Json)),
+        Some(crabka_pgtypes::oids::JSONB) => Ok(Some(ColumnType::Jsonb)),
         Some(crabka_pgtypes::oids::JSONPATH) => Ok(Some(ColumnType::JsonPath)),
         Some(crabka_pgtypes::oids::TSVECTOR) => Ok(Some(ColumnType::TsVector)),
         Some(crabka_pgtypes::oids::TSQUERY) => Ok(Some(ColumnType::TsQuery)),
@@ -11118,8 +11116,7 @@ fn param_column_type(param: &BoundParam) -> Result<Option<ColumnType>, PgError> 
         Some(crabka_pgtypes::oids::MACADDR) => Ok(Some(ColumnType::MacAddr)),
         Some(crabka_pgtypes::oids::MACADDR8) => Ok(Some(ColumnType::MacAddr8)),
         Some(0) | None => Ok(None),
-        // Every array OID crabka has an element type for (`_int4`, `_text`, …);
-        // `_json` folds onto `jsonb[]` the same way `json` folds onto `jsonb`.
+        // Every array OID crabka has an element type for (`_int4`, `_text`, …).
         Some(oid) => match ElemType::from_array_oid(oid) {
             Some(elem) => Ok(Some(ColumnType::Array(elem))),
             None => Err(PgError::error(
@@ -11366,6 +11363,15 @@ fn decode_binary_value(
                 .map_err(ExecError::into_pg)
         }
         ColumnType::Jsonb => decode_jsonb_binary(value),
+        // `json_recv` is `textrecv` plus a syntax check: no version byte, and
+        // the bytes are kept as sent.
+        ColumnType::Json => {
+            let text = std::str::from_utf8(value).map_err(invalid_parameter_encoding)?;
+            crabka_pgtypes::json::validate(text)
+                .map(|()| Datum::Json(text.to_string()))
+                .map_err(ExecError::from)
+                .map_err(ExecError::into_pg)
+        }
         ColumnType::JsonPath => decode_jsonpath_binary(value),
         ColumnType::TsVector | ColumnType::TsQuery => {
             let text = std::str::from_utf8(value).map_err(invalid_parameter_encoding)?;
@@ -11497,9 +11503,9 @@ const JSON_TEXT_MIN_FIRST_BYTE: u8 = b'\t';
 
 /// `jsonb_recv`: a version byte followed by the JSON text.
 ///
-/// A `json` (OID 114) parameter is the same document with no version byte, and
-/// the two forms are unambiguous, because no JSON document can begin with byte
-/// 0x01.
+/// A driver that declared a parameter `jsonb` but sent the bare document (as
+/// happens when it treated OID 114 and 3802 alike) is still accepted: the two
+/// forms are unambiguous, because no JSON document can begin with byte 0x01.
 fn decode_jsonb_binary(value: &[u8]) -> Result<Datum, PgError> {
     let json = match value.first() {
         Some(&crabka_pgtypes::encoding::JSONB_BINARY_VERSION) => &value[1..],
@@ -11555,9 +11561,7 @@ fn decode_array_binary(
     // PostgreSQL's own receiver likewise does not trust the flag.
     let _has_null = reader.read_i32()?;
     let elem_oid = reader.read_u32()?;
-    if elem_oid != expected_elem_oid
-        && !(elem == ElemType::Jsonb && elem_oid == crabka_pgtypes::oids::JSON)
-    {
+    if elem_oid != expected_elem_oid {
         return Err(PgError::error(
             "42804",
             format!(
@@ -17344,8 +17348,9 @@ mod notify_and_binary_parameter_tests {
     fn jsonb_and_array_parameter_oids_resolve_to_their_column_types() {
         let cases = [
             (oids::JSONB, ColumnType::Jsonb),
-            // `json` is an input alias for `jsonb`, scalar and array alike.
-            (oids::JSON, ColumnType::Jsonb),
+            // `json` is its own type, scalar and array alike -- it keeps the
+            // text a client sent, where `jsonb` decomposes it.
+            (oids::JSON, ColumnType::Json),
             (oids::JSONPATH, ColumnType::JsonPath),
             (oids::JSONPATHARRAY, ColumnType::Array(ElemType::JsonPath)),
             (oids::INT4ARRAY, ColumnType::Array(ElemType::Int4)),
@@ -17357,7 +17362,7 @@ mod notify_and_binary_parameter_tests {
                 ColumnType::Array(ElemType::Timestamptz),
             ),
             (oids::JSONBARRAY, ColumnType::Array(ElemType::Jsonb)),
-            (oids::JSONARRAY, ColumnType::Array(ElemType::Jsonb)),
+            (oids::JSONARRAY, ColumnType::Array(ElemType::Json)),
         ];
         for (oid, expected) in cases {
             let param = BoundParam {
@@ -17601,18 +17606,33 @@ mod notify_and_binary_parameter_tests {
     }
 
     #[test]
-    fn a_binary_jsonb_array_accepts_json_typed_elements() {
+    fn a_binary_array_element_oid_must_match_the_target_element_type() {
+        // A `json[]` array of `json` elements keeps each element's text.
         let mut bytes = array_header(1, 0, oids::JSON, Some((1, 1)));
-        let element = br#"{"a": 1}"#;
-        push_element(&mut bytes, Some(element));
+        push_element(&mut bytes, Some(br#"{"b":2,   "a":1}"#));
         let decoded = decode(
             &param(oids::JSONARRAY, 1, &bytes),
-            ColumnType::Array(ElemType::Jsonb),
+            ColumnType::Array(ElemType::Json),
         );
         assert!(
             decoded.expect("decode")
-                == Datum::Array(ArrayValue::new(ElemType::Jsonb, vec![jsonb(r#"{"a": 1}"#)]))
+                == Datum::Array(ArrayValue::new(
+                    ElemType::Json,
+                    vec![Datum::Json(r#"{"b":2,   "a":1}"#.to_owned())]
+                ))
         );
+
+        // json and jsonb are separate types, so an array declaring one element
+        // type cannot be read as the other -- PostgreSQL's array_recv checks
+        // the header's element oid the same way.
+        let mut bytes = array_header(1, 0, oids::JSON, Some((1, 1)));
+        push_element(&mut bytes, Some(br#"{"a": 1}"#));
+        let rejected = decode(
+            &param(oids::JSONARRAY, 1, &bytes),
+            ColumnType::Array(ElemType::Jsonb),
+        )
+        .expect_err("a json element cannot fill a jsonb array");
+        assert!(rejected.code == "42804", "{rejected:?}");
     }
 
     /// The fixed part of a binary array: `ndim`, `hasnull`, the element OID and

@@ -2262,6 +2262,17 @@ fn validate_default_index_opclass(
     ty: ColumnType,
     method: crabka_pgcatalog::IndexMethod,
 ) -> Result<(), ExecError> {
+    // `json` has no operator class for ANY access method — it has no equality
+    // operator to build one on — so unlike `jsonpath` it is not limited to
+    // btree and hash. This is also what makes `j json UNIQUE` and
+    // `j json PRIMARY KEY` fail, since both build a btree index.
+    if ty.storage_type() == ColumnType::Json {
+        return Err(ExecError::UndefinedObject(format!(
+            "data type {} has no default operator class for access method \"{}\"",
+            ty.name(),
+            index_method_name(method)
+        )));
+    }
     if ty.storage_type() == ColumnType::JsonPath
         && matches!(
             method,
@@ -2345,6 +2356,7 @@ fn ensure_default_can_be_persisted(value: &Datum) -> Result<(), ExecError> {
             | Datum::JsonPath(_)
             | Datum::Float8(_)
             | Datum::Numeric(_)
+            | Datum::Json(_)
             | Datum::Jsonb(_)
             | Datum::TsVector(_)
             | Datum::TsQuery(_)
@@ -9146,7 +9158,13 @@ pub(crate) fn coerce(
         (value @ Datum::BitString(_), ty @ (ColumnType::Bit(_) | ColumnType::VarBit(_))) => {
             crabka_pgtypes::cast::cast_assign(&value, ty, &ctx.time_zone)?
         }
-        (value @ (Datum::Text(_) | Datum::Jsonb(_)), ty @ ColumnType::Jsonb)
+        // `json → jsonb` and `jsonb → json` are assignment-level casts in
+        // `pg_cast`, so storing one in a column of the other is allowed and runs
+        // the target's input function over the source's output.
+        (
+            value @ (Datum::Text(_) | Datum::Jsonb(_) | Datum::Json(_)),
+            ty @ (ColumnType::Jsonb | ColumnType::Json),
+        )
         | (value @ (Datum::Text(_) | Datum::Array(_)), ty @ ColumnType::Array(_)) => {
             // `cast_assign`, because this is a store: an over-long element of a
             // `varchar(n)[]` column is 22001, not a silent truncation.
@@ -16075,9 +16093,10 @@ fn format_default_value(value: &Datum, ty: ColumnType) -> String {
             let _ = write!(out, "'{}'::{}", escape_sql_string(value), ty.name());
             out
         }
-        // A jsonb/array default renders like PostgreSQL's `pg_get_expr` output:
-        // the value's own text, quoted and cast to the column type.
-        Datum::Jsonb(_)
+        // A json/jsonb/array default renders like PostgreSQL's `pg_get_expr`
+        // output: the value's own text, quoted and cast to the column type.
+        Datum::Json(_)
+        | Datum::Jsonb(_)
         | Datum::Array(_)
         | Datum::OidVector(_)
         | Datum::Range(_)
@@ -17477,9 +17496,6 @@ fn scalar_type_rows() -> &'static [BuiltinTypeRow] {
             elem: 0,
             array: crabka_pgtypes::oids::UUIDARRAY as i32,
         },
-        // `json` is an input alias for `jsonb` (crabka never reports OID 114),
-        // but PostgreSQL's own row is what a driver's typeinfo query finds when
-        // an application asks about the `json` type by name or oid.
         BuiltinTypeRow {
             oid: crabka_pgtypes::oids::JSON as i32,
             name: "json",
@@ -17633,6 +17649,7 @@ fn array_typname(elem: crabka_pgtypes::ElemType) -> &'static str {
     use crabka_pgtypes::ElemType;
     match elem {
         ElemType::Bool => "_bool",
+        ElemType::Json => "_json",
         ElemType::Int4 => "_int4",
         ElemType::Int8 => "_int8",
         ElemType::Text => "_text",
@@ -19164,8 +19181,8 @@ pub(crate) fn column_type_from_oid(oid: u32) -> Result<ColumnType, ExecError> {
         crabka_pgtypes::oids::TIMESTAMPTZ => ColumnType::Timestamptz,
         crabka_pgtypes::oids::INTERVAL => ColumnType::Interval,
         crabka_pgtypes::oids::UUID => ColumnType::Uuid,
-        // `json` is an input alias for `jsonb`; both name the same column type.
-        crabka_pgtypes::oids::JSON | crabka_pgtypes::oids::JSONB => ColumnType::Jsonb,
+        crabka_pgtypes::oids::JSON => ColumnType::Json,
+        crabka_pgtypes::oids::JSONB => ColumnType::Jsonb,
         crabka_pgtypes::oids::JSONPATH => ColumnType::JsonPath,
         crabka_pgtypes::oids::RECORD => ColumnType::Record(None),
         // Every array oid crabka has an element type for, `_json` included.
@@ -27753,10 +27770,11 @@ mod tests {
         use crabka_pgtypes::{ColumnType, ElemType, oids};
 
         for (oid, expected) in [
-            // `json` is an input alias for `jsonb`.
-            (oids::JSON, ColumnType::Jsonb),
+            // `json` and `jsonb` are separate types: json keeps its input text,
+            // jsonb decomposes it. Each oid must map to its own.
+            (oids::JSON, ColumnType::Json),
             (oids::JSONB, ColumnType::Jsonb),
-            (oids::JSONARRAY, ColumnType::Array(ElemType::Jsonb)),
+            (oids::JSONARRAY, ColumnType::Array(ElemType::Json)),
             (oids::RECORD, ColumnType::Record(None)),
         ] {
             assert!(super::column_type_from_oid(oid).expect("known oid") == expected);

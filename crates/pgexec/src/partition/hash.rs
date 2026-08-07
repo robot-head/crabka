@@ -84,6 +84,10 @@ fn column_hash(value: &Datum, seed: u64) -> Result<Option<u64>, ExecError> {
         // whatever carries the type distinction.
         Datum::Text(v) => hash_bytes_extended(v.as_bytes(), seed)?,
         Datum::JsonPath(_) => return Err(unsupported("jsonpath")),
+        // `json` has no hash operator class in PostgreSQL — it has no equality
+        // operator to build one on — so it cannot be a hash partition key there
+        // either.
+        Datum::Json(_) => return Err(unsupported("json")),
         Datum::Bytea(v) => hash_bytes_extended(v, seed)?,
         // The date/time types hash their internal representation, which the
         // binary send functions already produce: days or microseconds relative

@@ -1731,7 +1731,7 @@ mod tests {
         let error = Inet::parse("192.168.1.2/30", true).expect_err("host bits set");
         assert!(error.sqlstate() == "22P02");
         assert!(error.to_string() == "invalid cidr value: \"192.168.1.2/30\"");
-        assert!(error.detail() == Some("Value has bits set to right of mask."));
+        assert!(error.detail().as_deref() == Some("Value has bits set to right of mask."));
         // The identical text is a perfectly good `inet`.
         assert!(inet("192.168.1.2/30").to_text() == "192.168.1.2/30");
     }

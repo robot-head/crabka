@@ -49,6 +49,7 @@ use crate::{
     error::ExecError,
     eval::ArgType,
     join::Relation,
+    json_fn::JsonbSrf,
     scope::{ColumnBinding, Scope},
 };
 
@@ -68,18 +69,21 @@ enum Srf {
     StringToTable,
     /// `regexp_split_to_table(text, pattern [, flags])`.
     RegexpSplitToTable,
-    /// `jsonb_each(jsonb)` → `(key text, value jsonb)`.
-    JsonbEach,
-    /// `jsonb_each_text(jsonb)` → `(key text, value text)`.
-    JsonbEachText,
-    /// `jsonb_object_keys(jsonb)` → `text`.
-    JsonbObjectKeys,
+    /// `json_each(json)` → `(key text, value json)`, `jsonb_each(jsonb)` →
+    /// `(key text, value jsonb)`.
+    Each(JsonFamily),
+    /// `json_each_text`/`jsonb_each_text` → `(key text, value text)`.
+    EachText(JsonFamily),
+    /// `json_object_keys`/`jsonb_object_keys` → `text`.
+    ObjectKeys(JsonFamily),
+    /// `json_array_elements(json)` → `value json`,
     /// `jsonb_array_elements(jsonb)` → `value jsonb`.
-    JsonbArrayElements,
-    /// `jsonb_array_elements_text(jsonb)` → `value text`.
-    JsonbArrayElementsText,
+    ArrayElements(JsonFamily),
+    /// `json_array_elements_text`/`jsonb_array_elements_text` → `value text`.
+    ArrayElementsText(JsonFamily),
     /// `jsonb_path_query(target, path [, vars [, silent]])` → one row per item
-    /// the jsonpath produces.
+    /// the jsonpath produces. There is no `json_path_query`: `PostgreSQL`
+    /// declares the jsonpath functions over `jsonb` alone.
     JsonbPathQuery,
     PgInputErrorInfo,
     /// `pg_partition_ancestors(regclass)` → `relid regclass` — the relation
@@ -87,6 +91,34 @@ enum Srf {
     PgPartitionAncestors,
     EventDdlCommands,
     EventDroppedObjects,
+}
+
+/// Which of the two JSON document types one of the five expansion shapes reads.
+///
+/// `PostgreSQL` declares them as two families of five, over `json` and over
+/// `jsonb`, and the families are not interchangeable: there is no implicit cast
+/// between the types, so `json_each('{}'::jsonb)` is a 42883 rather than a
+/// coercion. The document type is also the *output* type of the two shapes that
+/// hand back a sub-document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JsonFamily {
+    /// `json` — the original input text, so whitespace, object key order and
+    /// duplicate keys all survive into the expansion.
+    Json,
+    /// `jsonb` — decomposed and canonically ordered, with duplicate keys already
+    /// resolved to the last one.
+    Jsonb,
+}
+
+impl JsonFamily {
+    /// The type the family's argument carries — and, for `each` and
+    /// `array_elements`, the type of the sub-document column they produce.
+    fn column_type(self) -> ColumnType {
+        match self {
+            JsonFamily::Json => ColumnType::Json,
+            JsonFamily::Jsonb => ColumnType::Jsonb,
+        }
+    }
 }
 
 /// What a call *is*, as opposed to how it was written: the name with its
@@ -120,13 +152,19 @@ fn classify(name: &str) -> Option<Srf> {
         "generate_subscripts" => Srf::GenerateSubscripts,
         "string_to_table" => Srf::StringToTable,
         "regexp_split_to_table" => Srf::RegexpSplitToTable,
-        // The `json_*` spellings share their implementation: crabka stores
-        // `json` as `jsonb` (see the compatibility matrix row).
-        "jsonb_each" | "json_each" => Srf::JsonbEach,
-        "jsonb_each_text" | "json_each_text" => Srf::JsonbEachText,
-        "jsonb_object_keys" | "json_object_keys" => Srf::JsonbObjectKeys,
-        "jsonb_array_elements" | "json_array_elements" => Srf::JsonbArrayElements,
-        "jsonb_array_elements_text" | "json_array_elements_text" => Srf::JsonbArrayElementsText,
+        // Ten functions, five shapes over two document types. The `json_*` half
+        // reads the original text, so it keeps input order and duplicate keys
+        // where the `jsonb_*` half has already discarded both.
+        "json_each" => Srf::Each(JsonFamily::Json),
+        "jsonb_each" => Srf::Each(JsonFamily::Jsonb),
+        "json_each_text" => Srf::EachText(JsonFamily::Json),
+        "jsonb_each_text" => Srf::EachText(JsonFamily::Jsonb),
+        "json_object_keys" => Srf::ObjectKeys(JsonFamily::Json),
+        "jsonb_object_keys" => Srf::ObjectKeys(JsonFamily::Jsonb),
+        "json_array_elements" => Srf::ArrayElements(JsonFamily::Json),
+        "jsonb_array_elements" => Srf::ArrayElements(JsonFamily::Jsonb),
+        "json_array_elements_text" => Srf::ArrayElementsText(JsonFamily::Json),
+        "jsonb_array_elements_text" => Srf::ArrayElementsText(JsonFamily::Jsonb),
         "jsonb_path_query" | "jsonb_path_query_tz" => Srf::JsonbPathQuery,
         "pg_input_error_info" => Srf::PgInputErrorInfo,
         "pg_partition_ancestors" => Srf::PgPartitionAncestors,
@@ -182,32 +220,32 @@ pub(crate) fn plan(name: &str, args: &[Expr], scope: &Scope) -> Result<SrfPlan, 
             require_arity(name, &given, (2, 3))?;
             vec![column("regexp_split_to_table", ColumnType::Text)]
         }
-        Srf::JsonbEach => {
-            require_arity(name, &given, (1, 1))?;
+        Srf::Each(family) => {
+            require_json_document(name, &given, family)?;
             vec![
                 column("key", ColumnType::Text),
-                column("value", ColumnType::Jsonb),
+                column("value", family.column_type()),
             ]
         }
-        Srf::JsonbEachText => {
-            require_arity(name, &given, (1, 1))?;
+        Srf::EachText(family) => {
+            require_json_document(name, &given, family)?;
             vec![
                 column("key", ColumnType::Text),
                 column("value", ColumnType::Text),
             ]
         }
-        Srf::JsonbObjectKeys => {
-            require_arity(name, &given, (1, 1))?;
-            // A single-column SRF names its column after the function, so the
-            // `json_object_keys` alias must not report `jsonb_object_keys`.
+        Srf::ObjectKeys(family) => {
+            require_json_document(name, &given, family)?;
+            // A single-column SRF names its column after the function, so
+            // `json_object_keys` must not report `jsonb_object_keys`.
             vec![column(&bare, ColumnType::Text)]
         }
-        Srf::JsonbArrayElements => {
-            require_arity(name, &given, (1, 1))?;
-            vec![column("value", ColumnType::Jsonb)]
+        Srf::ArrayElements(family) => {
+            require_json_document(name, &given, family)?;
+            vec![column("value", family.column_type())]
         }
-        Srf::JsonbArrayElementsText => {
-            require_arity(name, &given, (1, 1))?;
+        Srf::ArrayElementsText(family) => {
+            require_json_document(name, &given, family)?;
             vec![column("value", ColumnType::Text)]
         }
         Srf::JsonbPathQuery => {
@@ -297,11 +335,11 @@ pub(crate) fn rows(
         Srf::GenerateSubscripts => subscript_rows(&plan.name, vals)?,
         Srf::StringToTable => string_to_table_rows(&plan.name, vals)?,
         Srf::RegexpSplitToTable => regexp_split_rows(&plan.name, vals)?,
-        Srf::JsonbEach
-        | Srf::JsonbEachText
-        | Srf::JsonbObjectKeys
-        | Srf::JsonbArrayElements
-        | Srf::JsonbArrayElementsText => crate::json_fn::jsonb_srf_rows(json_srf(plan.kind), vals)?,
+        Srf::Each(family) => expand_json(family, JsonbSrf::Each, vals)?,
+        Srf::EachText(family) => expand_json(family, JsonbSrf::EachText, vals)?,
+        Srf::ObjectKeys(family) => expand_json(family, JsonbSrf::ObjectKeys, vals)?,
+        Srf::ArrayElements(family) => expand_json(family, JsonbSrf::ArrayElements, vals)?,
+        Srf::ArrayElementsText(family) => expand_json(family, JsonbSrf::ArrayElementsText, vals)?,
         Srf::JsonbPathQuery => crate::json_fn::jsonb_path_query_rows(&plan.name, vals)?,
         Srf::PgInputErrorInfo => input_error_info_rows(vals, ctx)?,
         Srf::PgPartitionAncestors => partition_ancestor_rows(&vals[0], ctx)?,
@@ -332,11 +370,11 @@ fn param_types(plan: &SrfPlan) -> Vec<Option<ColumnType>> {
         }
         Srf::GenerateSubscripts => vec![None, Some(ColumnType::Int4), Some(ColumnType::Bool)],
         Srf::StringToTable | Srf::RegexpSplitToTable => vec![text, text, text],
-        Srf::JsonbEach
-        | Srf::JsonbEachText
-        | Srf::JsonbObjectKeys
-        | Srf::JsonbArrayElements
-        | Srf::JsonbArrayElementsText => vec![Some(ColumnType::Jsonb)],
+        Srf::Each(family)
+        | Srf::EachText(family)
+        | Srf::ObjectKeys(family)
+        | Srf::ArrayElements(family)
+        | Srf::ArrayElementsText(family) => vec![Some(family.column_type())],
         // `(jsonb, jsonpath [, jsonb vars [, boolean silent]])`.
         Srf::JsonbPathQuery => vec![
             Some(ColumnType::Jsonb),
@@ -444,15 +482,39 @@ fn type_error(name: &str, value: &Datum) -> ExecError {
     ))
 }
 
-fn json_srf(kind: Srf) -> crate::json_fn::JsonbSrf {
-    use crate::json_fn::JsonbSrf;
-    match kind {
-        Srf::JsonbEach => JsonbSrf::Each,
-        Srf::JsonbEachText => JsonbSrf::EachText,
-        Srf::JsonbObjectKeys => JsonbSrf::ObjectKeys,
-        Srf::JsonbArrayElements => JsonbSrf::ArrayElements,
-        Srf::JsonbArrayElementsText => JsonbSrf::ArrayElementsText,
-        _ => unreachable!("only the jsonb SRFs reach the jsonb dispatch"),
+/// The single document argument all ten expansion functions take.
+///
+/// `PostgreSQL` declares the `json` and `jsonb` families separately and has no
+/// implicit cast between the two types, so each family accepts only its own:
+/// `json_each('{}'::jsonb)` and `jsonb_each('{}'::json)` are both 42883, as is
+/// any other type. A bare literal is still `unknown` here and adopts the
+/// family's type in [`param_types`].
+fn require_json_document(
+    name: &str,
+    given: &[ArgType],
+    family: JsonFamily,
+) -> Result<(), ExecError> {
+    require_arity(name, given, (1, 1))?;
+    if given[0]
+        .known()
+        .is_some_and(|actual| actual != family.column_type())
+    {
+        return Err(undefined_function(name, given));
+    }
+    Ok(())
+}
+
+/// Expand one JSON document. The two families share all five shapes and differ
+/// only in what they expand — `jsonb`'s decomposed value, or `json`'s original
+/// text — so the family picks the row builder and the shape rides along.
+fn expand_json(
+    family: JsonFamily,
+    shape: JsonbSrf,
+    vals: &[Datum],
+) -> Result<Vec<Vec<Datum>>, ExecError> {
+    match family {
+        JsonFamily::Json => crate::json_fn::json_srf_rows(shape, vals),
+        JsonFamily::Jsonb => crate::json_fn::jsonb_srf_rows(shape, vals),
     }
 }
 
@@ -1658,6 +1720,21 @@ mod tests {
         )
     }
 
+    /// A `json` argument. Unlike [`jsonb_arg`] the document is *not* rebuilt —
+    /// `json_in` validates and keeps every byte — so the spacing, key order and
+    /// duplicate keys written here are what the expansion has to hand back.
+    fn json_arg(source: &str) -> Expr {
+        crabka_pgtypes::json::validate(source).expect("valid json");
+        constant(Datum::Json(source.to_string()), ColumnType::Json)
+    }
+
+    fn jsons(values: &[&str]) -> Vec<Datum> {
+        values
+            .iter()
+            .map(|s| Datum::Json((*s).to_string()))
+            .collect()
+    }
+
     /// Plan then expand a call, the way both callers do.
     fn call(name: &str, args: &[Expr]) -> Result<Vec<Vec<Datum>>, ExecError> {
         let plan = plan(name, args, &Scope::empty())?;
@@ -1699,12 +1776,27 @@ mod tests {
             "jsonb_object_keys",
             "jsonb_array_elements",
             "jsonb_array_elements_text",
+            "json_each",
+            "json_each_text",
+            "json_object_keys",
+            "json_array_elements",
+            "json_array_elements_text",
+            "jsonb_path_query",
             "pg_input_error_info",
         ] {
             assert!(is_srf(name), "{name} should be a set-returning function");
             assert!(is_srf(&name.to_ascii_uppercase()), "{name} uppercased");
         }
-        for name in ["jsonb_typeof", "generate_seriess", "abs", ""] {
+        // `PostgreSQL` declares the jsonpath functions over `jsonb` alone, so
+        // the `json_` spelling five of these have has no counterpart here.
+        for name in [
+            "jsonb_typeof",
+            "json_path_query",
+            "json_path_query_tz",
+            "generate_seriess",
+            "abs",
+            "",
+        ] {
             assert!(
                 !is_srf(name),
                 "{name} should not be a set-returning function"
@@ -1792,6 +1884,33 @@ mod tests {
             (
                 "jsonb_array_elements_text",
                 vec![jsonb_arg("[1]")],
+                vec![("value", ColumnType::Text)],
+            ),
+            // The `json` family is the same five shapes over the other document
+            // type, and the two that hand back a sub-document hand back `json`.
+            (
+                "json_each",
+                vec![json_arg(r#"{"a": 1}"#)],
+                vec![("key", ColumnType::Text), ("value", ColumnType::Json)],
+            ),
+            (
+                "json_each_text",
+                vec![json_arg(r#"{"a": 1}"#)],
+                vec![("key", ColumnType::Text), ("value", ColumnType::Text)],
+            ),
+            (
+                "json_object_keys",
+                vec![json_arg(r#"{"a": 1}"#)],
+                vec![("json_object_keys", ColumnType::Text)],
+            ),
+            (
+                "json_array_elements",
+                vec![json_arg("[1]")],
+                vec![("value", ColumnType::Json)],
+            ),
+            (
+                "json_array_elements_text",
+                vec![json_arg("[1]")],
                 vec![("value", ColumnType::Text)],
             ),
         ];
@@ -2164,6 +2283,225 @@ mod tests {
         );
     }
 
+    /// One row of a single-column expansion per value.
+    fn one_column(values: Vec<Datum>) -> Vec<Vec<Datum>> {
+        values.into_iter().map(|value| vec![value]).collect()
+    }
+
+    /// The `json` family expands the ORIGINAL document text, so the three things
+    /// `jsonb` has already thrown away by the time it is stored all survive:
+    /// input order, duplicate keys, and each sub-document's own spacing.
+    #[test]
+    fn the_json_set_returning_functions_preserve_input_order_duplicates_and_spacing() {
+        let object = json_arg(r#"{"b":1,   "a":"x",  "b":null, "o": { "b" : 1 }}"#);
+        let array = json_arg(r#"[1,  { "b" : 1 } , "x\"y", null]"#);
+
+        let cases: Vec<(&str, &Expr, Vec<Vec<Datum>>)> = vec![
+            (
+                "json_each",
+                &object,
+                vec![
+                    vec![Datum::Text("b".into()), Datum::Json("1".into())],
+                    vec![Datum::Text("a".into()), Datum::Json("\"x\"".into())],
+                    // The duplicate `b` is kept, where it was written — the one
+                    // row `jsonb_each` cannot produce.
+                    vec![Datum::Text("b".into()), Datum::Json("null".into())],
+                    vec![Datum::Text("o".into()), Datum::Json("{ \"b\" : 1 }".into())],
+                ],
+            ),
+            (
+                "json_each_text",
+                &object,
+                vec![
+                    vec![Datum::Text("b".into()), Datum::Text("1".into())],
+                    // `->>`'s rule: a JSON string is de-escaped, the JSON `null`
+                    // literal becomes SQL NULL, anything else is its own text.
+                    vec![Datum::Text("a".into()), Datum::Text("x".into())],
+                    vec![Datum::Text("b".into()), Datum::Null],
+                    vec![Datum::Text("o".into()), Datum::Text("{ \"b\" : 1 }".into())],
+                ],
+            ),
+            (
+                "json_object_keys",
+                &object,
+                one_column(texts(&["b", "a", "b", "o"])),
+            ),
+            (
+                "json_array_elements",
+                &array,
+                one_column(jsons(&["1", "{ \"b\" : 1 }", r#""x\"y""#, "null"])),
+            ),
+            (
+                "json_array_elements_text",
+                &array,
+                one_column(vec![
+                    Datum::Text("1".into()),
+                    Datum::Text("{ \"b\" : 1 }".into()),
+                    Datum::Text("x\"y".into()),
+                    Datum::Null,
+                ]),
+            ),
+        ];
+        for (name, argument, expected) in cases {
+            assert!(
+                call(name, std::slice::from_ref(argument)).expect("rows") == expected,
+                "{name}"
+            );
+        }
+
+        // An empty container expands to nothing, and — STRICT — so does NULL.
+        for (name, empty) in [
+            ("json_each", "{}"),
+            ("json_each_text", "{}"),
+            ("json_object_keys", "{}"),
+            ("json_array_elements", "[]"),
+            ("json_array_elements_text", "[]"),
+        ] {
+            assert!(
+                call(name, &[json_arg(empty)]).expect("rows") == Vec::<Vec<Datum>>::new(),
+                "{name}({empty})"
+            );
+            assert!(
+                call(name, &[constant(Datum::Null, ColumnType::Json)]).expect("rows")
+                    == Vec::<Vec<Datum>>::new(),
+                "{name}(NULL)"
+            );
+        }
+    }
+
+    /// The `json` family raises its own messages for a wrongly shaped document,
+    /// and they are NOT the `jsonb` ones: `json_each` on an array is "cannot
+    /// deconstruct an array as an object" where `jsonb_each` says "cannot call
+    /// jsonb_each on a non-object".
+    #[test]
+    fn a_wrongly_shaped_json_document_carries_the_json_familys_own_message() {
+        let cases: Vec<(&str, &str, &str)> = vec![
+            (
+                "json_each",
+                "[1]",
+                "cannot deconstruct an array as an object",
+            ),
+            ("json_each", "1", "cannot deconstruct a scalar"),
+            (
+                "json_each_text",
+                "[1]",
+                "cannot deconstruct an array as an object",
+            ),
+            ("json_each_text", "1", "cannot deconstruct a scalar"),
+            (
+                "json_object_keys",
+                "[1]",
+                "cannot call json_object_keys on an array",
+            ),
+            (
+                "json_object_keys",
+                "1",
+                "cannot call json_object_keys on a scalar",
+            ),
+            (
+                "json_array_elements",
+                r#"{"a": 1}"#,
+                "cannot call json_array_elements on a non-array",
+            ),
+            (
+                "json_array_elements",
+                "1",
+                "cannot call json_array_elements on a scalar",
+            ),
+            (
+                "json_array_elements_text",
+                r#"{"a": 1}"#,
+                "cannot call json_array_elements_text on a non-array",
+            ),
+            (
+                "json_array_elements_text",
+                "1",
+                "cannot call json_array_elements_text on a scalar",
+            ),
+        ];
+        for (name, source, message) in cases {
+            let error = call(name, &[json_arg(source)])
+                .expect_err("wrong container")
+                .into_pg();
+            assert!(
+                (error.code.as_str(), error.message.as_str()) == ("22023", message),
+                "{name}({source}) gave {error:?}"
+            );
+        }
+    }
+
+    /// `PostgreSQL` declares the two families over `json` and `jsonb` with no
+    /// implicit cast between them, so neither accepts the other's document — nor
+    /// any other type. Each is the plain 42883 an unresolvable call raises.
+    #[test]
+    fn neither_json_family_accepts_the_others_document_type() {
+        let cases: Vec<(&str, Expr, &str)> = vec![
+            ("json_each", jsonb_arg("{}"), "json_each(jsonb)"),
+            ("json_each_text", jsonb_arg("{}"), "json_each_text(jsonb)"),
+            (
+                "json_object_keys",
+                jsonb_arg("{}"),
+                "json_object_keys(jsonb)",
+            ),
+            (
+                "json_array_elements",
+                jsonb_arg("[]"),
+                "json_array_elements(jsonb)",
+            ),
+            (
+                "json_array_elements_text",
+                jsonb_arg("[]"),
+                "json_array_elements_text(jsonb)",
+            ),
+            ("jsonb_each", json_arg("{}"), "jsonb_each(json)"),
+            ("jsonb_each_text", json_arg("{}"), "jsonb_each_text(json)"),
+            (
+                "jsonb_object_keys",
+                json_arg("{}"),
+                "jsonb_object_keys(json)",
+            ),
+            (
+                "jsonb_array_elements",
+                json_arg("[]"),
+                "jsonb_array_elements(json)",
+            ),
+            (
+                "jsonb_array_elements_text",
+                json_arg("[]"),
+                "jsonb_array_elements_text(json)",
+            ),
+            ("json_each", int4(1), "json_each(integer)"),
+            ("json_each", text("x"), "json_each(text)"),
+            ("jsonb_each", int4(1), "jsonb_each(integer)"),
+            ("jsonb_each", text("x"), "jsonb_each(text)"),
+        ];
+        for (name, argument, signature) in cases {
+            let error = call(name, std::slice::from_ref(&argument))
+                .expect_err("wrong argument type")
+                .into_pg();
+            let expected = format!("function {signature} does not exist");
+            assert!(
+                (error.code.as_str(), error.message.as_str()) == ("42883", expected.as_str()),
+                "{name} gave {error:?}"
+            );
+        }
+
+        // A bare literal is `unknown` and adopts whichever type the family it was
+        // passed to declares, so the same spelling reaches both.
+        let literal = [Expr::StringLiteral(r#"{"a":1}"#.into())];
+        assert!(
+            call("json_each", &literal).expect("rows")
+                == vec![vec![Datum::Text("a".into()), Datum::Json("1".into())]]
+        );
+        assert!(
+            call("jsonb_each", &literal).expect("rows")
+                == vec![vec![
+                    Datum::Text("a".into()),
+                    Datum::Jsonb(JsonbValue::Number(bigdecimal::BigDecimal::from(1)))
+                ]]
+        );
+    }
+
     // ---- end-to-end, through the engine ----
 
     async fn query(session: &mut crate::SqlSession, sql: &str) -> QueryResult {
@@ -2387,6 +2725,33 @@ mod tests {
                 vec!["key", "value"],
                 vec![crabka_pgtypes::oids::TEXT, crabka_pgtypes::oids::TEXT],
             ),
+            // The `json` family's sub-document columns are `json` (114), not
+            // `jsonb` (3802) — `json` is a type of its own, not an alias.
+            (
+                "SELECT * FROM json_each('{\"a\": 1}'::json)",
+                vec!["key", "value"],
+                vec![crabka_pgtypes::oids::TEXT, crabka_pgtypes::oids::JSON],
+            ),
+            (
+                "SELECT * FROM json_each_text('{\"a\": 1}'::json)",
+                vec!["key", "value"],
+                vec![crabka_pgtypes::oids::TEXT, crabka_pgtypes::oids::TEXT],
+            ),
+            (
+                "SELECT * FROM json_array_elements('[1]'::json)",
+                vec!["value"],
+                vec![crabka_pgtypes::oids::JSON],
+            ),
+            (
+                "SELECT * FROM json_array_elements_text('[1]'::json)",
+                vec!["value"],
+                vec![crabka_pgtypes::oids::TEXT],
+            ),
+            (
+                "SELECT * FROM json_object_keys('{\"a\": 1}'::json)",
+                vec!["json_object_keys"],
+                vec![crabka_pgtypes::oids::TEXT],
+            ),
             (
                 "SELECT * FROM string_to_table('a,b', ',')",
                 vec!["string_to_table"],
@@ -2455,6 +2820,81 @@ mod tests {
         )
         .await;
         assert!(shape(&named).0 == vec!["x", "y"]);
+    }
+
+    /// The two families expand the SAME document differently, all the way out to
+    /// the wire: `json` keeps what was written, `jsonb` reports what it stored.
+    #[tokio::test]
+    async fn the_two_json_families_disagree_about_the_same_document_end_to_end() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        let document = r#"{"b":1,   "a":2,  "b":3}"#;
+
+        let r = query(
+            &mut s,
+            &format!("SELECT * FROM json_each('{document}'::json)"),
+        )
+        .await;
+        assert!(shape(&r).0 == vec!["key", "value"]);
+        assert!(shape(&r).1 == vec![crabka_pgtypes::oids::TEXT, crabka_pgtypes::oids::JSON]);
+        assert!(
+            shape(&r).2
+                == vec![
+                    vec![Some("b".into()), Some("1".into())],
+                    vec![Some("a".into()), Some("2".into())],
+                    vec![Some("b".into()), Some("3".into())],
+                ]
+        );
+
+        // The same three fields through `jsonb`: sorted, and the duplicate `b`
+        // already resolved to the last one written.
+        let r = query(
+            &mut s,
+            &format!("SELECT * FROM jsonb_each('{document}'::jsonb)"),
+        )
+        .await;
+        assert!(shape(&r).1 == vec![crabka_pgtypes::oids::TEXT, crabka_pgtypes::oids::JSONB]);
+        assert!(
+            shape(&r).2
+                == vec![
+                    vec![Some("a".into()), Some("2".into())],
+                    vec![Some("b".into()), Some("3".into())],
+                ]
+        );
+
+        // A single-column call names its column after the function it was
+        // written as, and reports the duplicate key the same way.
+        let r = query(
+            &mut s,
+            &format!("SELECT * FROM json_object_keys('{document}'::json)"),
+        )
+        .await;
+        assert!(shape(&r).0 == vec!["json_object_keys"]);
+        assert!(column_of(&r) == vec![Some("b".into()), Some("a".into()), Some("b".into())]);
+
+        // Element text survives verbatim, spacing and escapes included.
+        let r = query(
+            &mut s,
+            "SELECT * FROM json_array_elements('[1,  { \"b\" : 1 } ]'::json)",
+        )
+        .await;
+        assert!(shape(&r).1 == vec![crabka_pgtypes::oids::JSON]);
+        assert!(column_of(&r) == vec![Some("1".into()), Some("{ \"b\" : 1 }".into())]);
+    }
+
+    /// `PostgreSQL` declares the jsonpath functions over `jsonb` alone, so the
+    /// `json_` spelling the other five have is a name that resolves to nothing.
+    #[tokio::test]
+    async fn json_path_query_is_not_a_function() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        for sql in [
+            "SELECT * FROM json_path_query('{\"a\": 1}'::json, '$.a')",
+            "SELECT * FROM json_path_query_tz('{\"a\": 1}'::json, '$.a')",
+        ] {
+            let error = s.simple_query(sql).await.expect_err("refused");
+            assert!(error.code == "42883", "{sql} gave {error:?}");
+        }
     }
 
     /// Build `proot ⊃ pmid ⊃ pleaf`, an ordinary table beside it, and an index
@@ -2620,7 +3060,7 @@ mod tests {
 
         let r = query(
             &mut s,
-            "SELECT * FROM pg_catalog.json_object_keys('{\"a\": 1}'::jsonb)",
+            "SELECT * FROM pg_catalog.json_object_keys('{\"a\": 1}'::json)",
         )
         .await;
         assert!(shape(&r).0 == vec!["json_object_keys"]);

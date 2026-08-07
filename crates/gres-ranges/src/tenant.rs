@@ -7345,6 +7345,7 @@ fn datum_hash_bytes(value: &Datum) -> Option<Vec<u8>> {
         | Datum::Timestamp(_)
         | Datum::Timestamptz(_)
         | Datum::Interval(_)
+        | Datum::Json(_)
         | Datum::Jsonb(_)
         | Datum::JsonPath(_)
         | Datum::Array(_)

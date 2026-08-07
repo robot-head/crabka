@@ -550,10 +550,21 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
                         "operator does not exist: jsonpath = jsonpath".into(),
                     ));
                 }
+                // `NULLIF` is `=` in disguise, and `json` has no `=`. The
+                // wording is the operator's, not the function's, which is why
+                // this cannot fall through to the generic arity check.
+                ScalarFunc::NullIf if is_scalar_json(ty) => {
+                    return Err(ExecError::UndefinedFunction(
+                        "operator does not exist: json = json".into(),
+                    ));
+                }
                 ScalarFunc::Greatest | ScalarFunc::Least => {
                     if matches!(
                         ty.storage_type(),
-                        ColumnType::JsonPath | ColumnType::Array(ElemType::JsonPath)
+                        ColumnType::JsonPath
+                            | ColumnType::Json
+                            | ColumnType::Array(ElemType::JsonPath)
+                            | ColumnType::Array(ElemType::Json)
                     ) {
                         return Err(ExecError::UndefinedFunction(format!(
                             "could not identify a comparison function for type {}",
@@ -984,12 +995,18 @@ pub(crate) fn eval_scalar(
         }
         ScalarFunc::NullIf => {
             require_arity(fc, args.len() == 2)?;
-            if let Some(scope) = scope
-                && crate::eval::is_scalar_jsonpath(unify_args(f, args, scope)?)
-            {
-                return Err(ExecError::UndefinedFunction(
-                    "operator does not exist: jsonpath = jsonpath".into(),
-                ));
+            if let Some(scope) = scope {
+                let ty = unify_args(f, args, scope)?;
+                if crate::eval::is_scalar_jsonpath(ty) {
+                    return Err(ExecError::UndefinedFunction(
+                        "operator does not exist: jsonpath = jsonpath".into(),
+                    ));
+                }
+                if is_scalar_json(ty) {
+                    return Err(ExecError::UndefinedFunction(
+                        "operator does not exist: json = json".into(),
+                    ));
+                }
             }
             let vals = resolved_args(f, args, scope, ctx, &mut eval_child)?;
             let [a, b] = vals.as_slice() else {
@@ -2629,6 +2646,13 @@ fn eval_range_constructor(
 }
 
 // ---- string helpers ----
+
+/// Is this a bare `json`? `json` has no equality operator in `PostgreSQL`, so
+/// every construct that reaches for one — `NULLIF`, `GREATEST`, `LEAST` — has to
+/// refuse it, and each with its own wording.
+fn is_scalar_json(ty: ColumnType) -> bool {
+    ty.storage_type() == ColumnType::Json
+}
 
 fn trim_ws(f: ScalarFunc, s: &str) -> String {
     match f {

@@ -109,11 +109,17 @@ pub fn cast_allowed(from: ColumnType, to: ColumnType) -> bool {
         // form, so it must not fall into the numeric rules further down.
         (ColumnType::Bit(_) | ColumnType::VarBit(_), _)
         | (_, ColumnType::Bit(_) | ColumnType::VarBit(_)) => from.is_string() || to.is_string(),
-        // `jsonb` and arrays otherwise interconvert ONLY with the string family
-        // (the rule below): PostgreSQL has no jsonb/array ↔ number/bool/temporal
-        // cast, and this arm keeps the permissive numeric rules from claiming one.
-        (ColumnType::Jsonb | ColumnType::Array(_), _)
-        | (_, ColumnType::Jsonb | ColumnType::Array(_))
+        // `pg_cast` has exactly two entries between the JSON types, both at
+        // assignment level and both running the target's input function over the
+        // source's output — which is why `'{"b":1,  "a":2}'::json::jsonb`
+        // normalises and `…::jsonb::json` keeps `jsonb`'s canonical order.
+        (ColumnType::Json, ColumnType::Jsonb) | (ColumnType::Jsonb, ColumnType::Json) => true,
+        // `json`, `jsonb` and arrays otherwise interconvert ONLY with the string
+        // family (the rule below): PostgreSQL has no json/jsonb/array ↔
+        // number/bool/temporal cast, and this arm keeps the permissive numeric
+        // rules from claiming one.
+        (ColumnType::Json | ColumnType::Jsonb | ColumnType::Array(_), _)
+        | (_, ColumnType::Json | ColumnType::Jsonb | ColumnType::Array(_))
             if !from.is_string() && !to.is_string() =>
         {
             false
@@ -434,11 +440,23 @@ pub fn cast_in(
         // `cast_allowed` says yes for `T → T` and for anything ↔ the string
         // family, so without them a runtime cast would wrongly report 42846.
         (Datum::Jsonb(j), ColumnType::Jsonb) => Ok(Datum::Jsonb(j.clone())),
+        // `json` identity keeps the text; the type carries no modifier that
+        // could make a re-coercion do anything.
+        (Datum::Json(text), ColumnType::Json) => Ok(Datum::Json(text.clone())),
+        // The two `pg_cast` entries, both `castmethod = 'i'`: each runs the
+        // other type's input function over this one's output text.
+        (Datum::Json(text), ColumnType::Jsonb) => crate::jsonb::parse(text).map(Datum::Jsonb),
+        (Datum::Jsonb(j), ColumnType::Json) => Ok(Datum::Json(j.to_text())),
         (Datum::OidVector(vector), ColumnType::OidVector) => Ok(Datum::OidVector(vector.clone())),
         (Datum::TsVector(vector), ColumnType::TsVector) => Ok(Datum::TsVector(vector.clone())),
         (Datum::TsQuery(query), ColumnType::TsQuery) => Ok(Datum::TsQuery(query.clone())),
         // text → jsonb is `jsonb_in` (22P02 on bad JSON).
         (Datum::Text(s), ColumnType::Jsonb) => crate::jsonb::parse(s).map(Datum::Jsonb),
+        // text → json is `json_in`, which validates and keeps every byte. The
+        // whitespace and key order a `jsonb` cast would discard survive here.
+        (Datum::Text(s), ColumnType::Json) => {
+            crate::json::validate(s).map(|()| Datum::Json(s.clone()))
+        }
         // text → array is `array_in`: split the literal, then run the element
         // type's input function over each element.
         (Datum::Text(s), ColumnType::Array(elem)) => {
@@ -1777,12 +1795,55 @@ mod tests {
         assert!(err.sqlstate() == "22P02");
         // NULL casts to NULL like every other target.
         assert!(cast(&Datum::Null, jsonb, &tz).expect("null") == Datum::Null);
-        // `json` is an input alias for the same type.
-        assert!(ColumnType::from_sql_name("json") == Some(ColumnType::Jsonb));
         assert!(
             cast(&Datum::Text("[]".into()), jsonb, &tz).expect("empty")
                 == Datum::Jsonb(JsonbValue::Array(vec![]))
         );
+    }
+
+    #[test]
+    fn json_casts_keep_the_input_text_and_jsonb_casts_normalise_it() {
+        use assert2::assert;
+
+        let tz = utc();
+        let json = ColumnType::Json;
+        let raw = r#"{"b":1,   "a":2,  "b":3}"#;
+        // `json` is its own type, not a spelling of `jsonb`.
+        assert!(ColumnType::from_sql_name("json") == Some(ColumnType::Json));
+        assert!(ColumnType::Json.oid() == 114);
+        assert!(ColumnType::Array(crate::ElemType::Json).oid() == 199);
+
+        // text → json validates and changes nothing; text → jsonb decomposes.
+        let value = cast(&Datum::Text(raw.into()), json, &tz).expect("text -> json");
+        assert!(value == Datum::Json(raw.to_string()));
+        assert!(
+            cast(&value, ColumnType::Text, &tz).expect("json -> text") == Datum::Text(raw.into())
+        );
+        assert!(cast(&value, json, &tz).expect("identity") == value);
+
+        // The two pg_cast entries: json → jsonb normalises, jsonb → json keeps
+        // whatever the jsonb value had left.
+        let as_jsonb = cast(&value, ColumnType::Jsonb, &tz).expect("json -> jsonb");
+        assert!(
+            cast(&as_jsonb, ColumnType::Text, &tz).expect("text")
+                == Datum::Text(r#"{"a": 2, "b": 3}"#.into())
+        );
+        assert!(
+            cast(&as_jsonb, json, &tz).expect("jsonb -> json")
+                == Datum::Json(r#"{"a": 2, "b": 3}"#.to_string())
+        );
+
+        // Bad JSON is 22P02 with PostgreSQL's DETAIL, and NULL stays NULL.
+        let err = cast(&Datum::Text("{oops".into()), json, &tz).expect_err("bad json");
+        assert!(err.sqlstate() == "22P02");
+        assert!(err.detail().as_deref() == Some("Token \"oops\" is invalid."));
+        assert!(cast(&Datum::Null, json, &tz).expect("null") == Datum::Null);
+
+        // PostgreSQL has no json ↔ number/bool cast, in either direction.
+        for other in [ColumnType::Int4, ColumnType::Bool, ColumnType::Float8] {
+            assert!(!cast_allowed(json, other), "{other:?}");
+            assert!(!cast_allowed(other, json), "{other:?}");
+        }
     }
 
     #[test]

@@ -35,6 +35,12 @@ enum TextSearchFunc {
     TsRankCd,
     TsHeadline,
     JsonbToTsVector,
+    /// `json_to_tsvector(json, jsonb)` — the `json` sibling. Genuinely a
+    /// different function, not a spelling: it walks the document in *input*
+    /// order, so `json_to_tsvector('{"b":"cat sat","a":"mat"}', '["all"]')` is
+    /// `'b':1 'cat':3 'mat':7 'sat':4` where the `jsonb` form, walking canonical
+    /// key order, is `'b':4 'cat':6 'mat':2 'sat':7`.
+    JsonToTsVector,
 }
 
 type Catalog<'a> = Option<&'a dyn crabka_pgkv::Kv>;
@@ -58,6 +64,7 @@ fn text_search_func(name: &str) -> Option<TextSearchFunc> {
         "ts_rank_cd" => TextSearchFunc::TsRankCd,
         "ts_headline" => TextSearchFunc::TsHeadline,
         "jsonb_to_tsvector" => TextSearchFunc::JsonbToTsVector,
+        "json_to_tsvector" => TextSearchFunc::JsonToTsVector,
         _ => return None,
     })
 }
@@ -125,7 +132,7 @@ pub(crate) fn text_search_result_type(
             require_arity(fc, (2..=4).contains(&count))?;
             ColumnType::Text
         }
-        TextSearchFunc::JsonbToTsVector => {
+        TextSearchFunc::JsonbToTsVector | TextSearchFunc::JsonToTsVector => {
             require_arity(fc, count == 2 || count == 3)?;
             ColumnType::TsVector
         }
@@ -197,6 +204,7 @@ pub(crate) fn eval_text_search(
         TextSearchFunc::TsRank | TextSearchFunc::TsRankCd => rank(fc, &values),
         TextSearchFunc::TsHeadline => headline(fc, &values, catalog),
         TextSearchFunc::JsonbToTsVector => jsonb_to_vector(fc, &values, catalog),
+        TextSearchFunc::JsonToTsVector => json_to_vector(fc, &values, catalog),
     }
 }
 
@@ -301,6 +309,63 @@ fn collect_json_text(value: &JsonbValue, filter: JsonTextFilter, out: &mut Vec<S
             out.push(value.to_string());
         }
         JsonbValue::Null | JsonbValue::String(_) | JsonbValue::Number(_) | JsonbValue::Bool(_) => {}
+    }
+}
+
+/// `json_to_tsvector`: the same filter and the same lexeme accumulation, over the
+/// document's own text rather than a decomposed value, so the positions follow
+/// input order.
+fn json_to_vector(
+    fc: &FuncCall,
+    values: &[Datum],
+    catalog: Catalog<'_>,
+) -> Result<Datum, ExecError> {
+    let (config, document, filter) = match values {
+        [Datum::Json(document), Datum::Jsonb(filter)] => (default_config()?, document, filter),
+        [
+            Datum::Text(config),
+            Datum::Json(document),
+            Datum::Jsonb(filter),
+        ] => (config.clone(), document, filter),
+        [got, ..] => return Err(type_error("json", got)),
+        _ => return Err(undefined_function(&fc.name)),
+    };
+    let filter = JsonTextFilter::parse(filter)?;
+    let mut pieces = Vec::new();
+    collect_json_document_text(document, filter, &mut pieces);
+    Ok(Datum::TsVector(vector_from_pieces(
+        &config, &pieces, catalog,
+    )?))
+}
+
+/// [`collect_json_text`]'s twin over `json` text: object fields in input order
+/// with duplicates kept, and numbers as the token the document actually holds.
+fn collect_json_document_text(value: &str, filter: JsonTextFilter, out: &mut Vec<String>) {
+    use crabka_pgtypes::json::{self, Kind};
+    match json::kind(value) {
+        Kind::Object => {
+            for (key, item) in json::object_fields(value).unwrap_or_default() {
+                if filter.contains(JsonTextFilter::KEY) {
+                    out.push(key);
+                }
+                collect_json_document_text(item, filter, out);
+            }
+        }
+        Kind::Array => {
+            for item in json::array_elements(value).unwrap_or_default() {
+                collect_json_document_text(item, filter, out);
+            }
+        }
+        Kind::String if filter.contains(JsonTextFilter::STRING) => {
+            out.push(json::as_text(value.trim()));
+        }
+        Kind::Number if filter.contains(JsonTextFilter::NUMERIC) => {
+            out.push(value.trim().to_string());
+        }
+        Kind::Bool if filter.contains(JsonTextFilter::BOOLEAN) => {
+            out.push(value.trim().to_string());
+        }
+        Kind::Null | Kind::String | Kind::Number | Kind::Bool => {}
     }
 }
 

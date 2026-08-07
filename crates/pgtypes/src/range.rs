@@ -701,7 +701,7 @@ mod tests {
         ] {
             let error = canonicalize(input, ColumnType::Text, &jiff::tz::TimeZone::UTC)
                 .expect_err("malformed range");
-            assert_eq!(error.detail(), Some(detail), "{input}");
+            assert_eq!(error.detail().as_deref(), Some(detail), "{input}");
         }
     }
 

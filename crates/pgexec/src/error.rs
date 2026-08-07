@@ -701,7 +701,15 @@ fn undefined_function_hint(message: &str) -> Option<&'static str> {
              explicit type casts."
         });
     }
-    if message.starts_with("function ") && message.ends_with(" does not exist") {
+    // Only when the argument types are actually rendered. `function f(...) does
+    // not exist` is our placeholder for a name we could not resolve at all, and
+    // PostgreSQL never writes it -- it names every argument type. Hinting there
+    // adds a second wrong line to an error that is usually wrong to begin with,
+    // because the statement PostgreSQL runs successfully is one we cannot run.
+    if message.starts_with("function ")
+        && message.ends_with(" does not exist")
+        && !message.contains("(...)")
+    {
         return Some(
             "No function matches the given name and argument types. You might need to add \
              explicit type casts.",
@@ -732,6 +740,13 @@ impl ExecError {
             }
             ExecError::Type(e) => {
                 let rendered = PgError::error(e.sqlstate(), e.to_string());
+                // `json_in`/`jsonb_in` are the only type-layer errors with a
+                // CONTEXT: PostgreSQL prints the line of the document the lexer
+                // stopped on, which is often the only way to find the mistake.
+                let rendered = match e.context() {
+                    Some(context) => rendered.with_context(context),
+                    None => rendered,
+                };
                 let rendered = match e.detail() {
                     Some(detail) => rendered.with_detail(detail),
                     None => rendered,

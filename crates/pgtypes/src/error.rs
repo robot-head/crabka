@@ -108,6 +108,19 @@ pub enum TypeError {
         message: String,
         hint: &'static str,
     },
+    /// `json_in` / `jsonb_in`'s rejection of malformed JSON. Alone among the
+    /// type-layer errors it carries a CONTEXT as well as a DETAIL, because
+    /// `PostgreSQL` reports the offending token *and* an excerpt of the line it
+    /// sits on, and both are per-value rather than per-variant. The message is
+    /// `invalid input syntax for type json` for `jsonb` too — the two types
+    /// share one lexer, so they share its complaints.
+    #[error("{message}")]
+    JsonSyntax {
+        sqlstate: &'static str,
+        message: &'static str,
+        detail: String,
+        context: String,
+    },
 }
 
 impl TypeError {
@@ -134,14 +147,33 @@ impl TypeError {
             TypeError::RangeMalformed { .. } => "22P02",
             TypeError::InvalidCidr { .. } => "22P02",
             TypeError::CodedWithHint { sqlstate, .. } => sqlstate,
+            TypeError::JsonSyntax { sqlstate, .. } => sqlstate,
         }
     }
 
+    /// `PostgreSQL`'s DETAIL for this error. Borrowed where the wording is fixed
+    /// per variant, owned where it names the offending value — `json_in`'s
+    /// `Token "x" is invalid.` cannot be a `&'static str`.
     #[must_use]
-    pub fn detail(&self) -> Option<&'static str> {
+    pub fn detail(&self) -> Option<std::borrow::Cow<'_, str>> {
         match self {
-            TypeError::RangeMalformed { detail, .. } => Some(detail),
-            TypeError::InvalidCidr { .. } => Some("Value has bits set to right of mask."),
+            TypeError::RangeMalformed { detail, .. } => Some(std::borrow::Cow::Borrowed(*detail)),
+            TypeError::InvalidCidr { .. } => Some(std::borrow::Cow::Borrowed(
+                "Value has bits set to right of mask.",
+            )),
+            TypeError::JsonSyntax { detail, .. } => {
+                Some(std::borrow::Cow::Borrowed(detail.as_str()))
+            }
+            _ => None,
+        }
+    }
+
+    /// `PostgreSQL`'s CONTEXT for this error — the excerpt of the input line the
+    /// JSON lexer stopped on. No other type-layer error has one.
+    #[must_use]
+    pub fn context(&self) -> Option<&str> {
+        match self {
+            TypeError::JsonSyntax { context, .. } => Some(context),
             _ => None,
         }
     }

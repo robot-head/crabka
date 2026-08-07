@@ -78,6 +78,11 @@ mod tag {
     /// `PostgreSQL` `money` (`[35][8 big-endian bytes]`). Append-only — no
     /// version bump.
     pub const MONEY: u8 = 35;
+    /// `PostgreSQL` `json` (`[36][u32 length][UTF-8 document]`). Its own tag
+    /// rather than [`JSONB`]'s, because the stored bytes are the *input* text:
+    /// decoding through the `jsonb` tag would normalise them and lose exactly
+    /// what the type exists to keep. Append-only — no version bump.
+    pub const JSON: u8 = 36;
 }
 
 /// Encodes one row in the current storage format.
@@ -92,8 +97,17 @@ pub fn encode_row(cols: &[Datum]) -> Vec<u8> {
     out
 }
 
-/// Appends `cols` as tagged fields. This is the row body without the version
-/// byte, and it is also the payload format for array elements.
+/// Append `cols` as tagged fields (the row body, without the version byte —
+/// also the payload format for array elements).
+/// Append `[tag][u32 length][bytes]` — the shape every variable-length scalar
+/// uses. `what` names the column only so the 4 GiB panic can say which one.
+fn push_tagged_bytes(out: &mut Vec<u8>, tag: u8, bytes: &[u8], what: &str) {
+    out.push(tag);
+    let len = u32::try_from(bytes.len()).unwrap_or_else(|_| panic!("{what} exceeds 4 GiB"));
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(bytes);
+}
+
 fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
     for d in cols {
         match d {
@@ -114,17 +128,9 @@ fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
                 out.push(tag::INT8);
                 out.extend_from_slice(&n.to_be_bytes());
             }
-            Datum::Text(s) => {
-                out.push(tag::TEXT);
-                let len = u32::try_from(s.len()).expect("text column exceeds 4 GiB");
-                out.extend_from_slice(&len.to_be_bytes());
-                out.extend_from_slice(s.as_bytes());
-            }
+            Datum::Text(s) => push_tagged_bytes(out, tag::TEXT, s.as_bytes(), "text column"),
             Datum::JsonPath(s) => {
-                out.push(tag::JSONPATH);
-                let len = u32::try_from(s.len()).expect("jsonpath column exceeds 4 GiB");
-                out.extend_from_slice(&len.to_be_bytes());
-                out.extend_from_slice(s.as_bytes());
+                push_tagged_bytes(out, tag::JSONPATH, s.as_bytes(), "jsonpath column");
             }
             Datum::Float4(f) => {
                 out.push(tag::FLOAT4);
@@ -174,11 +180,8 @@ fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
                 }
             }
             Datum::Numeric(d) => {
-                out.push(tag::NUMERIC);
                 let s = crabka_pgtypes::numeric::to_text(d);
-                let len = u32::try_from(s.len()).expect("numeric text exceeds 4 GiB");
-                out.extend_from_slice(&len.to_be_bytes());
-                out.extend_from_slice(s.as_bytes());
+                push_tagged_bytes(out, tag::NUMERIC, s.as_bytes(), "numeric text");
             }
             Datum::Date(d) => {
                 out.push(tag::DATE);
@@ -204,18 +207,14 @@ fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
                 out.push(tag::INTERVAL);
                 out.extend_from_slice(&crabka_pgtypes::datetime::interval_to_binary(*iv));
             }
-            Datum::Bytea(b) => {
-                out.push(tag::BYTEA);
-                let len = u32::try_from(b.len()).expect("bytea column exceeds 4 GiB");
-                out.extend_from_slice(&len.to_be_bytes());
-                out.extend_from_slice(b);
-            }
+            Datum::Bytea(b) => push_tagged_bytes(out, tag::BYTEA, b, "bytea column"),
             Datum::Jsonb(j) => {
-                out.push(tag::JSONB);
-                let text = j.to_text();
-                let len = u32::try_from(text.len()).expect("jsonb column exceeds 4 GiB");
-                out.extend_from_slice(&len.to_be_bytes());
-                out.extend_from_slice(text.as_bytes());
+                push_tagged_bytes(out, tag::JSONB, j.to_text().as_bytes(), "jsonb column");
+            }
+            // The stored bytes are the input text, so there is nothing to
+            // render: `json` is the one JSON column that round-trips unchanged.
+            Datum::Json(text) => {
+                push_tagged_bytes(out, tag::JSON, text.as_bytes(), "json column");
             }
             Datum::Array(a) | Datum::OidVector(a) => {
                 out.push(tag::ARRAY);
@@ -569,6 +568,15 @@ fn decode_field(cur: &mut &[u8]) -> Result<Datum, KvError> {
                 crabka_pgtypes::jsonb::parse(text)
                     .map_err(|e| KvError::CorruptRow(format!("corrupt jsonb: {e}")))?,
             )
+        }
+        tag::JSON => {
+            let len = take_u32_len(cur)?;
+            let raw = take_n(cur, len)?;
+            let text = std::str::from_utf8(raw)
+                .map_err(|_| KvError::CorruptRow("json text is not valid UTF-8".into()))?;
+            // Stored verbatim and returned verbatim: no re-parse, because a
+            // re-parse is precisely what would normalise it.
+            Datum::Json(text.to_string())
         }
         tag::ARRAY => {
             let elem = crabka_pgtypes::ElemType::read_code(cur)
