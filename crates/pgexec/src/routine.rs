@@ -3232,9 +3232,21 @@ pub(crate) fn routine_by_reference(
 ///
 /// Propagates catalog read errors.
 pub(crate) fn pg_proc_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let mut rows = builtin_pg_proc_rows()?;
+    rows.extend(user_pg_proc_rows(kv)?);
+    Ok(rows)
+}
+
+/// The `pg_proc` rows for routines this database defines, without the built-in
+/// fixture.
+///
+/// Split out so a caller that only needs the user half -- `reg*` output, which
+/// indexes the built-ins once -- does not pay for cloning several thousand
+/// static rows on every call.
+pub(crate) fn user_pg_proc_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     use crabka_pgtypes::{ArrayValue, ElemType};
 
-    let mut rows = builtin_pg_proc_rows()?;
+    let mut rows = Vec::new();
     for routine in list_routines(kv)? {
         let inputs: Vec<&RoutineParam> = routine.input_params().collect();
         let all_default_modes = routine
@@ -3333,7 +3345,24 @@ pub(crate) fn pg_proc_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     Ok(rows)
 }
 
+/// The decoded built-in `pg_proc` fixture, decompressed and parsed once.
+///
+/// The fixture is immutable static data, but decoding it means zstd over the
+/// whole table and then a parse per line. `reg*` output resolves one oid to a
+/// name per rendered row, so a scan that projects a `reg*` value used to pay
+/// that decode once per row -- around 19 ms each, which turned a 3,400-row
+/// `pg_proc` scan into a minute and a full certification into a timeout.
+static BUILTIN_PG_PROC_ROWS: std::sync::OnceLock<Option<Vec<Vec<Datum>>>> =
+    std::sync::OnceLock::new();
+
 pub(crate) fn builtin_pg_proc_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
+    BUILTIN_PG_PROC_ROWS
+        .get_or_init(|| decode_builtin_pg_proc_rows().ok())
+        .clone()
+        .ok_or_else(|| ExecError::Unsupported("built-in pg_proc fixture is corrupt".into()))
+}
+
+fn decode_builtin_pg_proc_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
     let corrupt = || ExecError::Unsupported("built-in pg_proc fixture is corrupt".into());
     let data = crate::builtin_procs::BUILTIN_PROCS
         .iter()

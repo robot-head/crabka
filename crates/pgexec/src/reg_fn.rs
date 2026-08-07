@@ -345,42 +345,130 @@ fn proc_oids(kv: &dyn Kv, schema: Option<&str>, name: &str) -> Result<Vec<i32>, 
     if schema.is_some() && wanted.is_none() {
         return Ok(Vec::new());
     }
-    Ok(crate::routine::pg_proc_rows(kv)?
-        .iter()
-        .filter(|row| row.get(1) == Some(&Datum::Text(name.to_string())))
-        .filter(|row| wanted.is_none_or(|oid| row.get(2) == Some(&Datum::Int4(oid))))
-        .filter_map(|row| match row.first() {
-            Some(Datum::Int4(oid)) => Some(*oid),
-            _ => None,
+    // Indexed by name over the built-ins. `oid IN ('f'::regproc, ...)` puts a
+    // constant cast in a per-row filter, so this runs once per catalog row per
+    // list element; walking `pg_proc_rows` here cost 72 s on a three-function
+    // database and was what made a full certification time out.
+    let mut oids: Vec<i32> = builtin_proc_index()
+        .and_then(|(_, _, _, by_name)| by_name.get(name))
+        .map(|found| {
+            found
+                .iter()
+                .filter(|(_, namespace)| wanted.is_none_or(|oid| *namespace == Some(oid)))
+                .map(|(oid, _)| *oid)
+                .collect()
         })
-        .collect())
+        .unwrap_or_default();
+    oids.extend(
+        crate::routine::user_pg_proc_rows(kv)?
+            .iter()
+            .filter(|row| row.get(1) == Some(&Datum::Text(name.to_string())))
+            .filter(|row| wanted.is_none_or(|oid| row.get(2) == Some(&Datum::Int4(oid))))
+            .filter_map(|row| match row.first() {
+                Some(Datum::Int4(oid)) => Some(*oid),
+                _ => None,
+            }),
+    );
+    Ok(oids)
 }
 
 /// `regprocout`: the bare function name when that name would find this row and
 /// only this row, and the schema-qualified name when it would not — which is
 /// what makes an overloaded `abs` print as `pg_catalog.abs`.
+/// oid -> (name, namespace) and name -> how many procs carry it, over the
+/// built-in fixture alone.
+///
+/// `regprocout` resolves one oid per rendered row. Walking `pg_proc_rows` for
+/// each of them made any scan projecting a `reg*` value quadratic in the
+/// catalog: 3,400 rows times a 3,400-row search, twice over (once for the oid,
+/// once to decide whether the name is unique). The built-in half never changes,
+/// so it is indexed once; only the handful of user routines are walked per
+/// call.
+type ProcIndex = (
+    std::collections::HashMap<i32, (String, Option<i32>)>,
+    std::collections::HashMap<String, usize>,
+    std::collections::HashMap<i32, Vec<i32>>,
+    std::collections::HashMap<String, Vec<(i32, Option<i32>)>>,
+);
+static BUILTIN_PROC_INDEX: std::sync::OnceLock<Option<ProcIndex>> = std::sync::OnceLock::new();
+
+fn builtin_proc_index() -> Option<&'static ProcIndex> {
+    BUILTIN_PROC_INDEX
+        .get_or_init(|| {
+            let rows = crate::routine::builtin_pg_proc_rows().ok()?;
+            let mut by_oid = std::collections::HashMap::with_capacity(rows.len());
+            let mut counts: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::with_capacity(rows.len());
+            let mut args: std::collections::HashMap<i32, Vec<i32>> =
+                std::collections::HashMap::with_capacity(rows.len());
+            let mut by_name: std::collections::HashMap<String, Vec<(i32, Option<i32>)>> =
+                std::collections::HashMap::with_capacity(rows.len());
+            for row in &rows {
+                let (Some(Datum::Int4(oid)), Some(Datum::Text(name))) = (row.first(), row.get(1))
+                else {
+                    continue;
+                };
+                let namespace = match row.get(2) {
+                    Some(Datum::Int4(namespace)) => Some(*namespace),
+                    _ => None,
+                };
+                by_oid.insert(*oid, (name.clone(), namespace));
+                *counts.entry(name.clone()).or_default() += 1;
+                by_name
+                    .entry(name.clone())
+                    .or_default()
+                    .push((*oid, namespace));
+                if let Some(Datum::OidVector(vector)) = row.get(19) {
+                    args.insert(
+                        *oid,
+                        vector
+                            .elems
+                            .iter()
+                            .filter_map(|arg| match arg {
+                                Datum::Int4(oid) => Some(*oid),
+                                _ => None,
+                            })
+                            .collect(),
+                    );
+                }
+            }
+            Some((by_oid, counts, args, by_name))
+        })
+        .as_ref()
+}
+
 fn proc_name(kv: &dyn Kv, oid: i32) -> Result<Option<String>, ExecError> {
-    let rows = crate::routine::pg_proc_rows(kv)?;
-    let Some(row) = rows
+    // The user routines are few; the built-ins are indexed.
+    let user = crate::routine::user_pg_proc_rows(kv)?;
+    let index = builtin_proc_index();
+    let found = user
         .iter()
         .find(|row| row.first() == Some(&Datum::Int4(oid)))
-    else {
+        .and_then(|row| match (row.get(1), row.get(2)) {
+            (Some(Datum::Text(name)), Some(Datum::Int4(namespace))) => {
+                Some((name.clone(), Some(*namespace)))
+            }
+            (Some(Datum::Text(name)), _) => Some((name.clone(), None)),
+            _ => None,
+        })
+        .or_else(|| index.and_then(|(by_oid, _, _, _)| by_oid.get(&oid).cloned()));
+    let Some((name, namespace)) = found else {
         return Ok(None);
     };
-    let Some(Datum::Text(name)) = row.get(1) else {
-        return Ok(None);
-    };
-    let unique = rows
+    let user_count = user
         .iter()
         .filter(|other| other.get(1) == Some(&Datum::Text(name.clone())))
-        .count()
-        == 1;
+        .count();
+    let builtin_count = index.map_or(0, |(_, counts, _, _)| {
+        counts.get(&name).copied().unwrap_or(0)
+    });
+    let unique = user_count + builtin_count == 1;
     if unique {
         return Ok(Some(quote(name.clone())));
     }
-    let schema = match row.get(2) {
-        Some(Datum::Int4(namespace)) => namespace_name(kv, *namespace)?,
-        _ => None,
+    let schema = match namespace {
+        Some(namespace) => namespace_name(kv, namespace)?,
+        None => None,
     };
     Ok(Some(match schema {
         Some(schema) => format!("{}.{}", quote(schema), quote(name.clone())),
@@ -424,23 +512,35 @@ fn resolve_procedure(kv: &dyn Kv, written: &str) -> Result<i32, ExecError> {
 /// `regprocedureout`: `name(argtype,argtype)`, with the argument types spelled
 /// the way `format_type` spells them and no space after the comma.
 fn procedure_name(kv: &dyn Kv, oid: i32) -> Result<Option<String>, ExecError> {
-    let rows = crate::routine::pg_proc_rows(kv)?;
-    let Some(row) = rows
+    // Indexed for the same reason `proc_name` is: one lookup per rendered row.
+    let user = crate::routine::user_pg_proc_rows(kv)?;
+    let found = user
         .iter()
         .find(|row| row.first() == Some(&Datum::Int4(oid)))
-    else {
-        return Ok(None);
-    };
-    let (Some(Datum::Text(name)), Some(Datum::OidVector(args))) = (row.get(1), row.get(19)) else {
+        .and_then(|row| match (row.get(1), row.get(19)) {
+            (Some(Datum::Text(name)), Some(Datum::OidVector(args))) => Some((
+                name.clone(),
+                args.elems
+                    .iter()
+                    .filter_map(|arg| match arg {
+                        Datum::Int4(oid) => Some(*oid),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+            )),
+            _ => None,
+        })
+        .or_else(|| {
+            let (by_oid, _, args, _) = builtin_proc_index()?;
+            let (name, _) = by_oid.get(&oid)?;
+            Some((name.clone(), args.get(&oid).cloned().unwrap_or_default()))
+        });
+    let Some((name, args)) = found else {
         return Ok(None);
     };
     let rendered = args
-        .elems
         .iter()
-        .filter_map(|arg| match arg {
-            Datum::Int4(oid) => Some(crate::exec::regtype_name(*oid)),
-            _ => None,
-        })
+        .map(|arg| crate::exec::regtype_name(*arg))
         .collect::<Vec<_>>()
         .join(",");
     Ok(Some(format!("{name}({rendered})")))
