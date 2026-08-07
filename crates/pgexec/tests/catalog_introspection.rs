@@ -4,6 +4,7 @@
 //! These tests exercise that breadth through the SQL session, the way a client
 //! reaches it.
 
+use assert2::assert;
 use crabka_pgexec::SqlEngine;
 use crabka_pgwire::engine::{Cell, Engine, QueryResult, Session};
 
@@ -1320,4 +1321,67 @@ async fn relation_sizes_resolve_their_argument_and_report_zero() {
         .await
         .expect_err("missing relation is an error");
     assert2::assert!(missing.code == "42P01", "{missing:?}");
+}
+
+/// `pg_attribute.attstorage` is the column type's own storage class, which is
+/// what `\d+` prints in its Storage column.
+///
+/// Every expectation is `pg_type.typstorage` read off the pinned
+/// `PostgreSQL` 18.4 catalog, not inferred from whether the type looks fixed-length — two
+/// groups defeat that intuition. `inet` and `cidr` are `main` alongside
+/// `numeric`; and of the geometric types only the fixed ones are `plain`,
+/// while `path` is varlena and so `extended`.
+#[tokio::test]
+async fn attstorage_reports_each_types_storage_class() {
+    let engine = SqlEngine::new();
+    run(
+        &engine,
+        "CREATE TABLE stg (\
+             p_int int, p_bool bool, p_ts timestamptz, p_uuid uuid, p_money money, \
+             p_point point, p_oid oid, \
+             m_numeric numeric, m_inet inet, m_cidr cidr, \
+             x_text text, x_varchar varchar(9), x_bytea bytea, x_jsonb jsonb, \
+             x_array int[], x_path path)",
+    )
+    .await;
+
+    let rows = grid(
+        &engine,
+        "SELECT a.attname, a.attstorage FROM pg_attribute a \
+         JOIN pg_class c ON c.oid = a.attrelid \
+         WHERE c.relname = 'stg' AND a.attnum > 0 ORDER BY a.attnum",
+    )
+    .await;
+
+    let got: Vec<(String, String)> = rows
+        .into_iter()
+        .map(|row| {
+            (
+                row[0].clone().expect("attname"),
+                row[1].clone().expect("attstorage"),
+            )
+        })
+        .collect();
+    let expected: Vec<(String, String)> = [
+        ("p_int", "p"),
+        ("p_bool", "p"),
+        ("p_ts", "p"),
+        ("p_uuid", "p"),
+        ("p_money", "p"),
+        ("p_point", "p"),
+        ("p_oid", "p"),
+        ("m_numeric", "m"),
+        ("m_inet", "m"),
+        ("m_cidr", "m"),
+        ("x_text", "x"),
+        ("x_varchar", "x"),
+        ("x_bytea", "x"),
+        ("x_jsonb", "x"),
+        ("x_array", "x"),
+        ("x_path", "x"),
+    ]
+    .into_iter()
+    .map(|(name, class)| (name.to_owned(), class.to_owned()))
+    .collect();
+    assert!(got == expected);
 }

@@ -16179,7 +16179,7 @@ fn attribute_rows_for_table(relid: i32, table: &Table) -> Result<Vec<Vec<Datum>>
                 Datum::Int2(i16::from(matches!(column.ty, ColumnType::Array(_)))),
                 Datum::Bool(column.ty.type_size() > 0),
                 text("i"),
-                text("x"),
+                text(attribute_storage(column.ty)),
                 text(""),
                 Datum::Bool(column.not_null),
                 Datum::Bool(column.default.is_some()),
@@ -16210,6 +16210,86 @@ fn catalog_typmod(ty: ColumnType) -> i32 {
             (i32::from(typmod.precision) << 16 | i32::from(typmod.scale)) + 4
         }
         other => other.typmod(),
+    }
+}
+
+/// `attstorage`: the storage class the column's type declares, which is what
+/// `\d+` prints in its Storage column.
+///
+/// This is `pg_type.typstorage`, read off the pinned 18.4 catalog rather than
+/// inferred from whether a type looks fixed-length. Two groups do not follow
+/// that intuition: `inet` and `cidr` are `main` alongside `numeric`, not
+/// `plain`; and of the geometric types only `point`, `box`, `circle`, `line`
+/// and `lseg` are `plain`, while `path` and `polygon` are varlena and so
+/// `extended`. Arrays are `extended` except `int2vector` and `oidvector`.
+fn attribute_storage(ty: ColumnType) -> &'static str {
+    use ColumnType as C;
+    match ty {
+        // Fixed-length, stored inline and never toasted.
+        C::Bool
+        | C::Int2
+        | C::Int4
+        | C::Int8
+        | C::Float4
+        | C::Float8
+        | C::Date
+        | C::Time
+        | C::Timetz
+        | C::Timestamp
+        | C::Timestamptz
+        | C::Interval
+        | C::Uuid
+        | C::Money
+        | C::Oid
+        | C::Xid
+        | C::Xid8
+        | C::Cid
+        | C::Tid
+        | C::PgLsn
+        | C::MacAddr
+        | C::MacAddr8
+        | C::Point
+        | C::Box
+        | C::Circle
+        | C::Line
+        | C::Lseg
+        | C::TsQuery
+        | C::OidVector
+        | C::Int2Vector
+        | C::Regclass
+        | C::Regtype
+        | C::Regprocedure
+        | C::Regnamespace
+        | C::Regproc
+        | C::Regoper
+        | C::Regoperator
+        | C::Regconfig
+        | C::Regdictionary
+        | C::Regrole
+        | C::Regcollation => "p",
+        // Compressible but kept in the main table before it is toasted out.
+        C::Numeric(_) | C::Inet | C::Cidr => "m",
+        // Varlena: compressible and toastable.
+        C::Text
+        | C::Varchar(_)
+        | C::Char(_)
+        | C::Bytea
+        | C::Json
+        | C::Jsonb
+        | C::Xml
+        | C::JsonPath
+        | C::TsVector
+        | C::Bit(_)
+        | C::VarBit(_)
+        | C::Path
+        | C::Array(_)
+        | C::Record(_)
+        | C::Range(_)
+        | C::Multirange(_) => "x",
+        // An enum is a fixed four-byte oid; a domain takes its base type's
+        // class, which is the rule PostgreSQL's `CREATE DOMAIN` copies.
+        C::Enum(_) => "p",
+        C::Domain(domain) => attribute_storage(*domain.base),
     }
 }
 

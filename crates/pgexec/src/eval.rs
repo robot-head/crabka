@@ -134,9 +134,14 @@ fn eval_depth_inner(
         )),
         Expr::BoolLiteral(b) => Ok(Datum::Bool(*b)),
         Expr::NullLiteral => Ok(Datum::Null),
-        Expr::Param(_) => Err(ExecError::Unsupported(
-            "query parameters ($n) are not supported".into(),
-        )),
+        // A parameter that reached evaluation was never bound. The simple
+        // protocol supplies none, so PostgreSQL reports the placeholder as
+        // undefined rather than as an unimplemented feature -- 42P02, the same
+        // code and wording a view body already raises.
+        Expr::Param(number) => Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+            "42P02",
+            format!("there is no parameter ${number}"),
+        ))),
         Expr::Default => Err(ExecError::Syntax(
             "DEFAULT is not allowed in this context".into(),
         )),
@@ -3031,9 +3036,14 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
         // PostgreSQL types a bare NULL as "unknown"; the slice uses text as a
         // concrete stand-in so RowDescription has a real OID.
         Expr::NullLiteral => Ok(ColumnType::Text),
-        Expr::Param(_) => Err(ExecError::Unsupported(
-            "query parameters ($n) are not supported".into(),
-        )),
+        // A parameter that reached evaluation was never bound. The simple
+        // protocol supplies none, so PostgreSQL reports the placeholder as
+        // undefined rather than as an unimplemented feature -- 42P02, the same
+        // code and wording a view body already raises.
+        Expr::Param(number) => Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+            "42P02",
+            format!("there is no parameter ${number}"),
+        ))),
         Expr::Default => Err(ExecError::Syntax(
             "DEFAULT is not allowed in this context".into(),
         )),
@@ -4953,11 +4963,16 @@ mod tests {
     }
 
     #[test]
-    fn parameter_is_0a000() {
+    fn an_unbound_parameter_is_42p02() {
         let ctx = crate::clock::EvalCtx::test_default();
         let err = eval(&pexpr("$1").expect("parse"), &scope_of(None), &[], &ctx)
             .expect_err("eval $1 should fail");
-        assert_eq!(err.into_pg().code, "0A000");
+        let err = err.into_pg();
+        // PostgreSQL reports an unbound placeholder as undefined, not as an
+        // unimplemented feature: the simple protocol supplies no parameters, so
+        // `$1` names nothing rather than asking for something gres cannot do.
+        assert_eq!(err.code, "42P02");
+        assert_eq!(err.message, "there is no parameter $1");
     }
 
     #[test]

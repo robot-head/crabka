@@ -1199,9 +1199,14 @@ fn eval_grouped_depth(
         )),
         Expr::BoolLiteral(b) => Ok(Datum::Bool(*b)),
         Expr::NullLiteral => Ok(Datum::Null),
-        Expr::Param(_) => Err(ExecError::Unsupported(
-            "query parameters ($n) are not supported".into(),
-        )),
+        // A parameter that reached evaluation was never bound. The simple
+        // protocol supplies none, so PostgreSQL reports the placeholder as
+        // undefined rather than as an unimplemented feature -- 42P02, the same
+        // code and wording a view body already raises.
+        Expr::Param(number) => Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+            "42P02",
+            format!("there is no parameter ${number}"),
+        ))),
         Expr::Default => Err(ExecError::Syntax(
             "DEFAULT is not allowed in this context".into(),
         )),

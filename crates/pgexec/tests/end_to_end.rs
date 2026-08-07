@@ -1649,11 +1649,13 @@ async fn extended_bind_supports_additional_text_and_binary_parameter_types() {
 async fn parameter_edge_cases_report_expected_sqlstates() {
     let client = connect(spawn().await).await;
 
+    // The simple protocol supplies no parameters, so `$1` names nothing --
+    // PostgreSQL's 42P02, not an unimplemented-feature code.
     let err = client
         .batch_execute("SELECT $1")
         .await
         .expect_err("simple protocol parameters are rejected");
-    assert_eq!(sqlstate(&err), "0A000");
+    assert_eq!(sqlstate(&err), "42P02");
 
     // `regconfig` (OID 3734) stands in for "an OID the engine does not support"
     // — `json`/`jsonb` used to play that role and are now supported.
