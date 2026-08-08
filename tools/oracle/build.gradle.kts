@@ -12,7 +12,7 @@ dependencies {
     // Transitive compression codec deps — needed at compile time for the
     // compress/decompress oracle ops added in Task 9.
     implementation("org.xerial.snappy:snappy-java:1.1.10.8")
-    implementation("com.github.luben:zstd-jni:1.5.7-12")
+    implementation("com.github.luben:zstd-jni:1.5.7-13")
 }
 
 java { toolchain { languageVersion.set(JavaLanguageVersion.of(17)) } }
