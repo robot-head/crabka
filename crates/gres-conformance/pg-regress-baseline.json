@@ -529,10 +529,10 @@
       "sha256": "ca989e09022d5d232b99a056ef1ca06618ed8609002f61bd12fc39e71b893cae"
     },
     "json": {
-      "changed_lines": 1356,
+      "changed_lines": 983,
       "expected": "json.out",
-      "hunks": 36,
-      "sha256": "81582cdee5deab16259087eaf70d50e245dccb77a2837bcc5d98c8d71866a29b"
+      "hunks": 40,
+      "sha256": "cc976007aad0cbbff95d7965430a2114cd0e66b26c3849768c2a4ef792f7d09c"
     },
     "json_encoding": {
       "changed_lines": 66,
@@ -541,10 +541,10 @@
       "sha256": "f0a358350762b597ee0def4c80d11131ec6c827b6c474bb3b2010a964c097502"
     },
     "jsonb": {
-      "changed_lines": 1881,
+      "changed_lines": 1452,
       "expected": "jsonb.out",
-      "hunks": 53,
-      "sha256": "8c13bc85988048e181fae9c252e5f0ed51cb0d0f4857c713a31caac4b956b918"
+      "hunks": 61,
+      "sha256": "41f7e917ad57af2c7a7b7e350c6e5caa19d15d94029d5df9e04902d36bf204c4"
     },
     "jsonb_jsonpath": {
       "changed_lines": 2068,
@@ -799,10 +799,10 @@
       "sha256": "099e290593ba78ea6bf0a68571dc9c2a39bea1ebe8fc7ffd5777acf7b9f4671b"
     },
     "rangefuncs": {
-      "changed_lines": 1886,
+      "changed_lines": 1903,
       "expected": "rangefuncs.out",
-      "hunks": 49,
-      "sha256": "26452e0dc44f5f71e2067ee823a2790e69945ffb613f13c922850c0a20708e51"
+      "hunks": 50,
+      "sha256": "37020f6d9fba4f8d68095010773024fe44719ea9c20888fc95fbd5d8937716e5"
     },
     "rangetypes": {
       "changed_lines": 137,
@@ -928,13 +928,13 @@
       "changed_lines": 718,
       "expected": "sqljson.out",
       "hunks": 28,
-      "sha256": "2b85197d2b827fbfa818f0de8c0e59aa5ff73d5969826bbab0ba13fe37997a3f"
+      "sha256": "a40708f08a8b4df0473bed2fed98c6490a72ab398f2988b5ef926dc2ad3b9ee5"
     },
     "sqljson_jsontable": {
       "changed_lines": 313,
       "expected": "sqljson_jsontable.out",
       "hunks": 19,
-      "sha256": "263f6f202abfd5d716dd9045f077739cca341ad17db62f03607cab905c06b9a4"
+      "sha256": "5d7b1c899bd1c0fc3d51393ec493a690a5552bb4d1a6cc3003d81b50d28f5bf2"
     },
     "sqljson_queryfuncs": {
       "changed_lines": 506,
@@ -1036,7 +1036,7 @@
       "changed_lines": 1591,
       "expected": "timestamp.out",
       "hunks": 47,
-      "sha256": "a8058ef189e46e3c846c4da8ac9a904188187f1c44e0a4226f3a683e172e264c"
+      "sha256": "e4e86d1b5aad2a2134593acdc9ad16df1f2e9ec4204487410df834d24051f022"
     },
     "timestamptz": {
       "changed_lines": 3368,
@@ -1156,7 +1156,7 @@
       "changed_lines": 2438,
       "expected": "window.out",
       "hunks": 175,
-      "sha256": "3fe7f51c11d7376cbd252ecd1ad95570e63409d53a7bbdaf2260b1bcfc287f81"
+      "sha256": "3a111a9b7de144c2d724ad0b0f483a010e6db455b68ecc18c5bf32dcf95c3817"
     },
     "with": {
       "changed_lines": 1838,
