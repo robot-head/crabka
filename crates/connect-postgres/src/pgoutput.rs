@@ -443,22 +443,17 @@ impl RelationCache {
 
         let (op, before, after, key_columns) = match event.kind {
             RowEventKind::Insert => {
-                let values =
-                    normalize_values(schema, event.values, RowTupleKind::Full, "row values")?;
+                let values = normalize_values(schema, event.values, "row values")?;
                 let key_columns = extract_key_columns(schema, &values)?;
                 (Operation::Insert, Vec::new(), values, key_columns)
             }
-            RowEventKind::Update {
-                old,
-                old_tuple_kind,
-            } => {
-                let values =
-                    normalize_values(schema, event.values, RowTupleKind::Full, "row values")?;
+            RowEventKind::Update { old, .. } => {
+                let values = normalize_values(schema, event.values, "row values")?;
                 let key_columns = extract_key_columns(schema, &values)?;
                 let old = if old.is_empty() {
                     old
                 } else {
-                    normalize_values(schema, old, old_tuple_kind, "old row values")?
+                    normalize_values(schema, old, "old row values")?
                 };
                 if has_any_key_column(schema, &old) {
                     let old_key_columns = extract_key_columns(schema, &old)?;
@@ -471,8 +466,8 @@ impl RelationCache {
 
                 (Operation::Update, old, values, key_columns)
             }
-            RowEventKind::Delete { tuple_kind } => {
-                let values = normalize_values(schema, event.values, tuple_kind, "row values")?;
+            RowEventKind::Delete { .. } => {
+                let values = normalize_values(schema, event.values, "row values")?;
                 let key_columns = extract_key_columns(schema, &values)?;
                 (Operation::Delete, values, Vec::new(), key_columns)
             }
@@ -499,13 +494,12 @@ impl RelationCache {
 fn normalize_values(
     schema: &TableSchema,
     values: Vec<ColumnValue>,
-    tuple_kind: RowTupleKind,
     label: &str,
 ) -> Result<Vec<ColumnValue>, PostgresConnectError> {
-    let expected_columns: Vec<&ColumnSchema> = match tuple_kind {
-        RowTupleKind::Full => schema.columns.iter().collect(),
-        RowTupleKind::Key => schema.columns.iter().filter(|column| column.key).collect(),
-    };
+    // pgoutput TupleData always follows Relation column arity and order. Key
+    // tuples retain non-key positions as null markers; key extraction filters
+    // those columns after names have been restored here.
+    let expected_columns: Vec<&ColumnSchema> = schema.columns.iter().collect();
 
     if values.len() != expected_columns.len() {
         return Err(PostgresConnectError::Backend(format!(
@@ -1397,8 +1391,9 @@ mod decode_tests {
         let mut delete_bytes = vec![b'D'];
         put_i32(&mut delete_bytes, 7);
         delete_bytes.push(b'K');
-        put_i16(&mut delete_bytes, 1);
+        put_i16(&mut delete_bytes, 2);
         put_text_value(&mut delete_bytes, "42");
+        delete_bytes.push(b'n');
 
         let DecodedMessage::Row(row) =
             decode_pgoutput_message(&delete_bytes, PgLsn(0x35), Some(TransactionId(102)))
@@ -1414,7 +1409,22 @@ mod decode_tests {
             name: "id".to_owned(),
             value: ScalarValue::Int(42),
         }];
-        check!((difference.key.columns, difference.before) == (expected.clone(), expected));
+        check!(
+            (difference.key.columns, difference.before)
+                == (
+                    expected,
+                    vec![
+                        ColumnValue {
+                            name: "id".to_owned(),
+                            value: ScalarValue::Int(42),
+                        },
+                        ColumnValue {
+                            name: "status".to_owned(),
+                            value: ScalarValue::Null,
+                        },
+                    ],
+                )
+        );
     }
 
     #[test]
@@ -1425,8 +1435,9 @@ mod decode_tests {
         let mut update_bytes = vec![b'U'];
         put_i32(&mut update_bytes, 7);
         update_bytes.push(b'K');
-        put_i16(&mut update_bytes, 1);
+        put_i16(&mut update_bytes, 2);
         put_text_value(&mut update_bytes, "42");
+        update_bytes.push(b'n');
         update_bytes.push(b'N');
         put_i16(&mut update_bytes, 2);
         put_text_value(&mut update_bytes, "42");
@@ -1445,10 +1456,16 @@ mod decode_tests {
         check!(
             (difference.before, difference.after)
                 == (
-                    vec![ColumnValue {
-                        name: "id".to_owned(),
-                        value: ScalarValue::Int(42),
-                    }],
+                    vec![
+                        ColumnValue {
+                            name: "id".to_owned(),
+                            value: ScalarValue::Int(42),
+                        },
+                        ColumnValue {
+                            name: "status".to_owned(),
+                            value: ScalarValue::Null,
+                        }
+                    ],
                     vec![
                         ColumnValue {
                             name: "id".to_owned(),
@@ -1468,8 +1485,9 @@ mod decode_tests {
         let mut bytes = vec![b'D'];
         put_i32(&mut bytes, 7);
         bytes.push(b'K');
-        put_i16(&mut bytes, 1);
+        put_i16(&mut bytes, 2);
         put_text_value(&mut bytes, "42");
+        bytes.push(b'n');
 
         let decoded = decode_pgoutput_message(&bytes, PgLsn(0x2b), None)
             .expect("delete message should decode");
@@ -1485,10 +1503,16 @@ mod decode_tests {
                     kind: RowEventKind::Delete {
                         tuple_kind: RowTupleKind::Key,
                     },
-                    values: vec![ColumnValue {
-                        name: "col0".to_owned(),
-                        value: ScalarValue::Text("42".to_owned()),
-                    }],
+                    values: vec![
+                        ColumnValue {
+                            name: "col0".to_owned(),
+                            value: ScalarValue::Text("42".to_owned()),
+                        },
+                        ColumnValue {
+                            name: "col1".to_owned(),
+                            value: ScalarValue::Null,
+                        },
+                    ],
                 })
         );
     }
@@ -1498,8 +1522,9 @@ mod decode_tests {
         let mut bytes = vec![b'U'];
         put_i32(&mut bytes, 7);
         bytes.push(b'K');
-        put_i16(&mut bytes, 1);
+        put_i16(&mut bytes, 2);
         put_text_value(&mut bytes, "41");
+        bytes.push(b'n');
         bytes.push(b'N');
         put_i16(&mut bytes, 2);
         put_text_value(&mut bytes, "42");
@@ -1517,10 +1542,16 @@ mod decode_tests {
                     txid: Some(TransactionId(100)),
                     commit_timestamp_ms: None,
                     kind: RowEventKind::Update {
-                        old: vec![ColumnValue {
-                            name: "col0".to_owned(),
-                            value: ScalarValue::Text("41".to_owned()),
-                        }],
+                        old: vec![
+                            ColumnValue {
+                                name: "col0".to_owned(),
+                                value: ScalarValue::Text("41".to_owned()),
+                            },
+                            ColumnValue {
+                                name: "col1".to_owned(),
+                                value: ScalarValue::Null,
+                            },
+                        ],
                         old_tuple_kind: RowTupleKind::Key,
                     },
                     values: vec![

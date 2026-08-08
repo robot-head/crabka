@@ -44,6 +44,7 @@ jobs:
       traces: ${{ steps.filter.outputs.traces }}
       metrics: ${{ steps.filter.outputs.metrics }}
       gres: ${{ steps.filter.outputs.gres }}
+      connect: ${{ steps.filter.outputs.connect }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
@@ -294,6 +295,19 @@ jobs:
               - 'scripts/tests/gres-range-scaling-ci.sh'
               - 'scripts/gres-sharded-conformance.sh'
               - 'scripts/tests/gres_sharded_conformance_ci.py'
+            connect:
+              - 'crates/connect/**'
+              - 'crates/connect-postgres/**'
+              - 'crates/connect-worker/**'
+              - 'crates/replicator/**'
+              - 'crates/client-core/**'
+              - 'crates/client-producer/**'
+              - 'crates/client-consumer/**'
+              - 'crates/broker/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.config/nextest.toml'
+              - '.github/workflows/ci.yml'
 
   rust:
     needs: changes
@@ -652,6 +666,27 @@ jobs:
           grep -q "kind: PersistentVolumeClaim" /tmp/rebalancer.yaml
       - name: helm unittest rebalancer chart
         run: helm unittest charts/crabka-rebalancer
+
+  # Real PostgreSQL logical-decoding source feeding an in-process Crabka broker.
+  # The test is ignored in the workspace-wide suite so Docker is touched only here.
+  connect-postgres-acceptance:
+    needs: changes
+    if: ${{ needs.changes.outputs.connect == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/free-disk-space
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: connect-postgres-acceptance
+      - name: Preload PostgreSQL image
+        run: docker pull postgres:18
+      - name: Postgres CDC checkpoint and restart acceptance
+        run: cargo test -p crabka-connect-worker --test postgres_cdc -- --ignored --nocapture
 
   # cargo-semver-checks is intentionally disabled until Crabka publishes its
   # first crate to crates.io (tracked under the slice 1e publishing workflow).
@@ -1724,6 +1759,7 @@ jobs:
       - cargo-deny
       - creusot-verify
       - helm-lint
+      - connect-postgres-acceptance
       - client-core-integration
       - log-integration
       - client-consumer-integration

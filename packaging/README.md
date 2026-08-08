@@ -18,6 +18,7 @@ registries on a `crabka-broker-v*` release tag:
 | `crabka-broker`          | `robothead/crabka-broker`          | `ghcr.io/robot-head/crabka-broker`          |
 | `crabka-operator`        | `robothead/crabka-operator`        | `ghcr.io/robot-head/crabka-operator`        |
 | `crabka-schema-registry` | `robothead/crabka-schema-registry` | `ghcr.io/robot-head/crabka-schema-registry` |
+| `crabka-connect-worker`  | `robothead/crabka-connect-worker`  | `ghcr.io/robot-head/crabka-connect-worker`  |
 | `bench-driver`           | `robothead/bench-driver`           | `ghcr.io/robot-head/bench-driver`           |
 
 The observability demo image is published manually by

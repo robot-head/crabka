@@ -2,7 +2,7 @@ package:
   name: crabka
   version: 0.1.1
   epoch: 0
-  description: Crabka server binaries (broker, CLI, operator, schema-registry, bench driver)
+  description: Crabka server binaries (broker, CLI, operator, schema-registry, Connect worker, bench driver)
   copyright:
     - license: Apache-2.0
 
@@ -54,14 +54,16 @@ pipeline:
       fi
       cargo build --release \
         -p crabka-broker -p crabka-cli -p crabka-operator \
-        -p crabka-schema-registry -p crabka-bench-driver \
+        -p crabka-schema-registry -p crabka-connect-worker -p crabka-bench-driver \
         -p crabka-gres -p crabka-gres-activator \
         --bin crabka-broker --bin crabka --bin crabka-operator \
-        --bin crabka-schema-registry --bin crabka-bench-driver --bin crabka-bench-report \
+        --bin crabka-schema-registry --bin crabka-connect-worker \
+        --bin crabka-bench-driver --bin crabka-bench-report \
         --bin crabka-gres --bin crabka-gres-activator
       mkdir -p dist
       for bin in crabka-broker crabka crabka-operator crabka-schema-registry \
-                 crabka-bench-driver crabka-bench-report crabka-gres crabka-gres-activator; do
+                 crabka-connect-worker crabka-bench-driver crabka-bench-report \
+                 crabka-gres crabka-gres-activator; do
         install -m 0755 "$target/release/$bin" "dist/$bin"
       done
 
@@ -84,6 +86,12 @@ subpackages:
     pipeline:
       - runs: |
           install -D -m 0755 dist/crabka-schema-registry "${{targets.subpkgdir}}/usr/bin/crabka-schema-registry"
+
+  - name: crabka-connect-worker
+    description: Managed Postgres CDC connector worker for Crabka
+    pipeline:
+      - runs: |
+          install -D -m 0755 dist/crabka-connect-worker "${{targets.subpkgdir}}/usr/bin/crabka-connect-worker"
 
   - name: crabka-gres
     description: Gres PostgreSQL-compatible tenant compute

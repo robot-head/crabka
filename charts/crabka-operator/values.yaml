@@ -15,6 +15,12 @@ gatewayImage:
   tag: ""
   pullPolicy: IfNotPresent
 
+# Default image used for operator-managed KafkaConnector workloads.
+connectorImage:
+  repository: ghcr.io/robot-head/crabka-connect-worker
+  tag: ""
+  pullPolicy: IfNotPresent
+
 # Default images for operator-managed Gres compute and activator workloads.
 gresImage:
   repository: ghcr.io/robot-head/crabka-gres

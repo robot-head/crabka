@@ -1,0 +1,52 @@
+[package]
+name = "crabka-connect-worker"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Managed single-connector Postgres CDC worker for Crabka"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-connect-worker"
+readme = "README.md"
+keywords = ["kafka", "connect", "postgres", "cdc", "crabka"]
+categories = ["database", "network-programming"]
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "crabka-connect-worker"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
+bytes = { workspace = true }
+clap = { workspace = true, features = ["derive", "env"] }
+crabka-client-core = { version = "0.3.9", path = "../client-core" }
+crabka-client-producer = { version = "0.3.9", path = "../client-producer" }
+crabka-connect = { version = "0.3.9", path = "../connect" }
+crabka-connect-postgres = { version = "0.3.9", path = "../connect-postgres" }
+crabka-replicator = { version = "0.3.9", path = "../replicator" }
+crabka-security = { workspace = true }
+crabka-units = { workspace = true }
+prometheus-client = { workspace = true }
+rustls = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+assert2 = { workspace = true }
+crabka-broker = { version = "0.3.9", path = "../broker", features = ["test-helpers"] }
+crabka-client-consumer = { version = "0.3.9", path = "../client-consumer" }
+tempfile = { workspace = true }
+testcontainers = { workspace = true }
+tokio-postgres = { workspace = true }
+tower = { workspace = true, features = ["util"] }

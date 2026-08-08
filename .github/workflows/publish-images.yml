@@ -148,6 +148,7 @@ jobs:
           - crabka-broker
           - crabka-operator
           - crabka-schema-registry
+          - crabka-connect-worker
           - bench-driver
     env:
       VERSION: ${{ needs.version.outputs.version }}

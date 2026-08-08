@@ -7,8 +7,9 @@ use crate::ids::{Offset, PartitionIndex, Timestamp};
 /// One record from the source cluster, carried as the connect-value type `V`
 /// through the [`crabka_connect`] runtime.
 ///
-/// Because [`crabka_connect::ConnectRecord`] has no topic/partition fields,
-/// all envelope metadata is bundled here alongside the raw payload.
+/// Replication keeps its full source envelope here because the offset and
+/// provenance metadata are consumed by the specialized target sink in
+/// addition to the generic [`crabka_connect::ConnectRecord`] routing fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplicatedRecord {
     /// The source topic name.

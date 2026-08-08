@@ -78,6 +78,10 @@ pub async fn run(config: OperatorConfig) -> anyhow::Result<()> {
         let ctx = ctx.clone();
         async move { controller::grpc_gateway::run(ctx).await }
     });
+    let connector_handle = tokio::spawn({
+        let ctx = ctx.clone();
+        async move { controller::connector::run(ctx).await }
+    });
     let schema_registry_handle = tokio::spawn({
         let ctx = ctx.clone();
         async move { controller::schema_registry::run(ctx).await }
@@ -126,6 +130,11 @@ pub async fn run(config: OperatorConfig) -> anyhow::Result<()> {
             Ok(Ok(())) => {}
             Ok(Err(e)) => tracing::error!(error = %e, "KafkaGrpcGateway controller exited with error"),
             Err(e) => tracing::error!(error = %e, "KafkaGrpcGateway controller task panicked"),
+        },
+        res = connector_handle => match res {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::error!(error = %e, "KafkaConnector controller exited with error"),
+            Err(e) => tracing::error!(error = %e, "KafkaConnector controller task panicked"),
         },
         res = schema_registry_handle => match res {
             Ok(Ok(())) => {}

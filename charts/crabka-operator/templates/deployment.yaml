@@ -35,6 +35,7 @@ spec:
             - run
             - --default-broker-image={{ .Values.brokerImage.repository }}:{{ .Values.brokerImage.tag | default .Chart.AppVersion }}
             - --default-gateway-image={{ .Values.gatewayImage.repository }}:{{ .Values.gatewayImage.tag | default .Chart.AppVersion }}
+            - --default-connector-image={{ .Values.connectorImage.repository }}:{{ .Values.connectorImage.tag | default .Chart.AppVersion }}
             - --default-gres-image={{ .Values.gresImage.repository }}:{{ .Values.gresImage.tag | default .Chart.AppVersion }}
             - --default-gres-activator-image={{ .Values.gresActivatorImage.repository }}:{{ .Values.gresActivatorImage.tag | default .Chart.AppVersion }}
             - --default-pgdog-image={{ .Values.pgdogImage.repository }}:{{ .Values.pgdogImage.tag }}

@@ -424,6 +424,7 @@ pub fn op_config(namespace: &str) -> OperatorConfig {
         log_filter: "info".into(),
         default_broker_image: None,
         default_gateway_image: None,
+        default_connector_image: None,
         default_schema_registry_image: None,
         default_gres_image: None,
         default_pgdog_image: None,
