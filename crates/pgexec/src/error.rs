@@ -468,6 +468,15 @@ pub enum ExecError {
         child: String,
         column: String,
     },
+    /// A table being attached as a partition declares a column with a different
+    /// collation from the parent's (42P21). Every collation this engine has
+    /// orders text by byte value, so the two would in fact sort alike — but
+    /// `PostgreSQL` compares the declared collations, not their behaviour, and a
+    /// partitioned table whose children disagree about one is malformed.
+    ChildColumnCollationMismatch {
+        child: String,
+        column: String,
+    },
     /// `ONLY` suppressed a recursion `PostgreSQL` requires, because the
     /// relation has descendants that the subcommand would put out of step
     /// (42P16). The wording is per-subcommand, and two of them carry a hint.
@@ -1304,6 +1313,10 @@ impl ExecError {
             ExecError::ChildColumnTypeMismatch { child, column } => PgError::error(
                 "42804",
                 format!("child table \"{child}\" has different type for column \"{column}\""),
+            ),
+            ExecError::ChildColumnCollationMismatch { child, column } => PgError::error(
+                "42P21",
+                format!("child table \"{child}\" has different collation for column \"{column}\""),
             ),
             ExecError::OnlyWouldSkipDescendants { message, hint } => {
                 let error = PgError::error("42P16", message);

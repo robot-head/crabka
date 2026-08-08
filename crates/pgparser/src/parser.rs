@@ -98,6 +98,15 @@ struct QueryTailAndLocking {
     locking: Option<crate::ast::LockingClause>,
 }
 
+/// Everything that may follow a column's type name in a column definition or in
+/// a partition's inherited-column list: the constraint list and the at-most-one
+/// `COLLATE` clause `PostgreSQL` allows to sit anywhere among them.
+#[derive(Debug)]
+struct ColumnQualifiers {
+    constraints: Vec<crate::ast::ColumnConstraint>,
+    collation: Option<String>,
+}
+
 /// The parenthesized list after a FROM-function alias: renaming its columns, or
 /// declaring them for a record-returning function.
 #[derive(Debug)]
@@ -3773,14 +3782,15 @@ impl Parser {
             let _ = explicit_column;
             let name = self.expect_ident()?;
             let (ty, serial) = self.parse_column_type()?;
-            let constraints = self.column_constraints()?;
+            let qualifiers = self.column_qualifiers()?;
             return Ok(AlterTableAction::AddColumn {
                 if_not_exists,
                 column: ColumnDef {
                     name,
                     ty,
                     serial,
-                    constraints,
+                    collation: qualifiers.collation,
+                    constraints: qualifiers.constraints,
                 },
             });
         }
@@ -4022,15 +4032,22 @@ impl Parser {
     ) -> Result<crate::ast::AlterTableAction, ParseError> {
         self.expect_ident_eq("type")?;
         let ty = self.parse_type_name()?;
-        if self.eat_ident_eq("collate") {
-            self.expect_ident()?;
-        }
+        let collation = if self.eat_ident_eq("collate") {
+            Some(self.expect_collation_name()?)
+        } else {
+            None
+        };
         let using = if self.eat_keyword(Keyword::Using) {
             Some(self.expr(0)?)
         } else {
             None
         };
-        Ok(crate::ast::AlterTableAction::SetType { column, ty, using })
+        Ok(crate::ast::AlterTableAction::SetType {
+            column,
+            ty,
+            collation,
+            using,
+        })
     }
 
     /// Consume the rest of one `ALTER TABLE` subcommand that Crabka's storage
@@ -6564,7 +6581,12 @@ impl Parser {
                         if self.eat_keyword(Keyword::With) {
                             self.expect_ident_eq("options")?;
                         }
-                        column_options.push((column, self.column_constraints()?));
+                        let qualifiers = self.column_qualifiers()?;
+                        column_options.push(crate::ast::PartitionColumnOption {
+                            column,
+                            collation: qualifiers.collation,
+                            constraints: qualifiers.constraints,
+                        });
                     }
                     if self.eat_comma() {
                         continue;
@@ -6585,12 +6607,13 @@ impl Parser {
                     } else {
                         let col_name = self.expect_ident()?;
                         let (ty, serial) = self.parse_column_type()?;
-                        let constraints = self.column_constraints()?;
+                        let qualifiers = self.column_qualifiers()?;
                         columns.push(ColumnDef {
                             name: col_name,
                             ty,
                             serial,
-                            constraints,
+                            collation: qualifiers.collation,
+                            constraints: qualifiers.constraints,
                         });
                     }
                     if self.eat_comma() {
@@ -7459,10 +7482,40 @@ impl Parser {
         }
     }
 
-    fn column_constraints(&mut self) -> Result<Vec<crate::ast::ColumnConstraint>, ParseError> {
+    /// The qualifier list that follows a column's type: its constraints plus the
+    /// at-most-one `COLLATE` clause.
+    ///
+    /// `PostgreSQL`'s `ColQualList` admits `COLLATE any_name` as one alternative
+    /// of `ColConstraint`, so the clause may sit anywhere among the constraints
+    /// — `b text NOT NULL COLLATE "C"` and `b text COLLATE "C" NOT NULL` are the
+    /// same column. It is lifted out of the constraint list here because at most
+    /// one may be written and it describes the column rather than constraining
+    /// its values; a second one is `PostgreSQL`'s own 42601.
+    fn column_qualifiers(&mut self) -> Result<ColumnQualifiers, ParseError> {
         use crate::ast::{ColumnConstraint, ColumnConstraintKind, IdentitySpec};
         let mut constraints = Vec::new();
+        let mut collation: Option<String> = None;
         loop {
+            // `collate` is a `bare_label_keyword`, so — as in the postfix
+            // operator — it is only the clause when a name that could be a
+            // collation follows.
+            if self.peek_ident_eq("collate") && matches!(self.peek2(), Token::Ident(_)) {
+                let pos = self.peek_pos();
+                self.bump();
+                let name = self.expect_collation_name()?;
+                if collation.is_some() {
+                    // PostgreSQL renders this one verbatim, without its
+                    // "syntax error at position N:" lead-in, so the 42601 is
+                    // named rather than taken from `ParseError::new`.
+                    return Err(ParseError::new_sqlstate(
+                        "42601",
+                        "multiple COLLATE clauses not allowed",
+                        pos,
+                    ));
+                }
+                collation = Some(name);
+                continue;
+            }
             let name = if matches!(self.peek(), Token::Ident(s) if s.eq_ignore_ascii_case("constraint"))
                 && matches!(self.peek2(), Token::Ident(_))
                 && starts_column_constraint_kind(self.peek3())
@@ -7515,7 +7568,10 @@ impl Parser {
                 attributes,
             });
         }
-        Ok(constraints)
+        Ok(ColumnQualifiers {
+            constraints,
+            collation,
+        })
     }
 
     /// `GENERATED { ALWAYS | BY DEFAULT } AS
@@ -9409,9 +9465,11 @@ impl Parser {
         let _ = self.eat_keyword(Keyword::As);
         let base = self.parse_type_name()?;
         // A domain may carry a `COLLATE` before its constraints.
-        if self.eat_ident_eq("collate") {
-            let _ = self.expect_collation_name()?;
-        }
+        let collation = if self.eat_ident_eq("collate") {
+            Some(self.expect_collation_name()?)
+        } else {
+            None
+        };
         let mut constraints = Vec::new();
         loop {
             if self.eat_ident_eq("default") {
@@ -9452,6 +9510,7 @@ impl Parser {
         Ok(crate::ast::Statement::CreateDomain {
             name,
             base,
+            collation,
             constraints,
         })
     }
@@ -12680,10 +12739,18 @@ impl Parser {
         loop {
             let col_name = self.expect_ident()?;
             let ty = self.parse_type_name()?;
+            let collation =
+                if self.peek_ident_eq("collate") && matches!(self.peek2(), Token::Ident(_)) {
+                    self.bump();
+                    Some(self.expect_collation_name()?)
+                } else {
+                    None
+                };
             columns.push(ColumnDef {
                 name: col_name,
                 ty,
                 serial: None,
+                collation,
                 constraints: Vec::new(),
             });
             if self.eat_comma() {
@@ -15372,6 +15439,7 @@ mod tests {
             ty,
             serial: None,
             constraints: Vec::new(),
+            collation: None,
         }
     }
 
@@ -17731,6 +17799,151 @@ mod tests {
         }
     }
 
+    /// `PostgreSQL` makes `COLLATE any_name` one alternative of `ColConstraint`,
+    /// so a column's clause may sit anywhere among its constraints and may be
+    /// written at most once. It lands on the column rather than in its
+    /// constraint list, and it reaches the three places a column is declared:
+    /// `CREATE TABLE`, `ALTER TABLE … ADD COLUMN`, and a partition's inherited
+    /// column list.
+    #[test]
+    fn a_column_collate_clause_is_taken_anywhere_in_the_qualifier_list() {
+        use assert2::assert;
+
+        use crate::ast::{ColumnConstraint, ColumnConstraintKind, ConstraintAttributes};
+
+        fn not_null() -> ColumnConstraint {
+            ColumnConstraint {
+                name: None,
+                kind: ColumnConstraintKind::NotNull,
+                attributes: ConstraintAttributes::default(),
+            }
+        }
+        fn collated(
+            name: &str,
+            collation: Option<&str>,
+            constraints: Vec<ColumnConstraint>,
+        ) -> ColumnDef {
+            ColumnDef {
+                name: name.into(),
+                ty: ColumnType::Text,
+                serial: None,
+                collation: collation.map(Into::into),
+                constraints,
+            }
+        }
+
+        let cases: Vec<(&str, ColumnDef)> = vec![
+            ("CREATE TABLE t (b text)", collated("b", None, Vec::new())),
+            (
+                "CREATE TABLE t (b text COLLATE \"C\")",
+                collated("b", Some("C"), Vec::new()),
+            ),
+            // Either order is the same column.
+            (
+                "CREATE TABLE t (b text COLLATE \"C\" NOT NULL)",
+                collated("b", Some("C"), vec![not_null()]),
+            ),
+            (
+                "CREATE TABLE t (b text NOT NULL COLLATE \"C\")",
+                collated("b", Some("C"), vec![not_null()]),
+            ),
+            // `pg_catalog."C"` names the same collation as a bare `"C"`.
+            (
+                "CREATE TABLE t (b text COLLATE pg_catalog.\"C\")",
+                collated("b", Some("C"), Vec::new()),
+            ),
+            (
+                "CREATE TABLE t (b text COLLATE \"POSIX\" DEFAULT 'x')",
+                ColumnDef {
+                    collation: Some("POSIX".into()),
+                    constraints: vec![ColumnConstraint {
+                        name: None,
+                        kind: ColumnConstraintKind::Default(Expr::StringLiteral("x".into())),
+                        attributes: ConstraintAttributes::default(),
+                    }],
+                    ..collated("b", None, Vec::new())
+                },
+            ),
+        ];
+        for (sql, expected) in cases {
+            let Statement::CreateTable { columns, .. } = one(sql) else {
+                panic!("{sql} is not a CREATE TABLE");
+            };
+            assert!(columns == vec![expected], "{sql}");
+        }
+
+        // `ADD COLUMN` declares a column by the same grammar.
+        assert!(
+            one("ALTER TABLE t ADD COLUMN b text COLLATE \"C\" NOT NULL")
+                == alter_table_stmt(
+                    "t",
+                    vec![AlterTableAction::AddColumn {
+                        if_not_exists: false,
+                        column: collated("b", Some("C"), vec![not_null()]),
+                    }],
+                )
+        );
+
+        // A retype names the collation the column keeps afterwards.
+        assert!(
+            one("ALTER TABLE t ALTER COLUMN c TYPE text COLLATE \"POSIX\"")
+                == alter_table_stmt(
+                    "t",
+                    vec![AlterTableAction::SetType {
+                        column: "c".into(),
+                        ty: ColumnType::Text,
+                        collation: Some("POSIX".into()),
+                        using: None,
+                    }],
+                )
+        );
+
+        // A partition's inherited-column list takes the clause too.
+        let Statement::CreateTable { partition_of, .. } = one(
+            "CREATE TABLE p PARTITION OF q (a COLLATE \"POSIX\", b NOT NULL) \
+             FOR VALUES FROM ('a') TO ('m')",
+        ) else {
+            panic!("not a CREATE TABLE");
+        };
+        let options = partition_of.expect("PARTITION OF").column_options;
+        assert!(
+            options
+                == vec![
+                    crate::ast::PartitionColumnOption {
+                        column: "a".into(),
+                        collation: Some("POSIX".into()),
+                        constraints: Vec::new(),
+                    },
+                    crate::ast::PartitionColumnOption {
+                        column: "b".into(),
+                        collation: None,
+                        constraints: vec![not_null()],
+                    },
+                ]
+        );
+
+        // A second clause on one column is PostgreSQL's own 42601, rendered
+        // without the "syntax error at position N:" lead-in; an unknown name is
+        // the same 42704 the postfix operator gives, wherever it is written.
+        let error = parse("CREATE TABLE t (b text COLLATE \"C\" COLLATE \"POSIX\")")
+            .expect_err("two collations");
+        assert!(error.sqlstate() == "42601");
+        assert!(error.message == "multiple COLLATE clauses not allowed");
+        for sql in [
+            "CREATE TABLE t (b text COLLATE \"en_US\")",
+            "ALTER TABLE t ADD COLUMN b text COLLATE \"en_US\"",
+            "ALTER TABLE t ALTER COLUMN c TYPE text COLLATE \"en_US\"",
+            "CREATE TABLE p PARTITION OF q (a COLLATE \"en_US\") FOR VALUES IN (1)",
+        ] {
+            let error = parse(sql).expect_err("unknown collation");
+            assert!(error.sqlstate() == "42704", "{sql}");
+            assert!(
+                error.message == "collation \"en_US\" for encoding \"UTF8\" does not exist",
+                "{sql}"
+            );
+        }
+    }
+
     #[test]
     fn parses_searched_and_simple_case() {
         match expr("CASE WHEN a > 0 THEN 'pos' ELSE 'neg' END") {
@@ -19766,6 +19979,7 @@ mod tests {
                     vec![AlterTableAction::SetType {
                         column: "c".into(),
                         ty: ColumnType::Int8,
+                        collation: None,
                         using: None,
                     }],
                 ),

@@ -489,13 +489,23 @@ pub(crate) fn execute_ddl(
         Statement::CreateDomain {
             name,
             base,
+            collation,
             constraints,
-        } => crate::usertype::create_domain(
-            kv,
-            &resolve_relation(kv, resolution, name, SchemaDisposition::Creation)?,
-            *base,
-            constraints,
-        ),
+        } => {
+            // The collation itself has no effect — every collation the engine
+            // has orders text by byte value — but writing one over a base type
+            // that cannot carry one is PostgreSQL's 42804, reported before the
+            // domain is created.
+            if collation.is_some() {
+                crate::eval::require_collatable(*base)?;
+            }
+            crate::usertype::create_domain(
+                kv,
+                &resolve_relation(kv, resolution, name, SchemaDisposition::Creation)?,
+                *base,
+                constraints,
+            )
+        }
         Statement::AlterDomain { name, action } => {
             crate::usertype::alter_domain(kv, &resolve_user_type(kv, resolution, name)?, action)
         }
@@ -2035,6 +2045,14 @@ fn column_from_ast(
     primary_key_columns: &HashSet<&str>,
 ) -> Result<Column, ExecError> {
     let mut catalog_column = Column::new(column.name.clone(), column.ty);
+    // A written `COLLATE` is only legal on a collatable type. The parser has
+    // already refused a name no `pg_collation` row has (42704); what is left is
+    // PostgreSQL's type rule, and it is the same one the postfix operator
+    // applies, so it is asked of the same helper.
+    if let Some(collation) = &column.collation {
+        crate::eval::require_collatable(column.ty)?;
+        catalog_column.collation = Some(collation.clone());
+    }
     if primary_key_columns.contains(column.name.as_str()) {
         catalog_column.not_null = true;
     }
@@ -18101,7 +18119,7 @@ fn attribute_rows_for_table(relid: i32, table: &Table) -> Result<Vec<Vec<Datum>>
                 Datum::Bool(false),
                 Datum::Bool(true),
                 Datum::Int2(0),
-                int(text_collation_oid(column.ty)),
+                int(column_collation_oid(column)),
                 Datum::Int2(-1),
                 Datum::Null,
                 Datum::Null,
@@ -18203,6 +18221,23 @@ fn attribute_storage(ty: ColumnType) -> &'static str {
         // class, which is the rule PostgreSQL's `CREATE DOMAIN` copies.
         C::Enum(_) => "p",
         C::Domain(domain) => attribute_storage(*domain.base),
+    }
+}
+
+/// `pg_attribute.attcollation` for one catalog column: the oid of the collation
+/// its `COLLATE` clause named, or — with no clause written — whatever the type
+/// alone implies.
+///
+/// `\d` prints its Collation column exactly when `attcollation` differs from the
+/// type's `typcollation`, so a column that wrote no clause has to keep reporting
+/// the type's own collation and a column that wrote `COLLATE "default"` has to
+/// report it too: `PostgreSQL` prints nothing for either.
+fn column_collation_oid(column: &Column) -> i32 {
+    match column.collation.as_deref() {
+        None => text_collation_oid(column.ty),
+        Some(name) => {
+            crate::catalog_rel::collation_oid(name).unwrap_or_else(|| text_collation_oid(column.ty))
+        }
     }
 }
 
@@ -21496,6 +21531,16 @@ fn inherited_table_definition(
                         column.name
                     )));
                 }
+                // Two parents that spell the same column with different
+                // collations are as irreconcilable as two that spell it with
+                // different types: the child would have to pick one, and
+                // PostgreSQL refuses rather than choosing.
+                if existing.collation != column.collation {
+                    return Err(ExecError::InvalidTableDefinition(format!(
+                        "inherited column \"{}\" has a collation conflict",
+                        column.name
+                    )));
+                }
                 existing.not_null |= column.not_null;
                 if existing.default.is_none() {
                     existing.default = column.default;
@@ -21543,7 +21588,8 @@ fn partition_definition(
     let (_, extra_checks, sequences, indexes, foreign_keys) =
         create_table_definition(kv, name, &[], constraints, like, &parent.columns, ctx)?;
     let mut columns = parent.columns.clone();
-    for (column, qualifiers) in &spec.column_options {
+    for option in &spec.column_options {
+        let column = &option.column;
         let target = columns
             .iter_mut()
             .find(|candidate| candidate.name == *column)
@@ -21551,7 +21597,14 @@ fn partition_definition(
                 column: column.clone(),
                 table: name.to_string(),
             })?;
-        for qualifier in qualifiers {
+        // A partition's `(a COLLATE "POSIX")` is parsed and then dropped: the
+        // column keeps the collation the parent declared, which is what
+        // PostgreSQL does — it accepts the clause without complaint and without
+        // effect. The type rule still applies to what was written.
+        if option.collation.is_some() {
+            crate::eval::require_collatable(target.ty)?;
+        }
+        for qualifier in &option.constraints {
             match &qualifier.kind {
                 crabka_pgparser::ast::ColumnConstraintKind::NotNull => target.not_null = true,
                 crabka_pgparser::ast::ColumnConstraintKind::Null => target.not_null = false,
@@ -24005,8 +24058,19 @@ fn alter_table_action_ops(
             ));
             Ok(())
         }
-        Action::SetType { column, ty, using } => {
+        Action::SetType {
+            column,
+            ty,
+            collation,
+            using,
+        } => {
             let index = state.column_index(column)?;
+            // The written `COLLATE` is checked against the *new* type, before
+            // any rows are rewritten: `ALTER COLUMN id TYPE int COLLATE "C"` is
+            // PostgreSQL's 42804 and must not leave the column half-changed.
+            if collation.is_some() {
+                crate::eval::require_collatable(*ty)?;
+            }
             if state.retyped_columns.iter().any(|name| name == column) {
                 return Err(ExecError::Unsupported(format!(
                     "cannot alter type of column \"{column}\" twice"
@@ -24075,6 +24139,10 @@ fn alter_table_action_ops(
                 }
             }
             state.table.columns[index].ty = *ty;
+            // A retype resets the column to the new type's own collation unless
+            // the statement names one, which is why `ALTER … TYPE text` on a
+            // `COLLATE "C"` column drops the C rather than carrying it over.
+            state.table.columns[index].collation = collation.clone();
             // Every CHECK is stored as source text and re-resolved on write, so
             // one that no longer type-checks has to fail the ALTER rather than
             // leave a table nothing can be written to.
@@ -24456,6 +24524,21 @@ fn attach_partition_ops(
         .find(|column| candidate.column_index(&column.name).is_none())
     {
         return Err(ExecError::ChildMissingColumn(missing.name.clone()));
+    }
+    // A partition's columns have to be declared exactly as the parent declares
+    // them, collation included: PostgreSQL compares the two declarations rather
+    // than what they do, so `char(2) COLLATE "POSIX"` cannot join a parent whose
+    // column says `COLLATE "C"` even where both order text by byte value.
+    for column in &parent.columns {
+        let Some(index) = candidate.column_index(&column.name) else {
+            continue;
+        };
+        if candidate.columns[index].collation != column.collation {
+            return Err(ExecError::ChildColumnCollationMismatch {
+                child: child.name.clone(),
+                column: column.name.clone(),
+            });
+        }
     }
     if crate::partition::parent_of(kv, child)?.is_some() {
         return Err(ExecError::InvalidObjectDefinition(format!(
@@ -26699,6 +26782,286 @@ mod tests {
         ] {
             assert!(sqlstate_of(&mut session, sql).await == "42704", "{sql}");
         }
+    }
+
+    /// The `\d` Collation column: psql prints a column's collation exactly when
+    /// `pg_attribute.attcollation` differs from the type's `typcollation`, so
+    /// this asks the catalog the same question psql does.
+    /// `attrelid` is a SQL expression for the relation's oid rather than a name,
+    /// so a composite type — whose attributes hang off `pg_type.typrelid` — can
+    /// be asked the same question a table can.
+    async fn collation_shown_by_backslash_d(
+        session: &mut SqlSession,
+        attrelid: &str,
+    ) -> Vec<Vec<Option<String>>> {
+        text_rows_of(
+            session,
+            &format!(
+                "SELECT a.attname, (SELECT c.collname FROM pg_collation c, pg_type t \
+                 WHERE c.oid = a.attcollation AND t.oid = a.atttypid \
+                 AND a.attcollation <> t.typcollation) \
+                 FROM pg_attribute a WHERE a.attrelid = ({attrelid}) \
+                 AND a.attnum > 0 ORDER BY a.attnum"
+            ),
+        )
+        .await
+    }
+
+    /// A column-level `COLLATE` is accepted, recorded and reported. Every
+    /// collation this engine has orders text by byte value, so the clause never
+    /// changes how rows compare — what it changes is what `pg_attribute` and so
+    /// `\d` say about the column. The type rule (42804) and the unknown-name
+    /// rule (42704) are the same ones the postfix operator applies.
+    #[tokio::test]
+    async fn a_column_collate_clause_is_recorded_and_reported() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        run_s(&mut session, "CREATE DOMAIN dtext AS text").await;
+        run_s(
+            &mut session,
+            "CREATE TABLE t (id int4, plain text, c text COLLATE \"C\", \
+             p varchar(8) COLLATE \"POSIX\", d text COLLATE \"default\", \
+             dom dtext COLLATE \"C\", arr text[] COLLATE \"C\")",
+        )
+        .await;
+
+        // PostgreSQL prints nothing for a column with no clause and nothing for
+        // one that wrote the database default; it prints the name for the rest.
+        assert!(
+            collation_shown_by_backslash_d(&mut session, "'t'::regclass").await
+                == vec![
+                    vec![Some("id".into()), None],
+                    vec![Some("plain".into()), None],
+                    text_row(&["c", "C"]),
+                    text_row(&["p", "POSIX"]),
+                    vec![Some("d".into()), None],
+                    text_row(&["dom", "C"]),
+                    text_row(&["arr", "C"]),
+                ]
+        );
+
+        // The clause is semantically a no-op: the column stores, compares and
+        // orders exactly as an uncollated one does.
+        run_s(
+            &mut session,
+            "INSERT INTO t (id, c) VALUES (2, 'b'), (1, 'a')",
+        )
+        .await;
+        assert!(
+            text_rows_of(&mut session, "SELECT c FROM t ORDER BY c").await
+                == vec![text_row(&["a"]), text_row(&["b"])]
+        );
+        assert!(
+            text_rows_of(&mut session, "SELECT c FROM t WHERE c = 'a'").await
+                == vec![text_row(&["a"])]
+        );
+
+        // `LIKE` copies the whole column, collation included.
+        run_s(&mut session, "CREATE TABLE copied (LIKE t)").await;
+        assert!(
+            collation_shown_by_backslash_d(&mut session, "'copied'::regclass").await
+                == collation_shown_by_backslash_d(&mut session, "'t'::regclass").await
+        );
+
+        // `ADD COLUMN` takes the clause; a retype names the collation the column
+        // keeps, and omitting it resets the column to the type's own.
+        run_s(
+            &mut session,
+            "ALTER TABLE t ADD COLUMN added text COLLATE \"POSIX\"",
+        )
+        .await;
+        run_s(
+            &mut session,
+            "ALTER TABLE t ALTER COLUMN plain TYPE text COLLATE \"C\"",
+        )
+        .await;
+        run_s(&mut session, "ALTER TABLE t ALTER COLUMN c TYPE text").await;
+        let after = collation_shown_by_backslash_d(&mut session, "'t'::regclass").await;
+        assert!(after[1] == text_row(&["plain", "C"]));
+        assert!(after[2] == vec![Some("c".into()), None]);
+        assert!(after[7] == text_row(&["added", "POSIX"]));
+
+        // A collation is only meaningful on a collatable type, and only a
+        // collation `pg_collation` holds can be named — in every place a column
+        // is declared.
+        let refusals: &[(&str, &str)] = &[
+            ("CREATE TABLE bad (a int4 COLLATE \"C\")", "42804"),
+            ("CREATE TABLE bad (a int4[] COLLATE \"C\")", "42804"),
+            ("ALTER TABLE t ADD COLUMN bad int4 COLLATE \"C\"", "42804"),
+            (
+                "ALTER TABLE t ALTER COLUMN id TYPE int4 COLLATE \"C\"",
+                "42804",
+            ),
+            ("CREATE TABLE bad (a text COLLATE \"en_US\")", "42704"),
+            (
+                "CREATE TABLE bad (a text COLLATE \"C\" COLLATE \"POSIX\")",
+                "42601",
+            ),
+        ];
+        for (sql, expected) in refusals {
+            assert!(sqlstate_of(&mut session, sql).await == *expected, "{sql}");
+        }
+        // A refused statement created nothing.
+        assert!(sqlstate_of(&mut session, "SELECT * FROM bad").await == "42P01");
+        // The same type rule guards a domain's own clause, which the parser used
+        // to consume and throw away.
+        assert!(
+            sqlstate_of(&mut session, "CREATE DOMAIN di AS int4 COLLATE \"POSIX\"").await
+                == "42804"
+        );
+        run_s(&mut session, "CREATE DOMAIN dp AS text COLLATE \"POSIX\"").await;
+    }
+
+    /// A partition has to declare its columns exactly as its parent does, and
+    /// the collation is part of that declaration — PostgreSQL compares the two
+    /// written collations rather than what they do, so a `POSIX` child cannot
+    /// join a `C` parent even though both order text by byte value here.
+    #[tokio::test]
+    async fn a_partition_must_declare_the_parents_collation() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        run_s(
+            &mut session,
+            "CREATE TABLE lp (a int4, b text COLLATE \"C\") PARTITION BY LIST (a)",
+        )
+        .await;
+        run_s(
+            &mut session,
+            "CREATE TABLE lp_bad (a int4, b text COLLATE \"POSIX\")",
+        )
+        .await;
+        run_s(
+            &mut session,
+            "CREATE TABLE lp_ok (a int4, b text COLLATE \"C\")",
+        )
+        .await;
+
+        assert!(
+            sqlstate_of(
+                &mut session,
+                "ALTER TABLE lp ATTACH PARTITION lp_bad FOR VALUES IN (1)",
+            )
+            .await
+                == "42P21"
+        );
+        run_s(
+            &mut session,
+            "ALTER TABLE lp ATTACH PARTITION lp_ok FOR VALUES IN (2)",
+        )
+        .await;
+
+        // A partition declared through `PARTITION OF` may write the clause, and
+        // PostgreSQL parses it and then ignores it: the column keeps what the
+        // parent declared.
+        run_s(
+            &mut session,
+            "CREATE TABLE lp_of PARTITION OF lp (b COLLATE \"POSIX\") FOR VALUES IN (3)",
+        )
+        .await;
+        assert!(
+            collation_shown_by_backslash_d(&mut session, "'lp_of'::regclass").await
+                == collation_shown_by_backslash_d(&mut session, "'lp'::regclass").await
+        );
+    }
+
+    /// `pg_get_viewdef` has to write a collated expression back, not swallow it.
+    /// The deparser's catch-all renders an unknown node as the literal
+    /// `?column?`, which turns `WHERE (b COLLATE "C") >= 'bbc'` into a body that
+    /// no longer says what the view does.
+    #[tokio::test]
+    async fn a_view_body_keeps_the_collate_it_was_written_with() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        run_s(&mut session, "CREATE TABLE t (a int4, b text, x text)").await;
+        run_s(
+            &mut session,
+            "CREATE VIEW v1 AS SELECT a, b FROM t WHERE b COLLATE \"C\" >= 'bbc'",
+        )
+        .await;
+        run_s(
+            &mut session,
+            "CREATE VIEW v2 AS SELECT a, lower((x || x) COLLATE \"POSIX\") FROM t",
+        )
+        .await;
+
+        let bodies = text_rows_of(
+            &mut session,
+            "SELECT table_name, view_definition FROM information_schema.views \
+             WHERE table_name LIKE 'v%' ORDER BY 1",
+        )
+        .await;
+        let body = |row: &Vec<Option<String>>| row[1].clone().expect("a definition");
+        assert!(
+            body(&bodies[0]).contains("WHERE ((b COLLATE \"C\") >= 'bbc'::text)"),
+            "{}",
+            body(&bodies[0])
+        );
+        assert!(
+            body(&bodies[1]).contains("lower(((x || x) COLLATE \"POSIX\"))"),
+            "{}",
+            body(&bodies[1])
+        );
+    }
+
+    /// `pg_attribute` is built by one function for every kind of relation that
+    /// has columns, and `attcollation` is the field a column-level `COLLATE`
+    /// changed. None of these relations can carry one, so every one of them has
+    /// to keep reporting the collation its column's *type* implies — the
+    /// database default for the string types and 0 for everything else — or
+    /// `\d` starts printing a Collation column for relations that have none.
+    #[tokio::test]
+    async fn attcollation_follows_the_type_for_every_relation_without_a_collate() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        run_s(&mut session, "CREATE TABLE base (id int4, label text)").await;
+        run_s(&mut session, "CREATE VIEW v AS SELECT id, label FROM base").await;
+        run_s(&mut session, "CREATE TYPE pair AS (n int4, s text)").await;
+        run_s(
+            &mut session,
+            "CREATE MATERIALIZED VIEW m AS SELECT id, label FROM base",
+        )
+        .await;
+        run_s(
+            &mut session,
+            "CREATE TABLE ctas AS SELECT id, label FROM base",
+        )
+        .await;
+
+        // A table, a view, a materialized view, a CREATE TABLE AS, a composite
+        // type and a catalog relation of the engine's own — every one reports
+        // the type's collation and nothing else, so `\d` prints no Collation.
+        let relations = [
+            "'base'::regclass",
+            "'v'::regclass",
+            "'m'::regclass",
+            "'ctas'::regclass",
+            "SELECT typrelid FROM pg_type WHERE typname = 'pair'",
+            "'pg_class'::regclass",
+        ];
+        for relation in relations {
+            let printed = collation_shown_by_backslash_d(&mut session, relation).await;
+            assert!(!printed.is_empty(), "{relation} has no attributes");
+            assert!(
+                printed.iter().all(|row| row[1].is_none()),
+                "{relation} prints a collation: {printed:?}"
+            );
+        }
+
+        // And the underlying value is the database default for a text column,
+        // not 0 and not a named collation.
+        assert!(
+            text_rows_of(
+                &mut session,
+                "SELECT attname, attcollation FROM pg_attribute \
+                 WHERE attrelid = 'base'::regclass AND attnum > 0 ORDER BY attnum",
+            )
+            .await
+                == vec![text_row(&["id", "0"]), text_row(&["label", "100"])]
+        );
     }
 
     /// A `CHECK` constraint is persisted and enforced on INSERT, UPDATE and

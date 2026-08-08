@@ -1005,6 +1005,11 @@ pub enum Statement {
     CreateDomain {
         name: RelationRef,
         base: ColumnType,
+        /// `COLLATE "name"`, when written. The engine's collations all order
+        /// text by byte value, so the name has no effect on the domain — but
+        /// writing one over a non-collatable base is still `PostgreSQL`'s 42804,
+        /// which only the executor knows the base type well enough to report.
+        collation: Option<String>,
         constraints: Vec<DomainConstraint>,
     },
     /// `ALTER DOMAIN name <action>`.
@@ -1935,10 +1940,14 @@ pub enum AlterTableAction {
         column: String,
         if_exists: bool,
     },
-    /// `ALTER [COLUMN] c TYPE t [USING expr]`.
+    /// `ALTER [COLUMN] c TYPE t [COLLATE "name"] [USING expr]`.
     SetType {
         column: String,
         ty: ColumnType,
+        /// `COLLATE "name"`, when written — the collation the column carries
+        /// after the change. Omitting it resets the column to the type's own
+        /// default collation, which is what `PostgreSQL` does.
+        collation: Option<String>,
         using: Option<Expr>,
     },
     AddConstraint(TableConstraint),
@@ -2029,10 +2038,21 @@ pub struct PartitionKeyElem {
 pub struct PartitionOf {
     pub parent: RelationRef,
     pub bound: PartitionBound,
-    /// `(a NOT NULL, b WITH OPTIONS DEFAULT 0)`: extra constraints on columns
+    /// `(a NOT NULL, b WITH OPTIONS DEFAULT 0)` — extra qualifiers on columns
     /// the partition inherits from its parent. A partition declares no types of
     /// its own, so only the qualifier list is written.
-    pub column_options: Vec<(String, Vec<ColumnConstraint>)>,
+    pub column_options: Vec<PartitionColumnOption>,
+}
+
+/// One element of a partition's `(a NOT NULL, b COLLATE "C")` qualifier list.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PartitionColumnOption {
+    /// The inherited column the qualifiers apply to.
+    pub column: String,
+    /// `COLLATE "name"`, when written. `PostgreSQL` parses it and then ignores
+    /// it: a partition's column always keeps the collation the parent declared.
+    pub collation: Option<String>,
+    pub constraints: Vec<ColumnConstraint>,
 }
 
 /// A partition's bound specification, as written.
@@ -2375,6 +2395,15 @@ pub struct ColumnDef {
     pub name: String,
     pub ty: ColumnType,
     pub serial: Option<SerialKind>,
+    /// `COLLATE "name"`, when written. `PostgreSQL`'s grammar admits the clause
+    /// anywhere in the qualifier list, so `b text NOT NULL COLLATE "C"` parses
+    /// like `b text COLLATE "C" NOT NULL`; it is recorded here rather than as a
+    /// [`ColumnConstraint`] because at most one may be written and it is a
+    /// property of the column, not a constraint on its values.
+    ///
+    /// Every collation this engine has orders text by byte value, so the name
+    /// only ever changes what the catalog reports, never how rows compare.
+    pub collation: Option<String>,
     pub constraints: Vec<ColumnConstraint>,
 }
 

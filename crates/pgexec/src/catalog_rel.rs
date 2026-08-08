@@ -1690,6 +1690,16 @@ pub(crate) const BUILTIN_COLLATIONS: &[(i32, &str, &str, i32)] = &[
     (951, "POSIX", "c", -1),
 ];
 
+/// The oid `pg_collation` gives a collation name, or `None` when no row has it.
+/// The parser only ever admits a name this table holds, so a `None` here means
+/// the caller invented one rather than that the user wrote a bad one.
+pub(crate) fn collation_oid(name: &str) -> Option<i32> {
+    BUILTIN_COLLATIONS
+        .iter()
+        .find(|(_, collname, _, _)| *collname == name)
+        .map(|(oid, _, _, _)| *oid)
+}
+
 fn pg_collation_rows() -> Vec<Vec<Datum>> {
     BUILTIN_COLLATIONS
         .iter()

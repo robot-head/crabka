@@ -7570,6 +7570,12 @@ impl SqlSession {
                         .unwrap_or_else(|| f.name.clone()),
                     ty: crate::exec::column_type_from_oid(f.type_oid)?,
                     serial: None,
+                    // `CREATE TABLE AS` derives its columns from the query's
+                    // RowDescription, which carries a name and a type oid and
+                    // no collation, so the new table's columns get the type's
+                    // own — PostgreSQL instead carries the source column's
+                    // collation across.
+                    collation: None,
                     constraints: Vec::new(),
                 })
             })

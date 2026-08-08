@@ -45,7 +45,7 @@ pub type DecodedSchema = (
 /// foreign, or materialized view — is written with this version byte; a flag
 /// byte after the owner distinguishes ordinary (`0`) from foreign (`1`), and a
 /// `CHECK` constraint list and a materialized-view flag byte close the record.
-pub const SCHEMA_VERSION: u8 = 11;
+pub const SCHEMA_VERSION: u8 = 12;
 
 const TABLE_OPTION_SHARDED: u8 = 0b0000_0001;
 const TABLE_OPTION_ROW_SECURITY: u8 = 0b0000_0010;
@@ -1039,6 +1039,7 @@ pub fn serialize_schema(
         write_default(&mut out, c.default.as_ref());
         write_generated(&mut out, c.generated.as_ref());
         out.push(identity_flag(c.identity));
+        write_collation(&mut out, c.collation.as_deref());
     }
     out.push(table_option_flags(options));
     write_str(&mut out, owner);
@@ -1100,6 +1101,34 @@ fn read_generated(cur: &mut &[u8]) -> Result<Option<GeneratedColumn>, KvError> {
         expr: read_string(cur)?,
         kind,
     }))
+}
+
+const COLLATION_DEFAULT: u8 = 0;
+const COLLATION_NAMED: u8 = 1;
+
+/// A column's written `COLLATE "name"`: a presence byte, followed by the name
+/// when one was written. `None` is the type's own default collation, which is
+/// what every column had before the clause was accepted.
+fn write_collation(out: &mut Vec<u8>, collation: Option<&str>) {
+    match collation {
+        None => out.push(COLLATION_DEFAULT),
+        Some(name) => {
+            out.push(COLLATION_NAMED);
+            write_str(out, name);
+        }
+    }
+}
+
+/// Reads back what [`write_collation`] wrote, refusing any presence byte
+/// outside the two it writes.
+fn read_collation(cur: &mut &[u8]) -> Result<Option<String>, KvError> {
+    match take_u8(cur)? {
+        COLLATION_DEFAULT => Ok(None),
+        COLLATION_NAMED => Ok(Some(read_string(cur)?)),
+        flag => Err(KvError::CorruptRow(format!(
+            "unknown column-collation flag {flag}"
+        ))),
+    }
 }
 
 const IDENTITY_NONE: u8 = 0;
@@ -1811,6 +1840,7 @@ pub fn deserialize_schema(bytes: &[u8]) -> Result<DecodedSchema, KvError> {
         let default = read_default(&mut cur)?;
         let generated = read_generated(&mut cur)?;
         let identity = read_identity(&mut cur)?;
+        let collation = read_collation(&mut cur)?;
         columns.push(Column {
             name,
             ty,
@@ -1818,6 +1848,7 @@ pub fn deserialize_schema(bytes: &[u8]) -> Result<DecodedSchema, KvError> {
             default,
             generated,
             identity,
+            collation,
         });
     }
     let options = read_table_options(take_u8(&mut cur)?)?;
@@ -2305,6 +2336,10 @@ pub fn deserialize_view(bytes: &[u8]) -> Result<View, KvError> {
             default: None,
             generated: None,
             identity: None,
+            // A view's stored column list is name and type only: the collation a
+            // view column derives from its body is not persisted, so `\d` on a
+            // view reports the type's own.
+            collation: None,
         });
     }
     let options = ViewOptions {
@@ -2378,6 +2413,7 @@ mod tests {
                 default: None,
                 generated: None,
                 identity: None,
+                collation: None,
             },
             Column {
                 name: "ratio".into(),
@@ -2386,10 +2422,23 @@ mod tests {
                 default: None,
                 generated: None,
                 identity: None,
+                collation: None,
             },
             Column::new("code", ColumnType::Varchar(Some(8))),
             Column::new("flag", ColumnType::Char(Some(2))),
             Column::new("public_id", ColumnType::Uuid),
+            // A written `COLLATE` survives the round trip, and so does the
+            // absence of one on a column of the very same type — the two are
+            // distinct states, not one nullable string that defaults.
+            Column {
+                name: "sorted".into(),
+                ty: ColumnType::Text,
+                not_null: false,
+                default: None,
+                generated: None,
+                identity: None,
+                collation: Some("POSIX".into()),
+            },
         ];
         let bytes = serialize_schema(
             table_id,
@@ -2417,6 +2466,7 @@ mod tests {
             default: Some(ColumnDefault::Value(Datum::Text("anon".into()))),
             generated: None,
             identity: None,
+            collation: None,
         }];
 
         let bytes = serialize_schema(
@@ -2459,6 +2509,7 @@ mod tests {
                 default: None,
                 generated,
                 identity: None,
+                collation: None,
             }];
 
             let bytes = serialize_schema(
@@ -2495,6 +2546,7 @@ mod tests {
                     default: None,
                     generated,
                     identity: None,
+                    collation: None,
                 }],
                 TableOptions::default(),
                 "postgres",
@@ -2537,6 +2589,7 @@ mod tests {
                 default: Some(ColumnDefault::Value(Datum::Jsonb(doc.clone()))),
                 generated: None,
                 identity: None,
+                collation: None,
             },
             Column {
                 name: "holes".into(),
@@ -2548,6 +2601,7 @@ mod tests {
                 )))),
                 generated: None,
                 identity: None,
+                collation: None,
             },
             Column {
                 name: "empty".into(),
@@ -2559,6 +2613,7 @@ mod tests {
                 )))),
                 generated: None,
                 identity: None,
+                collation: None,
             },
             Column {
                 name: "docs".into(),
@@ -2570,6 +2625,7 @@ mod tests {
                 )))),
                 generated: None,
                 identity: None,
+                collation: None,
             },
             Column {
                 name: "path".into(),
@@ -2578,6 +2634,7 @@ mod tests {
                 default: Some(ColumnDefault::Value(Datum::JsonPath("$.\"a\"".into()))),
                 generated: None,
                 identity: None,
+                collation: None,
             },
             Column {
                 name: "paths".into(),
@@ -2589,6 +2646,7 @@ mod tests {
                 )))),
                 generated: None,
                 identity: None,
+                collation: None,
             },
         ];
 
@@ -3438,7 +3496,7 @@ mod tests {
     /// metadata moved it to `11`, and every other value is refused rather than
     /// decoded on a guess.
     #[test]
-    fn the_schema_version_byte_is_eleven_and_no_other_value_decodes() {
+    fn the_schema_version_byte_is_twelve_and_no_other_value_decodes() {
         use assert2::assert;
 
         let columns = vec![Column::new("x", ColumnType::Int4)];
@@ -3454,12 +3512,12 @@ mod tests {
             }),
             &[],
         );
-        assert!(bytes[0] == 11);
+        assert!(bytes[0] == 12);
 
         for version in u8::MIN..=u8::MAX {
             let mut written = bytes.clone();
             written[0] = version;
-            assert!(deserialize_schema(&written).is_ok() == (version == 11));
+            assert!(deserialize_schema(&written).is_ok() == (version == 12));
         }
     }
 

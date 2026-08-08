@@ -3710,15 +3710,15 @@ pub(crate) fn cmp_result(op: BinaryOp, ord: Option<Ordering>) -> Datum {
     }
 }
 
-/// Only the string types carry a collation.
+/// Only the string types carry a collation. `PostgreSQL` rejects `COLLATE` on
+/// anything else at parse analysis, naming the offending type.
 ///
-/// `PostgreSQL` rejects `COLLATE` on every other type at parse analysis, and it
-/// names the offending type.
+/// A domain carries whatever its base type carries, and an array carries
+/// whatever its elements carry — `text[] COLLATE "C"` is legal there and
+/// `pg_type.typcollation` of `_text` is the same `100` as `text`'s — so both
+/// are answered by the type they wrap rather than refused outright.
 pub(crate) fn require_collatable(ty: ColumnType) -> Result<(), ExecError> {
-    if matches!(
-        ty,
-        ColumnType::Text | ColumnType::Varchar(_) | ColumnType::Char(_)
-    ) {
+    if is_collatable(ty) {
         return Ok(());
     }
     Err(ExecError::TypeMismatch(format!(
@@ -3727,11 +3727,19 @@ pub(crate) fn require_collatable(ty: ColumnType) -> Result<(), ExecError> {
     )))
 }
 
-/// `(composite).field` at run time.
-///
-/// The result is the attribute's value, or NULL when the whole composite is
-/// NULL. `PostgreSQL` propagates a NULL row through field selection instead of
-/// failing.
+/// Whether a value of `ty` can carry a collation at all.
+fn is_collatable(ty: ColumnType) -> bool {
+    match ty {
+        ColumnType::Text | ColumnType::Varchar(_) | ColumnType::Char(_) => true,
+        ColumnType::Domain(domain) => is_collatable(*domain.base),
+        ColumnType::Array(elem) => is_collatable(elem.column_type()),
+        _ => false,
+    }
+}
+
+/// `(composite).field` at run time: the attribute's value, or NULL when the
+/// whole composite is NULL — `PostgreSQL` propagates a NULL row through field
+/// selection rather than failing.
 pub(crate) fn select_field(value: &Datum, field: &str) -> Result<Datum, ExecError> {
     match value {
         Datum::Null => Ok(Datum::Null),

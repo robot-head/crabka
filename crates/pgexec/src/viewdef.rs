@@ -1240,6 +1240,13 @@ fn expr_text_rest(expr: &Expr, ctx: Ctx<'_>) -> String {
             if *all { "ALL" } else { "ANY" },
             expr_text(array, ctx)
         )),
+        // `get_rule_expr` always parenthesizes a `CollateExpr`, whatever its
+        // argument is, so `b COLLATE "C"` stored in a view body comes back as
+        // `(b COLLATE "C")` — and an argument that parenthesizes itself keeps
+        // its own, giving `((x || x) COLLATE "POSIX")`.
+        Expr::Collate { expr, collation } => {
+            format!("({} COLLATE \"{collation}\")", expr_text(expr, ctx))
+        }
         _ => "?column?".to_string(),
     }
 }

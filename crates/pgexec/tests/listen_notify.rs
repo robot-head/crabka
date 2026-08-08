@@ -299,7 +299,6 @@ async fn queueing_a_bad_channel_or_payload_fails_the_notifying_statement() {
     for sql in [
         format!("NOTIFY news, '{oversized_payload}'"),
         format!(r#"NOTIFY "{oversized_channel}", 'x'"#),
-        r#"NOTIFY "", 'x'"#.to_string(),
         format!("SELECT pg_notify('news', '{oversized_payload}')"),
         format!("SELECT pg_notify('{oversized_channel}', 'x')"),
         "SELECT pg_notify('', 'x')".to_string(),
@@ -308,6 +307,14 @@ async fn queueing_a_bad_channel_or_payload_fails_the_notifying_statement() {
     ] {
         assert!(error(&mut notifier, &sql).await.code == "22023", "{sql}");
     }
+
+    // An empty channel is unreachable through the `NOTIFY` grammar: `""` is a
+    // zero-length delimited identifier, which PostgreSQL rejects in the scanner
+    // before the statement is parsed. Verified against 18.4, which reports the
+    // same 42601 here and the same 22023 for `pg_notify('')` above -- so the
+    // runtime check is still the one that catches an empty channel computed at
+    // run time, and only the literal spelling moved.
+    assert!(error(&mut notifier, r#"NOTIFY "", 'x'"#).await.code == "42601");
 
     // The rejected statements queued nothing, and the connection still works.
     let just_under = "y".repeat(7999);

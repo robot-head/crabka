@@ -159,6 +159,14 @@ pub struct Column {
     /// Set when the column is an identity column; the sequence itself lives in
     /// `default` as a [`ColumnDefault::NextVal`].
     pub identity: Option<IdentityKind>,
+    /// The column's explicitly written `COLLATE "name"`, if any. `None` means
+    /// the type's own default collation — which is what a collatable column
+    /// with no clause reports and the only thing a non-collatable one can have.
+    ///
+    /// Every collation this engine has orders text by byte value, so this only
+    /// changes what `pg_attribute.attcollation` (and so `\d`) reports; it never
+    /// changes how two values compare.
+    pub collation: Option<String>,
 }
 
 impl Column {
@@ -171,6 +179,7 @@ impl Column {
             default: None,
             generated: None,
             identity: None,
+            collation: None,
         }
     }
 
@@ -5817,6 +5826,7 @@ mod tests {
                 default: Some(ColumnDefault::NextVal("t_id_seq".into())),
                 generated: None,
                 identity: Some(IdentityKind::Always),
+                collation: None,
             },
             Column {
                 name: "doubled".into(),
@@ -5828,6 +5838,7 @@ mod tests {
                     kind: GeneratedKind::Stored,
                 }),
                 identity: None,
+                collation: None,
             },
         ];
         let checks = vec![
