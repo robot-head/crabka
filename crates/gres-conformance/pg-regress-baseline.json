@@ -37,10 +37,10 @@
       "sha256": "762b331fade072264a9e3789d28f6e27cf1341d20e5913c77ae5260f94c94d3b"
     },
     "arrays": {
-      "changed_lines": 850,
+      "changed_lines": 844,
       "expected": "arrays.out",
       "hunks": 37,
-      "sha256": "730d4df0c45de5eb4ddaa7fc1b8d5534cf56dba95751c6082b1b293fc91d9022"
+      "sha256": "01c00fe33b04f4f51a60ada7177d7745d6ca8daa03d86f8ca75995ce54f43a03"
     },
     "bit": {
       "changed_lines": 10,
@@ -532,7 +532,7 @@
       "changed_lines": 1356,
       "expected": "json.out",
       "hunks": 36,
-      "sha256": "8cd1018ff6baed6f7a216c129bf5ddbbd93499acfc530de3ff6d4aafed711f73"
+      "sha256": "81582cdee5deab16259087eaf70d50e245dccb77a2837bcc5d98c8d71866a29b"
     },
     "json_encoding": {
       "changed_lines": 66,
@@ -544,7 +544,7 @@
       "changed_lines": 1881,
       "expected": "jsonb.out",
       "hunks": 53,
-      "sha256": "af14e93e99869fe798a5595971271ab9cd22cd02c5dc4db21fe70cf28025f9bc"
+      "sha256": "8c13bc85988048e181fae9c252e5f0ed51cb0d0f4857c713a31caac4b956b918"
     },
     "jsonb_jsonpath": {
       "changed_lines": 2068,
