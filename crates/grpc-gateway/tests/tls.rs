@@ -223,6 +223,7 @@ async fn spawn_gateway_tls(bootstrap: &str, client: &str, settings: TlsSettings)
             crabka_authz::AllowAllAuthorizer,
         ))),
         codec: Arc::new(RawCodec),
+        queue: Arc::default(),
     });
 
     // Serve Connect + health + forward routes over TLS.

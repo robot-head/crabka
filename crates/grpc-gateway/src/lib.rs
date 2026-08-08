@@ -35,6 +35,7 @@ pub mod metrics;
 pub mod outbound;
 pub mod outbound_config;
 pub mod produce;
+pub mod queue;
 pub mod schema;
 pub mod serve;
 pub mod state;
@@ -53,6 +54,9 @@ pub fn router(state: std::sync::Arc<state::AppState>) -> axum::Router {
         .send(handlers::send)
         .send_stream(streaming::send_stream)
         .subscribe(streaming::subscribe)
+        .queue_acquire(queue::queue_acquire)
+        .queue_acknowledge(queue::queue_acknowledge)
+        .queue_renew(queue::queue_renew)
         // `build_connect()` applies the `ConnectLayer` (protocol detection + per-request
         // `ConnectContext`); plain `.build()` omits it, so every Connect response falls back
         // to `application/json` regardless of the request's content-type, which breaks proto

@@ -607,6 +607,7 @@ struct CoordinatorStartup {
     txn_coordinator: Arc<crate::txn::coordinator::TxnCoordinator>,
     share_coordinator: Arc<crate::share_coordinator::coordinator::ShareCoordinator>,
     share_partition_leaders: Arc<crate::share_partition::manager::SharePartitionLeaderManager>,
+    share_persister: Arc<crate::share_coordinator::persister_client::SharePersister>,
 }
 
 async fn start_coordinators(
@@ -673,6 +674,7 @@ async fn start_coordinators(
         txn_coordinator,
         share_coordinator,
         share_partition_leaders,
+        share_persister,
     }
 }
 
@@ -3709,6 +3711,7 @@ impl Broker {
             txn_coordinator,
             share_coordinator,
             share_partition_leaders,
+            share_persister,
         } = start_coordinators(
             &config,
             &controller,
@@ -3734,6 +3737,21 @@ impl Broker {
             &diskless_runtime,
         )
         .await?;
+
+        crate::share_partition::backlog_poller::BacklogPoller {
+            node_id: config.node_id,
+            coordinator: Arc::clone(&group_coordinator),
+            metadata: Arc::clone(&controller),
+            partitions: Arc::clone(&partitions),
+            persister: share_persister,
+            inter_broker: Arc::clone(&inter_broker_client),
+            listener_protocol: runtime.inter_listener_protocol,
+            listener_name: config.inter_broker_listener_name.clone(),
+            period: config.share_group.backlog_poll_interval,
+            metrics: runtime.metrics.clone(),
+            shutdown: runtime.supervisor_shutdown.child_token(),
+        }
+        .spawn();
 
         finish_broker_startup(
             config,

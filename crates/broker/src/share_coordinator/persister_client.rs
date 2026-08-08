@@ -19,7 +19,7 @@
 //! Errors are returned to the caller — the lifecycle hook treats them as
 //! best-effort and retries on the next heartbeat, never failing the heartbeat.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use crabka_ids::PartitionIndex;
 use crabka_log::Offset;
@@ -120,11 +120,10 @@ impl SharePersister {
         // the lifecycle hook is the first thing to touch the topic when no
         // client has issued FindCoordinator(SHARE) yet. Mirrors how the txn
         // handlers refresh before dispatching.
-        self.ensure_topic_and_refresh().await?;
-
         let state_partition = self
             .share_coordinator
             .state_partition_for(group, &topic_id, partition);
+        self.ensure_topic_and_refresh(state_partition).await?;
         if self.share_coordinator.is_leader(state_partition).await {
             return self
                 .share_coordinator
@@ -167,11 +166,10 @@ impl SharePersister {
         topic_id: uuid::Uuid,
         partition: i32,
     ) -> Result<(), BrokerError> {
-        self.ensure_topic_and_refresh().await?;
-
         let state_partition = self
             .share_coordinator
             .state_partition_for(group, &topic_id, partition);
+        self.ensure_topic_and_refresh(state_partition).await?;
         if self.share_coordinator.is_leader(state_partition).await {
             return self
                 .share_coordinator
@@ -203,17 +201,42 @@ impl SharePersister {
     /// which of its partitions it leads. The topic is created lazily (idempotent
     /// — tolerates an existing topic); the leadership refresh picks up any
     /// partitions already materialized locally by the replicator supervisor.
-    async fn ensure_topic_and_refresh(&self) -> Result<(), BrokerError> {
+    async fn ensure_topic_and_refresh(
+        &self,
+        state_partition: PartitionIndex,
+    ) -> Result<(), BrokerError> {
         bootstrap::ensure_topic(
             &self.controller,
             self.share_coordinator.state_topic_num_partitions(),
             self.share_coordinator.state_topic_replication_factor(),
         )
         .await?;
-        self.share_coordinator
-            .refresh_leader_partitions(&self.controller.current_image())
-            .await;
-        Ok(())
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let image = self.controller.current_image();
+            self.share_coordinator
+                .refresh_leader_partitions(&image)
+                .await;
+            match image.partition(bootstrap::TOPIC, state_partition.get()) {
+                Some(metadata) if metadata.leader != self.node_id => return Ok(()),
+                Some(_)
+                    if self
+                        .share_coordinator
+                        .partitions
+                        .contains(bootstrap::TOPIC, state_partition) =>
+                {
+                    return Ok(());
+                }
+                _ if tokio::time::Instant::now() >= deadline => {
+                    return Err(BrokerError::Share(format!(
+                        "timed out waiting for {}-{state_partition} to materialize locally",
+                        bootstrap::TOPIC
+                    )));
+                }
+                _ => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        }
     }
 
     /// Read the durable share state for `(group, topic_id, partition)`. Local
@@ -231,11 +254,10 @@ impl SharePersister {
         topic_id: uuid::Uuid,
         partition: i32,
     ) -> Result<Option<SharePartitionState>, BrokerError> {
-        self.ensure_topic_and_refresh().await?;
-
         let state_partition = self
             .share_coordinator
             .state_partition_for(group, &topic_id, partition);
+        self.ensure_topic_and_refresh(state_partition).await?;
         if self.share_coordinator.is_leader(state_partition).await {
             return Ok(self
                 .share_coordinator
@@ -313,11 +335,10 @@ impl SharePersister {
     ) -> Result<(), BrokerError> {
         let (state_epoch, leader_epoch) = epochs;
         let (start_offset, delivery_complete_count) = progress;
-        self.ensure_topic_and_refresh().await?;
-
         let state_partition = self
             .share_coordinator
             .state_partition_for(group, &topic_id, partition);
+        self.ensure_topic_and_refresh(state_partition).await?;
         if self.share_coordinator.is_leader(state_partition).await {
             return self
                 .share_coordinator

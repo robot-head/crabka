@@ -153,6 +153,7 @@ async fn app_state(bootstrap: &str, client: &str, authz: Arc<GatewayAuthz>) -> A
         }),
         authz,
         codec: Arc::new(RawCodec),
+        queue: Arc::default(),
     })
 }
 
@@ -769,6 +770,7 @@ async fn spawn_acl_gateway(bootstrap: &str, client: &str) -> AclGw {
         }),
         authz,
         codec: Arc::new(RawCodec),
+        queue: Arc::default(),
     });
 
     {

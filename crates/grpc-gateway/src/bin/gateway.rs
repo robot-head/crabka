@@ -686,6 +686,7 @@ async fn run(
         config: Arc::new(config.clone()),
         authz: gateway_authz,
         codec,
+        queue: Arc::default(),
     });
 
     let app = crabka_grpc_gateway::router(state.clone())

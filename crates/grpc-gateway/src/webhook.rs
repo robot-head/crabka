@@ -494,6 +494,7 @@ mod tests {
                 crabka_authz::AllowAllAuthorizer,
             ))),
             codec: Arc::new(RawCodec),
+            queue: Arc::default(),
         })
     }
 

@@ -21,6 +21,7 @@ pub struct DecodedConsumerRecord {
     pub timestamp: Timestamp,
     pub key: Option<bytes::Bytes>,
     pub value: bytes::Bytes,
+    pub headers: Vec<crabka_client_consumer::Header>,
     pub schema: Option<SchemaMeta>,
     pub json: Option<bytes::Bytes>,
 }
@@ -117,6 +118,7 @@ impl ConsumeSession {
                 timestamp: Timestamp(r.timestamp),
                 key: r.key,
                 value,
+                headers: r.headers,
                 schema,
                 json,
             });

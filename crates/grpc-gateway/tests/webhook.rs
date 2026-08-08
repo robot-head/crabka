@@ -190,6 +190,7 @@ async fn webhook_state(
             crabka_authz::AllowAllAuthorizer,
         ))),
         codec: Arc::new(RawCodec),
+        queue: Arc::default(),
     });
 
     (state, token, store)
@@ -760,6 +761,7 @@ async fn webhook_state_with_authz(
         }),
         authz,
         codec: Arc::new(RawCodec),
+        queue: Arc::default(),
     })
 }
 

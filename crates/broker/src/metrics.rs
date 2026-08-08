@@ -56,6 +56,14 @@ pub struct PartitionLabel {
     pub partition: i32,
 }
 
+/// Fleet-complete KIP-932 backlog for one share-group partition.
+#[derive(Debug, Clone, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct ShareGroupLabel {
+    pub group_id: String,
+    pub topic: String,
+    pub partition: i32,
+}
+
 /// KIP-511 client software fingerprint, attached to the
 /// `client_software_versions_total` counter on every accepted v3+
 /// `ApiVersions` handshake.
@@ -142,6 +150,8 @@ pub struct BrokerMetrics {
     /// `partition_bytes_out`).
     pub replication_bytes_out: Family<PartitionLabel, Counter>,
     pub partition_disk_bytes: Family<PartitionLabel, Gauge>,
+    /// Records waiting for acquisition in each share-group partition.
+    pub share_group_backlog: Family<ShareGroupLabel, Gauge>,
     /// Cumulative handler-thread microseconds spent processing each
     /// (topic, partition). Exported as
     /// `crabka_broker_partition_cpu_micros_total`. Rebalancer takes
@@ -351,6 +361,7 @@ impl BrokerMetrics {
             replication_bytes_in: Family::default(),
             replication_bytes_out: Family::default(),
             partition_disk_bytes: Family::default(),
+            share_group_backlog: Family::default(),
             partition_cpu_micros: Family::default(),
             partitions_led: Gauge::default(),
             partitions_total: Gauge::default(),
@@ -572,6 +583,12 @@ impl BrokerMetrics {
             "On-disk size of a partition's log directory (gauge). Updated by \
              the broker's periodic disk scanner; suppress if scanner is disabled.",
             self.partition_disk_bytes.clone(),
+        );
+
+        registry.register(
+            "share_group_backlog",
+            "Share-group partition backlog in records, emitted by the group coordinator.",
+            self.share_group_backlog.clone(),
         );
 
         registry.register(
@@ -1147,6 +1164,13 @@ mod tests {
                 partition: 0,
             })
             .set(42);
+        m.share_group_backlog
+            .get_or_create(&ShareGroupLabel {
+                group_id: "workers".into(),
+                topic: "topic-a".into(),
+                partition: 0,
+            })
+            .set(9);
         m.partitions_led.set(7);
         m.partitions_total.set(42);
         m.under_replicated_partitions.set(3);
@@ -1178,6 +1202,7 @@ mod tests {
             "crabka_broker_partition_bytes_in_total",
             "crabka_broker_partition_bytes_out_total",
             "crabka_broker_partition_disk_bytes",
+            "crabka_broker_share_group_backlog",
             "crabka_broker_partition_cpu_micros_total",
             "crabka_broker_incremental_fetch_sessions",
             "crabka_broker_incremental_fetch_session_evictions_total",

@@ -16,6 +16,8 @@ pub struct ShareConsumerRecord {
     pub timestamp: i64,
     pub key: Option<Bytes>,
     pub value: Option<Bytes>,
+    /// Kafka record headers, preserved losslessly and in wire order.
+    pub headers: Vec<(String, Option<Bytes>)>,
     pub delivery_count: i16,
 }
 

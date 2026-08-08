@@ -146,6 +146,7 @@ async fn spawn_gateway(bootstrap: &str, client: &str) -> Gw {
             crabka_authz::AllowAllAuthorizer,
         ))),
         codec: Arc::new(RawCodec),
+        queue: Arc::default(),
     });
 
     // Serve Connect + forward routes (health omitted — not needed here).

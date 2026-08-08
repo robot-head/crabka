@@ -478,6 +478,7 @@ mod tests {
             config: Arc::new(config(bootstrap, dedup, tls)),
             authz: Arc::new(crate::authz::GatewayAuthz::new(authorizer)),
             codec: Arc::new(RawCodec),
+            queue: Arc::default(),
         })
     }
 
