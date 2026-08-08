@@ -177,6 +177,7 @@ fn table() -> Table {
         force_row_security: false,
         sharding: None,
         foreign: None,
+        materialized: None,
         checks: Vec::new(),
     }
 }
@@ -955,6 +956,7 @@ fn strict_predicate_rejects_const_types_the_scanner_cannot_execute() {
         force_row_security: false,
         sharding: None,
         foreign: None,
+        materialized: None,
         checks: Vec::new(),
     };
     let filter = Expr::Binary {

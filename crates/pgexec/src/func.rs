@@ -2869,6 +2869,7 @@ mod tests {
             force_row_security: false,
             sharding: None,
             foreign: None,
+            materialized: None,
             checks: Vec::new(),
         }
     }
@@ -2884,6 +2885,7 @@ mod tests {
             force_row_security: false,
             sharding: None,
             foreign: None,
+            materialized: None,
             checks: Vec::new(),
         }
     }
@@ -3156,16 +3158,23 @@ mod tests {
             text("range_merge(numrange(1.0, 2.0), numrange(2.5, 3.0))"),
             "[1.0,3.0)"
         );
-        let _ = crabka_pgtypes::usertype::register(
-            "range_constructor_test",
-            crabka_pgtypes::usertype::UserTypeBody::Range(crabka_pgtypes::usertype::RangeBody {
-                subtype: ColumnType::Text,
-                collation: None,
-                multirange_schema: None,
-                multirange_name: None,
-            }),
-        );
-        assert_eq!(text("range_constructor_test('a', 'z')"), "[a,z)");
+        // A user-defined range type is usable as a constructor function. The
+        // oid is chosen here rather than allocated: the catalog that persists a
+        // type owns its oid, and this test never builds one.
+        crabka_pgtypes::usertype::replace(&crabka_pgtypes::usertype::UserType {
+            oid: 300_700,
+            schema: crabka_pgtypes::usertype::USER_TYPE_DEFAULT_SCHEMA.to_string(),
+            name: "range_constructor_test".to_string(),
+            body: crabka_pgtypes::usertype::UserTypeBody::Range(
+                crabka_pgtypes::usertype::RangeBody {
+                    subtype: ColumnType::Text,
+                    collation: None,
+                    multirange_schema: None,
+                    multirange_name: None,
+                },
+            ),
+        });
+        assert!(text("range_constructor_test('a', 'z')") == "[a,z)");
         crabka_pgtypes::usertype::unregister("range_constructor_test");
     }
 
@@ -3526,6 +3535,7 @@ mod tests {
             force_row_security: false,
             sharding: None,
             foreign: None,
+            materialized: None,
             checks: Vec::new(),
         }
     }

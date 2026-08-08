@@ -1026,6 +1026,9 @@ fn statement_shape(statement: &Statement) -> &'static str {
         }
         Statement::DropTable { .. } => "DropTable",
         Statement::DropView { .. } => "DropView",
+        Statement::CreateMaterializedView { .. } => "CreateMaterializedView",
+        Statement::RefreshMaterializedView { .. } => "RefreshMaterializedView",
+        Statement::DropMaterializedView { .. } => "DropMaterializedView",
         Statement::CreateSchema { .. } => "CreateSchema",
         Statement::AlterSchema { .. } => "AlterSchema",
         Statement::DropSchema { .. } => "DropSchema",

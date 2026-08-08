@@ -2264,6 +2264,12 @@ fn establishes_transaction_activity(stmt: &Statement) -> bool {
         | Statement::Delete { .. }
         | Statement::Merge { .. }
         | Statement::CreateTableAs { .. }
+        // A materialized view's DDL reads rows (`WITH DATA`) or writes them
+        // (`REFRESH`), so all three establish transaction semantics exactly as
+        // the CREATE TABLE AS they are shaped like does.
+        | Statement::CreateMaterializedView { .. }
+        | Statement::RefreshMaterializedView { .. }
+        | Statement::DropMaterializedView { .. }
         | Statement::Truncate { .. }
         | Statement::Cluster(_)
         | Statement::CreateTable { .. }
@@ -6208,6 +6214,9 @@ impl SqlSession {
             | Statement::Comment { .. }
             | Statement::CreateView { .. }
             | Statement::DropView { .. }
+            // A materialized view drops as a stored relation, so it takes the
+            // same catalog-lock + execute_ddl + commit path a table does.
+            | Statement::DropMaterializedView { .. }
             // D7: schema DDL is an ordinary catalog mutation.
             | Statement::CreateSchema { .. }
             | Statement::AlterSchema { .. }
@@ -6265,9 +6274,21 @@ impl SqlSession {
             | Statement::Update { .. }
             | Statement::Delete { .. }
             | Statement::Merge { .. }
-            | Statement::Truncate { .. } => self.run_write(stmt).await,
+            | Statement::Truncate { .. } => {
+                // Refused here rather than inside `run_write`, because
+                // `REFRESH MATERIALIZED VIEW` fills a matview through that very
+                // path: what is forbidden is a *user* write, not every write.
+                self.refuse_materialized_view_write(stmt)?;
+                self.run_write(stmt).await
+            }
             Statement::Cluster(target) => self.run_cluster(stmt, target.as_ref()).await,
             Statement::CreateTableAs { .. } => self.run_create_table_as(stmt).await,
+            Statement::CreateMaterializedView { .. } => {
+                self.run_create_materialized_view(stmt).await
+            }
+            Statement::RefreshMaterializedView { .. } => {
+                self.run_refresh_materialized_view(stmt).await
+            }
             Statement::Vacuum => {
                 // PostgreSQL refuses VACUUM inside a transaction block. The
                 // reclamation itself is autonomous here (adaptive background
@@ -6292,6 +6313,7 @@ impl SqlSession {
                     .as_ref()
                     .is_some_and(crabka_pgparser::ast::WithClause::has_data_modifying_cte) =>
             {
+                self.refuse_materialized_view_write(stmt)?;
                 self.run_write(stmt).await
             }
             Statement::Query(_) => Box::pin(self.run_select(stmt)).await,
@@ -6923,6 +6945,80 @@ impl SqlSession {
         Ok(crate::exec::table_uses_global_visibility(&table))
     }
 
+    /// Refuse a user write aimed at a materialized view.
+    ///
+    /// A materialized view is not auto-updatable and has no rewrite rules, so
+    /// PostgreSQL refuses `INSERT`/`UPDATE`/`DELETE` against one with 42809
+    /// `cannot change materialized view "x"` — the only way its contents move is
+    /// `REFRESH`. `MERGE` and `TRUNCATE` carry their own wordings, which are the
+    /// wordings PostgreSQL uses for any relation kind those commands cannot
+    /// reach.
+    ///
+    /// The statement's `WITH` list is checked alongside its body: a
+    /// data-modifying CTE is part of the same command and writes through the
+    /// same path, so a matview named in one is refused for the same reason.
+    fn refuse_materialized_view_write(&self, stmt: &Statement) -> Result<(), ExecError> {
+        let mut targets: Vec<(&crabka_pgparser::ast::RelationRef, &'static str)> = Vec::new();
+        fn collect(stmt: &Statement) -> Option<(&crabka_pgparser::ast::RelationRef, &'static str)> {
+            match stmt {
+                Statement::Insert { table, .. }
+                | Statement::Update { table, .. }
+                | Statement::Delete { table, .. } => Some((table, "change")),
+                Statement::Merge { table, .. } => Some((table, "merge")),
+                _ => None,
+            }
+        }
+        if let Some(found) = collect(stmt) {
+            targets.push(found);
+        }
+        if let Statement::Truncate { targets: names, .. } = stmt {
+            for target in names {
+                targets.push((&target.name, "truncate"));
+            }
+        }
+        if let Some(with) = crate::exec::statement_with_clause(stmt) {
+            for cte in &with.ctes {
+                if let crabka_pgparser::ast::CteBody::Dml(body) = &cte.body
+                    && let Some(found) = collect(body)
+                {
+                    targets.push(found);
+                }
+            }
+        }
+        for (reference, verb) in targets {
+            let Ok(name) = crate::relname::resolve_relation(
+                self.catalog_kv.as_ref(),
+                &self.resolution_scope(),
+                reference,
+                crate::relname::SchemaDisposition::Reference,
+            ) else {
+                // A name that does not resolve is the write path's own 42P01.
+                continue;
+            };
+            if !crabka_pgcatalog::is_materialized_view(self.catalog_kv.as_ref(), &name)? {
+                continue;
+            }
+            return Err(match verb {
+                "merge" => ExecError::Remote(
+                    PgError::error(
+                        "42809",
+                        format!("cannot execute MERGE on relation \"{}\"", name.name),
+                    )
+                    .with_detail("This operation is not supported for materialized views."),
+                ),
+                // TRUNCATE's refusal is the one it gives for every relation it
+                // cannot empty, so it names the kind it wanted rather than the
+                // kind it found, and carries the DROP-family hint.
+                "truncate" => crate::exec::wrong_relation_kind_write_error(&name),
+                _ => ExecError::WrongObjectType(format!(
+                    "cannot change materialized view \"{}\"",
+                    name.name
+                )),
+            });
+        }
+        Ok(())
+    }
+
     fn statement_has_returning(stmt: &Statement) -> bool {
         match stmt {
             Statement::Insert { returning, .. }
@@ -7544,6 +7640,180 @@ impl SqlSession {
         .unwrap_or(0);
         Ok(QueryResult::Command {
             tag: format!("SELECT {n}"),
+        })
+    }
+
+    /// `CREATE MATERIALIZED VIEW … AS <query> [WITH [NO] DATA]`.
+    ///
+    /// Split the way [`Session::run_create_table_as`] is split, and for the same
+    /// reason: DDL here commits one catalog batch and cannot also carry rows, so
+    /// the relation is created by the DDL path and filled by the ordinary write
+    /// path. What is different is the third step — the population flag is only
+    /// set once the rows are actually there, so a `WITH DATA` create whose query
+    /// fails leaves nothing behind at all rather than an empty relation claiming
+    /// to hold the query's answer.
+    async fn run_create_materialized_view(
+        &mut self,
+        stmt: &Statement,
+    ) -> Result<QueryResult, ExecError> {
+        let Statement::CreateMaterializedView {
+            name,
+            if_not_exists,
+            with_data,
+            ..
+        } = stmt
+        else {
+            return Err(ExecError::Unsupported(
+                "not a CREATE MATERIALIZED VIEW".into(),
+            ));
+        };
+        let resolved = crate::relname::resolve_relation(
+            self.catalog_kv.as_ref(),
+            &self.resolution_scope(),
+            name,
+            crate::relname::SchemaDisposition::Creation,
+        )?;
+        if *if_not_exists
+            && crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &resolved).is_ok()
+        {
+            return Ok(QueryResult::Command {
+                tag: "CREATE MATERIALIZED VIEW".into(),
+            });
+        }
+        // Every statement this synthesizes names the target schema-qualified, so
+        // the fill and the undo cannot land on a different relation of the same
+        // name earlier on the search path.
+        let target = crabka_pgparser::ast::RelationRef::qualified(&resolved.schema, &resolved.name);
+        self.run_ddl(stmt).await?;
+        if !*with_data {
+            return Ok(QueryResult::Command {
+                tag: "CREATE MATERIALIZED VIEW".into(),
+            });
+        }
+        let filled = self.fill_materialized_view(&resolved, &target).await;
+        if let Err(error) = filled {
+            // PostgreSQL's CREATE MATERIALIZED VIEW is atomic: a runtime failure
+            // evaluating the query leaves no relation behind. DDL here is not
+            // transactional, so the create is undone explicitly and the original
+            // failure is what the client sees.
+            self.run_ddl(&Statement::DropMaterializedView {
+                names: vec![target],
+                if_exists: true,
+                cascade: false,
+            })
+            .await?;
+            return Err(error);
+        }
+        // PostgreSQL reports the populated form as `SELECT <n>`, exactly as
+        // `CREATE TABLE AS` does — the command that ran is the query.
+        Ok(QueryResult::Command {
+            tag: format!("SELECT {}", filled.unwrap_or(0)),
+        })
+    }
+
+    /// `REFRESH MATERIALIZED VIEW [CONCURRENTLY] name [WITH [NO] DATA]`.
+    ///
+    /// The contents are replaced rather than merged: the heap is emptied and, for
+    /// `WITH DATA`, refilled from the stored query. `CONCURRENTLY` asks
+    /// PostgreSQL to do that without an exclusive lock, which changes the
+    /// locking and not the answer, so it is accepted and the result is the same.
+    ///
+    /// Indexes are not touched. They are ordinary catalog objects over the
+    /// relation, and the refill goes through the write path that maintains them,
+    /// so a refresh leaves every index on the matview both present and correct.
+    async fn run_refresh_materialized_view(
+        &mut self,
+        stmt: &Statement,
+    ) -> Result<QueryResult, ExecError> {
+        let Statement::RefreshMaterializedView {
+            name, with_data, ..
+        } = stmt
+        else {
+            return Err(ExecError::Unsupported(
+                "not a REFRESH MATERIALIZED VIEW".into(),
+            ));
+        };
+        let resolved = crate::relname::resolve_relation(
+            self.catalog_kv.as_ref(),
+            &self.resolution_scope(),
+            name,
+            crate::relname::SchemaDisposition::Utility,
+        )?;
+        // Checked before anything is emptied, so a REFRESH aimed at the wrong
+        // relation kind changes nothing.
+        crate::exec::require_materialized_view(self.catalog_kv.as_ref(), &resolved)?;
+        let target = crabka_pgparser::ast::RelationRef::qualified(&resolved.schema, &resolved.name);
+        self.run_write(&Statement::Delete {
+            table: target.clone(),
+            alias: None,
+            using: Vec::new(),
+            only: false,
+            filter: None,
+            returning: None,
+            with: None,
+        })
+        .await?;
+        if *with_data {
+            self.fill_materialized_view(&resolved, &target).await?;
+        } else {
+            // The relation is empty and stays unreadable: `WITH NO DATA` is the
+            // one way an already-populated matview goes back to being an error
+            // to scan.
+            self.run_ddl(stmt).await?;
+        }
+        Ok(QueryResult::Command {
+            tag: "REFRESH MATERIALIZED VIEW".into(),
+        })
+    }
+
+    /// Run a materialized view's stored query into its heap and mark it
+    /// populated, in that order.
+    ///
+    /// The query is re-parsed from the catalog rather than taken from the
+    /// statement, which is what makes `REFRESH` and `CREATE … WITH DATA` fill a
+    /// relation the same way — and what makes a `REFRESH` see the definition the
+    /// relation actually has rather than one a caller supplied.
+    async fn fill_materialized_view(
+        &mut self,
+        resolved: &crabka_pgcatalog::RelationName,
+        target: &crabka_pgparser::ast::RelationRef,
+    ) -> Result<u64, ExecError> {
+        let table = crate::exec::require_materialized_view(self.catalog_kv.as_ref(), resolved)?;
+        let definition = table
+            .materialized
+            .as_ref()
+            .expect("require_materialized_view returned a materialized view")
+            .definition
+            .clone();
+        let statements = crabka_pgparser::parse(&definition)?;
+        let [Statement::Query(query)] = statements.as_slice() else {
+            return Err(ExecError::Unsupported(
+                "stored materialized view definition is not a query".into(),
+            ));
+        };
+        let inserted = self
+            .run_write(&Statement::Insert {
+                table: target.clone(),
+                columns: None,
+                source: crabka_pgparser::ast::InsertSource::Query(Box::new(query.clone())),
+                on_conflict: None,
+                returning: None,
+                with: None,
+            })
+            .await?;
+        self.run_ddl(&Statement::RefreshMaterializedView {
+            name: target.clone(),
+            concurrently: false,
+            with_data: true,
+        })
+        .await?;
+        Ok(match &inserted {
+            QueryResult::Command { tag } => tag
+                .rsplit(' ')
+                .next()
+                .and_then(|count| count.parse::<u64>().ok())
+                .unwrap_or(0),
+            _ => 0,
         })
     }
 
@@ -12075,6 +12345,16 @@ impl SqlSession {
                 crate::relname::SchemaDisposition::Utility,
             )?,
         )?;
+        // A materialized view holds rows but takes none: PostgreSQL words this
+        // refusal for `COPY` specifically rather than reusing the DML one, and
+        // it belongs in the precheck for the same reason the privilege test
+        // does — after `CopyInResponse` has gone out it is too late.
+        if table.materialized.is_some() {
+            return Err(ExecError::WrongObjectType(format!(
+                "cannot copy to materialized view \"{}\"",
+                table.name.name
+            )));
+        }
         let role = self.current_role_for_row_security();
         // The privilege test belongs here rather than only in
         // `execute_copy_write`: a denial that arrives after `CopyInResponse` has

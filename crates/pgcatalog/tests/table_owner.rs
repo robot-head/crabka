@@ -1,14 +1,16 @@
 //! The owning role is part of a table's durable schema record: it survives a
 //! serialize/deserialize round trip, it is what `ALTER TABLE` preserves while
 //! it rewrites the column and `CHECK` lists, and the reader still refuses a
-//! record it does not fully understand.
+//! record it does not fully understand. The materialized-view metadata rides
+//! the same record and is checked here for the same reasons.
 
 use assert2::assert;
 use crabka_pgcatalog::{
-    BOOTSTRAP_ROLE, CheckConstraint, Column, ForeignTableMeta, RelationName, Table, TableCreation,
-    TableOptions, create_server, create_table_with_options_ops, get_table,
-    replace_table_schema_ops,
+    BOOTSTRAP_ROLE, CheckConstraint, Column, ForeignTableMeta, MaterializedView, RelationName,
+    Table, TableCreation, TableOptions, create_server, create_table_with_options_ops, get_table,
+    is_materialized_view, replace_table_schema_ops,
     serde::{SCHEMA_VERSION, deserialize_schema, serialize_schema},
+    set_materialized_populated_op,
 };
 use crabka_pgkv::{Kv, MemKv};
 use crabka_pgtypes::ColumnType;
@@ -29,6 +31,15 @@ fn checks() -> Vec<CheckConstraint> {
 }
 
 fn create(kv: &dyn Kv, name: &RelationName, owner: &str) {
+    create_as(kv, name, owner, None);
+}
+
+fn create_as(
+    kv: &dyn Kv,
+    name: &RelationName,
+    owner: &str,
+    materialized: Option<&MaterializedView>,
+) {
     let (_, ops) = create_table_with_options_ops(
         kv,
         name,
@@ -38,6 +49,7 @@ fn create(kv: &dyn Kv, name: &RelationName, owner: &str) {
         TableCreation {
             owner,
             id: crabka_pgcatalog::TableIdSource::Counter,
+            materialized,
         },
     )
     .expect("create table ops");
@@ -45,7 +57,12 @@ fn create(kv: &dyn Kv, name: &RelationName, owner: &str) {
 }
 
 /// The whole decoded record, compared as one value, for every combination of
-/// owner name and table shape the encoder has to carry it through.
+/// owner name and relation shape the encoder has to carry it through.
+///
+/// The two relation-kind payloads are exercised one at a time and neither at
+/// all, which is what pins them as independent: a foreign table still decodes
+/// with no materialized-view metadata, and a materialized view with no foreign
+/// metadata.
 #[test]
 fn a_schema_record_round_trips_its_owner() {
     let foreign = ForeignTableMeta {
@@ -53,10 +70,17 @@ fn a_schema_record_round_trips_its_owner() {
         options: vec![("topic".into(), "orders".into())],
     };
     let cases = [
-        (BOOTSTRAP_ROLE, TableOptions::default(), None, Vec::new()),
+        (
+            BOOTSTRAP_ROLE,
+            TableOptions::default(),
+            None,
+            None,
+            Vec::new(),
+        ),
         (
             "regress_owner",
             TableOptions::default(),
+            None,
             None,
             vec![CheckConstraint {
                 name: "positive".into(),
@@ -72,21 +96,78 @@ fn a_schema_record_round_trips_its_owner() {
                 force_row_security: false,
             },
             None,
+            None,
             Vec::new(),
         ),
         (
             "foreign_owner",
             TableOptions::default(),
             Some(foreign),
+            None,
             Vec::new(),
+        ),
+        (
+            "matview_owner",
+            TableOptions::default(),
+            None,
+            Some(MaterializedView {
+                definition: "SELECT id, label FROM orders".into(),
+                populated: true,
+            }),
+            Vec::new(),
+        ),
+        // An unpopulated matview differs from a populated one by a single byte,
+        // and that byte is what makes a scan of it `55000` rather than a read
+        // of an empty heap.
+        (
+            "matview_owner",
+            TableOptions::default(),
+            None,
+            Some(MaterializedView {
+                definition: "SELECT id, label FROM orders".into(),
+                populated: false,
+            }),
+            Vec::new(),
+        ),
+        // A definition is stored as written: multi-byte text and the newlines a
+        // multi-line query is laid out with both survive byte for byte, because
+        // `pg_matviews.definition` deparses from exactly these bytes.
+        (
+            "matview_owner",
+            TableOptions::default(),
+            None,
+            Some(MaterializedView {
+                definition: "SELECT '价格 ✓'::text AS \"étiquette\"\n  FROM orders\n WHERE id > 0"
+                    .into(),
+                populated: true,
+            }),
+            vec![CheckConstraint {
+                name: "positive".into(),
+                expr: "id > 0".into(),
+                validated: true,
+            }],
         ),
         // A quoted-identifier owner: the encoding is length-prefixed bytes, so
         // an owner with a delimiter in it must survive unchanged.
-        ("odd owner.name", TableOptions::default(), None, Vec::new()),
+        (
+            "odd owner.name",
+            TableOptions::default(),
+            None,
+            None,
+            Vec::new(),
+        ),
     ];
 
-    for (owner, options, meta, table_checks) in cases {
-        let bytes = serialize_schema(7, &columns(), options, owner, meta.as_ref(), &table_checks);
+    for (owner, options, meta, materialized, table_checks) in cases {
+        let bytes = serialize_schema(
+            7,
+            &columns(),
+            options,
+            owner,
+            meta.as_ref(),
+            materialized.as_ref(),
+            &table_checks,
+        );
 
         assert!(bytes[0] == SCHEMA_VERSION);
         assert!(
@@ -97,8 +178,86 @@ fn a_schema_record_round_trips_its_owner() {
                     options,
                     owner.to_string(),
                     meta,
-                    table_checks.clone()
+                    table_checks.clone(),
+                    materialized,
                 )
+        );
+    }
+}
+
+/// A materialized view is created as one schema record, reads back as a whole
+/// `Table`, and answers [`is_materialized_view`] — while an ordinary table
+/// created through the same battery answers `false` and carries no metadata.
+#[test]
+fn a_created_materialized_view_reads_back_with_its_query_and_flag() {
+    for populated in [true, false] {
+        let kv = MemKv::new();
+        let matview = MaterializedView {
+            definition: "SELECT id, label FROM orders".into(),
+            populated,
+        };
+        let summary = RelationName::public("summary");
+        let orders = RelationName::public("orders");
+        create_as(&kv, &summary, "regress_owner", Some(&matview));
+        create(&kv, &orders, "regress_owner");
+
+        assert!(
+            get_table(&kv, &summary).expect("stored matview")
+                == Table {
+                    id: 1,
+                    name: summary.clone(),
+                    owner: "regress_owner".into(),
+                    columns: columns(),
+                    sharded: false,
+                    row_security: false,
+                    force_row_security: false,
+                    sharding: None,
+                    foreign: None,
+                    materialized: Some(matview),
+                    checks: checks(),
+                }
+        );
+        assert!(is_materialized_view(&kv, &summary).expect("matview lookup"));
+        assert!(!is_materialized_view(&kv, &orders).expect("table lookup"));
+        assert!(get_table(&kv, &orders).expect("stored table").materialized == None);
+        // A name that is no relation at all is not a materialized view either,
+        // rather than an error every caller has to translate.
+        assert!(
+            !is_materialized_view(&kv, &RelationName::public("absent")).expect("absent lookup")
+        );
+    }
+}
+
+/// `REFRESH MATERIALIZED VIEW` moves the population flag and nothing else: the
+/// query text, owner, columns and `CHECK` list all come back as they were.
+#[test]
+fn flipping_the_population_flag_leaves_the_rest_of_the_record_alone() {
+    for (created, refreshed) in [(false, true), (true, false), (true, true)] {
+        let kv = MemKv::new();
+        let summary = RelationName::public("summary");
+        create_as(
+            &kv,
+            &summary,
+            "regress_owner",
+            Some(&MaterializedView {
+                definition: "SELECT id, label FROM orders".into(),
+                populated: created,
+            }),
+        );
+        let before = get_table(&kv, &summary).expect("stored matview");
+
+        kv.write_batch(&[set_materialized_populated_op(&before, refreshed)])
+            .expect("catalog batch");
+
+        assert!(
+            get_table(&kv, &summary).expect("stored matview")
+                == Table {
+                    materialized: Some(MaterializedView {
+                        definition: "SELECT id, label FROM orders".into(),
+                        populated: refreshed,
+                    }),
+                    ..before
+                }
         );
     }
 }
@@ -122,6 +281,7 @@ fn a_created_table_reads_back_owned_by_the_role_it_was_created_under() {
                 force_row_security: false,
                 sharding: None,
                 foreign: None,
+                materialized: None,
                 checks: checks(),
             }
     );
@@ -164,6 +324,7 @@ fn replacing_a_schema_record_writes_the_owner_it_is_given() {
                     force_row_security: false,
                     sharding: None,
                     foreign: None,
+                    materialized: None,
                     checks: checks(),
                 }
         );
@@ -185,6 +346,7 @@ fn a_foreign_table_reads_back_owned_by_the_role_it_was_created_under() {
         TableCreation {
             owner: "regress_owner",
             id: crabka_pgcatalog::TableIdSource::Counter,
+            materialized: None,
         },
     )
     .expect("create foreign table ops");
@@ -198,7 +360,8 @@ fn a_foreign_table_reads_back_owned_by_the_role_it_was_created_under() {
 /// row-level security occupies one of those bits, is a silent total bypass.
 #[test]
 fn a_record_carrying_an_unknown_option_bit_is_refused() {
-    let encode = |options| serialize_schema(7, &columns(), options, BOOTSTRAP_ROLE, None, &[]);
+    let encode =
+        |options| serialize_schema(7, &columns(), options, BOOTSTRAP_ROLE, None, None, &[]);
     let clear = encode(TableOptions::default());
     let set = encode(TableOptions {
         sharded: true,

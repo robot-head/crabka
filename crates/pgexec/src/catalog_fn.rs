@@ -559,12 +559,17 @@ fn flag_arg(value: &Datum) -> Result<bool, ExecError> {
 }
 
 /// The catalog name behind a relation oid, for the two kinds the updatability
-/// analysis can say anything about. A sequence or an index resolves to `None`,
-/// which both predicates report as "not updatable" exactly as PostgreSQL does
-/// for a relkind it has no rewrite rules for.
+/// analysis can say anything about. A sequence, an index, or a materialized
+/// view resolves to `None`, which both predicates report as "not updatable"
+/// exactly as PostgreSQL does for a relkind it has no rewrite rules for — and a
+/// materialized view genuinely has none, which is why `INSERT` into one is
+/// 42809 rather than a rewrite.
 fn updatable_relation_name(kv: &dyn Kv, oid: i32) -> Result<Option<RelationName>, ExecError> {
     for table in crabka_pgcatalog::list_tables(kv)? {
         if crate::catalog_rel::table_relation_oid(table.id)? == oid {
+            if table.materialized.is_some() {
+                return Ok(None);
+            }
             return Ok(Some(table.name));
         }
     }
@@ -1717,7 +1722,16 @@ fn description(
             continue;
         }
         if subid == 0 {
-            return comment_datum(kv, "table", CommentObject::Relation(&table.name));
+            // Comments are stored under the kind word the `COMMENT ON` wrote,
+            // and `COMMENT ON MATERIALIZED VIEW` and `COMMENT ON FOREIGN TABLE`
+            // are both stored relations here — so the lookup has to ask for the
+            // kind this relation actually is, not the one every `Table` used to
+            // be.
+            return comment_datum(
+                kv,
+                crate::exec::stored_relation_kind(&table),
+                CommentObject::Relation(&table.name),
+            );
         }
         let index = usize::try_from(subid.saturating_sub(1)).unwrap_or(usize::MAX);
         let Some(column) = table.columns.get(index) else {
@@ -1760,10 +1774,43 @@ fn view_def(kv: &dyn Kv, scope: &ResolutionScope, vals: &[Datum]) -> Result<Datu
             (true, usize::try_from(column).ok().filter(|n| *n > 0))
         }
     };
+    // A materialized view answers `pg_get_viewdef` too — it is what `\d+` prints
+    // under "View definition:" for one — so it is tried before the literal
+    // refusal, which is reserved for a relation kind that carries no query.
+    if let Some(table) = lookup_materialized(kv, scope, &vals[0])? {
+        return Ok(Datum::Text(materialized_definition(&table, pretty, wrap)));
+    }
     let Some(view) = lookup_view(kv, scope, &vals[0])? else {
         return Ok(Datum::Text("Not a view".into()));
     };
     Ok(Datum::Text(view_definition(&view, pretty, wrap)))
+}
+
+/// Find the materialized view an oid or a name refers to, resolved exactly as
+/// [`lookup_view`] resolves one, or `None` when the argument names anything
+/// else.
+fn lookup_materialized(
+    kv: &dyn Kv,
+    scope: &ResolutionScope,
+    object: &Datum,
+) -> Result<Option<crabka_pgcatalog::Table>, ExecError> {
+    let wanted = match object {
+        Datum::Null => return Ok(None),
+        Datum::Text(name) => match resolve_relation_in_scope(kv, scope, name) {
+            Ok(oid) => oid,
+            Err(_) => return Ok(None),
+        },
+        other => i32::try_from(int_arg(other)?)
+            .map_err(|_| ExecError::Unsupported("oid exceeds int4 range".into()))?,
+    };
+    for table in crabka_pgcatalog::list_tables(kv)? {
+        if table.materialized.is_some()
+            && crate::catalog_rel::table_relation_oid(table.id)? == wanted
+        {
+            return Ok(Some(table));
+        }
+    }
+    Ok(None)
 }
 
 /// Find the view an oid or a name refers to, or `None` when the argument names
@@ -1802,6 +1849,46 @@ fn lookup_view(
 /// the source text, which is still a valid view definition.
 pub(crate) fn view_definition_text(view: &View, pretty: bool) -> String {
     view_definition(view, pretty, None)
+}
+
+/// The same rendering for a materialized view, whose definition and output
+/// column list live on its [`crabka_pgcatalog::Table`] record rather than on a
+/// [`View`].
+///
+/// It borrows the view renderer rather than duplicating it because
+/// `pg_get_viewdef` answers for both relation kinds and PostgreSQL prints the
+/// same text for each: the deparser only ever needs the stored query and the
+/// names its output columns currently carry, and a materialized view has both.
+/// Naming the columns from the catalog rather than the stored text is what makes
+/// `ALTER MATERIALIZED VIEW … RENAME COLUMN` show up in the definition, as it
+/// does in PostgreSQL.
+pub(crate) fn materialized_definition_text(
+    table: &crabka_pgcatalog::Table,
+    pretty: bool,
+) -> String {
+    materialized_definition(table, pretty, None)
+}
+
+/// [`materialized_definition_text`] with an explicit select-list wrap column.
+fn materialized_definition(
+    table: &crabka_pgcatalog::Table,
+    pretty: bool,
+    wrap: Option<usize>,
+) -> String {
+    let Some(matview) = &table.materialized else {
+        return String::new();
+    };
+    view_definition(
+        &View {
+            name: table.name.clone(),
+            definition: matview.definition.clone(),
+            owner: table.owner.clone(),
+            columns: table.columns.clone(),
+            options: crabka_pgcatalog::ViewOptions::default(),
+        },
+        pretty,
+        wrap,
+    )
 }
 
 /// [`view_definition_text`] with an explicit select-list wrap column.
@@ -2363,6 +2450,7 @@ mod tests {
                 force_row_security: false,
                 sharding: None,
                 foreign: None,
+                materialized: None,
                 checks: Vec::new(),
             };
             let expression = pexpr("pg_size_pretty(v)").expect("parse size call");
@@ -2387,6 +2475,7 @@ mod tests {
             force_row_security: false,
             sharding: None,
             foreign: None,
+            materialized: None,
             checks: Vec::new(),
         };
         let error = crate::eval::infer_type(

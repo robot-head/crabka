@@ -2364,6 +2364,7 @@ mod cursor_contract_tests {
             force_row_security: false,
             sharding: None,
             foreign: None,
+            materialized: None,
             checks: Vec::new(),
         };
 
@@ -2410,6 +2411,7 @@ mod cursor_contract_tests {
             force_row_security: false,
             sharding: None,
             foreign: None,
+            materialized: None,
             checks: Vec::new(),
         };
         let error = super::collect_cursor_bounded(
@@ -2490,6 +2492,7 @@ mod streaming_aggregate_tests {
             force_row_security: false,
             sharding: None,
             foreign: None,
+            materialized: None,
             checks: Vec::new(),
         }
     }

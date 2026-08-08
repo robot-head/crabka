@@ -326,6 +326,16 @@ pub enum ExecError {
         detail: &'static str,
         hint: &'static str,
     },
+    /// A read reached a materialized view whose contents have never been
+    /// computed — one created `WITH NO DATA`, or refreshed `WITH NO DATA`
+    /// (55000).
+    ///
+    /// It is an error rather than an empty result because the two are not the
+    /// same answer: a matview with no rows and a matview that was never
+    /// populated look identical to a scan, and `PostgreSQL` refuses to let a
+    /// query silently read the second as if it were the first. The `HINT` names
+    /// the command that fixes it, which is the whole of the recovery.
+    MaterializedViewNotPopulated(String),
     /// A write assigned to a view column that is not a column of the relation
     /// underneath — a computed, system, or whole-row column (0A000).
     ///
@@ -1186,6 +1196,11 @@ impl ExecError {
             } => PgError::error("55000", message)
                 .with_detail(detail)
                 .with_hint(hint),
+            ExecError::MaterializedViewNotPopulated(relation) => PgError::error(
+                "55000",
+                format!("materialized view \"{relation}\" has not been populated"),
+            )
+            .with_hint("Use the REFRESH MATERIALIZED VIEW command."),
             ExecError::ViewColumnNotUpdatable { message, detail } => {
                 PgError::error("0A000", message).with_detail(detail)
             }

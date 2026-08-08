@@ -192,6 +192,7 @@ mod tests {
                 server: "s".into(),
                 options: vec![("topic".into(), "events".into())],
             }),
+            materialized: None,
             checks: Vec::new(),
         }
     }

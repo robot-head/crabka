@@ -21,7 +21,7 @@
 
 use std::{
     collections::HashMap,
-    sync::{OnceLock, RwLock},
+    sync::{Arc, OnceLock, RwLock},
 };
 
 use crate::datum::ColumnType;
@@ -324,33 +324,33 @@ impl UserType {
     }
 }
 
-/// The first oid handed out to a user-defined type.
-///
-/// Above every oid the engine reports for a built-in type, a catalog relation,
-/// an index (`50_000 +`) or a system view (`120_0xx`), and above `FirstNormalObjectId`
-/// (16384) so that `oid >= 16384` "is a user object" tests behave.
-const FIRST_USER_TYPE_OID: u32 = 300_000;
-
 /// The default schema used by the process-wide parser registry.
 pub const USER_TYPE_DEFAULT_SCHEMA: &str = "public";
 
-/// Oids are handed out in this stride so that a composite's type oid, its array
-/// type oid and its backing `pg_class` relation oid never collide.
-const OID_STRIDE: u32 = 4;
-
-/// The name and oid indexes of one [`CatalogTypes`], plus its oid counter.
+/// The name and oid indexes of one [`CatalogTypes`].
 ///
 /// Every map here is keyed by a SQL name or an oid, both of which are only
 /// meaningful within a single catalog — which is why this lives inside
 /// [`CatalogTypes`] rather than in a `static` of its own.
+///
+/// There is deliberately no oid counter here. Oids are allocated by the
+/// catalog that will persist them (`crabka_pgcatalog::next_user_type_oid`,
+/// from a durable per-catalog KV counter) and only ever *published* here. A
+/// second counter in this process would be unreconcilable with that one rather
+/// than merely redundant: oids are written into rows and onto the wire, so two
+/// catalogs built in separate processes both start at 300000 and collide the
+/// moment they are loaded together, however either of them counts.
 #[derive(Default)]
 struct TypeIndex {
     by_identity: HashMap<(String, String), u32>,
     by_lower_name: HashMap<String, u32>,
     multirange_by_identity: HashMap<(String, String), u32>,
     multirange_by_lower_name: HashMap<String, u32>,
-    by_oid: HashMap<u32, UserType>,
-    next_oid: u32,
+    /// Shared rather than owned because [`CatalogTypes::lookup_oid`] is on the
+    /// row-decode path — once per user-typed field of every row read — and a
+    /// `UserType` clone is three heap allocations plus one per composite field
+    /// or enum label. Handing back the `Arc` makes the lookup a refcount bump.
+    by_oid: HashMap<u32, Arc<UserType>>,
 }
 
 impl TypeIndex {
@@ -364,8 +364,7 @@ impl TypeIndex {
             .retain(|_, found| *found != oid);
     }
 
-    /// Index `ty` under every name it answers to, and keep the oid counter
-    /// ahead of it.
+    /// Index `ty` under every name it answers to.
     fn insert(&mut self, ty: &UserType) {
         let qualified_name = ty.qualified_name();
         self.by_identity
@@ -379,14 +378,13 @@ impl TypeIndex {
         if let Some(identity) = ty.multirange_identity() {
             self.multirange_by_identity.insert(identity, ty.oid);
         }
-        self.by_oid.insert(ty.oid, ty.clone());
-        self.next_oid = self.next_oid.max(ty.oid + OID_STRIDE);
+        self.by_oid.insert(ty.oid, Arc::new(ty.clone()));
     }
 }
 
-/// The user-defined types of **one catalog**: the name and oid indexes, the oid
-/// counter, and the cache of leaked `&'static ColumnType`s that a [`DomainRef`]
-/// base or a [`RangeRef`] subtype points at.
+/// The user-defined types of **one catalog**: the name and oid indexes, and the
+/// cache of leaked `&'static ColumnType`s that a [`DomainRef`] base or a
+/// [`RangeRef`] subtype points at.
 ///
 /// # Why this is a struct and must stay one
 ///
@@ -431,60 +429,15 @@ fn catalog_types() -> &'static CatalogTypes {
 }
 
 impl CatalogTypes {
-    /// A catalog with no user-defined types, ready to hand out oids from
-    /// [`FIRST_USER_TYPE_OID`].
+    /// A catalog with no user-defined types.
     fn new() -> Self {
         Self {
-            index: RwLock::new(TypeIndex {
-                next_oid: FIRST_USER_TYPE_OID,
-                ..TypeIndex::default()
-            }),
+            index: RwLock::new(TypeIndex::default()),
             leaked_column_types: RwLock::new(Vec::new()),
         }
     }
 
-    /// Register `body` under `name`, allocating a fresh oid, and return the
-    /// registered type. See [`register`].
-    ///
-    /// # Panics
-    ///
-    /// If the type-index lock is poisoned, which can only happen if another
-    /// thread panicked while holding it.
-    #[must_use]
-    pub fn register(&self, name: &str, body: UserTypeBody) -> UserType {
-        let mut guard = self.index.write().expect("user type registry is healthy");
-        let oid = guard.next_oid;
-        guard.next_oid += OID_STRIDE;
-        let ty = UserType {
-            oid,
-            schema: USER_TYPE_DEFAULT_SCHEMA.to_string(),
-            name: name.to_string(),
-            body,
-        };
-        let qualified_name = ty.qualified_name();
-        guard
-            .by_identity
-            .insert((ty.schema.clone(), ty.name.clone()), oid);
-        guard
-            .by_lower_name
-            .insert(qualified_name.to_ascii_lowercase(), oid);
-        if let Some(companion) = ty.multirange_name() {
-            guard
-                .multirange_by_lower_name
-                .insert(companion.to_ascii_lowercase(), oid);
-        }
-        if let Some(identity) = ty.multirange_identity() {
-            guard.multirange_by_identity.insert(identity, oid);
-        }
-        guard.by_oid.insert(oid, ty.clone());
-        // Intern eagerly so `column_type()` never has to take the interner lock
-        // while the registry lock is held.
-        drop(guard);
-        let _ = intern(&qualified_name);
-        ty
-    }
-
-    /// Re-register a type that already has an oid. See [`replace`].
+    /// Publish a type that already has an oid. See [`replace`].
     ///
     /// # Panics
     ///
@@ -601,7 +554,7 @@ impl CatalogTypes {
     /// If the type-index lock is poisoned, which can only happen if another
     /// thread panicked while holding it.
     #[must_use]
-    pub fn lookup(&self, name: &str) -> Option<UserType> {
+    pub fn lookup(&self, name: &str) -> Option<Arc<UserType>> {
         let guard = self.index.read().expect("user type registry is healthy");
         let lower_name = name.to_ascii_lowercase();
         let oid = *guard
@@ -618,7 +571,7 @@ impl CatalogTypes {
     /// If the type-index lock is poisoned, which can only happen if another
     /// thread panicked while holding it.
     #[must_use]
-    pub fn lookup_in(&self, schema: &str, name: &str) -> Option<UserType> {
+    pub fn lookup_in(&self, schema: &str, name: &str) -> Option<Arc<UserType>> {
         let guard = self.index.read().expect("user type registry is healthy");
         let oid = *guard
             .by_identity
@@ -628,12 +581,16 @@ impl CatalogTypes {
 
     /// The type with this oid. See [`lookup_oid`].
     ///
+    /// The `Arc` is the point: this runs once per user-typed field of every row
+    /// the storage layer decodes, and cloning the definition out of the map made
+    /// the copy 85–97% of the call.
+    ///
     /// # Panics
     ///
     /// If the type-index lock is poisoned, which can only happen if another
     /// thread panicked while holding it.
     #[must_use]
-    pub fn lookup_oid(&self, oid: u32) -> Option<UserType> {
+    pub fn lookup_oid(&self, oid: u32) -> Option<Arc<UserType>> {
         self.index
             .read()
             .expect("user type registry is healthy")
@@ -649,9 +606,9 @@ impl CatalogTypes {
     /// If the type-index lock is poisoned, which can only happen if another
     /// thread panicked while holding it.
     #[must_use]
-    pub fn all(&self) -> Vec<UserType> {
+    pub fn all(&self) -> Vec<Arc<UserType>> {
         let guard = self.index.read().expect("user type registry is healthy");
-        let mut types: Vec<UserType> = guard.by_oid.values().cloned().collect();
+        let mut types: Vec<Arc<UserType>> = guard.by_oid.values().cloned().collect();
         types.sort_by_key(|ty| ty.oid);
         types
     }
@@ -791,22 +748,7 @@ fn leak_column_type(ty: ColumnType) -> &'static ColumnType {
 // caller acquires one it should call the `CatalogTypes` method directly rather
 // than growing another free function here.
 
-/// Register `body` under `name`, allocating a fresh oid, and return the
-/// registered type. An existing registration under the same name is replaced —
-/// callers enforce `PostgreSQL`'s duplicate-name rule (42710) before getting
-/// here, and DDL that legitimately replaces a definition (`ALTER TYPE`) goes
-/// through [`replace`].
-///
-/// # Panics
-///
-/// If the process-wide user-type registry lock is poisoned, which can only
-/// happen if another thread panicked while holding it.
-#[must_use]
-pub fn register(name: &str, body: UserTypeBody) -> UserType {
-    catalog_types().register(name, body)
-}
-
-/// Re-register a type that already has an oid: the catalog-hydration path and
+/// Re-register a type that already has an oid — the catalog-hydration path and
 /// the `ALTER TYPE` / `ALTER DOMAIN` path, both of which must preserve the oid.
 ///
 /// # Panics
@@ -860,7 +802,7 @@ pub fn unregister_in(schema: &str, name: &str) {
 /// If the process-wide user-type registry lock is poisoned, which can only
 /// happen if another thread panicked while holding it.
 #[must_use]
-pub fn lookup(name: &str) -> Option<UserType> {
+pub fn lookup(name: &str) -> Option<Arc<UserType>> {
     catalog_types().lookup(name)
 }
 
@@ -871,18 +813,23 @@ pub fn lookup(name: &str) -> Option<UserType> {
 /// If the process-wide user-type registry lock is poisoned, which can only
 /// happen if another thread panicked while holding it.
 #[must_use]
-pub fn lookup_in(schema: &str, name: &str) -> Option<UserType> {
+pub fn lookup_in(schema: &str, name: &str) -> Option<Arc<UserType>> {
     catalog_types().lookup_in(schema, name)
 }
 
-/// The type with this oid.
+/// The type with this oid, shared rather than copied — see
+/// [`CatalogTypes::lookup_oid`].
+///
+/// `None` means *no such type in this catalog*, and callers treat it as an
+/// error, not as a fallback: the row decoder turns it into `corrupt row
+/// encoding`. Nothing here can answer with a different catalog's type.
 ///
 /// # Panics
 ///
 /// If the process-wide user-type registry lock is poisoned, which can only
 /// happen if another thread panicked while holding it.
 #[must_use]
-pub fn lookup_oid(oid: u32) -> Option<UserType> {
+pub fn lookup_oid(oid: u32) -> Option<Arc<UserType>> {
     catalog_types().lookup_oid(oid)
 }
 
@@ -893,7 +840,7 @@ pub fn lookup_oid(oid: u32) -> Option<UserType> {
 /// If the process-wide user-type registry lock is poisoned, which can only
 /// happen if another thread panicked while holding it.
 #[must_use]
-pub fn all() -> Vec<UserType> {
+pub fn all() -> Vec<Arc<UserType>> {
     catalog_types().all()
 }
 
@@ -968,13 +915,50 @@ pub fn user_multirange_array_oid(multirange_oid: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
+
+    use super::*;
+
+    /// The stride the catalog allocates user-type oids at
+    /// (`crabka_pgcatalog`'s `USER_TYPE_OID_STRIDE`). Restated here because
+    /// this module derives oids *inside* that stride and nothing in it
+    /// allocates; see [`derived_oids_stay_inside_the_catalog_oid_stride`].
+    const CATALOG_OID_STRIDE: u32 = 4;
+
+    /// Publish a type in the default schema under an oid the test names.
+    ///
+    /// Every oid a real type carries was allocated by the catalog that
+    /// persists it, so tests choose theirs explicitly rather than asking the
+    /// registry to invent one.
+    fn publish(oid: u32, name: &str, body: UserTypeBody) -> UserType {
+        let ty = UserType {
+            oid,
+            schema: USER_TYPE_DEFAULT_SCHEMA.to_string(),
+            name: name.to_string(),
+            body,
+        };
+        replace(&ty);
+        ty
+    }
+
+    /// [`publish`], into one named catalog instead of the process-wide one.
+    fn publish_in(catalog: &CatalogTypes, oid: u32, name: &str, body: UserTypeBody) -> UserType {
+        let ty = UserType {
+            oid,
+            schema: USER_TYPE_DEFAULT_SCHEMA.to_string(),
+            name: name.to_string(),
+            body,
+        };
+        catalog.replace(&ty);
+        ty
+    }
 
     #[test]
     fn default_multirange_names_replace_first_range_and_fit_name_limit() {
-        assert_eq!(default_multirange_name("price"), "price_multirange");
-        assert_eq!(default_multirange_name("range_range"), "multirange_range");
+        assert!(default_multirange_name("price") == "price_multirange");
+        assert!(default_multirange_name("range_range") == "multirange_range");
         let clipped = default_multirange_name(&"x".repeat(70));
-        assert_eq!(clipped.len(), 63);
+        assert!(clipped.len() == 63);
         assert!(clipped.is_char_boundary(clipped.len()));
     }
 
@@ -982,7 +966,8 @@ mod tests {
     fn range_registers_derived_multirange_name_and_oid() {
         use crate::{ColumnType, usertype::RangeBody};
 
-        let range = register(
+        publish(
+            300_100,
             "companion_textrange",
             UserTypeBody::Range(RangeBody {
                 subtype: ColumnType::Text,
@@ -996,12 +981,10 @@ mod tests {
         else {
             panic!("derived multirange is registered");
         };
-        assert_eq!(multirange.oid, range.oid + 3);
-        assert_eq!(multirange.range.oid, range.oid);
-        assert_eq!(
-            column_type_for_oid(multirange.oid),
-            Some(ColumnType::Multirange(multirange))
-        );
+        // The companion sits at the range's oid + 3, inside the catalog stride.
+        assert!(multirange.oid == 300_103);
+        assert!(multirange.range.oid == 300_100);
+        assert!(column_type_for_oid(300_103) == Some(ColumnType::Multirange(multirange)));
     }
 
     /// `DROP TYPE` must make the name unresolvable without making stored rows
@@ -1010,9 +993,8 @@ mod tests {
     /// corrupt-row error and wedged the background vacuum on every pass.
     #[test]
     fn dropping_a_type_frees_the_name_but_keeps_the_oid_decodable() {
-        use assert2::assert;
-
-        let ty = register(
+        publish(
+            300_200,
             "drop_tombstone_t",
             UserTypeBody::Enum(vec!["a".to_string()]),
         );
@@ -1021,22 +1003,24 @@ mod tests {
 
         assert!(lookup("drop_tombstone_t").is_none(), "name must be free");
         assert!(
-            lookup_oid(ty.oid).is_some(),
-            "oid {} must still decode stored rows",
-            ty.oid
+            lookup_oid(300_200).is_some(),
+            "oid 300200 must still decode stored rows"
         );
 
-        // The freed name may be reused, and takes a fresh oid.
-        let reused = register(
+        // The freed name may be reused by a type the catalog gave a fresh oid.
+        publish(
+            300_204,
             "drop_tombstone_t",
             UserTypeBody::Enum(vec!["b".to_string()]),
         );
-        assert!(reused.oid != ty.oid);
-        assert!(lookup("drop_tombstone_t").map(|t| t.oid) == Some(reused.oid));
+        assert!(lookup("drop_tombstone_t").map(|ty| ty.oid) == Some(300_204));
+        // The tombstoned oid still resolves to its *own* definition, not the
+        // one that took its name over.
+        assert!(
+            lookup_oid(300_200).and_then(|ty| ty.labels().map(<[String]>::to_vec))
+                == Some(vec!["a".to_string()])
+        );
     }
-    use assert2::assert;
-
-    use super::*;
 
     #[test]
     fn interning_returns_one_pointer_per_name() {
@@ -1048,7 +1032,8 @@ mod tests {
 
     #[test]
     fn a_registered_composite_resolves_by_name_and_reports_its_fields() {
-        let registered = register(
+        let registered = publish(
+            300_300,
             "ut_reg_composite",
             UserTypeBody::Composite(vec![CompositeField {
                 name: "x".into(),
@@ -1056,7 +1041,8 @@ mod tests {
             }]),
         );
         let found = lookup("UT_REG_COMPOSITE").expect("case-insensitive lookup");
-        assert!(found == registered);
+        assert!(*found == registered);
+        assert!(found.oid == 300_300);
         assert!(found.typtype() == "c");
         assert!(found.fields().expect("composite").len() == 1);
         assert!(found.labels().is_none());
@@ -1069,7 +1055,8 @@ mod tests {
 
     #[test]
     fn a_registered_domain_carries_its_base_type() {
-        let registered = register(
+        let registered = publish(
+            300_400,
             "ut_reg_domain",
             UserTypeBody::Domain(DomainBody {
                 base: ColumnType::Numeric(None),
@@ -1086,7 +1073,7 @@ mod tests {
         };
         assert!(*domain.base == ColumnType::Numeric(None));
         assert!(domain.name == "ut_reg_domain");
-        assert!(domain.as_ref().oid == registered.oid);
+        assert!(domain.as_ref().oid == 300_400);
         assert!(registered.typtype() == "d");
         assert!(registered.domain().expect("domain").not_null);
         unregister("ut_reg_domain");
@@ -1094,33 +1081,105 @@ mod tests {
 
     #[test]
     fn replace_preserves_the_oid_so_alter_type_does_not_orphan_columns() {
-        let created = register(
+        let created = publish(
+            300_500,
             "ut_replace_enum",
             UserTypeBody::Enum(vec!["a".into(), "b".into()]),
         );
-        let mut altered = created.clone();
+        let mut altered = created;
         altered.body = UserTypeBody::Enum(vec!["a".into(), "b".into(), "c".into()]);
         replace(&altered);
         let found = lookup("ut_replace_enum").expect("still registered");
-        assert!(found.oid == created.oid);
+        assert!(found.oid == 300_500);
         assert!(found.labels().expect("enum") == ["a", "b", "c"]);
-        assert!(lookup_oid(created.oid) == Some(found));
+        assert!(lookup_oid(300_500) == Some(found));
         unregister("ut_replace_enum");
     }
 
+    /// A resolved definition is a snapshot, not a window onto the registry.
+    ///
+    /// [`lookup_oid`] hands out a shared `Arc` rather than a private copy, so
+    /// this is worth stating: `replace` publishes a *new* `Arc` under the oid
+    /// and never mutates the one a caller already holds. A row decoder that
+    /// resolved a type just before an `ALTER TYPE` committed therefore keeps
+    /// decoding against a consistent definition instead of seeing labels
+    /// appear underneath it.
     #[test]
-    fn distinct_types_get_distinct_non_overlapping_oids() {
-        let a = register("ut_oid_a", UserTypeBody::Composite(Vec::new()));
-        let b = register("ut_oid_b", UserTypeBody::Composite(Vec::new()));
-        assert!(a.oid != b.oid);
-        assert!(a.oid >= FIRST_USER_TYPE_OID);
-        // The derived relation and array oids of one type never reach the next.
+    fn a_resolved_definition_is_a_snapshot_not_a_live_view() {
+        let created = publish(
+            300_900,
+            "ut_snapshot_enum",
+            UserTypeBody::Enum(vec!["a".into()]),
+        );
+        let held = lookup_oid(300_900).expect("registered");
+
+        let mut altered = created;
+        altered.body = UserTypeBody::Enum(vec!["a".into(), "b".into()]);
+        replace(&altered);
+
+        assert!(held.labels().expect("enum") == ["a"]);
+        assert!(
+            lookup_oid(300_900)
+                .expect("still registered")
+                .labels()
+                .expect("enum")
+                == ["a", "b"]
+        );
+        unregister("ut_snapshot_enum");
+    }
+
+    /// The catalog allocates user-type oids [`CATALOG_OID_STRIDE`] apart
+    /// precisely so that the oids this module *derives* from a type oid — the
+    /// `pg_class` row type at `+1`, the array type at `+2`, the multirange
+    /// companion at `+3` — never land on the next type. Nothing here
+    /// allocates; the arithmetic is the whole contract.
+    #[test]
+    fn derived_oids_stay_inside_the_catalog_oid_stride() {
+        let a = publish(300_600, "ut_oid_a", UserTypeBody::Composite(Vec::new()));
+        let b = publish(300_604, "ut_oid_b", UserTypeBody::Composite(Vec::new()));
+        assert!(b.oid == a.oid + CATALOG_OID_STRIDE);
         assert!(composite_relation_oid(a.oid) != b.oid);
         assert!(user_array_oid(a.oid) != b.oid);
         assert!(user_array_oid(a.oid) != composite_relation_oid(b.oid));
         assert!(all().iter().any(|ty| ty.oid == a.oid));
         unregister("ut_oid_a");
         unregister("ut_oid_b");
+    }
+
+    /// Every relation's rows reach this registry whether or not the catalog
+    /// has any user-defined type: the row decoder calls [`lookup_oid`] once
+    /// per user-typed field, and `ElemType::from_array_oid` scans [`all`] on
+    /// every array decode, built-in element types included. A catalog with no
+    /// user types must answer both — with `None` and with nothing — rather
+    /// than inventing a type or falling back to somewhere else.
+    #[test]
+    fn an_empty_catalog_still_answers_the_row_decode_path() {
+        let empty = CatalogTypes::new();
+        assert!(empty.all().is_empty());
+        assert!(empty.lookup_oid(300_000).is_none());
+        assert!(empty.lookup("int4").is_none());
+        assert!(empty.lookup_in(USER_TYPE_DEFAULT_SCHEMA, "int4").is_none());
+        assert!(empty.column_type_for_name("int4").is_none());
+        // Not a user type oid and not a multirange derived from one.
+        assert!(empty.column_type_for_oid(23).is_none());
+
+        // And through the real array path. `from_array_oid` scans the whole
+        // registry before falling back to the built-in element types, so a
+        // built-in array must resolve identically whether the catalog holds no
+        // user types or some — a user type must never shadow it.
+        let int4_array = crate::datum::oids::INT4ARRAY;
+        let with_none = crate::datum::ElemType::from_array_oid(int4_array)
+            .expect("int4[] resolves with no user type registered");
+        publish(
+            301_000,
+            "ut_empty_path_probe",
+            UserTypeBody::Enum(vec!["a".into()]),
+        );
+        let with_some = crate::datum::ElemType::from_array_oid(int4_array)
+            .expect("int4[] still resolves once a user type exists");
+        assert!(with_none == with_some);
+        assert!(with_none.array_oid() == int4_array);
+        unregister("ut_empty_path_probe");
     }
 
     /// The premise behind [`CatalogTypes`] owning its leak cache: every
@@ -1195,18 +1254,30 @@ mod tests {
         }
     }
 
-    /// Two catalogs allocate from independent counters, so both hand out
-    /// oid [`FIRST_USER_TYPE_OID`] to *different* types. Because those types
-    /// then compare equal (see above), a shared leak cache would return one
-    /// catalog's `&'static ColumnType` to the other, permanently. Owning the
-    /// cache per [`CatalogTypes`] is what keeps them apart.
+    /// Two catalogs allocate from independent durable counters that both start
+    /// at 300000, so both hand that oid to a *different* type — and no
+    /// allocation scheme fixes that, because the oids are already written into
+    /// rows and onto the wire before the two catalogs ever meet. Because those
+    /// types then compare equal (see above), a shared leak cache would return
+    /// one catalog's `&'static ColumnType` to the other, permanently. Owning
+    /// the cache per [`CatalogTypes`] is what keeps them apart.
     #[test]
     fn each_catalog_leaks_its_own_column_types() {
         let first = CatalogTypes::new();
         let second = CatalogTypes::new();
 
-        let first_enum = first.register("zleak_first", UserTypeBody::Enum(vec!["a".into()]));
-        let second_enum = second.register("zleak_second", UserTypeBody::Enum(vec!["b".into()]));
+        let first_enum = publish_in(
+            &first,
+            300_000,
+            "zleak_first",
+            UserTypeBody::Enum(vec!["a".into()]),
+        );
+        let second_enum = publish_in(
+            &second,
+            300_000,
+            "zleak_second",
+            UserTypeBody::Enum(vec!["b".into()]),
+        );
         assert!(first_enum.oid == second_enum.oid);
 
         let first_leaked = first.leak_column_type(first_enum.column_type());
@@ -1239,16 +1310,21 @@ mod tests {
         let first = CatalogTypes::new();
         let second = CatalogTypes::new();
 
-        let registered = first.register("zindex_isolated", UserTypeBody::Composite(Vec::new()));
+        let registered = publish_in(
+            &first,
+            300_800,
+            "zindex_isolated",
+            UserTypeBody::Composite(Vec::new()),
+        );
 
-        assert!(first.lookup("zindex_isolated").as_ref() == Some(&registered));
+        assert!(first.lookup("zindex_isolated").as_deref() == Some(&registered));
         assert!(
             first
                 .lookup_in(USER_TYPE_DEFAULT_SCHEMA, "zindex_isolated")
                 .is_some()
         );
         assert!(second.lookup("zindex_isolated").is_none());
-        assert!(second.lookup_oid(registered.oid).is_none());
+        assert!(second.lookup_oid(300_800).is_none());
         assert!(lookup("zindex_isolated").is_none());
         assert!(second.all().is_empty());
     }

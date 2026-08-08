@@ -1256,6 +1256,7 @@ mod tests {
                 },
             )),
             foreign: None,
+            materialized: None,
             checks: Vec::new(),
         };
         let left = table(1, "left", "pair");

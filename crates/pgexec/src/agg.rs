@@ -2765,6 +2765,7 @@ mod tests {
             force_row_security: false,
             sharding: None,
             foreign: None,
+            materialized: None,
             checks: Vec::new(),
         }
     }
@@ -3630,6 +3631,7 @@ mod tests {
             force_row_security: false,
             sharding: None,
             foreign: None,
+            materialized: None,
             checks: Vec::new(),
         }
     }
@@ -3700,6 +3702,7 @@ mod tests {
             force_row_security: false,
             sharding: None,
             foreign: None,
+            materialized: None,
             checks: Vec::new(),
         }
     }
@@ -3983,6 +3986,7 @@ mod tests {
             force_row_security: false,
             sharding: None,
             foreign: None,
+            materialized: None,
             checks: Vec::new(),
         }
     }
@@ -4386,6 +4390,7 @@ mod tests {
             force_row_security: false,
             sharding: None,
             foreign: None,
+            materialized: None,
             checks: Vec::new(),
         }
     }

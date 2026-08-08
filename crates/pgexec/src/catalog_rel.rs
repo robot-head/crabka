@@ -136,6 +136,7 @@ const PG_CATALOG_RELATIONS: &[&str] = &[
     "pg_inherits",
     "pg_language",
     "pg_locks",
+    "pg_matviews",
     "pg_partitioned_table",
     "pg_policies",
     "pg_policy",
@@ -195,6 +196,7 @@ static RELATION_NAMES: &[&str] = &[
     "pg_inherits",
     "pg_language",
     "pg_locks",
+    "pg_matviews",
     "pg_partitioned_table",
     "pg_policies",
     "pg_policy",
@@ -289,6 +291,7 @@ fn system_view_oid(name: &str) -> i32 {
         "pg_views" => 120_006,
         "pg_shmem_allocations_numa" => 120_007,
         "pg_policies" => 120_008,
+        "pg_matviews" => 120_009,
         "information_schema.applicable_roles" => 120_010,
         "information_schema.column_privileges" => 120_011,
         "information_schema.constraint_column_usage" => 120_012,
@@ -769,6 +772,7 @@ pub(crate) fn rows(
         "pg_stat_activity" => Ok(pg_stat_activity_rows(backend_pid)),
         "pg_policies" => pg_policies_rows(kv),
         "pg_policy" => pg_policy_rows(kv),
+        "pg_matviews" => pg_matviews_rows(kv),
         "pg_tables" => pg_tables_rows(kv),
         "pg_tablespace" => pg_tablespace_rows(kv),
         "pg_trigger" => pg_trigger_rows(kv),
@@ -1390,6 +1394,15 @@ fn pg_catalog_columns_rest(name: &str) -> Vec<Column> {
             ("schemaname", Text),
             ("viewname", Text),
             ("viewowner", Text),
+            ("definition", Text),
+        ]),
+        "pg_matviews" => cols(&[
+            ("schemaname", Text),
+            ("matviewname", Text),
+            ("matviewowner", Text),
+            ("tablespace", Text),
+            ("hasindexes", Bool),
+            ("ispopulated", Bool),
             ("definition", Text),
         ]),
         _ => Vec::new(),
@@ -2647,7 +2660,10 @@ fn pg_tables_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         .collect::<std::collections::BTreeSet<_>>();
     Ok(crabka_pgcatalog::list_tables(kv)?
         .into_iter()
-        .filter(|table| table.foreign.is_none())
+        // `pg_tables` is `relkind IN ('r','p')`: a foreign table has its own
+        // view and a materialized view is reported by `pg_matviews`, so neither
+        // belongs here even though both are stored relations.
+        .filter(|table| table.foreign.is_none() && table.materialized.is_none())
         .map(|table| {
             vec![
                 text(&table.name.schema),
@@ -2661,6 +2677,44 @@ fn pg_tables_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             ]
         })
         .collect())
+}
+
+/// `pg_matviews` — one row per materialized view, the counterpart `pg_views` is
+/// for ordinary views and `pg_tables` for tables.
+///
+/// `ispopulated` is the column that has no analogue in either of those: a
+/// materialized view created `WITH NO DATA`, or refreshed `WITH NO DATA`, exists
+/// and has a shape but holds nothing, and reading one is an error rather than an
+/// empty result. `definition` is deparsed through the same path `pg_views` uses,
+/// so a matview and a view over the same query read identically — including
+/// after a `RENAME COLUMN`, because the deparser names output columns from the
+/// relation's own catalog column list rather than from the stored text.
+fn pg_matviews_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let indexed = crabka_pgcatalog::list_indexes(kv)?
+        .into_iter()
+        .map(|index| index.table)
+        .collect::<std::collections::BTreeSet<_>>();
+    crabka_pgcatalog::list_tables(kv)?
+        .into_iter()
+        .filter(|table| table.materialized.is_some())
+        .map(|table| {
+            let matview = table
+                .materialized
+                .as_ref()
+                .expect("the filter kept only materialized views");
+            Ok(vec![
+                text(&table.name.schema),
+                text(&table.name.name),
+                text(&table.owner),
+                Datum::Null,
+                Datum::Bool(indexed.contains(&table.name)),
+                Datum::Bool(matview.populated),
+                text(&crate::catalog_fn::materialized_definition_text(
+                    &table, false,
+                )),
+            ])
+        })
+        .collect()
 }
 
 fn pg_views_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
@@ -3206,6 +3260,13 @@ fn table_privilege_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let owner = crate::catalog_fn::OBJECT_OWNER;
     let mut rows = Vec::new();
     for table in crabka_pgcatalog::list_tables(kv)? {
+        // A materialized view is grantable — `has_table_privilege` answers for
+        // one — but `information_schema` does not know the relation kind at all,
+        // so PostgreSQL leaves it out of this view exactly as it does out of
+        // `information_schema.tables`.
+        if table.materialized.is_some() {
+            continue;
+        }
         for privilege in OWNER_PRIVILEGES {
             rows.push(privilege_row(owner, &table.name, privilege, true));
         }

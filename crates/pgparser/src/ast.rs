@@ -519,6 +519,46 @@ pub enum Statement {
         /// accepted as the explicit spelling of it.
         cascade: bool,
     },
+    /// `CREATE MATERIALIZED VIEW [IF NOT EXISTS] name [(col, …)] AS <query>
+    /// [WITH [NO] DATA]` — a stored relation whose contents come from a query it
+    /// keeps, so it has both a heap and a definition.
+    CreateMaterializedView {
+        name: RelationRef,
+        if_not_exists: bool,
+        /// An explicit output column list, which renames the query's columns.
+        columns: Option<Vec<String>>,
+        /// Exact query text following `AS`, retained for durable catalog storage
+        /// exactly as [`Statement::CreateView`]'s is. `REFRESH` re-runs it, so
+        /// the *written* text is what has to survive: a re-rendered form would
+        /// lose whatever schema qualification the author supplied, and a refresh
+        /// resolving under a different search path would then read a different
+        /// relation — or none.
+        definition: String,
+        query: Box<QueryExpr>,
+        /// `WITH DATA` (the default) runs the query and populates the relation;
+        /// `WITH NO DATA` leaves it unpopulated, and scanning one is an error
+        /// until `REFRESH` runs.
+        with_data: bool,
+        tablespace: Option<String>,
+    },
+    /// `REFRESH MATERIALIZED VIEW [CONCURRENTLY] name [WITH [NO] DATA]` — re-run
+    /// the stored query and replace the contents. `WITH NO DATA` instead empties
+    /// the relation and marks it unpopulated.
+    RefreshMaterializedView {
+        name: RelationRef,
+        /// `CONCURRENTLY` — `PostgreSQL` refreshes without an exclusive lock,
+        /// which requires a unique index. Parsed so the executor can decide.
+        concurrently: bool,
+        with_data: bool,
+    },
+    /// `DROP MATERIALIZED VIEW [IF EXISTS] name [, …] [CASCADE | RESTRICT]`.
+    DropMaterializedView {
+        /// One entry per name in the list; the drop is all-or-nothing across it,
+        /// matching `PostgreSQL`.
+        names: Vec<RelationRef>,
+        if_exists: bool,
+        cascade: bool,
+    },
     /// `CREATE SCHEMA [IF NOT EXISTS] [name] [AUTHORIZATION role] [<element>…]`.
     CreateSchema {
         /// `None` for `CREATE SCHEMA AUTHORIZATION role`, whose schema takes

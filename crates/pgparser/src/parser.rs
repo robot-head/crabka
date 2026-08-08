@@ -3319,6 +3319,9 @@ impl Parser {
                     }
                     Token::Keyword(Keyword::Server) => emitted(I::DropServer, self.drop_server()),
                     Token::Keyword(Keyword::View) => emitted(I::DropView, self.drop_view()),
+                    Token::Ident(s) if s == "materialized" => {
+                        emitted(I::DropMaterializedView, self.drop_materialized_view())
+                    }
                     Token::Keyword(Keyword::Index) => emitted(I::DropIndex, self.drop_index()),
                     Token::Keyword(Keyword::User) => {
                         if matches!(self.peek3(), Token::Keyword(Keyword::Mapping)) {
@@ -3381,6 +3384,9 @@ impl Parser {
             Token::Ident(s) if s == "unlisten" => emitted(I::Unlisten, self.unlisten_stmt()),
             Token::Ident(s) if s == "call" => emitted(I::Call, self.call_stmt()),
             Token::Ident(s) if s == "do" => emitted(I::Do, self.do_stmt()),
+            Token::Ident(s) if s == "refresh" => {
+                emitted(I::RefreshMaterializedView, self.refresh_materialized_view())
+            }
             Token::Ident(s) if s == "truncate" => emitted(I::Truncate, self.truncate()),
             Token::Ident(s) if s == "vacuum" => emitted(I::Vacuum, self.vacuum()),
             Token::Ident(s) if s == "grant" => emitted(I::Grant, self.grant_table_privileges()),
@@ -3485,6 +3491,13 @@ impl Parser {
                     })
                 }
                 Token::Keyword(Keyword::View) => emitted(I::AlterView, self.alter_view()),
+                // The statement is an `AlterTable` — a materialized view takes
+                // `ALTER TABLE`'s subcommands — but the identity is its own row
+                // in PostgreSQL's command inventory, so the two are chosen
+                // independently here.
+                Token::Ident(s) if s == "materialized" => {
+                    emitted(I::AlterMaterializedView, self.alter_materialized_view())
+                }
                 Token::Keyword(Keyword::Index) => emitted(I::AlterIndex, self.alter_index()),
                 Token::Keyword(Keyword::Schema) => emitted(I::AlterSchema, self.alter_schema()),
                 Token::Keyword(Keyword::Server) => emitted(I::AlterServer, self.alter_server()),
@@ -3633,15 +3646,58 @@ impl Parser {
     }
 
     fn alter_table(&mut self) -> Result<crate::ast::Statement, ParseError> {
-        use crate::ast::Statement;
-
         self.expect_ident_eq("alter")?;
         self.expect(&Token::Keyword(Keyword::Table))?;
+        self.alter_table_body()
+    }
+
+    /// `ALTER MATERIALIZED VIEW …`, which `PostgreSQL` defines with the same
+    /// subcommand list as `ALTER TABLE` minus the column-shape ones — `RENAME`,
+    /// `OWNER TO`, `SET SCHEMA`, `SET TABLESPACE`, `SET ACCESS METHOD` and
+    /// `ALTER COLUMN … SET` all read identically.
+    ///
+    /// It therefore lands on [`Statement::AlterTable`](crate::ast::Statement)
+    /// rather than a variant of its own: a materialized view is a relation with
+    /// a heap, so an executor that can move one can move the other, and a
+    /// separate variant would only duplicate the action parser and let the two
+    /// spellings drift.
+    fn alter_materialized_view(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.expect_ident_eq("alter")?;
+        self.expect_ident_eq("materialized")?;
+        self.expect(&Token::Keyword(Keyword::View))?;
+        self.alter_table_body()
+    }
+
+    /// The shared tail of `ALTER TABLE`/`ALTER MATERIALIZED VIEW`, positioned
+    /// after the object keyword.
+    fn alter_table_body(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::Statement;
+
         let if_exists = self.eat_if_exists()?;
         // `ONLY t` suppresses recursion into the relation's partitions and
         // inheritance children; the `t *` spelling is the explicit form of the
         // default, so it leaves `only` clear.
         let only = self.eat_ident_eq("only");
+        // `ALL IN TABLESPACE ts` names a tablespace where a relation would
+        // otherwise stand and moves every relation in it. `ALL` is reserved, so
+        // it can never be a written relation name and needs no further
+        // lookahead. Crabka has no tablespaces to move between, so the whole
+        // statement is carried as one unsupported subcommand — the same shape
+        // any other `ALTER TABLE` knob without a Crabka counterpart takes — and
+        // the relation slot keeps the word the statement wrote.
+        if *self.peek() == Token::Keyword(Keyword::All) {
+            self.bump();
+            // Not `consume_unsupported_subcommand`: `OWNED BY a, b` puts
+            // top-level commas inside this form, and they separate roles rather
+            // than subcommands, so the whole tail belongs to the one label.
+            let label = self.consume_statement_tail("ALL");
+            return Ok(Statement::AlterTable {
+                table: crate::ast::RelationRef::bare("all"),
+                if_exists,
+                only,
+                actions: vec![crate::ast::AlterTableAction::Unsupported(label)],
+            });
+        }
         let table = self.relation_ref()?;
         if *self.peek() == Token::Star {
             self.bump();
@@ -3992,6 +4048,23 @@ impl Parser {
                 Token::RParen => depth = depth.saturating_sub(1),
                 _ => {}
             }
+            self.bump();
+        }
+        let tail = self.source[start..self.peek_pos()].trim();
+        if tail.is_empty() {
+            prefix.to_string()
+        } else {
+            format!("{prefix} {tail}")
+        }
+    }
+
+    /// Consume everything left in the statement, returning it under `prefix` the
+    /// way [`Self::consume_unsupported_subcommand`] does. For the forms whose
+    /// tail is one indivisible subcommand, so a comma inside it separates
+    /// something other than subcommands.
+    fn consume_statement_tail(&mut self, prefix: &str) -> String {
+        let start = self.peek_pos();
+        while !matches!(self.peek(), Token::Eof | Token::Semicolon) {
             self.bump();
         }
         let tail = self.source[start..self.peek_pos()].trim();
@@ -4934,6 +5007,12 @@ impl Parser {
                 emitted(I::CreateIndex, self.create_index())
             }
             Token::Keyword(Keyword::View) => emitted(I::CreateView, self.create_view()),
+            // Must precede the `statement_has_top_level_as` fallback below:
+            // this statement has a top-level `AS` too, and that arm would send
+            // it to `create_table_as`.
+            Token::Ident(word) if word == "materialized" => {
+                emitted(I::CreateMaterializedView, self.create_materialized_view())
+            }
             Token::Keyword(Keyword::Foreign) => {
                 // CREATE FOREIGN ... — look at the third token
                 match self.peek3() {
@@ -6256,6 +6335,127 @@ impl Parser {
             query: Box::new(query),
             with_data,
             tablespace,
+        })
+    }
+
+    /// `CREATE MATERIALIZED VIEW [IF NOT EXISTS] name [(col, …)] [USING method]
+    /// [WITH (…)] [TABLESPACE ts] AS <query> [WITH [NO] DATA]`.
+    ///
+    /// The head reads like `CREATE TABLE … AS` — the same optional column list,
+    /// the same tablespace clause, the same `WITH [NO] DATA` tail — because
+    /// `PostgreSQL` defines it from the same `create_as_target`. `USING` and the
+    /// reloption list are parsed and dropped: Crabka has one storage engine and
+    /// no per-relation storage parameters, and leaving either unconsumed would
+    /// turn a statement it can run into a syntax error.
+    fn create_materialized_view(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::Statement;
+        self.expect(&Token::Keyword(Keyword::Create))?;
+        self.expect_ident_eq("materialized")?;
+        self.expect(&Token::Keyword(Keyword::View))?;
+        let if_not_exists = self.eat_if_not_exists();
+        let name = self.relation_ref()?;
+        let columns = if *self.peek() == Token::LParen {
+            Some(self.parse_parenthesized_ident_list()?)
+        } else {
+            None
+        };
+        if self.eat_keyword(Keyword::Using) {
+            let _access_method = self.expect_ident()?;
+        }
+        // A reloption list, not the `WITH [NO] DATA` tail: that one closes the
+        // statement and this one is the only `WITH` that can precede `AS`.
+        if self.eat_keyword(Keyword::With) {
+            self.skip_parenthesized_group()?;
+        }
+        let tablespace = self
+            .eat_ident_eq("tablespace")
+            .then(|| self.expect_ident())
+            .transpose()?;
+        self.expect(&Token::Keyword(Keyword::As))?;
+        let definition_start = self.peek_pos();
+        let query = self.query_expr()?;
+        // Taken before the `WITH [NO] DATA` tail, which is a property of the
+        // statement rather than of the query the relation stores.
+        let definition_end = self.peek_pos();
+        let definition = self.source[definition_start..definition_end]
+            .trim()
+            .to_string();
+        let with_data = if self.eat_keyword(Keyword::With) {
+            // `NO` is an ordinary identifier to this lexer, but `NOT` is a
+            // keyword and PostgreSQL's grammar spells the clause `WITH NO DATA`
+            // only — both are taken here for the same reason `CREATE TABLE AS`
+            // takes both.
+            let no = self.eat_keyword(Keyword::Not) || self.eat_ident_eq("no");
+            self.expect(&Token::Keyword(Keyword::Data))?;
+            !no
+        } else {
+            true
+        };
+        Ok(Statement::CreateMaterializedView {
+            name,
+            if_not_exists,
+            columns,
+            definition,
+            query: Box::new(query),
+            with_data,
+            tablespace,
+        })
+    }
+
+    /// Consume a parenthesized group whose contents carry no meaning here,
+    /// balancing nested parentheses so a value that contains one cannot end the
+    /// group early.
+    fn skip_parenthesized_group(&mut self) -> Result<(), ParseError> {
+        let start = self.peek_pos();
+        self.expect(&Token::LParen)?;
+        let mut depth = 1usize;
+        while depth > 0 {
+            match self.bump() {
+                Token::LParen => depth += 1,
+                Token::RParen => depth -= 1,
+                Token::Eof => {
+                    return Err(ParseError::new("unterminated ( in option list", start));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// `REFRESH MATERIALIZED VIEW [CONCURRENTLY] name [WITH [NO] DATA]`.
+    fn refresh_materialized_view(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::Statement;
+        self.expect_ident_eq("refresh")?;
+        self.expect_ident_eq("materialized")?;
+        self.expect(&Token::Keyword(Keyword::View))?;
+        let concurrently = self.eat_ident_eq("concurrently");
+        let name = self.relation_ref()?;
+        let with_data = if self.eat_keyword(Keyword::With) {
+            let no = self.eat_keyword(Keyword::Not) || self.eat_ident_eq("no");
+            self.expect(&Token::Keyword(Keyword::Data))?;
+            !no
+        } else {
+            true
+        };
+        Ok(Statement::RefreshMaterializedView {
+            name,
+            concurrently,
+            with_data,
+        })
+    }
+
+    /// `DROP MATERIALIZED VIEW [IF EXISTS] name [, …] [CASCADE | RESTRICT]`.
+    fn drop_materialized_view(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::Statement;
+        self.expect(&Token::Keyword(Keyword::Drop))?;
+        self.expect_ident_eq("materialized")?;
+        self.expect(&Token::Keyword(Keyword::View))?;
+        let if_exists = self.eat_if_exists()?;
+        let names = self.relation_ref_list()?;
+        Ok(Statement::DropMaterializedView {
+            names,
+            if_exists,
+            cascade: self.eat_drop_behavior(),
         })
     }
 
@@ -21656,6 +21856,274 @@ mod q1_statement_completeness_tests {
                 }
             ]
         ));
+    }
+
+    /// The [`QueryExpr`](crate::ast::QueryExpr) a standalone spelling of `sql`
+    /// parses to. A materialized view's stored query is then compared against
+    /// the query the same text produces on its own, which is the property that
+    /// matters: the `AS` body is parsed by the ordinary query parser.
+    fn query_of(sql: &str) -> crate::ast::QueryExpr {
+        let Statement::Query(query) = one(sql) else {
+            panic!("expected a query: {sql}");
+        };
+        query
+    }
+
+    fn relation(spelling: &str) -> crate::ast::RelationRef {
+        match spelling.split_once('.') {
+            Some((schema, name)) => crate::ast::RelationRef::qualified(schema, name),
+            None => crate::ast::RelationRef::bare(spelling),
+        }
+    }
+
+    #[test]
+    fn create_materialized_view_grammar() {
+        let cases = vec![
+            (
+                "CREATE MATERIALIZED VIEW m AS SELECT 1",
+                Statement::CreateMaterializedView {
+                    name: relation("m"),
+                    if_not_exists: false,
+                    columns: None,
+                    definition: "SELECT 1".into(),
+                    query: Box::new(query_of("SELECT 1")),
+                    with_data: true,
+                    tablespace: None,
+                },
+            ),
+            (
+                "CREATE MATERIALIZED VIEW m AS SELECT 1 WITH NO DATA",
+                Statement::CreateMaterializedView {
+                    name: relation("m"),
+                    if_not_exists: false,
+                    columns: None,
+                    definition: "SELECT 1".into(),
+                    query: Box::new(query_of("SELECT 1")),
+                    with_data: false,
+                    tablespace: None,
+                },
+            ),
+            (
+                "CREATE MATERIALIZED VIEW IF NOT EXISTS m (a, b) AS SELECT 1, 2",
+                Statement::CreateMaterializedView {
+                    name: relation("m"),
+                    if_not_exists: true,
+                    columns: Some(vec!["a".into(), "b".into()]),
+                    definition: "SELECT 1, 2".into(),
+                    query: Box::new(query_of("SELECT 1, 2")),
+                    with_data: true,
+                    tablespace: None,
+                },
+            ),
+            (
+                "CREATE MATERIALIZED VIEW s.m TABLESPACE ts AS SELECT 1",
+                Statement::CreateMaterializedView {
+                    name: relation("s.m"),
+                    if_not_exists: false,
+                    columns: None,
+                    definition: "SELECT 1".into(),
+                    query: Box::new(query_of("SELECT 1")),
+                    with_data: true,
+                    tablespace: Some("ts".into()),
+                },
+            ),
+            (
+                // `USING` and the reloption list are accepted and dropped, so
+                // both spellings land on the same statement as the bare one.
+                "CREATE MATERIALIZED VIEW m USING heap AS SELECT 1",
+                Statement::CreateMaterializedView {
+                    name: relation("m"),
+                    if_not_exists: false,
+                    columns: None,
+                    definition: "SELECT 1".into(),
+                    query: Box::new(query_of("SELECT 1")),
+                    with_data: true,
+                    tablespace: None,
+                },
+            ),
+            (
+                "CREATE MATERIALIZED VIEW m USING heap2 WITH (fillfactor = 70) \
+                 TABLESPACE ts AS SELECT 1 WITH NO DATA",
+                Statement::CreateMaterializedView {
+                    name: relation("m"),
+                    if_not_exists: false,
+                    columns: None,
+                    definition: "SELECT 1".into(),
+                    query: Box::new(query_of("SELECT 1")),
+                    with_data: false,
+                    tablespace: Some("ts".into()),
+                },
+            ),
+        ];
+        for (sql, want) in cases {
+            assert!(one(sql) == want, "{sql}");
+        }
+    }
+
+    #[test]
+    fn refresh_materialized_view_grammar() {
+        let cases = [
+            ("REFRESH MATERIALIZED VIEW m", false, true),
+            ("REFRESH MATERIALIZED VIEW CONCURRENTLY m", true, true),
+            ("REFRESH MATERIALIZED VIEW m WITH NO DATA", false, false),
+            (
+                "REFRESH MATERIALIZED VIEW CONCURRENTLY s.m WITH NO DATA",
+                true,
+                false,
+            ),
+            ("REFRESH MATERIALIZED VIEW m WITH DATA", false, true),
+        ];
+        for (sql, concurrently, with_data) in cases {
+            let name = if sql.contains("s.m") { "s.m" } else { "m" };
+            assert!(
+                one(sql)
+                    == Statement::RefreshMaterializedView {
+                        name: relation(name),
+                        concurrently,
+                        with_data,
+                    },
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn drop_materialized_view_grammar() {
+        let cases = vec![
+            (
+                "DROP MATERIALIZED VIEW m",
+                Statement::DropMaterializedView {
+                    names: vec![relation("m")],
+                    if_exists: false,
+                    cascade: false,
+                },
+            ),
+            (
+                "DROP MATERIALIZED VIEW IF EXISTS a, b CASCADE",
+                Statement::DropMaterializedView {
+                    names: vec![relation("a"), relation("b")],
+                    if_exists: true,
+                    cascade: true,
+                },
+            ),
+            (
+                "DROP MATERIALIZED VIEW s.m RESTRICT",
+                Statement::DropMaterializedView {
+                    names: vec![relation("s.m")],
+                    if_exists: false,
+                    cascade: false,
+                },
+            ),
+        ];
+        for (sql, want) in cases {
+            assert!(one(sql) == want, "{sql}");
+        }
+    }
+
+    /// `ALTER MATERIALIZED VIEW` shares `ALTER TABLE`'s subcommand grammar, so
+    /// it lands on the same statement — including for the subcommands Crabka
+    /// carries as [`AlterTableAction::Unsupported`](crate::ast::AlterTableAction).
+    #[test]
+    fn alter_materialized_view_parses_as_alter_table() {
+        use crate::ast::AlterTableAction as Action;
+
+        let cases = vec![
+            (
+                "ALTER MATERIALIZED VIEW m SET SCHEMA s",
+                relation("m"),
+                vec![Action::Unsupported("SET SCHEMA s".into())],
+            ),
+            (
+                "ALTER MATERIALIZED VIEW m RENAME TO m2",
+                relation("m"),
+                vec![Action::RenameTable {
+                    new_name: "m2".into(),
+                }],
+            ),
+            (
+                "ALTER MATERIALIZED VIEW s.m RENAME COLUMN a TO b",
+                relation("s.m"),
+                vec![Action::RenameColumn {
+                    column: "a".into(),
+                    new_name: "b".into(),
+                }],
+            ),
+            (
+                "ALTER MATERIALIZED VIEW m OWNER TO bob",
+                relation("m"),
+                vec![Action::OwnerTo("bob".into())],
+            ),
+            (
+                "ALTER MATERIALIZED VIEW m SET TABLESPACE ts",
+                relation("m"),
+                vec![Action::SetTablespace("ts".into())],
+            ),
+            (
+                // The `ALL IN TABLESPACE` form names a tablespace where a
+                // relation would stand; it is carried as one unsupported
+                // subcommand rather than refused at parse time.
+                "ALTER MATERIALIZED VIEW ALL IN TABLESPACE ts OWNED BY a, b \
+                 SET TABLESPACE ts2 NOWAIT",
+                relation("all"),
+                vec![Action::Unsupported(
+                    "ALL IN TABLESPACE ts OWNED BY a, b SET TABLESPACE ts2 NOWAIT".into(),
+                )],
+            ),
+        ];
+        for (sql, table, actions) in cases {
+            assert!(
+                one(sql)
+                    == Statement::AlterTable {
+                        table,
+                        if_exists: false,
+                        only: false,
+                        actions,
+                    },
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn materialized_view_command_identities() {
+        for (sql, want) in [
+            (
+                "CREATE MATERIALIZED VIEW m AS SELECT 1",
+                CommandIdentity::CreateMaterializedView,
+            ),
+            (
+                "REFRESH MATERIALIZED VIEW m",
+                CommandIdentity::RefreshMaterializedView,
+            ),
+            (
+                "DROP MATERIALIZED VIEW m",
+                CommandIdentity::DropMaterializedView,
+            ),
+            (
+                "ALTER MATERIALIZED VIEW m RENAME TO m2",
+                CommandIdentity::AlterMaterializedView,
+            ),
+        ] {
+            assert!(identity(sql) == want, "{sql}");
+        }
+    }
+
+    /// The `CREATE MATERIALIZED VIEW` arm sits ahead of the
+    /// `statement_has_top_level_as` fallback in the `CREATE` dispatcher, which
+    /// is the arm every other `CREATE … AS` spelling reaches. Both must survive
+    /// it.
+    #[test]
+    fn the_materialized_view_arm_does_not_shadow_create_table_as() {
+        assert!(matches!(
+            one("CREATE TABLE t AS SELECT 1"),
+            Statement::CreateTableAs { .. }
+        ));
+        assert!(identity("CREATE TABLE t AS SELECT 1") == CommandIdentity::CreateTableAs);
+        assert!(matches!(
+            one("SELECT 1 AS a INTO t"),
+            Statement::CreateTableAs { .. }
+        ));
+        assert!(identity("SELECT 1 AS a INTO t") == CommandIdentity::SelectInto);
     }
 }
 

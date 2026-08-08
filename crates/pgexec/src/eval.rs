@@ -5168,6 +5168,7 @@ mod tests {
             force_row_security: false,
             sharding: None,
             foreign: None,
+            materialized: None,
             checks: Vec::new(),
         }
     }
@@ -5825,6 +5826,7 @@ mod tests {
             force_row_security: false,
             sharding: None,
             foreign: None,
+            materialized: None,
             checks: Vec::new(),
         };
         let tstz_scope = scope_of(Some(&tstz_col));
@@ -6068,6 +6070,7 @@ mod tests {
             force_row_security: false,
             sharding: None,
             foreign: None,
+            materialized: None,
             checks: Vec::new(),
         };
         let err = infer_type(&pexpr("a::bool").expect("parse"), &scope_of(Some(&ft)))
@@ -6173,6 +6176,7 @@ mod tests {
             force_row_security: false,
             sharding: None,
             foreign: None,
+            materialized: None,
             checks: Vec::new(),
         }
     }

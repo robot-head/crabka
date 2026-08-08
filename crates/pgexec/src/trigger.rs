@@ -208,6 +208,7 @@ pub(crate) fn relation_trigger_table(kv: &dyn Kv, name: &RelationName) -> Result
         force_row_security: false,
         sharding: None,
         foreign: None,
+        materialized: None,
         checks: Vec::new(),
     })
 }

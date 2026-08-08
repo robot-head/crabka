@@ -663,9 +663,34 @@ pub struct Table {
     /// Optional physical sharding strategy for range routing.
     pub sharding: Option<ShardingStrategy>,
     /// Present when the table is a foreign table; `None` for ordinary tables.
+    /// Mutually exclusive with [`Self::materialized`]: a relation's contents
+    /// come either from a remote server or from a stored query, never both.
     pub foreign: Option<ForeignTableMeta>,
+    /// Present when the relation is a materialized view; `None` for every other
+    /// stored relation. Mutually exclusive with [`Self::foreign`].
+    pub materialized: Option<MaterializedView>,
     /// Table `CHECK` constraints, in declaration order.
     pub checks: Vec<CheckConstraint>,
+}
+
+/// What makes a stored relation a materialized view: the query its contents
+/// come from, and whether those contents have been computed yet.
+///
+/// It rides on [`Table`] rather than in a catalog of its own for the reason
+/// [`Table::row_security`] gives — every read path already holds a `Table`, so
+/// it holds this too, and there is no second lookup to forget. That also makes
+/// `relkind` a pure function of the record: a `Table` carrying this is `m`,
+/// one carrying [`Table::foreign`] is `f`, and so on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaterializedView {
+    /// The `AS <query>` text as written, which `pg_matviews.definition` and
+    /// `pg_get_viewdef` deparse from — stored exactly as [`View::definition`]
+    /// is, so the two render through one path.
+    pub definition: String,
+    /// `pg_class.relispopulated`. `CREATE … WITH NO DATA` and
+    /// `REFRESH … WITH NO DATA` clear it; a successful `REFRESH` sets it.
+    /// Scanning a relation whose flag is clear is `55000`.
+    pub populated: bool,
 }
 
 /// A stored view definition and its resolved output schema.
@@ -2214,7 +2239,7 @@ pub fn rename_table_ops(
         return Err(CatalogError::DuplicateTable(new_name.to_string()));
     }
 
-    let (table_id, _, _, _, _, _) = deserialize_schema(&schema)?;
+    let (table_id, ..) = deserialize_schema(&schema)?;
     let mut ops = vec![
         WriteOp::Delete {
             key: catalog_key(name),
@@ -2323,9 +2348,14 @@ impl TableIdSource {
     }
 }
 
-/// The two creation-time facts a new relation needs beyond its schema: who it
-/// belongs to, and where its id comes from. Bundled so the create batteries keep
-/// a workable parameter count as more of them accumulate.
+/// The creation-time facts a new relation needs beyond its schema: who it
+/// belongs to, where its id comes from, and — for `CREATE MATERIALIZED VIEW` —
+/// the query its contents come from. Bundled so the create batteries keep a
+/// workable parameter count as more of them accumulate.
+///
+/// The materialized-view metadata is borrowed rather than owned so this stays a
+/// `Copy` handle onto facts the caller already holds, which is what lets the
+/// create batteries keep taking it by value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TableCreation<'a> {
     /// The role the new relation is owned by — the creating session's
@@ -2333,6 +2363,10 @@ pub struct TableCreation<'a> {
     pub owner: &'a str,
     /// Where the new relation's [`TableId`] comes from.
     pub id: TableIdSource,
+    /// Present when the relation being created is a materialized view, so
+    /// `CREATE MATERIALIZED VIEW` writes one schema record rather than creating
+    /// a table and then rewriting it. `None` for every other relation.
+    pub materialized: Option<&'a MaterializedView>,
 }
 
 impl TableCreation<'_> {
@@ -2344,6 +2378,7 @@ impl TableCreation<'_> {
         Self {
             owner: BOOTSTRAP_ROLE,
             id: TableIdSource::Counter,
+            materialized: None,
         }
     }
 }
@@ -2372,7 +2407,15 @@ pub fn create_table_with_options_ops(
     let mut batch = vec![
         WriteOp::Put {
             key: catalog_key(name),
-            value: serialize_schema(next, &columns, options, creation.owner, None, &checks),
+            value: serialize_schema(
+                next,
+                &columns,
+                options,
+                creation.owner,
+                None,
+                creation.materialized,
+                &checks,
+            ),
         },
         WriteOp::Put {
             key: key::seq_key(next),
@@ -2507,7 +2550,7 @@ pub fn replace_table_schema_ops(
     let bytes = kv
         .get(&catalog_key(name))?
         .ok_or_else(|| CatalogError::UndefinedTable(name.to_string()))?;
-    let (id, _, options, _, foreign, _) = deserialize_schema(&bytes)?;
+    let (id, _, options, _, foreign, _, _) = deserialize_schema(&bytes)?;
     Ok(vec![WriteOp::Put {
         key: catalog_key(name),
         value: serialize_schema(
@@ -2526,6 +2569,11 @@ pub fn replace_table_schema_ops(
             },
             &table.owner,
             foreign.as_ref(),
+            // Like the row-security flags, the materialized-view metadata comes
+            // from the working relation: `REFRESH MATERIALIZED VIEW` folds into
+            // the same `Table` an `ALTER` subcommand edits, so re-reading it
+            // from storage here would undo the refresh.
+            table.materialized.as_ref(),
             &table.checks,
         ),
     }])
@@ -2551,7 +2599,7 @@ pub fn set_row_security_ops(
     let bytes = kv
         .get(&catalog_key(name))?
         .ok_or_else(|| CatalogError::UndefinedTable(name.to_string()))?;
-    let (id, columns, options, owner, foreign, checks) = deserialize_schema(&bytes)?;
+    let (id, columns, options, owner, foreign, checks, materialized) = deserialize_schema(&bytes)?;
     Ok(vec![WriteOp::Put {
         key: catalog_key(name),
         value: serialize_schema(
@@ -2564,9 +2612,65 @@ pub fn set_row_security_ops(
             },
             &owner,
             foreign.as_ref(),
+            materialized.as_ref(),
             &checks,
         ),
     }])
+}
+
+/// Build the write op that flips a materialized view's population flag and
+/// writes back the definition `table` carries, leaving every other field of the
+/// schema record alone.
+///
+/// It is a pure function of the relation rather than a read-modify-write
+/// against storage because a `Table` already determines the whole record — id,
+/// columns, option flags, owner, relation-kind payload and `CHECK` list — so
+/// `REFRESH MATERIALIZED VIEW` can put the flag flip in the same batch as the
+/// heap rewrite it belongs with, without a catalog read in between.
+///
+/// A relation that is not a materialized view has no flag to set, so the op
+/// rewrites its record unchanged; callers reject `REFRESH` on an ordinary
+/// relation with `42809` long before they get here.
+#[must_use]
+pub fn set_materialized_populated_op(table: &Table, populated: bool) -> WriteOp {
+    let materialized = table.materialized.as_ref().map(|matview| MaterializedView {
+        definition: matview.definition.clone(),
+        populated,
+    });
+    WriteOp::Put {
+        key: catalog_key(&table.name),
+        value: serialize_schema(
+            table.id,
+            &table.columns,
+            TableOptions {
+                sharded: table.sharded,
+                row_security: table.row_security,
+                force_row_security: table.force_row_security,
+            },
+            &table.owner,
+            table.foreign.as_ref(),
+            materialized.as_ref(),
+            &table.checks,
+        ),
+    }
+}
+
+/// Whether `name` names a materialized view.
+///
+/// A name that is not a stored relation at all — a plain view, a sequence, or
+/// nothing — answers `false` rather than erroring, because every caller is
+/// asking which of several relation kinds it is holding and has its own
+/// "relation does not exist" path already.
+///
+/// # Errors
+///
+/// Returns storage/corruption errors from the catalog KV seam.
+pub fn is_materialized_view(kv: &dyn Kv, name: &RelationName) -> Result<bool, CatalogError> {
+    let Some(bytes) = kv.get(&catalog_key(name))? else {
+        return Ok(false);
+    };
+    let (.., materialized) = deserialize_schema(&bytes)?;
+    Ok(materialized.is_some())
 }
 
 /// Build the write batch that drops a view without persisting it.
@@ -2722,7 +2826,7 @@ fn table_from_schema_bytes(
     name: &RelationName,
     bytes: &[u8],
 ) -> Result<Table, CatalogError> {
-    let (id, columns, options, owner, foreign, checks) = deserialize_schema(bytes)?;
+    let (id, columns, options, owner, foreign, checks, materialized) = deserialize_schema(bytes)?;
     let sharding = kv
         .get(&sharding_key(name))?
         .map(|bytes| deserialize_sharding(&bytes))
@@ -2738,6 +2842,7 @@ fn table_from_schema_bytes(
         force_row_security: options.force_row_security,
         sharding,
         foreign,
+        materialized,
         checks,
     })
 }
@@ -2807,7 +2912,7 @@ pub fn complete_table_conversion_ops(
     let bytes = kv
         .get(&catalog_key(name))?
         .ok_or_else(|| CatalogError::UndefinedTable(name.to_string()))?;
-    let (id, columns, options, owner, foreign, checks) = deserialize_schema(&bytes)?;
+    let (id, columns, options, owner, foreign, checks, materialized) = deserialize_schema(&bytes)?;
     if foreign.is_some() {
         return Err(CatalogError::NotOrdinaryTable(name.to_string()));
     }
@@ -2821,6 +2926,7 @@ pub fn complete_table_conversion_ops(
         force_row_security: options.force_row_security,
         sharding: get_table_sharding(kv, name)?,
         foreign: None,
+        materialized,
         checks,
     };
     if let Some(ShardingStrategy::Hash(hash)) = sharding {
@@ -2842,6 +2948,7 @@ pub fn complete_table_conversion_ops(
             },
             &table.owner,
             None,
+            table.materialized.as_ref(),
             &table.checks,
         ),
     });
@@ -3244,7 +3351,8 @@ pub fn set_columns_not_null_ops(
     let bytes = kv
         .get(&catalog_key(table_name))?
         .ok_or_else(|| CatalogError::UndefinedTable(table_name.to_string()))?;
-    let (id, mut columns, options, owner, foreign, checks) = deserialize_schema(&bytes)?;
+    let (id, mut columns, options, owner, foreign, checks, materialized) =
+        deserialize_schema(&bytes)?;
     for name in not_null_columns {
         let column = columns
             .iter_mut()
@@ -3254,7 +3362,15 @@ pub fn set_columns_not_null_ops(
     }
     Ok(vec![WriteOp::Put {
         key: catalog_key(table_name),
-        value: serialize_schema(id, &columns, options, &owner, foreign.as_ref(), &checks),
+        value: serialize_schema(
+            id,
+            &columns,
+            options,
+            &owner,
+            foreign.as_ref(),
+            materialized.as_ref(),
+            &checks,
+        ),
     }])
 }
 
@@ -5351,6 +5467,10 @@ pub fn create_foreign_table_ops(
                 TableOptions::default(),
                 creation.owner,
                 Some(&meta),
+                // A foreign table's contents come from its server, so the
+                // materialized-view payload is not its to carry even when the
+                // caller left one in the creation record.
+                None,
                 &[],
             ),
         },
@@ -5473,8 +5593,8 @@ mod tests {
         let error = hydrate_user_types(&kv).expect_err("foreign registry entry is ignored");
         assert!(error.to_string().contains("1100000"));
         assert_eq!(
-            crabka_pgtypes::usertype::lookup_oid(foreign.oid),
-            Some(foreign)
+            crabka_pgtypes::usertype::lookup_oid(foreign.oid).as_deref(),
+            Some(&foreign)
         );
         assert!(crabka_pgtypes::usertype::lookup_oid(dependent.oid).is_none());
     }
@@ -5541,8 +5661,8 @@ mod tests {
 
         hydrate_user_types(&kv).expect_err("corrupt record rejects the whole hydration");
         assert_eq!(
-            crabka_pgtypes::usertype::lookup_oid(original.oid),
-            Some(original)
+            crabka_pgtypes::usertype::lookup_oid(original.oid).as_deref(),
+            Some(&original)
         );
         assert!(crabka_pgtypes::usertype::lookup_oid(1_300_004).is_none());
     }

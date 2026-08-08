@@ -494,6 +494,7 @@ mod tests {
             force_row_security: false,
             sharding: None,
             foreign: None,
+            materialized: None,
             checks: Vec::new(),
         }
     }
@@ -512,6 +513,7 @@ mod tests {
             crabka_pgcatalog::TableCreation {
                 owner: OWNER,
                 id: crabka_pgcatalog::TableIdSource::Counter,
+                materialized: None,
             },
         )
         .expect("create table");

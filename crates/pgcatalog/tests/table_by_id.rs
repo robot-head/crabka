@@ -51,6 +51,7 @@ fn ordinary_table(id: TableId, name: &RelationName) -> Table {
         force_row_security: false,
         sharding: None,
         foreign: None,
+        materialized: None,
         checks: Vec::new(),
     }
 }
@@ -196,6 +197,7 @@ fn table_id_source_decides_whether_the_shared_counter_moves() {
             TableCreation {
                 owner: BOOTSTRAP_ROLE,
                 id: source,
+                materialized: None,
             },
         )
         .expect("create table ops");

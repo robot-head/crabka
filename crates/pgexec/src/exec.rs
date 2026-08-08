@@ -138,6 +138,10 @@ impl ForeignCtx<'_> {
         crabka_pgcatalog::TableCreation {
             owner: self.effective_role(),
             id: self.table_id(),
+            // `CREATE MATERIALIZED VIEW` builds its own `TableCreation` so it can
+            // attach the query; every other creation here makes an ordinary
+            // relation.
+            materialized: None,
         }
     }
 }
@@ -628,6 +632,7 @@ pub(crate) fn execute_ddl(
                 force_row_security: false,
                 sharding,
                 foreign: None,
+                materialized: None,
                 checks,
             };
             for index in &pending_indexes {
@@ -754,6 +759,9 @@ pub(crate) fn execute_ddl(
             for (name, is_sequence) in &targets {
                 if *is_sequence {
                     tag = "DROP SEQUENCE";
+                    if let Some(error) = drop_kind_mismatch(kv, name, "sequence") {
+                        return Err(error);
+                    }
                     match crabka_pgcatalog::drop_sequence_ops(kv, name) {
                         Ok(sequence_ops) => ops.extend(sequence_ops),
                         Err(crabka_pgcatalog::CatalogError::UndefinedSequence(_)) if *if_exists => {
@@ -761,6 +769,12 @@ pub(crate) fn execute_ddl(
                         Err(error) => return Err(error.into()),
                     }
                 } else {
+                    // A relation of another kind is 42809 whether or not
+                    // IF EXISTS was written: the relation exists, so there is
+                    // nothing for IF EXISTS to waive.
+                    if let Some(error) = drop_kind_mismatch(kv, name, "table") {
+                        return Err(error);
+                    }
                     match crabka_pgcatalog::get_table(kv, name) {
                         Ok(table) => ops.extend(drop_table_and_dependents_ops(
                             kv, &table, &dropping, *cascade,
@@ -989,6 +1003,9 @@ pub(crate) fn execute_ddl(
                 }
                 Err(error) => return Err(error),
             };
+            if let Some(error) = drop_kind_mismatch(kv, name, "view") {
+                return Err(error);
+            }
             let ops = match drop_view_with_triggers_ops(kv, name) {
                 Ok(mut ops) => {
                     // A view may itself be read by other views. PostgreSQL
@@ -1006,7 +1023,7 @@ pub(crate) fn execute_ddl(
                             ));
                         }
                         for (view, _) in &dependents {
-                            ops.extend(drop_view_with_triggers_ops(kv, view)?);
+                            ops.extend(drop_dependent_relation_ops(kv, view)?);
                         }
                     }
                     ops
@@ -1019,6 +1036,137 @@ pub(crate) fn execute_ddl(
                 Err(error) => return Err(error),
             };
             Ok((command("DROP VIEW"), ops))
+        }
+        // The relation half of `CREATE MATERIALIZED VIEW`: the heap, its column
+        // list, and the query it will be refilled from, created unpopulated. The
+        // session drives the data half — running the query and flipping the
+        // flag — because that is a write, and DDL here commits one catalog batch
+        // that cannot also carry rows.
+        Statement::CreateMaterializedView {
+            name,
+            if_not_exists,
+            columns: aliases,
+            definition,
+            query,
+            tablespace,
+            with_data: _,
+        } => {
+            let _ = tablespace;
+            let name = &resolve_relation(kv, resolution, name, SchemaDisposition::Creation)?;
+            if *if_not_exists && crabka_pgcatalog::get_table(kv, name).is_ok() {
+                return Ok((command("CREATE MATERIALIZED VIEW"), Vec::new()));
+            }
+            crate::usertype::ensure_relation_type_name_available(kv, name)?;
+            let described = crate::query::describe_query_expr(kv, resolution, query)?;
+            if let Some(aliases) = aliases
+                && aliases.len() > described.len()
+            {
+                return Err(ExecError::Syntax(
+                    "too many column names were specified".into(),
+                ));
+            }
+            let columns = described
+                .into_iter()
+                .enumerate()
+                .map(|(index, field)| {
+                    let name = aliases
+                        .as_ref()
+                        .and_then(|aliases| aliases.get(index).cloned())
+                        .unwrap_or(field.name);
+                    Ok(Column::new(name, column_type_from_oid(field.type_oid)?))
+                })
+                .collect::<Result<Vec<_>, ExecError>>()?;
+            let mut seen = std::collections::HashSet::new();
+            for column in &columns {
+                if !seen.insert(column.name.as_str()) {
+                    return Err(ExecError::DuplicateOutputColumn(column.name.clone()));
+                }
+            }
+            // Created unpopulated whatever `WITH DATA` said: the flag is what
+            // makes a scan legal, and it is only true once the rows are actually
+            // there. A `WITH DATA` create that fails partway therefore leaves
+            // nothing readable rather than an empty relation claiming to hold
+            // the query's answer.
+            // The text as written is stored, exactly as `CREATE VIEW` stores
+            // its own: `REFRESH` re-runs it, so whatever schema qualification
+            // the author supplied has to survive to be re-resolved.
+            let matview = crabka_pgcatalog::MaterializedView {
+                definition: definition.clone(),
+                populated: false,
+            };
+            let mut ops = ensure_schema_ops(kv, &name.schema)?;
+            let (_, created) = crabka_pgcatalog::create_table_with_options_ops(
+                kv,
+                name,
+                columns,
+                crabka_pgcatalog::TableOptions::default(),
+                Vec::new(),
+                crabka_pgcatalog::TableCreation {
+                    owner: fctx.effective_role(),
+                    id: fctx.table_id(),
+                    materialized: Some(&matview),
+                },
+            )?;
+            ops.extend(created);
+            Ok((command("CREATE MATERIALIZED VIEW"), ops))
+        }
+        // The catalog half of `REFRESH MATERIALIZED VIEW`: the population flag,
+        // nothing else. The session has already emptied and (for `WITH DATA`)
+        // refilled the heap, so this is what makes the new contents readable —
+        // or, for `WITH NO DATA`, what makes the emptied relation an error to
+        // scan rather than a relation that answers zero rows.
+        Statement::RefreshMaterializedView {
+            name,
+            concurrently: _,
+            with_data,
+        } => {
+            let name = &resolve_relation(kv, resolution, name, SchemaDisposition::Utility)?;
+            let table = require_materialized_view(kv, name)?;
+            Ok((
+                command("REFRESH MATERIALIZED VIEW"),
+                vec![crabka_pgcatalog::set_materialized_populated_op(
+                    &table, *with_data,
+                )],
+            ))
+        }
+        // A materialized view is a stored relation, so it drops through the
+        // table batteries — the heap, its indexes and its privileges all have to
+        // go — while the *name* it answers to is checked against `relkind` first,
+        // exactly as `DROP TABLE` and `DROP VIEW` check theirs.
+        Statement::DropMaterializedView {
+            names,
+            if_exists,
+            cascade,
+        } => {
+            let mut targets = Vec::with_capacity(names.len());
+            for reference in names {
+                match resolve_relation(kv, resolution, reference, SchemaDisposition::Utility) {
+                    Ok(resolved) => targets.push(resolved),
+                    Err(error) if *if_exists && is_missing_schema(&error) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            let dropping: std::collections::HashSet<_> = targets.iter().cloned().collect();
+            let mut ops = Vec::new();
+            for name in &targets {
+                if let Some(error) = drop_kind_mismatch(kv, name, "materialized view") {
+                    return Err(error);
+                }
+                match crabka_pgcatalog::get_table(kv, name) {
+                    Ok(table) => ops.extend(drop_table_and_dependents_ops(
+                        kv, &table, &dropping, *cascade,
+                    )?),
+                    Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) if *if_exists => {}
+                    Err(crabka_pgcatalog::CatalogError::UndefinedTable(missing)) => {
+                        return Err(ExecError::UndefinedRelationOfKind {
+                            kind: "materialized view",
+                            name: missing,
+                        });
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            Ok((command("DROP MATERIALIZED VIEW"), ops))
         }
         Statement::CreateIndex {
             name,
@@ -1156,6 +1304,9 @@ pub(crate) fn execute_ddl(
                 }
                 Err(error) => return Err(error),
             };
+            if let Some(error) = drop_kind_mismatch(kv, name, "index") {
+                return Err(error);
+            }
             let (index, mut ops) = match crabka_pgcatalog::drop_index_ops(kv, name) {
                 Ok(result) => result,
                 Err(crabka_pgcatalog::CatalogError::UndefinedIndex(_)) if *if_exists => {
@@ -1575,6 +1726,7 @@ pub(crate) fn execute_ddl(
                     crabka_pgcatalog::TableCreation {
                         owner: fctx.effective_role(),
                         id: crabka_pgcatalog::TableIdSource::Reserved(id),
+                        materialized: None,
                     },
                 )?;
                 ops.append(&mut table_ops);
@@ -3651,7 +3803,7 @@ fn table_expr_references(item: &crabka_pgparser::ast::TableExpr, name: &str) -> 
 }
 
 /// The `WITH` list attached to a statement, when it has one.
-fn statement_with_clause(stmt: &Statement) -> Option<&crabka_pgparser::ast::WithClause> {
+pub(crate) fn statement_with_clause(stmt: &Statement) -> Option<&crabka_pgparser::ast::WithClause> {
     match stmt {
         Statement::Query(q) => q.with.as_ref(),
         Statement::CreateTableAs { query, .. } => query.with.as_ref(),
@@ -7335,12 +7487,15 @@ fn drop_table_and_dependents_ops(
         if !cascade {
             return Err(dependent_objects_error(
                 kv,
-                &format!("cannot drop table {name} because other objects depend on it"),
+                &format!(
+                    "cannot drop {} {name} because other objects depend on it",
+                    stored_relation_kind(table)
+                ),
                 &dependents,
             ));
         }
         for (view, _) in &dependents {
-            ops.extend(drop_view_with_triggers_ops(kv, view)?);
+            ops.extend(drop_dependent_relation_ops(kv, view)?);
         }
     }
     ops.extend(drop_blocking_foreign_keys(kv, table, dropping, cascade)?);
@@ -7362,6 +7517,44 @@ fn drop_table_and_dependents_ops(
     )?);
     ops.extend(table_ops);
     Ok(ops)
+}
+
+/// A materialized view seen as the [`crabka_pgcatalog::View`] the dependency
+/// machinery understands, or `None` for any other stored relation.
+///
+/// The synthesized record is not stored and is never written back — it exists so
+/// one walker can answer "what does this relation's query read" for both kinds.
+fn materialized_as_view(table: crabka_pgcatalog::Table) -> Option<crabka_pgcatalog::View> {
+    let matview = table.materialized?;
+    Some(crabka_pgcatalog::View {
+        name: table.name,
+        definition: matview.definition,
+        owner: table.owner,
+        columns: table.columns,
+        options: crabka_pgcatalog::ViewOptions::default(),
+    })
+}
+
+/// Drop one relation that a `CASCADE` reached because its query reads the
+/// relation being dropped.
+///
+/// A dependent is a view or a materialized view, and the two go away by
+/// different batteries: a view is a catalog record, a materialized view is a
+/// stored relation with a heap and indexes. Dispatching here rather than at each
+/// call site is what keeps `DROP TABLE … CASCADE` and `DROP VIEW … CASCADE` from
+/// each having to know.
+fn drop_dependent_relation_ops(
+    kv: &dyn Kv,
+    name: &crabka_pgcatalog::RelationName,
+) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
+    if let Ok(table) = crabka_pgcatalog::get_table(kv, name)
+        && table.materialized.is_some()
+    {
+        let mut ops = crabka_pgcatalog::trigger::drop_triggers_for_table_ops(kv, table.id)?;
+        ops.extend(crabka_pgcatalog::drop_table_ops(kv, name)?);
+        return Ok(ops);
+    }
+    drop_view_with_triggers_ops(kv, name)
 }
 
 fn drop_view_with_triggers_ops(
@@ -7504,6 +7697,14 @@ pub(crate) fn cascade_drop_notice(
             cascade: true,
             ..
         } => name,
+        Statement::DropMaterializedView {
+            names,
+            cascade: true,
+            ..
+        } => match names.as_slice() {
+            [only] => only,
+            _ => return Ok(None),
+        },
         _ => return Ok(None),
     };
     let column = None;
@@ -7513,7 +7714,13 @@ pub(crate) fn cascade_drop_notice(
     let dependents = dependent_view_chain(kv, &name, column)?;
     let mut lines: Vec<String> = dependents
         .iter()
-        .map(|(view, _)| format!("drop cascades to view {}", view.name))
+        .map(|(view, _)| {
+            format!(
+                "drop cascades to {} {}",
+                relation_kind(kv, view).unwrap_or("view"),
+                view.name
+            )
+        })
         .collect();
     match lines.len() {
         0 => Ok(None),
@@ -14616,6 +14823,12 @@ fn build_base_table(
         Err(error) => return Err(error.into()),
     }
     let t = crabka_pgcatalog::get_table(catalog_kv, name)?;
+    // An unpopulated materialized view is refused here, at the one place every
+    // stored-relation read passes, rather than in each of the planner's
+    // pushdowns: the refusal has to hold whichever path a query takes, and a
+    // pushdown that pruned the projection would otherwise return zero rows for
+    // `count(*)` while the general path errored.
+    require_populated(&t)?;
     let qualifier = alias.as_deref().unwrap_or(&t.name.name);
     // One scan, one gate, and one permit. Every stored-relation read the
     // executor does arrives here; `RawScan` cannot become a `Relation` any
@@ -15706,6 +15919,11 @@ fn single_local_base_table(
         Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => return Ok(None),
         Err(error) => return Err(error.into()),
     };
+    // An unpopulated materialized view is an error to read, and the pushdowns
+    // are exactly where that would go unnoticed: a fold over the row space
+    // never opens the general scan path, so `count(*)` would answer zero for a
+    // relation the general path refuses.
+    require_populated(&table)?;
     // A partitioned parent owns no rows of its own: the streaming fold would
     // read its empty row space and answer for the whole hierarchy.
     if table.sharded
@@ -15779,6 +15997,7 @@ fn single_sharded_base_table(
         Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => return Ok(None),
         Err(error) => return Err(error.into()),
     };
+    require_populated(&table)?;
     if !table.sharded
         || table.foreign.is_some()
         || reads_inheritance_children(catalog_kv, *only, name)?
@@ -16589,6 +16808,7 @@ fn virtual_catalog_table(name: &str) -> Table {
         force_row_security: false,
         sharding: None,
         foreign: None,
+        materialized: None,
         checks: Vec::new(),
     }
 }
@@ -17007,9 +17227,10 @@ fn schema_owner_oid(owner: &str) -> i32 {
 }
 
 /// Every relation crabka has, in the `relkind` PostgreSQL would report: user
-/// tables `r`, foreign tables `f`, views `v`, sequences `S`, indexes `i`, and
-/// the virtual catalog relations `v`. `psql`'s `\dt`/`\dv`/`\di`/`\ds` differ
-/// only in the `relkind` they filter on, so all four need this one list.
+/// tables `r`, partitioned tables `p`, foreign tables `f`, materialized views
+/// `m`, views `v`, sequences `S`, indexes `i`, and the virtual catalog
+/// relations `v`. `psql`'s `\dt`/`\dv`/`\dm`/`\di`/`\ds` differ only in the
+/// `relkind` they filter on, so all of them need this one list.
 fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let triggered_relation_ids = crabka_pgcatalog::trigger::list_triggers(catalog_kv)?
         .into_iter()
@@ -17028,10 +17249,15 @@ fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut rows = Vec::new();
     for table in crabka_pgcatalog::list_tables(catalog_kv)? {
         let partitioned = crate::partition::is_partitioned(catalog_kv, &table.name)?;
-        let relkind = match (table.foreign.is_some(), partitioned) {
-            (true, _) => "f",
-            (false, true) => "p",
-            (false, false) => "r",
+        let relkind = match (
+            table.foreign.is_some(),
+            table.materialized.is_some(),
+            partitioned,
+        ) {
+            (true, _, _) => "f",
+            (_, true, _) => "m",
+            (false, false, true) => "p",
+            (false, false, false) => "r",
         };
         let mut row = PgClassRow::new(
             crate::catalog_rel::table_relation_oid(table.id)?,
@@ -17039,6 +17265,15 @@ fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             relkind,
             crate::catalog_rel::namespace_oid(&table.name.schema),
         );
+        // A materialized view is rewritten by a rule the way an ordinary view
+        // is, so PostgreSQL reports `relhasrules` for one; and its contents
+        // exist only once `REFRESH` has run, which is the whole meaning of
+        // `relispopulated` — every other relation kind is populated by
+        // definition.
+        if let Some(matview) = &table.materialized {
+            row.relhasrules = true;
+            row.relispopulated = matview.populated;
+        }
         row.relnatts = table.columns.len();
         row.relchecks = table.checks.len();
         row.relhasindex = indexed_table_ids.contains(&table.id);
@@ -17228,6 +17463,10 @@ struct PgClassRow<'a> {
     /// can carry row security; every other relation kind leaves these false.
     relrowsecurity: bool,
     relforcerowsecurity: bool,
+    /// `pg_class.relispopulated`. Only a materialized view can be unpopulated —
+    /// every other relation kind holds whatever it holds the moment it exists —
+    /// so this defaults true and only `relkind = 'm'` ever clears it.
+    relispopulated: bool,
     reltablespace: u32,
     /// The `pg_authid.oid` of the owning role. Only stored relations carry a
     /// real owner; the catalog's own relations belong to the bootstrap
@@ -17256,11 +17495,14 @@ impl<'a> PgClassRow<'a> {
             relhasindex: false,
             relhasrules: false,
             relhastriggers: false,
-            relam: if relkind == "r" { 2 } else { 0 },
+            // A materialized view's contents live in the heap exactly as a
+            // table's do, so PostgreSQL gives it the heap access method too.
+            relam: if matches!(relkind, "r" | "m") { 2 } else { 0 },
             relfilenode,
             relispartition: false,
             relrowsecurity: false,
             relforcerowsecurity: false,
+            relispopulated: true,
             reltablespace: 0,
             relowner: crate::catalog_fn::BOOTSTRAP_ROLE_OID,
             relpersistence: 'p',
@@ -17290,8 +17532,8 @@ impl<'a> PgClassRow<'a> {
             int(0),
             Datum::Bool(self.relhasindex),
             Datum::Bool(false),
-            // Every crabka relation is populated and replica-identity
-            // "default"; its persistence follows the schema holding it.
+            // Every crabka relation is replica-identity "default"; its
+            // persistence follows the schema holding it.
             text(&self.relpersistence.to_string()),
             text(self.relkind),
             Datum::Int2(natts),
@@ -17301,7 +17543,7 @@ impl<'a> PgClassRow<'a> {
             Datum::Bool(false),
             Datum::Bool(self.relrowsecurity),
             Datum::Bool(self.relforcerowsecurity),
-            Datum::Bool(true),
+            Datum::Bool(self.relispopulated),
             text("d"),
             Datum::Bool(self.relispartition),
             int(0),
@@ -17341,6 +17583,7 @@ fn pg_attribute_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> 
             force_row_security: false,
             sharding: None,
             foreign: None,
+            materialized: None,
             checks: Vec::new(),
         };
         rows.extend(attribute_rows_for_table(oid, &table)?);
@@ -17376,6 +17619,7 @@ fn pg_attribute_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> 
             force_row_security: false,
             sharding: None,
             foreign: None,
+            materialized: None,
             checks: Vec::new(),
         };
         rows.extend(attribute_rows_for_table(relid, &table)?);
@@ -17429,14 +17673,21 @@ fn is_other_temp_schema(schema: &str, backend_id: i32) -> bool {
 }
 
 /// Every relation the SQL standard calls a table: base tables, foreign tables,
-/// and (F-2) views, which `table_type = 'VIEW'` distinguishes.
+/// and — F-2 — views, which `table_type = 'VIEW'` distinguishes.
+///
+/// A materialized view is not one of them. The standard has no such object, and
+/// PostgreSQL's `information_schema.tables` filters `relkind` to `r`/`p`/`v`/`f`
+/// rather than inventing a `table_type` for it, so one is absent here as well as
+/// from `information_schema.columns`.
 fn information_schema_tables_rows(
     catalog_kv: &dyn Kv,
     backend_id: i32,
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut rows = crabka_pgcatalog::list_tables(catalog_kv)?
         .into_iter()
-        .filter(|table| !is_other_temp_schema(&table.name.schema, backend_id))
+        .filter(|table| {
+            !is_other_temp_schema(&table.name.schema, backend_id) && table.materialized.is_none()
+        })
         .map(|table| {
             information_schema_table_row(
                 &table.name,
@@ -17493,7 +17744,10 @@ fn information_schema_columns_rows(
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut rows = Vec::new();
     for table in crabka_pgcatalog::list_tables(catalog_kv)? {
-        if is_other_temp_schema(&table.name.schema, backend_id) {
+        // A materialized view contributes no rows here for the same reason it
+        // contributes none to `information_schema.tables`: the standard has no
+        // such relation, so PostgreSQL leaves it out of both.
+        if is_other_temp_schema(&table.name.schema, backend_id) || table.materialized.is_some() {
             continue;
         }
         for (idx, column) in table.columns.iter().enumerate() {
@@ -18326,6 +18580,7 @@ fn builtin_catalog_index_table(index: &BuiltinCatalogOidIndex) -> Table {
         force_row_security: false,
         sharding: None,
         foreign: None,
+        materialized: None,
         checks: Vec::new(),
     }
 }
@@ -18859,7 +19114,7 @@ pub(crate) fn regtype_oid(name: &str) -> Option<i32> {
 
 pub(crate) fn regtype_name(oid: i32) -> String {
     crabka_pgtypes::usertype::lookup_oid(u32::try_from(oid).unwrap_or(0))
-        .map(|ty| ty.name)
+        .map(|ty| ty.name.clone())
         .unwrap_or_else(|| {
             let formatted = crate::func::format_type(i64::from(oid), -1);
             if formatted == "-" {
@@ -21710,6 +21965,7 @@ fn create_table_definition(
         force_row_security: false,
         sharding: None,
         foreign: None,
+        materialized: None,
         checks: checks.clone(),
     };
     for check in &checks {
@@ -25418,8 +25674,18 @@ pub(crate) fn dependent_view_chain(
     )>,
     ExecError,
 > {
+    // A materialized view depends on what its query reads exactly as a view
+    // does — that is the whole of the dependency — so it is probed through the
+    // same machinery, from a `View` synthesized out of its `Table` record. The
+    // dependent's own kind is recovered from the catalog when a message names
+    // it; the walk itself does not care which it is.
     let mut views: Vec<ViewProbe> = crabka_pgcatalog::list_views(kv)?
         .into_iter()
+        .chain(
+            crabka_pgcatalog::list_tables(kv)?
+                .into_iter()
+                .filter_map(materialized_as_view),
+        )
         .map(ViewProbe::new)
         .collect();
     // A column restriction applies only to the direct step: once a view is a
@@ -25641,12 +25907,8 @@ fn dependent_objects_error(
     let detail = dependents
         .iter()
         .map(|(view, via)| {
-            let kind = if crabka_pgcatalog::get_view(kv, via).is_ok() {
-                "view"
-            } else {
-                "table"
-            };
-            format!("view {view} depends on {kind} {via}")
+            let kind = |name| relation_kind(kv, name).unwrap_or("table");
+            format!("{} {view} depends on {} {via}", kind(view), kind(via))
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -25895,11 +26157,20 @@ fn constraint_index_named(
 }
 
 /// The kind of relation `name` is, or `None` when no relation of that name
-/// exists. Tables, views, indexes, and sequences share one namespace in
-/// `PostgreSQL`, so a name resolves to at most one of them.
-fn relation_kind(kv: &dyn Kv, name: &crabka_pgcatalog::RelationName) -> Option<&'static str> {
-    if crabka_pgcatalog::get_table(kv, name).is_ok() {
-        Some("table")
+/// exists. Tables, views, materialized views, indexes, and sequences share one
+/// namespace in `PostgreSQL`, so a name resolves to at most one of them.
+///
+/// The three stored kinds are all `Table` records here, so the word comes from
+/// the record's relation-kind payload rather than from which catalog answered:
+/// a foreign table and a materialized view both satisfy `get_table`, and
+/// reporting either as `table` is what let `COMMENT ON TABLE` accept a foreign
+/// table before this distinction existed.
+pub(crate) fn relation_kind(
+    kv: &dyn Kv,
+    name: &crabka_pgcatalog::RelationName,
+) -> Option<&'static str> {
+    if let Ok(table) = crabka_pgcatalog::get_table(kv, name) {
+        Some(stored_relation_kind(&table))
     } else if crabka_pgcatalog::get_view(kv, name).is_ok() {
         Some("view")
     } else if crabka_pgcatalog::get_index(kv, name).is_ok() {
@@ -25911,11 +26182,128 @@ fn relation_kind(kv: &dyn Kv, name: &crabka_pgcatalog::RelationName) -> Option<&
     }
 }
 
+/// Which of the three kinds a stored relation is, in the word `PostgreSQL`
+/// writes in a message about it.
+pub(crate) fn stored_relation_kind(table: &crabka_pgcatalog::Table) -> &'static str {
+    if table.foreign.is_some() {
+        "foreign table"
+    } else if table.materialized.is_some() {
+        "materialized view"
+    } else {
+        "table"
+    }
+}
+
+/// `DROP <kind> name` where `name` is a relation of some *other* kind.
+///
+/// `PostgreSQL`'s `DropErrorMsgWrongType` writes two things: the refusal names
+/// the kind that was *asked for*, and the `HINT` names the command that would
+/// have worked on the kind that is actually there. Both halves matter — the
+/// message alone does not tell you what the relation is — and the relation is
+/// named bare rather than schema-qualified, because the name in the message is
+/// the one the statement wrote.
+fn wrong_drop_kind_error(
+    name: &crabka_pgcatalog::RelationName,
+    requested: &str,
+    actual: &str,
+) -> ExecError {
+    let article = |kind: &str| {
+        if kind.starts_with(['a', 'e', 'i', 'o', 'u']) {
+            "an"
+        } else {
+            "a"
+        }
+    };
+    ExecError::Remote(
+        crabka_pgwire::error::PgError::error(
+            "42809",
+            format!(
+                "\"{}\" is not {} {requested}",
+                name.name,
+                article(requested)
+            ),
+        )
+        .with_hint(format!(
+            "Use DROP {} to remove {} {actual}.",
+            actual.to_ascii_uppercase(),
+            article(actual)
+        )),
+    )
+}
+
+/// `TRUNCATE` against a relation that is not a table.
+///
+/// `PostgreSQL`'s `truncate_check_rel` words this like the `DROP TABLE` refusal
+/// — `"x" is not a table` — but emits no `HINT`, because there is no command it
+/// could suggest: nothing truncates a materialized view.
+pub(crate) fn wrong_relation_kind_write_error(name: &crabka_pgcatalog::RelationName) -> ExecError {
+    ExecError::WrongObjectType(format!("\"{}\" is not a table", name.name))
+}
+
+/// The `DROP <kind>` refusal for `name`, or `None` when no relation of that
+/// name exists at all — which is the caller's own 42P01, not a kind mismatch.
+fn drop_kind_mismatch(
+    kv: &dyn Kv,
+    name: &crabka_pgcatalog::RelationName,
+    requested: &str,
+) -> Option<ExecError> {
+    let actual = relation_kind(kv, name)?;
+    (actual != requested).then(|| wrong_drop_kind_error(name, requested, actual))
+}
+
+/// The materialized view `name` names, or `PostgreSQL`'s refusal for a relation
+/// of any other kind.
+///
+/// `REFRESH MATERIALIZED VIEW` refuses a wrong relation kind in two different
+/// wordings, and which one you get depends on how far `PostgreSQL` got:
+///
+/// * a relation with no heap at all — a view, a sequence, an index — is rejected
+///   while the name is still being opened, as `42809 "x" is not a table or
+///   materialized view`;
+/// * a relation that *does* have a heap but is not a materialized view — an
+///   ordinary or foreign table — gets past that and is rejected by the command
+///   itself, as `0A000 "x" is not a materialized view`.
+///
+/// Neither carries a `HINT`, which is what separates them from
+/// [`drop_kind_mismatch`]'s family.
+pub(crate) fn require_materialized_view(
+    kv: &dyn Kv,
+    name: &crabka_pgcatalog::RelationName,
+) -> Result<crabka_pgcatalog::Table, ExecError> {
+    match crabka_pgcatalog::get_table(kv, name) {
+        Ok(table) if table.materialized.is_some() => Ok(table),
+        Ok(_) => Err(ExecError::Unsupported(format!(
+            "\"{}\" is not a materialized view",
+            name.name
+        ))),
+        Err(crabka_pgcatalog::CatalogError::UndefinedTable(_))
+            if relation_kind(kv, name).is_some() =>
+        {
+            Err(ExecError::WrongObjectType(format!(
+                "\"{}\" is not a table or materialized view",
+                name.name
+            )))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Refuse a read of a materialized view whose contents have never been
+/// computed. Every other relation — and a populated materialized view — passes
+/// through untouched.
+fn require_populated(table: &crabka_pgcatalog::Table) -> Result<(), ExecError> {
+    match &table.materialized {
+        Some(matview) if !matview.populated => Err(ExecError::MaterializedViewNotPopulated(
+            table.name.name.clone(),
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// `COMMENT ON <kind> <name>` names one relation kind and `PostgreSQL` enforces
 /// it: a name that resolves to a relation of a *different* kind is 42809, and
 /// only a name that resolves to nothing at all is the 42P01 relation lookup
-/// failure. Crabka has no materialized views or foreign tables, so those kinds
-/// never match a relation it can find.
+/// failure.
 fn require_relation_kind(
     kv: &dyn Kv,
     requested: &str,
@@ -29339,6 +29727,7 @@ mod tests {
             force_row_security: false,
             sharding: None,
             foreign: None,
+            materialized: None,
             checks: Vec::new(),
         };
         let rowid: u64 = 1;
@@ -30418,6 +30807,7 @@ mod tests {
                 },
             )),
             foreign: None,
+            materialized: None,
             checks: Vec::new(),
         };
         for value in [
@@ -30516,6 +30906,7 @@ mod tests {
                 },
             )),
             foreign: None,
+            materialized: None,
             checks: Vec::new(),
         };
         let error = super::hash_bucket_for_row(&table, &[Datum::Int4(1), Datum::Int4(2)])
@@ -30733,6 +31124,7 @@ mod tests {
             force_row_security: false,
             sharding: None,
             foreign: None,
+            materialized: None,
             checks: Vec::new(),
         };
         let indexes = indexes

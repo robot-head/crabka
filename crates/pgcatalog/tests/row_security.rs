@@ -48,6 +48,7 @@ fn create_reserved(
         TableCreation {
             owner: BOOTSTRAP_ROLE,
             id,
+            materialized: None,
         },
     )
     .expect("create table ops");
@@ -66,6 +67,7 @@ fn expected_table(id: TableId, name: &RelationName, options: TableOptions) -> Ta
         force_row_security: options.force_row_security,
         sharding: None,
         foreign: None,
+        materialized: None,
         checks: Vec::new(),
     }
 }
