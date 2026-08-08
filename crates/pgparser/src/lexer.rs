@@ -20,6 +20,22 @@ use crate::{
 /// this code, not with 42601.
 const UNTRANSLATABLE: &str = "22021";
 
+/// SQLSTATE 42601 (`syntax_error`). [`ParseError::new`] already defaults to it,
+/// but it also prefixes its argument with "syntax error at position N:", so a
+/// lexer rule whose text `PostgreSQL` renders verbatim has to name the code.
+const SYNTAX_ERROR: &str = "42601";
+
+/// `PostgreSQL`'s `scan.l` rejects a delimiter pair enclosing nothing at the
+/// moment it closes the identifier (`literallen == 0`), so `""` never becomes a
+/// name — the error fires wherever a quoted identifier may appear, not only in
+/// the clause that would have consumed it.
+///
+/// The message quotes the offending two-character lexeme, which is why it ends
+/// in four quote characters. A doubled quote INSIDE the delimiters is an escape
+/// rather than a delimiter, so this never fires for `""""` (the one-character
+/// identifier `"`) or for `"a""b"` — only the accumulated name's length decides.
+const ZERO_LENGTH_IDENT: &str = "zero-length delimited identifier at or near \"\"\"\"";
+
 /// Tokenize SQL text and preserve each token's byte offset.
 ///
 /// # Errors
@@ -99,6 +115,13 @@ pub fn lex(sql: &str) -> Result<Vec<(Token, usize)>, ParseError> {
                             i += 1;
                         }
                     }
+                }
+                if s.is_empty() {
+                    return Err(ParseError::new_sqlstate(
+                        SYNTAX_ERROR,
+                        ZERO_LENGTH_IDENT,
+                        start,
+                    ));
                 }
                 out.push((Token::Ident(decode_utf8(s, start)?), start));
             }
@@ -1534,6 +1557,92 @@ mod tests {
                     Token::Eof,
                 ]
         );
+    }
+
+    #[test]
+    fn a_zero_length_delimited_identifier_is_rejected_wherever_one_can_appear() {
+        use assert2::assert;
+
+        // `PostgreSQL` raises this from `scan.l`, so it fires at the quote pair
+        // itself rather than in whatever clause would have consumed the name.
+        // Each case pairs a statement with the BYTE offset of its `""`; the
+        // one-based column PostgreSQL's caret prints is that offset plus one.
+        let cases: &[(&str, usize)] = &[
+            // The `create_am` regression case: an access method name.
+            ("CREATE TABLE i_am_a_failure() USING \"\";", 36),
+            // A relation name, bare and schema-qualified on either side.
+            ("SELECT * FROM \"\";", 14),
+            ("SELECT * FROM \"\".t;", 14),
+            ("SELECT * FROM pg_catalog.\"\";", 25),
+            ("CREATE TABLE \"\" (a int);", 13),
+            // A column name, in a target list, a definition and an insert list.
+            ("SELECT \"\" FROM t;", 7),
+            ("CREATE TABLE t (\"\" int);", 16),
+            ("INSERT INTO t (\"\") VALUES (1);", 15),
+            // An alias, a sort key, a grouping key, a function and a type.
+            ("SELECT * FROM t AS \"\";", 19),
+            ("SELECT 1 AS \"\";", 12),
+            ("SELECT x FROM t ORDER BY \"\";", 25),
+            ("SELECT x FROM t GROUP BY \"\";", 25),
+            ("SELECT \"\"('a');", 7),
+            ("SELECT 1::\"\";", 10),
+            ("SELECT CAST(1 AS \"\");", 17),
+            // Other object namespaces, and a name abutting a bare word on
+            // either side — `x""` is the identifier `x` and then the error.
+            ("CREATE SCHEMA \"\";", 14),
+            ("CREATE INDEX \"\" ON t (a);", 13),
+            ("SET \"\" = 1;", 4),
+            ("SELECT \"\"x;", 7),
+            ("SELECT x\"\";", 8),
+        ];
+        for (sql, position) in cases {
+            let e = lex(sql).expect_err("a zero-length delimited identifier");
+            assert!(
+                e.message == "zero-length delimited identifier at or near \"\"\"\"",
+                "lexing {sql:?}: {}",
+                e.message
+            );
+            assert!(e.sqlstate() == "42601", "lexing {sql:?}");
+            assert!(e.position == *position, "lexing {sql:?}");
+        }
+    }
+
+    #[test]
+    fn a_doubled_quote_inside_the_delimiters_is_an_escape_not_an_empty_name() {
+        use assert2::assert;
+
+        // Only the ACCUMULATED name's length decides, so a pair that is escaped
+        // rather than delimiting still yields a name. `""""` is the one-character
+        // identifier `"`, and the rule reaches neither the empty string literal
+        // (which is legal) nor any other quoted form the lexer scans.
+        let cases: &[(&str, Token)] = &[
+            ("\"\"\"\"", Token::Ident("\"".into())),
+            ("\"\"\"\"\"\"", Token::Ident("\"\"".into())),
+            ("\"a\"\"b\"", Token::Ident("a\"b".into())),
+            ("\"\"\"ab\"", Token::Ident("\"ab".into())),
+            ("\"ab\"\"\"", Token::Ident("ab\"".into())),
+            ("\"a\"\"\"\"b\"", Token::Ident("a\"\"b".into())),
+            ("\"\"\"a\"\"\"", Token::Ident("\"a\"".into())),
+            ("\" \"", Token::Ident(" ".into())),
+            ("\"select\"", Token::Ident("select".into())),
+            ("\"MixedCase\"", Token::Ident("MixedCase".into())),
+            ("\"héllo\"", Token::Ident("héllo".into())),
+            // A zero-length STRING is legal in PostgreSQL, in every spelling.
+            ("''", Token::StringLit(String::new())),
+            ("E''", Token::StringLit(String::new())),
+            ("$$$$", Token::StringLit(String::new())),
+            ("B''", Token::BitStringLit("b".into())),
+            ("X''", Token::BitStringLit("x".into())),
+            // And a quote pair that is DATA rather than a delimiter is untouched.
+            ("'\"\"'", Token::StringLit("\"\"".into())),
+            ("$$\"\"$$", Token::StringLit("\"\"".into())),
+        ];
+        for (sql, token) in cases {
+            assert!(
+                toks(sql) == vec![token.clone(), Token::Eof],
+                "lexing {sql:?}"
+            );
+        }
     }
 
     #[test]
