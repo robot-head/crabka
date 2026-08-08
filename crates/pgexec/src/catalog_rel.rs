@@ -574,6 +574,129 @@ pub fn table_relation_oid(table_id: u32) -> Result<i32, ExecError> {
         .ok_or_else(|| ExecError::Unsupported("table oid leaves its band".into()))
 }
 
+/// The slot `oid` occupies in the band starting at `base`, or `None` when it
+/// falls outside that band.
+fn band_slot(base: i32, oid: i32) -> Option<u32> {
+    oid.checked_sub(base)
+        .filter(|slot| (0..OID_BAND_WIDTH).contains(slot))
+        .map(i32::unsigned_abs)
+}
+
+/// The catalog name of the relation `oid` names, or `None` when no relation
+/// carries it.
+///
+/// The inverse of the oid derivations above, and deliberately band-directed:
+/// an oid names exactly one relation kind, so reading the catalogs the other
+/// three kinds live in would be wasted work. A table — the overwhelmingly
+/// common case, and the one `pg_table_is_visible` is asked about once per row
+/// of a `\d` listing — costs a single id-keyed `get` rather than a scan.
+///
+/// A composite type's row relation sits above every band, keyed by the type's
+/// own oid, so it is looked for last and only when nothing else can match.
+///
+/// # Errors
+///
+/// Returns storage/corruption errors from the catalog KV seam.
+pub(crate) fn relation_for_oid(kv: &dyn Kv, oid: i32) -> Result<Option<RelationName>, ExecError> {
+    if let Some(id) = band_slot(TABLE_OID_BASE, oid) {
+        return Ok(crabka_pgcatalog::relation_name_of(kv, id)?);
+    }
+    if band_slot(INDEX_OID_BASE, oid).is_some() {
+        return Ok(crabka_pgcatalog::list_indexes(kv)?
+            .into_iter()
+            .find(|index| index_relation_oid(index.id) == Ok(oid))
+            .map(|index| index.qualified_name()));
+    }
+    if band_slot(VIEW_OID_BASE, oid).is_some() {
+        return Ok(view_oids(kv)?
+            .into_iter()
+            .find(|(_, candidate)| *candidate == oid)
+            .map(|(name, _)| name));
+    }
+    if band_slot(SEQUENCE_OID_BASE, oid).is_some() {
+        return Ok(sequence_oids(kv)?
+            .into_iter()
+            .find(|(_, candidate)| *candidate == oid)
+            .map(|(name, _)| name));
+    }
+    if let Some(name) = virtual_relation_for_oid(oid) {
+        return Ok(Some(name));
+    }
+    Ok(composite_relation_for_oid(kv, oid)?)
+}
+
+/// The catalog name of the synthesised `pg_catalog`/`information_schema`
+/// relation `oid` names.
+fn virtual_relation_for_oid(oid: i32) -> Option<RelationName> {
+    virtual_relations()
+        .iter()
+        .find(|(_, candidate)| **candidate == oid)
+        .map(|(name, _)| name.clone())
+}
+
+/// Does a synthesised catalog relation answer to exactly this name?
+///
+/// The per-schema probe [`crate::visibility`] repeats while walking the search
+/// path, alongside [`crabka_pgcatalog::relation_exists`] for the four kinds the
+/// catalog stores.
+pub(crate) fn virtual_relation_named(name: &RelationName) -> bool {
+    virtual_relations().contains_key(name)
+}
+
+/// Every synthesised catalog relation, keyed by its catalog name.
+///
+/// [`crate::exec`] keys those relations by a flat spelling, so the schema is
+/// read back off the spelling: an `information_schema.` prefix names that
+/// schema and every other spelling is `pg_catalog`.
+/// The catalogs' own oid indexes are included: they are `pg_class` rows like
+/// any other, so `pg_table_is_visible(2662)` has to answer for
+/// `pg_class_oid_index` rather than report that no relation carries the oid.
+fn virtual_relations() -> &'static BTreeMap<RelationName, i32> {
+    static NAMES: std::sync::LazyLock<BTreeMap<RelationName, i32>> =
+        std::sync::LazyLock::new(|| {
+            crate::exec::virtual_table_names()
+                .iter()
+                .map(|spelled| {
+                    let name = match spelled.split_once('.') {
+                        Some((schema, relation)) => RelationName::new(schema, relation),
+                        None => RelationName::new(crate::search_path::PG_CATALOG, *spelled),
+                    };
+                    (name, crate::exec::virtual_relation_oid(spelled))
+                })
+                .chain(
+                    crate::exec::BUILTIN_CATALOG_OID_INDEXES
+                        .iter()
+                        .map(|index| {
+                            (
+                                RelationName::new(crate::search_path::PG_CATALOG, index.name),
+                                index.oid,
+                            )
+                        }),
+                )
+                .collect()
+        });
+    &NAMES
+}
+
+/// The name of the row relation a composite type owns, when `oid` is one.
+fn composite_relation_for_oid(
+    kv: &dyn Kv,
+    oid: i32,
+) -> Result<Option<RelationName>, crabka_pgcatalog::CatalogError> {
+    let Ok(oid) = u32::try_from(oid) else {
+        return Ok(None);
+    };
+    Ok(crabka_pgcatalog::list_user_types(kv)?
+        .into_iter()
+        .find(|ty| {
+            matches!(
+                ty.body,
+                crabka_pgtypes::usertype::UserTypeBody::Composite(_)
+            ) && crabka_pgtypes::usertype::composite_relation_oid(ty.oid) == oid
+        })
+        .map(|ty| RelationName::new(ty.schema, ty.name)))
+}
+
 /// Build a column list from `(name, type)` pairs.
 fn cols(defs: &[(&str, ColumnType)]) -> Vec<Column> {
     defs.iter()

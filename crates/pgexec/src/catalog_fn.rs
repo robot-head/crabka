@@ -136,14 +136,21 @@ fn catalog_func(name: &str) -> Option<CatalogFunc> {
         | "pg_get_partkeydef"
         | "pg_get_statisticsobjdef"
         | "pg_get_statisticsobjdef_columns" => NullDef,
+        // `pg_table_is_visible` belongs to the same family but is dispatched
+        // through [`crate::func`]; every other member lands here. Both routes
+        // evaluate through [`crate::visibility`].
         "pg_type_is_visible"
         | "pg_function_is_visible"
         | "pg_opclass_is_visible"
+        | "pg_opfamily_is_visible"
         | "pg_operator_is_visible"
         | "pg_collation_is_visible"
         | "pg_conversion_is_visible"
         | "pg_statistics_obj_is_visible"
-        | "pg_ts_config_is_visible" => IsVisible,
+        | "pg_ts_config_is_visible"
+        | "pg_ts_dict_is_visible"
+        | "pg_ts_parser_is_visible"
+        | "pg_ts_template_is_visible" => IsVisible,
         "pg_relation_size" => RelationSize,
         "pg_table_size" => TableSize,
         "pg_indexes_size" => IndexesSize,
@@ -340,7 +347,13 @@ fn eval_resolved(
     match f {
         NullDef => Ok(Datum::Null),
         TablespaceLocation => tablespace_location(&vals[0], ctx),
-        IsVisible | IsPublishable => Ok(visibility_answer(&vals[0])),
+        IsVisible => crate::visibility::is_visible(
+            crate::visibility::Catalog::for_function(name)
+                .ok_or_else(|| undefined_function(name))?,
+            &vals[0],
+            ctx,
+        ),
+        IsPublishable => Ok(publishable_answer(&vals[0])),
         InRecovery => Ok(Datum::Bool(false)),
         // A whole-database or whole-tablespace size names something that is not
         // a relation, so its argument is taken as given rather than resolved.
@@ -689,9 +702,9 @@ fn catalog_unavailable() -> ExecError {
     ExecError::Unsupported("catalog functions require a SQL session".into())
 }
 
-/// Everything crabka exposes is in a schema on the search path, so a
-/// visibility test is true for any non-NULL oid and NULL for a NULL one.
-fn visibility_answer(oid: &Datum) -> Datum {
+/// `pg_relation_is_publishable(oid)`. crabka publishes every relation, so the
+/// answer is true for any non-NULL oid and NULL for a NULL one.
+fn publishable_answer(oid: &Datum) -> Datum {
     match oid {
         Datum::Null => Datum::Null,
         _ => Datum::Bool(true),
@@ -1377,34 +1390,23 @@ fn cluster_size(object: &Datum) -> Datum {
     }
 }
 
-/// Resolve a `regclass`-shaped argument, an oid or a relation name, to its
-/// `pg_class` oid.
-/// Whether a relation is visible to this session — `pg_table_is_visible`.
+/// `pg_table_is_visible(oid)` — would an unqualified reference to this
+/// relation's name resolve to *this* relation?
 ///
-/// The rule that matters here is the temporary one: another session's
-/// `pg_temp_N` namespace is never visible, which is how PostgreSQL keeps
-/// `\d` and the `information_schema` views from listing relations that belong
-/// to somebody else's backend. Everything else answers visible, because an
-/// unqualified name here already resolves through the search path.
-pub(crate) fn relation_is_visible(oid: i64, ctx: &EvalCtx) -> bool {
-    let (Some(kv), Ok(oid)) = (ctx.catalog(), i32::try_from(oid)) else {
-        return true;
-    };
-    let Some(schema) = relation_schema_for_oid(kv, oid) else {
-        return true;
-    };
-    !crabka_pgcatalog::is_temp_schema(&schema) || schema == ctx.resolution().temp_schema()
+/// [`crate::visibility`] holds the rule, which is the same one every other
+/// member of the family follows. This is the entry point [`crate::func`]
+/// dispatches through, because `pg_table_is_visible` is classified there rather
+/// than in this module's family.
+///
+/// # Errors
+///
+/// Propagates storage/corruption errors from the catalog KV seam.
+pub(crate) fn relation_is_visible(oid: &Datum, ctx: &EvalCtx) -> Result<Datum, ExecError> {
+    crate::visibility::is_visible(crate::visibility::Catalog::Relation, oid, ctx)
 }
 
-/// The schema a relation oid lives in, or `None` when no relation claims it.
-fn relation_schema_for_oid(kv: &dyn Kv, oid: i32) -> Option<String> {
-    crabka_pgcatalog::list_tables(kv)
-        .ok()?
-        .into_iter()
-        .find(|table| crate::catalog_rel::table_relation_oid(table.id) == Ok(oid))
-        .map(|table| table.name.schema)
-}
-
+/// Resolve a `regclass`-shaped argument — an oid, or a relation name — to its
+/// `pg_class` oid.
 fn resolve_relation_oid(
     kv: &dyn Kv,
     scope: &ResolutionScope,

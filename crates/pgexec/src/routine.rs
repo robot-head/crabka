@@ -3691,7 +3691,17 @@ fn named_type_oid(name: &str) -> i32 {
         .map_or(0, |(_, oid)| *oid)
 }
 
-/// A signature type's `pg_type.oid`, or `0` for a relation's composite type.
+/// A routine's `pg_proc.proargtypes` — the input parameters' type oids, in
+/// declaration order. The same list [`user_pg_proc_rows`] publishes, so a
+/// caller comparing signatures against `pg_proc` reads the same values.
+pub(crate) fn routine_arg_type_oids(routine: &Routine) -> Vec<i32> {
+    routine
+        .input_params()
+        .map(|param| type_oid(&param.ty))
+        .collect()
+}
+
+/// A signature type's `pg_type.oid`; `0` for a relation's composite type.
 fn type_oid(ty: &RoutineType) -> i32 {
     ty.column.map_or_else(
         || named_type_oid(&ty.name),

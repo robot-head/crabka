@@ -124,6 +124,7 @@ mod values;
 mod viewdef;
 mod viewdeps;
 mod viewwrite;
+mod visibility;
 pub mod watchdog;
 mod window;
 mod xml_fn;

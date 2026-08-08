@@ -437,6 +437,31 @@ fn builtin_proc_index() -> Option<&'static ProcIndex> {
         .as_ref()
 }
 
+/// The name and input type oids of the built-in routine `oid` names.
+///
+/// The pair `pg_function_is_visible` shadows on: two routines hide one another
+/// only when both the name and the whole argument list match, which is why an
+/// overload on different arguments is visible alongside an earlier namesake.
+pub(crate) fn builtin_proc_signature(oid: i32) -> Option<(&'static str, &'static [i32])> {
+    let (by_oid, _, args, _) = builtin_proc_index()?;
+    let name = by_oid.get(&oid).map(|(name, _)| name.as_str())?;
+    Some((name, args.get(&oid).map_or(&[][..], Vec::as_slice)))
+}
+
+/// Does the built-in fixture declare a routine of exactly this signature?
+pub(crate) fn builtin_proc_declared(name: &str, args: &[i32]) -> bool {
+    let Some((_, _, arg_index, by_name)) = builtin_proc_index() else {
+        return false;
+    };
+    by_name.get(name).is_some_and(|candidates| {
+        candidates.iter().any(|(oid, _)| {
+            arg_index
+                .get(oid)
+                .map_or(args.is_empty(), |declared| declared == args)
+        })
+    })
+}
+
 fn proc_name(kv: &dyn Kv, oid: i32) -> Result<Option<String>, ExecError> {
     // The user routines are few; the built-ins are indexed.
     let user = crate::routine::user_pg_proc_rows(kv)?;
