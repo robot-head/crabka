@@ -1006,7 +1006,18 @@ impl ColumnType {
             "tstzmultirange" => ColumnType::builtin_multirange(oids::TSTZMULTIRANGE),
             "datemultirange" => ColumnType::builtin_multirange(oids::DATEMULTIRANGE),
             "int8multirange" => ColumnType::builtin_multirange(oids::INT8MULTIRANGE),
-            _ => None,
+            // `_int4` is what `pg_type.typname` calls `int4[]`, and PostgreSQL
+            // accepts that spelling wherever a type name is written -- which is
+            // how `CREATE TYPE … AS (ia _int4)` and `'_int4'::regtype` are
+            // written in the regress corpus. The element must itself be a
+            // built-in: a user type's array is reached through the catalog, and
+            // an array of arrays does not exist, so `__int4` resolves to
+            // nothing rather than nesting.
+            other => other
+                .strip_prefix('_')
+                .and_then(Self::from_builtin_sql_name)
+                .and_then(ElemType::from_column_type)
+                .map(ColumnType::Array),
         }
     }
 
@@ -2140,6 +2151,34 @@ pub fn canonicalize_row_for_key(values: &[Datum]) -> std::borrow::Cow<'_, [Datum
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `pg_type.typname` spells an array with a leading underscore, and
+    /// PostgreSQL accepts that wherever a type name is written -- which is how
+    /// `CREATE TYPE … AS (ia _int4)` is written in the regress corpus, and what
+    /// blocked it here. Only a built-in element resolves: a user type's array
+    /// is reached through the catalog, and there is no array of arrays.
+    #[test]
+    fn an_underscore_prefix_names_the_array_of_a_builtin() {
+        for (written, expected) in [
+            ("_int4", Some(ColumnType::Array(ElemType::Int4))),
+            ("_text", Some(ColumnType::Array(ElemType::Text))),
+            ("_bool", Some(ColumnType::Array(ElemType::Bool))),
+            ("_INT4", Some(ColumnType::Array(ElemType::Int4))),
+            // Not an array of arrays, and not a type that does not exist.
+            ("__int4", None),
+            ("_nosuchtype", None),
+            ("_", None),
+            // The ordinary spellings are untouched.
+            ("int4", Some(ColumnType::Int4)),
+            ("text", Some(ColumnType::Text)),
+        ] {
+            assert!(
+                ColumnType::from_sql_name(written) == expected,
+                "{written}: {:?}",
+                ColumnType::from_sql_name(written)
+            );
+        }
+    }
 
     #[test]
     fn column_type_from_sql_names_and_aliases() {

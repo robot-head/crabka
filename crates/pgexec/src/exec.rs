@@ -17235,6 +17235,30 @@ pub(crate) fn regtype_oid(name: &str) -> Option<i32> {
         .iter()
         .find(|(candidate, _)| *candidate == name)
         .map(|(_, oid)| *oid)
+        // `TYPE_OIDS` lists the scalar spellings. An array is written either
+        // `int4[]` or as `pg_type.typname` spells it, `_int4`, and both reach
+        // the same type -- so fall back to the ordinary type-name resolver
+        // rather than duplicating the array names in the table.
+        .or_else(|| {
+            // A written type name may spell an array either way. The `[]`
+            // suffix is stripped by the parser before a declared type reaches
+            // the resolver, but `to_regtype` receives the string as written, so
+            // it is handled here rather than in the shared name table.
+            let lower = name.to_ascii_lowercase();
+            let spelling = lower.trim_end();
+            let element = spelling
+                .strip_suffix("[]")
+                .map(str::trim_end)
+                .map(std::borrow::Cow::Borrowed)
+                .unwrap_or(std::borrow::Cow::Borrowed(spelling));
+            let resolved = crabka_pgtypes::ColumnType::from_builtin_sql_name(&element)?;
+            let resolved = if spelling.ends_with("[]") {
+                crabka_pgtypes::ColumnType::array_of(resolved)?
+            } else {
+                resolved
+            };
+            i32::try_from(resolved.oid()).ok()
+        })
 }
 
 pub(crate) fn regtype_name(oid: i32) -> String {
