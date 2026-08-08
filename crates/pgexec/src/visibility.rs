@@ -196,6 +196,36 @@ pub(crate) fn is_visible(catalog: Catalog, oid: &Datum, ctx: &EvalCtx) -> Result
     Ok(Datum::Bool(false))
 }
 
+/// `RelationIsVisible` asked about a relation the caller already has the *name*
+/// of rather than an oid: would writing `name.name` unqualified reach this very
+/// relation?
+///
+/// This is the test PostgreSQL's `generate_relation_name` makes before it
+/// decides whether to spell a schema out, and it is the same path walk
+/// [`is_visible`] makes — the only difference is that the relation is given
+/// rather than looked up, which saves the whole-catalog scan an oid lookup
+/// costs. Callers that render a name they already hold should use this.
+///
+/// # Errors
+///
+/// Propagates storage/corruption errors from the catalog KV seam.
+pub(crate) fn relation_name_is_visible(
+    kv: &dyn Kv,
+    scope: &crate::relname::ResolutionScope,
+    name: &RelationName,
+) -> Result<bool, ExecError> {
+    let key = ShadowKey::Name(name.name.clone());
+    for schema in scope.visible_schemas(kv)? {
+        if schema == name.schema {
+            return Ok(true);
+        }
+        if occupied(Catalog::Relation, kv, &schema, &key)? {
+            return Ok(false);
+        }
+    }
+    Ok(false)
+}
+
 /// The argument as a `pg_class`-width oid. A value outside `int4` names no
 /// object, so it reads as absent rather than as an error.
 fn oid_arg(oid: &Datum) -> Result<Option<i32>, ExecError> {

@@ -3231,7 +3231,7 @@ impl Parser {
     fn set_statement_dispatch(&mut self) -> Result<ParsedStatement, ParseError> {
         use crate::command::CommandIdentity as I;
 
-        if matches!(self.peek2(), Token::Ident(role) if role == "role") {
+        if self.at_set_role() {
             emitted(I::SetRole, self.set_role_stmt())
         } else if matches!(self.peek2(), Token::Keyword(Keyword::Transaction)) {
             emitted(I::SetTransaction, self.set_stmt())
@@ -4230,14 +4230,65 @@ impl Parser {
         })
     }
 
+    /// Whether the statement starting at `SET` is a `SET ROLE`, in either of the
+    /// two spellings `PostgreSQL`'s grammar gives it.
+    ///
+    /// `gram.y` reaches `SET ROLE` twice. `set_rest`'s `ROLE
+    /// NonReservedWord_or_Sconst` is the bare spelling, and `generic_set`'s
+    /// `var_name TO var_list` catches `SET ROLE TO x` because `role` is an
+    /// ordinary GUC. `SESSION` is the explicit spelling of the default scope and
+    /// may precede either.
+    fn at_set_role(&self) -> bool {
+        let after_scope = if matches!(self.peek2(), Token::Ident(w) if w.eq_ignore_ascii_case("session"))
+        {
+            self.peek3()
+        } else {
+            self.peek2()
+        };
+        matches!(after_scope, Token::Ident(w) if w.eq_ignore_ascii_case("role"))
+    }
+
+    /// `SET [SESSION] ROLE [TO | =] { <name> | <string> | NONE | DEFAULT }`.
+    ///
+    /// `NONE` and `DEFAULT` both drop back to the session's authenticated user,
+    /// which is what `RESET ROLE` does, so all three produce the same statement.
+    /// `SET LOCAL ROLE` is deliberately *not* accepted: its effect is undone at
+    /// the end of the transaction, and [`crate::ast::Statement::SetRole`] has no
+    /// way to say so, so parsing it would silently promote a transaction-local
+    /// role change to a session-wide one.
     fn set_role_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
         self.expect(&Token::Keyword(Keyword::Set))?;
+        self.eat_ident_eq("session");
         self.expect_ident_eq("role")?;
-        let role = if matches!(self.peek(), Token::Ident(s) if s.eq_ignore_ascii_case("none")) {
-            self.bump();
-            None
-        } else {
-            Some(self.expect_object_name()?)
+        // `TO` is a keyword to this lexer; `=` is its own token. Either separates
+        // the GUC spelling's name from its value, and neither appears in the
+        // bare `SET ROLE x` spelling.
+        let guc_spelling = self.eat_keyword(Keyword::To) || self.eat_token(&Token::Eq);
+        let role = match self.peek() {
+            // `DEFAULT` is a value only the GUC spelling has: `set_rest`'s
+            // `ROLE NonReservedWord_or_Sconst` never sees it, because `DEFAULT`
+            // is reserved. So `SET ROLE TO DEFAULT` resets the role and a bare
+            // `SET ROLE DEFAULT` is the syntax error PostgreSQL reports.
+            Token::Ident(word) if word.eq_ignore_ascii_case("default") => {
+                if !guc_spelling {
+                    return Err(ParseError::new(
+                        "DEFAULT is not a role name",
+                        self.peek_pos(),
+                    ));
+                }
+                self.bump();
+                None
+            }
+            Token::Ident(word) if word.eq_ignore_ascii_case("none") => {
+                self.bump();
+                None
+            }
+            Token::StringLit(name) => {
+                let name = name.clone();
+                self.bump();
+                Some(name)
+            }
+            _ => Some(self.expect_object_name()?),
         };
         Ok(crate::ast::Statement::SetRole { role, reset: false })
     }
@@ -6393,6 +6444,7 @@ impl Parser {
             None
         };
         let sharded = saw_sharded;
+        self.table_access_method_clause()?;
         // PostgreSQL storage parameters (`WITH (fillfactor=100, ...)`) tune
         // heap/TOAST behavior Crabka has no equivalent of: accept the standard
         // `key [= value] [, ...]` shape and discard it. pgbench -i emits this
@@ -6422,6 +6474,49 @@ impl Parser {
             partition_of,
             tablespace,
         })
+    }
+
+    /// `table_access_method_clause`: the optional `USING <method>` that names the
+    /// table access method a `CREATE TABLE` stores its rows with. It sits after
+    /// `INHERITS`/`PARTITION BY`/`PARTITION OF … FOR VALUES` and before `WITH`,
+    /// which is the one position `gram.y` gives it.
+    ///
+    /// crabka implements exactly one table access method — `heap`, the oid-2 row
+    /// `pg_am` carries and the value `pg_class.relam` already reports for every
+    /// table — so `USING heap` names the storage the table was going to get
+    /// anyway and nothing has to be recorded. Any *other* method has no
+    /// implementation behind it, and accepting it would quietly hand back a heap
+    /// table that `\d+` then mislabels, so it is refused here with `PostgreSQL`'s
+    /// own two messages and SQLSTATEs.
+    ///
+    /// The method list is the parser's only piece of catalog knowledge, and it is
+    /// sound only because crabka has no `CREATE ACCESS METHOD`: `pg_am` cannot
+    /// gain a row at runtime, so a name outside this list cannot exist. Adding
+    /// `CREATE ACCESS METHOD` would have to move this check to the executor.
+    fn table_access_method_clause(&mut self) -> Result<(), ParseError> {
+        /// The `amtype = 'i'` rows of `pg_am`. Named, but not a table's storage.
+        const INDEX_METHODS: [&str; 6] = ["brin", "btree", "gin", "gist", "hash", "spgist"];
+
+        if !self.eat_keyword(Keyword::Using) {
+            return Ok(());
+        }
+        let position = self.peek_pos();
+        let method = self.expect_object_name()?;
+        if method == "heap" {
+            return Ok(());
+        }
+        if INDEX_METHODS.contains(&method.as_str()) {
+            return Err(ParseError::new_sqlstate(
+                "42809",
+                format!("access method \"{method}\" is not of type TABLE"),
+                position,
+            ));
+        }
+        Err(ParseError::new_sqlstate(
+            "42704",
+            format!("access method \"{method}\" does not exist"),
+            position,
+        ))
     }
 
     /// `PARTITION BY <strategy> ( <key> [COLLATE c] [opclass], … )`, or `None`
@@ -14022,6 +14117,103 @@ mod tests {
         let mut v = parse(sql).expect("parse");
         assert_eq!(v.len(), 1);
         v.pop().expect("one statement")
+    }
+
+    /// `gram.y` reaches `SET ROLE` through two productions — `set_rest`'s bare
+    /// `ROLE name` and `generic_set`'s `role TO value`, because `role` is an
+    /// ordinary GUC — so both spellings, and the `=` separator `generic_set`
+    /// also accepts, have to land on the same statement.
+    #[test]
+    fn set_role_accepts_every_spelling_postgres_gives_it() {
+        use assert2::assert;
+        let named = ["regress_display_role", "'regress_display_role'"];
+        for value in named {
+            for sql in [
+                format!("SET ROLE {value}"),
+                format!("SET ROLE TO {value}"),
+                format!("SET ROLE = {value}"),
+                format!("SET SESSION ROLE {value}"),
+                format!("SET SESSION ROLE TO {value}"),
+            ] {
+                assert!(
+                    one(&sql)
+                        == Statement::SetRole {
+                            role: Some("regress_display_role".into()),
+                            reset: false,
+                        },
+                    "{sql}"
+                );
+            }
+        }
+        // `NONE` and `DEFAULT` both drop back to the authenticated user. Only
+        // the `TO`/`=` spelling takes `DEFAULT`: PostgreSQL rejects a bare
+        // `SET ROLE DEFAULT`, because `set_rest` has no such value.
+        for sql in [
+            "SET ROLE NONE",
+            "SET ROLE TO NONE",
+            "SET ROLE TO DEFAULT",
+            "SET SESSION ROLE TO none",
+        ] {
+            assert!(
+                one(sql)
+                    == Statement::SetRole {
+                        role: None,
+                        reset: false,
+                    },
+                "{sql}"
+            );
+        }
+        // `set_rest` has no `DEFAULT` value, so the bare spelling refuses it
+        // even though the `TO` spelling takes it.
+        assert!(crate::parse("SET ROLE DEFAULT").is_err());
+    }
+
+    /// `SET LOCAL ROLE` is refused rather than silently widened: its effect ends
+    /// with the transaction, and `Statement::SetRole` carries no scope, so
+    /// accepting it would turn a transaction-local role change into a
+    /// session-wide one.
+    #[test]
+    fn set_local_role_is_refused_because_the_statement_cannot_express_it() {
+        use assert2::assert;
+        assert!(crate::parse("SET LOCAL ROLE regress_display_role").is_err());
+    }
+
+    /// `table_access_method_clause`: crabka implements only `heap`, so that one
+    /// name is accepted and every other is refused with the message and SQLSTATE
+    /// `PostgreSQL` uses — an index method is "not of type TABLE", and a name no
+    /// `pg_am` row carries "does not exist".
+    #[test]
+    fn create_table_using_accepts_heap_and_refuses_every_other_access_method() {
+        use assert2::assert;
+        for sql in [
+            "CREATE TABLE t (a int) USING heap",
+            "CREATE TABLE t (a int) USING \"heap\"",
+            "CREATE TABLE t (a int) INHERITS (p) USING heap",
+            "CREATE TABLE t (a int) USING heap WITH (fillfactor = 50)",
+            "CREATE TABLE t (a int) PARTITION BY LIST (a) USING heap",
+        ] {
+            assert!(crate::parse(sql).is_ok(), "{sql}");
+        }
+        let refused = [
+            (
+                "btree",
+                "42809",
+                "access method \"btree\" is not of type TABLE",
+            ),
+            ("gin", "42809", "access method \"gin\" is not of type TABLE"),
+            (
+                "heap_psql",
+                "42704",
+                "access method \"heap_psql\" does not exist",
+            ),
+            ("heap2", "42704", "access method \"heap2\" does not exist"),
+        ];
+        for (method, sqlstate, message) in refused {
+            let error = crate::parse(&format!("CREATE TABLE t (a int) USING {method}"))
+                .expect_err("refused");
+            assert!(error.sqlstate() == sqlstate, "{method}");
+            assert!(error.to_string() == message, "{method}");
+        }
     }
 
     /// `PostgreSQL`'s `TABLE` object-type keyword is optional, so `GRANT SELECT

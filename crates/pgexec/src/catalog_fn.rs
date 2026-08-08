@@ -449,7 +449,7 @@ fn eval_catalog_reading(f: CatalogFunc, vals: &[Datum], ctx: &EvalCtx) -> Result
             &vals[0],
             matches!(vals.get(2), Some(Datum::Bool(true))),
         ),
-        ConstraintDef => constraint_def(kv, &vals[0]),
+        ConstraintDef => constraint_def(kv, scope, &vals[0]),
         CatalogFunc::TriggerDef => trigger_def(kv, &vals[0]),
         // Every catalog column this reaches already holds the text that column
         // is supposed to report — `polqual` deparsed by its projection, a
@@ -1584,10 +1584,32 @@ pub(crate) fn relation_name_by_oid(kv: &dyn Kv, oid: i32) -> Result<Option<Strin
     Ok(None)
 }
 
-/// Spell a catalog relation name the way `regclassout` would.
+/// Spell a catalog relation name the way `regclassout` would: `schema.relation`
+/// with each half quoted as needed, dropping the schema for the two that are
+/// *usually* on the search path.
 ///
-/// The form is `schema.relation` with each half quoted as needed. This function
-/// drops the schema for the two schemas that are always on the search path.
+/// **This rule is known to be wrong, and the fix needs a signature change this
+/// function cannot make alone.** `regclassout` qualifies exactly when
+/// `RelationIsVisible` says an unqualified reference would miss the relation —
+/// the test [`crate::visibility::relation_name_is_visible`] now implements —
+/// and the fixed rule only agrees with it under the default `search_path`.
+/// Verified against `postgres:18.4`, it is wrong in both directions:
+///
+/// ```text
+/// SET search_path = app;
+/// 'app.ap'::regclass::text     -- PostgreSQL: ap          here: app.ap
+/// 'public.pp'::regclass::text  -- PostgreSQL: public.pp   here: pp
+/// ```
+///
+/// Everything a `regclass` renders funnels through [`relation_name_by_oid`],
+/// whose one name-consuming caller is `crate::exec::regclass_by_oid`; making the
+/// answer depend on the session means threading a `ResolutionScope` through that
+/// function and its callers in `exec.rs` and `session.rs`. Doing it halfway is
+/// worse than not doing it: the `::regclass` cast and a scanned `regclass`
+/// column would then disagree inside one query. [`foreign_key_definition`]'s
+/// referent is *not* affected — it deparses with `generate_relation_name`, a
+/// different `PostgreSQL` function that this one used to be conflated with, and
+/// it takes the visibility test directly.
 fn quote_relation_name(name: &RelationName) -> String {
     if name.schema == crabka_pgcatalog::PUBLIC_SCHEMA
         || name.schema == crate::search_path::PG_CATALOG
@@ -1865,7 +1887,11 @@ fn index_definition_as(index: &Index, table: &Table, qualify: bool) -> String {
 
 /// `pg_get_constraintdef(oid)`, the constraint clause that rebuilds a
 /// constraint, in the spelling `ALTER TABLE … ADD CONSTRAINT` takes.
-fn constraint_def(kv: &dyn Kv, object: &Datum) -> Result<Datum, ExecError> {
+fn constraint_def(
+    kv: &dyn Kv,
+    scope: &ResolutionScope,
+    object: &Datum,
+) -> Result<Datum, ExecError> {
     if matches!(object, Datum::Null) {
         return Ok(Datum::Null);
     }
@@ -1896,7 +1922,7 @@ fn constraint_def(kv: &dyn Kv, object: &Datum) -> Result<Datum, ExecError> {
             quoted_column_list(&index.columns)
         )));
     }
-    if let Some(definition) = foreign_key_constraint_def(kv, wanted)? {
+    if let Some(definition) = foreign_key_constraint_def(kv, scope, wanted)? {
         return Ok(Datum::Text(definition));
     }
     check_constraint_def(kv, wanted)
@@ -1904,12 +1930,16 @@ fn constraint_def(kv: &dyn Kv, object: &Datum) -> Result<Datum, ExecError> {
 
 /// The `FOREIGN KEY …` clause for the foreign key an oid names, or `None` when
 /// the oid is outside the foreign-key band.
-fn foreign_key_constraint_def(kv: &dyn Kv, wanted: i32) -> Result<Option<String>, ExecError> {
+fn foreign_key_constraint_def(
+    kv: &dyn Kv,
+    scope: &ResolutionScope,
+    wanted: i32,
+) -> Result<Option<String>, ExecError> {
     let oids = crate::catalog_rel::foreign_key_constraint_oids(kv)?;
     for foreign_key in crabka_pgcatalog::list_foreign_keys(kv)? {
         let key = format!("{}.{}", foreign_key.table, foreign_key.name);
         if oids.get(&key) == Some(&wanted) {
-            return Ok(Some(foreign_key_definition(&foreign_key)));
+            return Ok(Some(foreign_key_definition(kv, scope, &foreign_key)?));
         }
     }
     Ok(None)
@@ -1930,15 +1960,25 @@ fn foreign_key_constraint_def(kv: &dyn Kv, wanted: i32) -> Result<Option<String>
 /// This function emits the referent **unqualified** when it is visible, so
 /// `REFERENCES pp(id)` and never `public.pp(id)`. PostgreSQL renders it with
 /// `generate_relation_name`, which omits the schema of a relation the search
-/// path reaches and spells out the schema of one it does not. That is a real
-/// asymmetry with [`index_definition`], whose `ON public.t` is qualified
-/// because `pg_get_indexdef` genuinely qualifies. Do not "fix" either one to
-/// match the other.
-pub(crate) fn foreign_key_definition(foreign_key: &ForeignKey) -> String {
+/// path reaches and spells out the schema of one it does not, so the answer
+/// depends on the session's `search_path` and changes as that changes:
+/// `REFERENCES pp(id)` under the default path becomes `REFERENCES public.pp(id)`
+/// once `public` is off it. That is a real asymmetry with [`index_definition`],
+/// whose `ON public.t` is qualified because `pg_get_indexdef` genuinely
+/// qualifies unconditionally; neither should be "fixed" to match the other.
+///
+/// # Errors
+///
+/// Propagates the catalog reads the visibility test needs.
+pub(crate) fn foreign_key_definition(
+    kv: &dyn Kv,
+    scope: &ResolutionScope,
+    foreign_key: &ForeignKey,
+) -> Result<String, ExecError> {
     let mut out = format!(
         "FOREIGN KEY ({}) REFERENCES {}({})",
         quoted_column_list(&foreign_key.columns),
-        quote_relation_name(&foreign_key.referenced_table),
+        qualified_unless_visible(kv, scope, &foreign_key.referenced_table)?,
         quoted_column_list(&foreign_key.referenced_columns),
     );
     if foreign_key.match_type == MatchType::Full {
@@ -1966,7 +2006,33 @@ pub(crate) fn foreign_key_definition(foreign_key: &ForeignKey) -> String {
     if !foreign_key.validated {
         out.push_str(" NOT VALID");
     }
-    out
+    Ok(out)
+}
+
+/// `generate_relation_name`: the name a *deparsed* relation reference is spelled
+/// with — bare when an unqualified reference would reach this relation, and
+/// `schema.relation` when it would not, because a qualifier is then the only
+/// spelling that reads back as the same relation.
+///
+/// The distinction from [`quote_relation_name`] is the whole point: that one
+/// answers `regclassout`'s question with a fixed rule about which schemas are
+/// "always" reachable, and this one asks the search path what it actually
+/// reaches right now. `public` is on the default path but is not on every path,
+/// and a schema that is on the path can still be shadowed by an earlier one
+/// holding the same relation name.
+fn qualified_unless_visible(
+    kv: &dyn Kv,
+    scope: &ResolutionScope,
+    name: &RelationName,
+) -> Result<String, ExecError> {
+    if crate::visibility::relation_name_is_visible(kv, scope, name)? {
+        return Ok(quote_identifier(&name.name));
+    }
+    Ok(format!(
+        "{}.{}",
+        quote_identifier(&name.schema),
+        quote_identifier(&name.name)
+    ))
 }
 
 /// How a referential action spells itself in a constraint definition.
@@ -2116,9 +2182,50 @@ mod tests {
     }
 
     fn rendered(configure: fn(&mut ForeignKey)) -> String {
+        rendered_under(&crate::relname::ResolutionScope::default(), configure)
+    }
+
+    /// The same rendering, with the session's `search_path` chosen by the
+    /// caller — the input the referent's spelling actually depends on.
+    fn rendered_under(
+        scope: &crate::relname::ResolutionScope,
+        configure: fn(&mut ForeignKey),
+    ) -> String {
         let mut foreign_key = sample_foreign_key();
         configure(&mut foreign_key);
-        foreign_key_definition(&foreign_key)
+        let kv = MemKv::new();
+        for schema in ["app", "shadow"] {
+            kv.write_batch(
+                &crabka_pgcatalog::create_schema_ops(&kv, schema, "postgres").expect("schema ops"),
+            )
+            .expect("seed schema");
+        }
+        foreign_key_definition(&kv, scope, &foreign_key).expect("foreign key definition")
+    }
+
+    /// Make `name` exist as a table, so that it occupies its bare name in its
+    /// schema and can shadow a relation of the same name further down the path.
+    fn seed_relation(kv: &MemKv, name: &RelationName) {
+        let (_, ops) = crabka_pgcatalog::create_table_ops(
+            kv,
+            name,
+            vec![crabka_pgcatalog::Column::new("x", ColumnType::Int4)],
+        )
+        .expect("create table");
+        kv.write_batch(&ops).expect("apply");
+    }
+
+    /// A session whose `search_path` is exactly `entries`.
+    fn path(entries: &[&str]) -> crate::relname::ResolutionScope {
+        crate::relname::ResolutionScope {
+            search_path: crate::search_path::SearchPath::from_items(
+                &entries
+                    .iter()
+                    .map(|name| (*name).to_string())
+                    .collect::<Vec<_>>(),
+            ),
+            ..crate::relname::ResolutionScope::default()
+        }
     }
 
     #[test]
@@ -2705,21 +2812,83 @@ mod tests {
         );
     }
 
+    /// The referent's spelling is decided by the session's `search_path`, not by
+    /// which schema the relation happens to sit in. Each row pairs a path with
+    /// the clause PostgreSQL 18.4 renders under it.
+    #[test]
+    fn a_referent_is_qualified_exactly_when_the_search_path_misses_it() {
+        /// A `search_path`, a tweak to the sample key, and the referent the
+        /// oracle spells under that path.
+        type Case = (&'static [&'static str], fn(&mut ForeignKey), &'static str);
+
+        let cases: [Case; 6] = [
+            // `public` is on the default path, so its relations print bare …
+            (&["public"], |_| (), "pp"),
+            // … and off it, the very same relation has to be spelled out.
+            (&["app"], |_| (), "public.pp"),
+            (&[], |_| (), "public.pp"),
+            // A user schema on the path prints bare, which the fixed
+            // "everything but public and pg_catalog is qualified" rule cannot.
+            (
+                &["app"],
+                |fk| fk.referenced_table = RelationName::new("app", "pp"),
+                "pp",
+            ),
+            (
+                &["public", "app"],
+                |fk| fk.referenced_table = RelationName::new("app", "pp"),
+                "pp",
+            ),
+            // Being on the path is not enough: an earlier entry holding the same
+            // relation name shadows this one, so a qualifier is the only
+            // spelling that reads back as the same relation.
+            (
+                &["shadow", "app"],
+                |fk| fk.referenced_table = RelationName::new("app", "pp"),
+                "app.pp",
+            ),
+        ];
+        for (entries, configure, referent) in cases {
+            let mut scope = path(entries);
+            let shadowing = referent == "app.pp";
+            let kv = MemKv::new();
+            for schema in ["app", "shadow"] {
+                kv.write_batch(
+                    &crabka_pgcatalog::create_schema_ops(&kv, schema, "postgres")
+                        .expect("schema ops"),
+                )
+                .expect("seed schema");
+            }
+            if shadowing {
+                seed_relation(&kv, &RelationName::new("shadow", "pp"));
+            }
+            scope.user = "postgres".into();
+            let mut foreign_key = sample_foreign_key();
+            configure(&mut foreign_key);
+            let expected = format!("FOREIGN KEY (a) REFERENCES {referent}(id)");
+            assert!(
+                foreign_key_definition(&kv, &scope, &foreign_key).expect("definition") == expected,
+                "search_path = {entries:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_foreign_key_oid_resolves_to_its_definition() {
         let kv = MemKv::new();
+        let scope = crate::relname::ResolutionScope::default();
         let foreign_key = sample_foreign_key();
         kv.write_batch(&crabka_pgcatalog::put_foreign_key_ops(&foreign_key))
             .expect("seed the catalog");
         let oids = crate::catalog_rel::foreign_key_constraint_oids(&kv).expect("foreign key oids");
         let oid = oids["cc.cc_a_fkey"];
         assert!(
-            constraint_def(&kv, &Datum::Int4(oid)).expect("constraint definition")
+            constraint_def(&kv, &scope, &Datum::Int4(oid)).expect("constraint definition")
                 == Datum::Text("FOREIGN KEY (a) REFERENCES pp(id)".into())
         );
         // An oid no constraint holds is NULL, as PostgreSQL answers.
         assert!(
-            constraint_def(&kv, &Datum::Int4(oid + 1)).expect("constraint definition")
+            constraint_def(&kv, &scope, &Datum::Int4(oid + 1)).expect("constraint definition")
                 == Datum::Null
         );
     }
