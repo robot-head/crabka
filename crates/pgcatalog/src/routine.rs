@@ -1,7 +1,5 @@
-//! P2: the SQL-routine catalog.
-//!
-//! This module covers `CREATE FUNCTION` and `CREATE PROCEDURE`, and the
-//! `pg_proc` rows they produce.
+//! P2: the SQL-routine catalog — `CREATE FUNCTION`, `CREATE PROCEDURE` and
+//! `CREATE AGGREGATE`, and the `pg_proc` rows they produce.
 //!
 //! The catalog stores a routine as its *source text* plus the resolved
 //! signature, the same shape the view catalog uses. It parses the body again
@@ -30,6 +28,9 @@ pub const ROUTINE_OID_BASE: u32 = 140_000;
 pub enum RoutineKind {
     Function,
     Procedure,
+    /// A user-defined aggregate, whose definition rides along in
+    /// [`Routine::aggregate`].
+    Aggregate,
 }
 
 impl RoutineKind {
@@ -39,6 +40,7 @@ impl RoutineKind {
         match self {
             Self::Function => "f",
             Self::Procedure => "p",
+            Self::Aggregate => "a",
         }
     }
 
@@ -48,6 +50,7 @@ impl RoutineKind {
         match self {
             Self::Function => "function",
             Self::Procedure => "procedure",
+            Self::Aggregate => "aggregate",
         }
     }
 
@@ -55,6 +58,7 @@ impl RoutineKind {
         match self {
             Self::Function => 0,
             Self::Procedure => 1,
+            Self::Aggregate => 2,
         }
     }
 
@@ -62,6 +66,7 @@ impl RoutineKind {
         match code {
             0 => Some(Self::Function),
             1 => Some(Self::Procedure),
+            2 => Some(Self::Aggregate),
             _ => None,
         }
     }
@@ -211,6 +216,24 @@ pub enum BodyForm {
     Return,
 }
 
+/// The definition of a user-defined aggregate, carried by the [`Routine`] whose
+/// [`RoutineKind`] is [`RoutineKind::Aggregate`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AggregateDefinition {
+    /// The transition function's name, resolved against the routine catalog
+    /// when the aggregate runs.
+    pub transfn: String,
+    /// The transition (state) type, `pg_aggregate.aggtranstype`.
+    pub transtype: RoutineType,
+    /// The final function's name, if the definition named one.
+    pub finalfn: Option<String>,
+    /// `pg_aggregate.agginitval`: the initial state's text representation.
+    pub initcond: Option<String>,
+    /// Options this engine records for catalog fidelity but does not execute,
+    /// each already spelled `name=value`.
+    pub unimplemented: Vec<String>,
+}
+
 /// A stored SQL routine.
 ///
 /// `cost`/`rows` are `f64`, so the type is `PartialEq` but not `Eq`.
@@ -242,6 +265,9 @@ pub struct Routine {
     /// `pg_proc.proconfig` entries, each already spelled `name=value`.
     pub config: Vec<String>,
     pub owner: String,
+    /// The aggregate definition, present exactly when `kind` is
+    /// [`RoutineKind::Aggregate`].
+    pub aggregate: Option<AggregateDefinition>,
 }
 
 impl Routine {
@@ -272,6 +298,12 @@ impl Routine {
     #[must_use]
     pub fn identity(&self) -> String {
         signature_identity(&self.name, &self.input_type_names())
+    }
+
+    /// True when this routine is a user-defined aggregate.
+    #[must_use]
+    pub fn is_aggregate(&self) -> bool {
+        self.kind == RoutineKind::Aggregate
     }
 
     /// True when the routine returns a set (`SETOF`, or `RETURNS TABLE`).
@@ -401,7 +433,7 @@ pub fn drop_routine_ops(identity: &str) -> Vec<WriteOp> {
     }]
 }
 
-const ROUTINE_VERSION: u8 = 2;
+const ROUTINE_VERSION: u8 = 3;
 
 fn write_routine_type(out: &mut Vec<u8>, ty: &RoutineType) {
     match ty.column {
@@ -462,6 +494,54 @@ fn read_opt_str(cur: &mut &[u8]) -> Result<Option<String>, KvError> {
     }
 }
 
+/// An aggregate definition: a presence byte, and for a present definition the
+/// transition function name, the transition type, the optional final function
+/// and initial condition, then the recorded-but-unexecuted option list.
+fn write_aggregate(out: &mut Vec<u8>, aggregate: Option<&AggregateDefinition>) {
+    let Some(aggregate) = aggregate else {
+        out.push(0);
+        return;
+    };
+    out.push(1);
+    write_str(out, &aggregate.transfn);
+    write_routine_type(out, &aggregate.transtype);
+    write_opt_str(out, aggregate.finalfn.as_deref());
+    write_opt_str(out, aggregate.initcond.as_deref());
+    write_count(out, aggregate.unimplemented.len());
+    for option in &aggregate.unimplemented {
+        write_str(out, option);
+    }
+}
+
+/// Reads back what [`write_aggregate`] wrote, refusing any presence byte
+/// outside the two it writes.
+fn read_aggregate(cur: &mut &[u8]) -> Result<Option<AggregateDefinition>, KvError> {
+    match take_u8(cur)? {
+        0 => Ok(None),
+        1 => {
+            let transfn = read_string(cur)?;
+            let transtype = read_routine_type(cur)?;
+            let finalfn = read_opt_str(cur)?;
+            let initcond = read_opt_str(cur)?;
+            let count = read_count(cur)?;
+            let mut unimplemented = Vec::with_capacity(count.min(1024));
+            for _ in 0..count {
+                unimplemented.push(read_string(cur)?);
+            }
+            Ok(Some(AggregateDefinition {
+                transfn,
+                transtype,
+                finalfn,
+                initcond,
+                unimplemented,
+            }))
+        }
+        other => Err(KvError::CorruptRow(format!(
+            "unknown aggregate definition tag {other}"
+        ))),
+    }
+}
+
 /// Serialize a routine for the catalog KV.
 ///
 /// # Panics
@@ -516,6 +596,7 @@ pub fn serialize_routine(routine: &Routine) -> Vec<u8> {
         write_str(&mut out, entry);
     }
     write_str(&mut out, &routine.owner);
+    write_aggregate(&mut out, routine.aggregate.as_ref());
     out
 }
 
@@ -616,6 +697,7 @@ pub fn deserialize_routine(bytes: &[u8]) -> Result<Routine, KvError> {
         config.push(read_string(&mut cur)?);
     }
     let owner = read_string(&mut cur)?;
+    let aggregate = read_aggregate(&mut cur)?;
     if !cur.is_empty() {
         return Err(KvError::CorruptRow(
             "trailing bytes in routine record".into(),
@@ -640,6 +722,7 @@ pub fn deserialize_routine(bytes: &[u8]) -> Result<Routine, KvError> {
         rows,
         config,
         owner,
+        aggregate,
     })
 }
 
@@ -686,6 +769,36 @@ mod tests {
             rows: 0.0,
             config: vec!["search_path=public".into()],
             owner: "crab".into(),
+            aggregate: None,
+        }
+    }
+
+    /// `CREATE AGGREGATE newavg (int4)`, the fully-populated shape.
+    fn sample_aggregate() -> Routine {
+        Routine {
+            name: "newavg".into(),
+            kind: RoutineKind::Aggregate,
+            params: vec![RoutineParam {
+                name: None,
+                mode: ParamMode::In,
+                ty: RoutineType::builtin(ColumnType::Int4),
+                default: None,
+            }],
+            result: RoutineResult::Type {
+                ty: RoutineType::builtin(ColumnType::Numeric(None)),
+                setof: false,
+            },
+            language: "internal".into(),
+            body: String::new(),
+            body_form: BodyForm::Source,
+            aggregate: Some(AggregateDefinition {
+                transfn: "int4_avg_accum".into(),
+                transtype: RoutineType::named("_int8".into()),
+                finalfn: Some("int8_avg".into()),
+                initcond: Some("{0,0}".into()),
+                unimplemented: vec!["parallel=safe".into(), "sortop=<".into()],
+            }),
+            ..sample()
         }
     }
 
@@ -809,6 +922,100 @@ mod tests {
         kv.write_batch(&drop_routine_ops("add2(integer,integer)"))
             .expect("write");
         assert!(get_routine(&kv, "add2(integer,integer)").expect("read") == None);
+    }
+
+    #[test]
+    fn round_trips_aggregates_alongside_plain_routines() {
+        let minimal = Routine {
+            aggregate: Some(AggregateDefinition {
+                transfn: "int4larger".into(),
+                transtype: RoutineType::builtin(ColumnType::Int4),
+                finalfn: None,
+                initcond: None,
+                unimplemented: Vec::new(),
+            }),
+            ..sample_aggregate()
+        };
+        for routine in [sample(), sample_aggregate(), minimal] {
+            let bytes = serialize_routine(&routine);
+            assert!(bytes[0] == ROUTINE_VERSION);
+            assert!(deserialize_routine(&bytes).expect("decodes") == routine);
+        }
+    }
+
+    #[test]
+    fn refuses_the_superseded_routine_version() {
+        let mut bytes = serialize_routine(&sample_aggregate());
+        bytes[0] = 2;
+        assert!(let Err(KvError::CorruptRow(_)) = deserialize_routine(&bytes));
+    }
+
+    #[test]
+    fn refuses_trailing_bytes_after_an_aggregate() {
+        let mut bytes = serialize_routine(&sample_aggregate());
+        bytes.push(0);
+        assert!(let Err(KvError::CorruptRow(_)) = deserialize_routine(&bytes));
+    }
+
+    #[test]
+    fn aggregate_is_a_kind_of_its_own() {
+        let aggregate = sample_aggregate();
+        assert!(aggregate.is_aggregate());
+        assert!(!sample().is_aggregate());
+        assert!(
+            RoutineKind::from_code(RoutineKind::Aggregate.code()) == Some(RoutineKind::Aggregate)
+        );
+        assert!(RoutineKind::Aggregate.catalog_code() == "a");
+        assert!(RoutineKind::Aggregate.word() == "aggregate");
+    }
+
+    #[test]
+    fn allocates_and_preserves_an_aggregate_oid_like_a_function() {
+        let kv = MemKv::default();
+        let ops = put_routine_ops(&kv, &sample_aggregate()).expect("ops");
+        kv.write_batch(&ops).expect("write");
+        let stored = get_routine(&kv, "newavg(integer)")
+            .expect("read")
+            .expect("present");
+        assert!(stored.oid == ROUTINE_OID_BASE);
+        assert!(
+            stored
+                == Routine {
+                    oid: ROUTINE_OID_BASE,
+                    ..sample_aggregate()
+                }
+        );
+
+        let mut replacement = sample_aggregate();
+        replacement.aggregate.as_mut().expect("aggregate").initcond = Some("{1,1}".into());
+        let ops = put_routine_ops(&kv, &replacement).expect("ops");
+        kv.write_batch(&ops).expect("write");
+        let stored = get_routine(&kv, "newavg(integer)")
+            .expect("read")
+            .expect("present");
+        assert!(stored.oid == ROUTINE_OID_BASE);
+        assert!(stored.aggregate == replacement.aggregate);
+    }
+
+    #[test]
+    fn a_zero_argument_aggregate_is_identified_by_its_bare_name() {
+        // `CREATE AGGREGATE newcnt (*)` declares no parameters at all.
+        let routine = Routine {
+            name: "newcnt".into(),
+            params: Vec::new(),
+            ..sample_aggregate()
+        };
+        assert!(routine.identity() == "newcnt()");
+
+        let kv = MemKv::default();
+        let ops = put_routine_ops(&kv, &routine).expect("ops");
+        kv.write_batch(&ops).expect("write");
+        let stored = get_routine(&kv, "newcnt()")
+            .expect("read")
+            .expect("present");
+        assert!(stored.oid == ROUTINE_OID_BASE);
+        assert!(routines_named(&kv, "newcnt").expect("scan").len() == 1);
+        assert!(list_routines(&kv).expect("scan").len() == 1);
     }
 
     #[test]

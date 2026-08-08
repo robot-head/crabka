@@ -744,7 +744,7 @@ pub(crate) fn rows(
     backend_pid: i32,
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
     match name {
-        "pg_aggregate" => Ok(pg_aggregate_rows()),
+        "pg_aggregate" => pg_aggregate_rows(kv),
         "pg_am" => Ok(pg_am_rows()),
         "pg_amop" => pg_amop_rows(kv),
         "pg_amproc" => pg_amproc_rows(kv),
@@ -781,7 +781,15 @@ pub(crate) fn rows(
     }
 }
 
-fn pg_aggregate_rows() -> Vec<Vec<Datum>> {
+/// `pg_aggregate`: the pinned built-in rows, then one per user-defined
+/// aggregate.
+fn pg_aggregate_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let mut rows = builtin_pg_aggregate_rows();
+    rows.extend(crate::useragg::pg_aggregate_rows(kv)?);
+    Ok(rows)
+}
+
+fn builtin_pg_aggregate_rows() -> Vec<Vec<Datum>> {
     crate::builtin_aggregates::BUILTIN_AGGREGATES
         .iter()
         .map(|row| {

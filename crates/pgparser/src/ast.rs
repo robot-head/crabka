@@ -974,6 +974,19 @@ pub enum Statement {
         routine: RoutineSignature,
         action: AlterRoutineAction,
     },
+    /// `CREATE [OR REPLACE] AGGREGATE name (…) ( option = value [, …] )`.
+    CreateAggregate(Box<CreateAggregateStmt>),
+    /// `DROP AGGREGATE [IF EXISTS] name (aggsig) [, …] [CASCADE | RESTRICT]`.
+    DropAggregate {
+        if_exists: bool,
+        aggregates: Vec<AggregateSignature>,
+        cascade: bool,
+    },
+    /// `ALTER AGGREGATE name (aggsig) { RENAME TO | OWNER TO | SET SCHEMA } …`.
+    AlterAggregate {
+        aggregate: AggregateSignature,
+        action: AlterRoutineAction,
+    },
     /// P2: `CALL name ( [arg, …] )`.
     Call {
         name: String,
@@ -4473,4 +4486,75 @@ pub enum AlterRoutineAction {
         name: String,
         no: bool,
     },
+}
+
+/// The argument list of an aggregate: `(*)` (zero-argument), or a type list.
+///
+/// The old-style `CREATE AGGREGATE name (BASETYPE = …, …)` spelling has no
+/// argument list at all — its one argument comes from
+/// [`AggregateOption::BaseType`] — which is why
+/// [`CreateAggregateStmt::args`] is an `Option`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AggregateArgs {
+    /// `(*)` — the aggregate takes no arguments, as `count(*)` does.
+    Star,
+    /// A written argument list, which may be empty.
+    Args(Vec<RoutineArg>),
+}
+
+/// One `option = value` pair from an aggregate definition.
+///
+/// `PostgreSQL` spells every one of these as an unreserved word followed by
+/// `=`, so none of them is a keyword in this lexer. The numbered spellings
+/// (`SFUNC1`, `STYPE1`, `INITCOND1`) that survive from `PostgreSQL` 7 are folded
+/// onto the unnumbered variants; they mean exactly the same thing.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AggregateOption {
+    /// `SFUNC`/`SFUNC1` — the state transition function.
+    SFunc(String),
+    /// `STYPE`/`STYPE1` — the state value's type.
+    SType(RoutineType),
+    /// `FINALFUNC` — the function that turns the final state into the result.
+    FinalFunc(String),
+    /// `INITCOND`/`INITCOND1` — the state's initial value as external text, so
+    /// `initcond = 0` and `initcond = '0'` are the same value. `NULL` (the
+    /// default) is `None`.
+    InitCond(Option<String>),
+    /// Old-style `BASETYPE` — the aggregate's single argument type. `'ANY'` in
+    /// any spelling or quoting is `PostgreSQL`'s way of writing "no declared
+    /// argument type" and arrives as `None`.
+    BaseType(Option<RoutineType>),
+    /// An option this engine records but does not execute — the moving-aggregate
+    /// family (`MSFUNC`, `MINVFUNC`, `MSTYPE`, `MINITCOND`, …), `COMBINEFUNC`,
+    /// `SERIALFUNC`, `DESERIALFUNC`, `PARALLEL`, `SORTOP`, `SSPACE`,
+    /// `FINALFUNC_EXTRA`, `FINALFUNC_MODIFY` and anything else.
+    ///
+    /// `name` is the word as written, so a quoted mixed-case spelling such as
+    /// `"Sfunc1"` — which `PostgreSQL` does *not* recognise — is reported
+    /// verbatim. `value` is the right-hand side rendered the way
+    /// `PostgreSQL`'s `defGetString` renders it: a string literal without its
+    /// quotes, a type or function name without its parenthesised modifiers.
+    Unimplemented { name: String, value: String },
+    /// The bare `HYPOTHETICAL` marker, which carries no `= value`.
+    Hypothetical,
+}
+
+/// `CREATE [OR REPLACE] AGGREGATE name (…) ( option = value [, …] )`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateAggregateStmt {
+    pub name: String,
+    pub or_replace: bool,
+    /// `None` for the old-style form, whose argument comes from `BASETYPE`.
+    pub args: Option<AggregateArgs>,
+    pub options: Vec<AggregateOption>,
+}
+
+/// `name ( * )` or `name ( argtypes )` — an aggregate named for `DROP`/`ALTER`.
+///
+/// Unlike [`RoutineSignature`] the argument list is mandatory: `PostgreSQL` has
+/// no no-parentheses spelling for an aggregate.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AggregateSignature {
+    pub name: String,
+    pub args: AggregateArgs,
 }

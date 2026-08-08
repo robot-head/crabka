@@ -119,6 +119,7 @@ mod text_search_fn;
 pub mod timestamp_txn;
 mod trigger;
 pub mod ts_gc;
+mod useragg;
 mod usertype;
 mod values;
 mod viewdef;

@@ -2317,6 +2317,9 @@ fn establishes_transaction_activity(stmt: &Statement) -> bool {
         | Statement::CreateRoutine(_)
         | Statement::DropRoutine { .. }
         | Statement::AlterRoutine { .. }
+        | Statement::CreateAggregate(_)
+        | Statement::DropAggregate { .. }
+        | Statement::AlterAggregate { .. }
         | Statement::CreateType { .. }
         | Statement::AlterType { .. }
         | Statement::DropType { .. }
@@ -4916,7 +4919,12 @@ impl SqlSession {
         // (42P01 / 42703) rather than a plan for a query that cannot run. The
         // plan renderer is purely syntactic and would otherwise happily describe
         // a scan of a table that does not exist.
-        crate::exec::describe_statement(&*self.catalog_kv, &self.resolution_scope(), statement)?;
+        // The scalar runtime has to be installed for this, because resolving a
+        // user-defined routine or aggregate is a catalog read and `describe`
+        // takes no `kv` of its own.
+        crate::routine::with_scalar_runtime(&self.catalog_kv, None, || {
+            crate::exec::describe_statement(&*self.catalog_kv, &self.resolution_scope(), statement)
+        })?;
         let mut actual_rows = 0;
         if options.analyze {
             // ANALYZE runs the statement for real, inside the caller's
@@ -4926,7 +4934,11 @@ impl SqlSession {
                 actual_rows = rows.len();
             }
         }
-        let plan = crate::explain::plan_statement(statement);
+        // Deciding whether a call aggregates is a catalog question once a user
+        // can define an aggregate, so the renderer needs the runtime too.
+        let plan = crate::routine::with_scalar_runtime(&self.catalog_kv, None, || {
+            crate::explain::plan_statement(statement)
+        });
         let lines = crate::explain::render_with_rows(&plan, options, actual_rows);
         let field = FieldDescription {
             name: "QUERY PLAN".into(),
@@ -6257,6 +6269,10 @@ impl SqlSession {
         | Statement::CreateRoutine(_)
         | Statement::DropRoutine { .. }
         | Statement::AlterRoutine { .. }
+        // P6: aggregates are routines, so they take the same path.
+        | Statement::CreateAggregate(_)
+        | Statement::DropAggregate { .. }
+        | Statement::AlterAggregate { .. }
         // T5: user-defined type DDL shares the catalog-lock + execute_ddl +
         // commit path with every other catalog mutation.
         | Statement::CreateType { .. }

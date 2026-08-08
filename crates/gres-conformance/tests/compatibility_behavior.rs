@@ -125,6 +125,15 @@ fn probe_setup(command: &str) -> &'static [&'static str] {
         "ALTER PROCEDURE" | "DROP PROCEDURE" | "CALL" => {
             &["CREATE PROCEDURE parser_commands_proc(a int) LANGUAGE sql AS 'SELECT $1'"]
         }
+        // An aggregate is defined against a transition function that must
+        // already exist, and its own lifecycle probes need the aggregate.
+        "CREATE AGGREGATE" => &[
+            "CREATE FUNCTION parser_commands_add(int4, int4) RETURNS int4 LANGUAGE sql AS 'select $1 + $2'",
+        ],
+        "ALTER AGGREGATE" | "DROP AGGREGATE" => &[
+            "CREATE FUNCTION parser_commands_add(int4, int4) RETURNS int4 LANGUAGE sql AS 'select $1 + $2'",
+            "CREATE AGGREGATE parser_commands_agg (int4) (SFUNC = parser_commands_add, STYPE = int4, INITCOND = '0')",
+        ],
         // T5/D7: the probes are executed in command-name order, so every
         // lifecycle probe must create the object it names — `ALTER DOMAIN`
         // sorts ahead of `CREATE DOMAIN`.
@@ -190,7 +199,7 @@ async fn execute_probe(command: &str, sql: &str) {
 #[tokio::test]
 async fn every_resolved_behavior_probe_reaches_the_session_contract() {
     let report = parser_command_report().expect("behavior manifest parses");
-    assert!(report.probes.len() == 167);
+    assert!(report.probes.len() == 170);
     let mut executed = 0;
     let mut refused = 0;
     for probe in report.probes {
@@ -226,7 +235,7 @@ async fn every_resolved_behavior_probe_reaches_the_session_contract() {
         );
         refused += 1;
     }
-    assert!(executed == 124);
+    assert!(executed == 127);
     assert!(refused == 43);
 }
 

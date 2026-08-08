@@ -465,6 +465,19 @@ pub(crate) fn execute_ddl(
             routine,
             action,
         } => crate::routine::alter(kv, *object, routine, action),
+        // P6: user-defined aggregates. Stored as routines, so only the
+        // definition-time rules and the aggregate evaluator are new.
+        Statement::CreateAggregate(aggregate) => {
+            crate::useragg::create(kv, aggregate, fctx.current_user)
+        }
+        Statement::DropAggregate {
+            if_exists,
+            aggregates,
+            cascade,
+        } => crate::useragg::drop_aggregates(kv, *if_exists, aggregates, *cascade),
+        Statement::AlterAggregate { aggregate, action } => {
+            crate::useragg::alter(kv, aggregate, action)
+        }
         // T5: user-defined types. Definition, lifecycle and catalog storage
         // live in `usertype`; only the DDL routing is here.
         Statement::CreateType { name, definition } => crate::usertype::create_type(

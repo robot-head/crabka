@@ -14,6 +14,7 @@ macro_rules! command_identities {
 
 command_identities!(
     (Abort, "ABORT"),
+    (AlterAggregate, "ALTER AGGREGATE"),
     (AlterConversion, "ALTER CONVERSION"),
     (AlterDatabase, "ALTER DATABASE"),
     (AlterDomain, "ALTER DOMAIN"),
@@ -66,6 +67,7 @@ command_identities!(
     (CommitPrepared, "COMMIT PREPARED"),
     (Copy, "COPY"),
     (CreateAccessMethod, "CREATE ACCESS METHOD"),
+    (CreateAggregate, "CREATE AGGREGATE"),
     (CreateConversion, "CREATE CONVERSION"),
     (CreateDatabase, "CREATE DATABASE"),
     (CreateDomain, "CREATE DOMAIN"),
@@ -112,6 +114,7 @@ command_identities!(
     (Discard, "DISCARD"),
     (Do, "DO"),
     (DropAccessMethod, "DROP ACCESS METHOD"),
+    (DropAggregate, "DROP AGGREGATE"),
     (DropConversion, "DROP CONVERSION"),
     (DropDatabase, "DROP DATABASE"),
     (DropDomain, "DROP DOMAIN"),

@@ -90,6 +90,20 @@ pub(crate) fn with_scalar_runtime<T>(
     })
 }
 
+/// The catalog the statement runtime exposes, when one is installed.
+///
+/// The aggregate resolver needs a catalog from inside expression walkers that
+/// take no `kv` — the same problem `is_plpgsql_scalar_runtime` solves — and this
+/// is the one seam that answers it.
+pub(crate) fn scalar_runtime_catalog() -> Option<Arc<dyn Kv>> {
+    SCALAR_RUNTIME.with(|runtime| {
+        runtime
+            .borrow()
+            .as_ref()
+            .map(|runtime| Arc::clone(&runtime.catalog))
+    })
+}
+
 pub(crate) fn scalar_runtime_request_sender()
 -> Option<tokio::sync::mpsc::Sender<ScalarFunctionRequest>> {
     SCALAR_RUNTIME.with(|runtime| {
@@ -441,6 +455,16 @@ fn ambiguous_routine(name: &str) -> ExecError {
 }
 
 /// Resolve a type written in a routine signature against the catalog.
+/// [`resolve_type`] for callers outside this module — the aggregate DDL, which
+/// resolves the same signature vocabulary.
+pub(crate) fn resolve_routine_type(
+    kv: &dyn Kv,
+    ty: &crabka_pgparser::ast::RoutineType,
+    quoted: bool,
+) -> Result<RoutineType, ExecError> {
+    resolve_type(kv, ty, quoted)
+}
+
 fn resolve_type(
     kv: &dyn Kv,
     ty: &crabka_pgparser::ast::RoutineType,
@@ -665,6 +689,7 @@ fn build_routine(kv: &dyn Kv, stmt: &CreateRoutineStmt, owner: &str) -> Result<R
             }),
         config: options.config,
         owner: owner.to_string(),
+        aggregate: None,
     })
 }
 
@@ -1005,9 +1030,28 @@ fn signature_type_names(kv: &dyn Kv, args: &[RoutineArg]) -> Result<Vec<String>,
 
 // ------------------------------------------------------------------ calling
 
-/// Is `name` a routine this catalog defines?
+/// Does a user-defined aggregate of this name and arity own the call?
+///
+/// A name may carry both an aggregate and an ordinary function — nothing stops
+/// `CREATE AGGREGATE acc(int4)` next to `CREATE FUNCTION acc(text)` — and the
+/// scalar paths must stand aside when the aggregate is the one being called,
+/// or the query silently returns one row per input instead of aggregating.
+fn shadowing_user_aggregate(kv: &dyn Kv, name: &str, arity: usize) -> bool {
+    routines_named(kv, name).is_ok_and(|found| {
+        found
+            .iter()
+            .any(|routine| routine.is_aggregate() && routine.input_params().count() == arity)
+    })
+}
+
+/// Is `name` a routine this catalog defines that an ordinary call could reach?
+///
+/// A user-defined aggregate does not count. Its `pg_proc` row names the
+/// internal language and a dummy body, so letting one through here would send
+/// every aggregate call into the scalar inliner instead of the aggregate
+/// evaluator.
 pub(crate) fn is_user_routine(kv: &dyn Kv, name: &str) -> bool {
-    routines_named(kv, name).is_ok_and(|found| !found.is_empty())
+    routines_named(kv, name).is_ok_and(|found| found.iter().any(|routine| !routine.is_aggregate()))
 }
 
 /// Resolve a call of `name` with `given` argument types.
@@ -1019,7 +1063,11 @@ pub(crate) fn resolve_call(
     name: &str,
     given: &[ArgType],
 ) -> Result<Option<Routine>, ExecError> {
-    let candidates = routines_named(kv, name)?;
+    // An aggregate is never the answer to a scalar call; `agg` resolves those.
+    let candidates: Vec<Routine> = routines_named(kv, name)?
+        .into_iter()
+        .filter(|routine| !routine.is_aggregate())
+        .collect();
     if candidates.is_empty() {
         return Ok(None);
     }
@@ -1534,6 +1582,12 @@ fn known_builtin(name: &str) -> bool {
         || crate::json_fn::is_json_func(name)
         || crate::array_fn::is_array_func(name)
         || crate::srf::is_srf(name)
+        // An aggregate belongs here too. Nothing stops `CREATE FUNCTION
+        // sum(text)`, and once one exists every `sum` in the database is a user
+        // routine as far as the inliner is concerned; without this arm
+        // `sum(int4)` stops resolving to the built-in aggregate and reports
+        // 42883 where PostgreSQL still sums.
+        || crate::agg::is_builtin_aggregate_name(name)
         || crate::window::is_window_only_function(name)
 }
 
@@ -1708,6 +1762,16 @@ pub(crate) fn inline_scalar(kv: &dyn Kv, call: &FuncCall) -> Result<Option<Expr>
     if !is_user_routine(kv, &call.name) {
         return Ok(None);
     }
+    // A user aggregate of this name and arity owns the call: `agg` evaluates it.
+    // Without this the inliner would bind a same-named ordinary function --
+    // `CREATE AGGREGATE acc(int4)` next to `CREATE FUNCTION acc(text)` -- and
+    // the query would silently return one row per input instead of aggregating.
+    if routines_named(kv, &call.name)?
+        .iter()
+        .any(|routine| routine.is_aggregate() && routine.input_params().count() == args.len())
+    {
+        return Ok(None);
+    }
     let given = best_effort_arg_types(args);
     // PL/pgSQL and the pinned regression-C adapters are executed by the scalar
     // runtime rather than inlined. Keeping the call node intact is what lets
@@ -1784,6 +1848,9 @@ pub(crate) fn plpgsql_scalar_result_type(
         let runtime = runtime.borrow();
         let runtime = runtime.as_ref()?;
         if !is_user_routine(runtime.catalog.as_ref(), &call.name) {
+            return None;
+        }
+        if shadowing_user_aggregate(runtime.catalog.as_ref(), &call.name, args.len()) {
             return None;
         }
         let given = crate::eval::static_arg_types(args, scope);
@@ -1865,6 +1932,9 @@ pub(crate) fn eval_plpgsql_scalar_with(
         let runtime = runtime.borrow();
         let runtime = runtime.as_ref()?.clone();
         if !is_user_routine(runtime.catalog.as_ref(), &call.name) {
+            return None;
+        }
+        if shadowing_user_aggregate(runtime.catalog.as_ref(), &call.name, args.len()) {
             return None;
         }
         let result = (|| {

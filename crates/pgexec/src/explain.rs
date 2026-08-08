@@ -290,37 +290,18 @@ fn scan_node(table: &str, alias: Option<&str>, filter: Option<&Expr>) -> PlanNod
     node
 }
 
+/// Does `expr` aggregate, and therefore need an `Aggregate` plan node above the
+/// scan?
+///
+/// This asks the executor's own resolver rather than keeping a list here. A
+/// private list drifts: the one this replaced named fourteen aggregates and had
+/// not learned `json_agg`, the bitwise trio, the range pair, `var_pop`/`var_samp`,
+/// `stddev_pop`/`stddev_samp`, or any of the two-variable statistical family, so
+/// `EXPLAIN SELECT corr(a, b) FROM t` printed a bare `Seq Scan` where
+/// `PostgreSQL` prints an `Aggregate`. Deferring also means a user-defined
+/// aggregate is explained like a built-in one, for free.
 fn contains_aggregate(expr: &Expr) -> bool {
-    match expr {
-        Expr::Func(call) => {
-            const AGGREGATES: &[&str] = &[
-                "count",
-                "sum",
-                "avg",
-                "min",
-                "max",
-                "bool_and",
-                "bool_or",
-                "string_agg",
-                "array_agg",
-                "jsonb_agg",
-                "jsonb_object_agg",
-                "stddev",
-                "variance",
-                "every",
-            ];
-            AGGREGATES
-                .iter()
-                .any(|name| call.name.eq_ignore_ascii_case(name))
-                || match &call.args {
-                    FuncArgs::Star => false,
-                    FuncArgs::Exprs(args) => args.iter().any(contains_aggregate),
-                }
-        }
-        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => contains_aggregate(expr),
-        Expr::Binary { left, right, .. } => contains_aggregate(left) || contains_aggregate(right),
-        _ => false,
-    }
+    crate::agg::contains_aggregate(expr)
 }
 
 fn expr_list(exprs: &[Expr]) -> String {

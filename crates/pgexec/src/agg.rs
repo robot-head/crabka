@@ -91,6 +91,10 @@ enum AggFunc {
     RegrSlope,
     RegrIntercept,
     RegrR2,
+    /// A `CREATE AGGREGATE` definition from the catalog. The compiled
+    /// definition travels in `AggSpec::user`, so this variant stays `Copy`
+    /// alongside the built-ins.
+    User,
 }
 
 impl AggFunc {
@@ -139,6 +143,10 @@ impl AggFunc {
                 | AggFunc::JsonbObjectAgg
                 | AggFunc::JsonAgg
                 | AggFunc::JsonObjectAgg
+                // A user transition function sees every row: PostgreSQL applies
+                // the skip-NULLs rule from the function's own strictness, which
+                // `UserAggregate::fold` does.
+                | AggFunc::User
         )
     }
 
@@ -157,6 +165,16 @@ impl AggFunc {
 /// `PostgreSQL`'s 42809, a real function used with `OVER`, from its 42883, no
 /// such function.
 pub(crate) fn is_aggregate_name(name: &str) -> bool {
+    aggregate_func(name).is_some() || crate::useragg::exists(name)
+}
+
+/// Is `name` one of the aggregates *built into* this engine?
+///
+/// Distinct from [`is_aggregate_name`], which also consults the catalog. A
+/// caller asking "is this name spoken for by the engine itself?" — rather than
+/// "does this call resolve?" — wants this one, because it answers the same way
+/// whether or not a statement runtime is installed.
+pub(crate) fn is_builtin_aggregate_name(name: &str) -> bool {
     aggregate_func(name).is_some()
 }
 
@@ -206,11 +224,39 @@ fn aggregate_func(name: &str) -> Option<AggFunc> {
     }
 }
 
+/// Resolve `fc` as a user-defined aggregate, if the catalog holds one under
+/// that name and arity.
+///
+/// `Ok(None)` means "not a user aggregate", which leaves every built-in path
+/// exactly as it was — including the case where no statement runtime is
+/// installed at all.
+fn resolve_user(
+    fc: &FuncCall,
+    scope: &Scope,
+) -> Result<Option<crate::useragg::UserAggregate>, ExecError> {
+    if aggregate_func(&fc.name).is_some() {
+        return Ok(None);
+    }
+    if !crate::useragg::exists(&fc.name) {
+        return Ok(None);
+    }
+    // `agg(*)` is how a zero-argument aggregate is called, built-in or not.
+    let args: &[Expr] = match &fc.args {
+        FuncArgs::Star => &[],
+        FuncArgs::Exprs(args) => args,
+    };
+    let given = args
+        .iter()
+        .map(|arg| crate::eval::infer_type(arg, scope))
+        .collect::<Result<Vec<_>, _>>()?;
+    crate::useragg::resolve(&fc.name, args, &given).transpose()
+}
+
 /// Does `e` (or any subexpression) call a known aggregate function?
 pub(crate) fn contains_aggregate(e: &Expr) -> bool {
     match e {
         Expr::Func(fc) => {
-            aggregate_func(&fc.name).is_some()
+            is_aggregate_name(&fc.name)
                 || match &fc.args {
                     FuncArgs::Star => false,
                     FuncArgs::Exprs(args) => args.iter().any(contains_aggregate),
@@ -269,7 +315,7 @@ pub(crate) fn is_aggregate_query(s: &SelectStmt) -> bool {
 /// A known aggregate there is misplaced or nested, which is 42803. Every other
 /// call is an undefined function, which is 42883.
 pub(crate) fn func_in_scalar_context_error(fc: &FuncCall) -> ExecError {
-    if aggregate_func(&fc.name).is_some() {
+    if is_aggregate_name(&fc.name) {
         ExecError::Grouping(format!(
             "aggregate function \"{}\" is not allowed here \
              (aggregates cannot be nested)",
@@ -285,6 +331,9 @@ pub(crate) fn func_in_scalar_context_error(fc: &FuncCall) -> ExecError {
 /// This function also validates the name, the arity and the argument type. It
 /// maps all three failures to 42883.
 pub(crate) fn func_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType, ExecError> {
+    if let Some(user) = resolve_user(fc, scope)? {
+        return Ok(user.result_type);
+    }
     let Some(func) = aggregate_func(&fc.name) else {
         return Err(undefined_function(&fc.name));
     };
@@ -530,6 +579,10 @@ struct AggSpec {
     /// so a row the predicate rejects never reaches the accumulator and never
     /// joins the `DISTINCT` buffer.
     filter: Option<Expr>,
+    /// The compiled user-defined aggregate, when `func` is [`AggFunc::User`].
+    /// Boxed because it is far larger than any built-in spec and almost every
+    /// spec is a built-in one.
+    user: Option<Box<crate::useragg::UserAggregate>>,
 }
 
 /// Build the spec for one aggregate call.
@@ -537,6 +590,20 @@ struct AggSpec {
 /// This function validates the arity, the argument type and the
 /// no-nested-aggregate rule.
 fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
+    if let Some(user) = resolve_user(fc, scope)? {
+        for arg in &user.args {
+            reject_nested_aggregate(arg)?;
+        }
+        return Ok(AggSpec {
+            func: AggFunc::User,
+            arg: user.args.first().cloned(),
+            value_arg: None,
+            arg_type: None,
+            distinct: fc.distinct,
+            filter: fc.filter.as_deref().cloned(),
+            user: Some(Box::new(user)),
+        });
+    }
     let func = aggregate_func(&fc.name).ok_or_else(|| undefined_function(&fc.name))?;
     // A FILTER predicate resolves in the same scope as the arguments: it must be
     // boolean, and — like an argument — it may not contain an aggregate itself.
@@ -571,6 +638,7 @@ fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
                 arg_type: None,
                 distinct: fc.distinct,
                 filter: fc.filter.as_deref().cloned(),
+                user: None,
             }),
             FuncArgs::Exprs(args) if args.len() == 1 => {
                 reject_nested_aggregate(&args[0])?;
@@ -582,6 +650,7 @@ fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
                     arg_type: Some(arg_type),
                     distinct: fc.distinct,
                     filter: fc.filter.as_deref().cloned(),
+                    user: None,
                 })
             }
             _ => Err(undefined_function("count")),
@@ -604,6 +673,7 @@ fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
                 arg_type: Some(arg_type),
                 distinct: fc.distinct,
                 filter: fc.filter.as_deref().cloned(),
+                user: None,
             })
         }
         AggFunc::JsonbObjectAgg | AggFunc::JsonObjectAgg => {
@@ -625,6 +695,7 @@ fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
                 arg_type: Some(key_type),
                 distinct: fc.distinct,
                 filter: fc.filter.as_deref().cloned(),
+                user: None,
             })
         }
         AggFunc::Sum | AggFunc::Avg | AggFunc::Min | AggFunc::Max => {
@@ -659,6 +730,7 @@ fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
                 arg_type: Some(arg_type),
                 distinct: fc.distinct,
                 filter: fc.filter.as_deref().cloned(),
+                user: None,
             })
         }
         // `string_agg(value, delimiter)` and the two-variable statistical
@@ -680,6 +752,7 @@ fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
                 arg_type: Some(arg_type),
                 distinct: fc.distinct,
                 filter: fc.filter.as_deref().cloned(),
+                user: None,
             })
         }
         _ if func.is_two_variable() => {
@@ -695,6 +768,7 @@ fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
                 arg_type: Some(ColumnType::Float8),
                 distinct: fc.distinct,
                 filter: fc.filter.as_deref().cloned(),
+                user: None,
             })
         }
         // The remaining single-argument aggregates: the boolean pair, the
@@ -713,6 +787,7 @@ fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
                 arg_type: Some(arg_type),
                 distinct: fc.distinct,
                 filter: fc.filter.as_deref().cloned(),
+                user: None,
             })
         }
     }?;
@@ -740,6 +815,15 @@ impl AggSpec {
         row: &[Datum],
         ctx: &EvalCtx,
     ) -> Result<Vec<Datum>, ExecError> {
+        // A user aggregate carries its own argument list, which may be empty
+        // (`myagg(*)`) or longer than the two slots a built-in ever needs.
+        if let Some(user) = &self.user {
+            return user
+                .args
+                .iter()
+                .map(|arg| crate::eval::eval(arg, scope, row, ctx))
+                .collect();
+        }
         let arg = self
             .arg
             .as_ref()
@@ -766,7 +850,7 @@ fn reject_nested_aggregate(arg: &Expr) -> Result<(), ExecError> {
 /// A non-aggregate function call is an undefined function, which is 42883.
 fn collect_specs(e: &Expr, scope: &Scope, specs: &mut Vec<AggSpec>) -> Result<(), ExecError> {
     match e {
-        Expr::Func(fc) if aggregate_func(&fc.name).is_some() => {
+        Expr::Func(fc) if is_aggregate_name(&fc.name) => {
             let spec = spec_of(fc, scope)?;
             if !specs.contains(&spec) {
                 specs.push(spec);
@@ -1005,7 +1089,7 @@ pub(crate) fn eval_over_aggregate_values(
 /// below matches `t.a` against a bare `a` naming the same column.
 fn validate_grouped(e: &Expr, group_by: &[Expr], scope: &Scope) -> Result<(), ExecError> {
     if let Expr::Func(fc) = e
-        && aggregate_func(&fc.name).is_some()
+        && is_aggregate_name(&fc.name)
     {
         return Ok(()); // an aggregate may reference any column in its argument
     }
@@ -1165,7 +1249,7 @@ fn eval_grouped_depth(
     }
     let d = depth + 1;
     if let Expr::Func(fc) = e
-        && aggregate_func(&fc.name).is_some()
+        && is_aggregate_name(&fc.name)
     {
         let spec = spec_of(fc, scope)?;
         let i = specs
@@ -1443,6 +1527,12 @@ enum AccState {
     Count {
         n: i64,
     },
+    /// A user-defined aggregate's running state. `None` until the first fold or
+    /// finish, because materializing `INITCOND` needs the evaluation context
+    /// that accumulator construction does not have.
+    User {
+        state: Option<Datum>,
+    },
     SumI {
         acc: Option<i64>,
     },
@@ -1680,6 +1770,7 @@ fn compare_tuples(a: &[Datum], b: &[Datum]) -> Result<Ordering, ExecError> {
 impl AccState {
     fn new(spec: &AggSpec) -> AccState {
         match spec.func {
+            AggFunc::User => AccState::User { state: None },
             AggFunc::Count => AccState::Count { n: 0 },
             AggFunc::Sum => match spec.arg_type {
                 Some(ColumnType::Float4) => AccState::SumF4 {
@@ -1761,11 +1852,22 @@ impl AccState {
         args: &[Datum],
         ctx: &EvalCtx,
     ) -> Result<(), ExecError> {
-        let v = args
-            .first()
-            .cloned()
-            .expect("an aggregate argument tuple is never empty");
+        // A zero-argument user aggregate folds an empty tuple; every built-in
+        // family below has at least one argument by construction.
+        let v = args.first().cloned().unwrap_or(Datum::Null);
         match self {
+            AccState::User { state } => {
+                let user = spec
+                    .user
+                    .as_ref()
+                    .expect("a user aggregate accumulator carries its definition");
+                let mut current = match state.take() {
+                    Some(current) => current,
+                    None => user.initial_state(ctx)?,
+                };
+                user.fold(&mut current, args, ctx)?;
+                *state = Some(current);
+            }
             AccState::Count { n } => *n += 1,
             AccState::SumI { acc } => {
                 let add = as_i64(&v).ok_or_else(|| {
@@ -2064,6 +2166,17 @@ impl AccState {
 
     fn finish(&self, spec: &AggSpec, ctx: &EvalCtx) -> Result<Datum, ExecError> {
         Ok(match self {
+            AccState::User { state } => {
+                let user = spec
+                    .user
+                    .as_ref()
+                    .expect("a user aggregate accumulator carries its definition");
+                let current = match state {
+                    Some(current) => current.clone(),
+                    None => user.initial_state(ctx)?,
+                };
+                return user.finish(&current, ctx);
+            }
             AccState::Count { n } => Datum::Int8(*n),
             AccState::SumI { acc } => acc.map(Datum::Int8).unwrap_or(Datum::Null),
             AccState::SumMoney { acc } => acc.map(Datum::Money).unwrap_or(Datum::Null),

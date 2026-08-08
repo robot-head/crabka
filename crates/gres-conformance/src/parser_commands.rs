@@ -908,6 +908,27 @@ const COMMAND_PROBES: &[CommandProbe] = &[
         expected_statement: "DoBlock",
         refusal: None,
     },
+    // User-defined aggregates, which are routines with `prokind = 'a'`: their
+    // transition function is an ordinary SQL function the setup defines first.
+    CommandProbe {
+        command: "CREATE AGGREGATE",
+        sql: "CREATE AGGREGATE parser_commands_agg (int4) (SFUNC = parser_commands_add, STYPE = \
+              int4, INITCOND = '0')",
+        expected_statement: "CreateAggregate",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "ALTER AGGREGATE",
+        sql: "ALTER AGGREGATE parser_commands_agg (int4) OWNER TO postgres",
+        expected_statement: "AlterAggregate",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "DROP AGGREGATE",
+        sql: "DROP AGGREGATE parser_commands_agg (int4)",
+        expected_statement: "DropAggregate",
+        refusal: None,
+    },
 ];
 
 /// Build the compatibility matrix's parser-command inventory.
@@ -1032,6 +1053,9 @@ fn statement_shape(statement: &Statement) -> &'static str {
         Statement::AlterEventTrigger { .. } => "AlterEventTrigger",
         Statement::DropEventTrigger { .. } => "DropEventTrigger",
         Statement::CreateRoutine(_) => "CreateRoutine",
+        Statement::CreateAggregate(_) => "CreateAggregate",
+        Statement::DropAggregate { .. } => "DropAggregate",
+        Statement::AlterAggregate { .. } => "AlterAggregate",
         Statement::DropRoutine { .. } => "DropRoutine",
         Statement::AlterRoutine { .. } => "AlterRoutine",
         Statement::Call { .. } => "Call",
@@ -1209,7 +1233,7 @@ mod tests {
 
         assert!(report.format_version == PARSER_COMMAND_REPORT_FORMAT_VERSION);
         assert!(
-            report.commands.len() == 167,
+            report.commands.len() == 170,
             "all resolved command rows need probes"
         );
         assert!(report.commands.windows(2).all(|pair| pair[0] < pair[1]));
@@ -1267,7 +1291,7 @@ mod tests {
 
         assert!(json["format_version"] == PARSER_COMMAND_REPORT_FORMAT_VERSION);
         assert!(json["commands"][0] == "ABORT");
-        assert!(json["probes"].as_array().map(Vec::len) == Some(167));
+        assert!(json["probes"].as_array().map(Vec::len) == Some(170));
         let refusal = json["probes"]
             .as_array()
             .expect("probe array")

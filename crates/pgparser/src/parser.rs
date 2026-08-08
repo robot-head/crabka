@@ -55,6 +55,11 @@ const MAX_GROUPING_SETS: usize = 4096;
 /// `54011`. `ROLLUP` has no such limit. Its expansion is linear.
 const MAX_CUBE_ELEMENTS: usize = 12;
 
+/// The characters an operator name may be spelled with (`scan.l`'s `op_chars`).
+/// Used to read an operator back out of the source, which the lexer has already
+/// split across many token kinds.
+const OPERATOR_CHARS: &str = "+-*/<>=~!@#%^&|`?";
+
 /// A parsed `GROUP BY` clause: the flattened grouping expressions, and the set
 /// structure over their indices when the clause expands to more than one set.
 type GroupByClause = (Vec<crate::ast::Expr>, Option<crate::ast::GroupingClause>);
@@ -3342,6 +3347,9 @@ impl Parser {
                     Token::Ident(s) if s == "function" || s == "procedure" || s == "routine" => {
                         self.drop_routine_statement()
                     }
+                    Token::Ident(s) if s == "aggregate" => {
+                        emitted(I::DropAggregate, self.drop_aggregate())
+                    }
                     Token::Ident(s) if s == "role" => emitted(I::DropRole, self.drop_role()),
                     Token::Ident(s) if s == "sequence" => {
                         emitted(I::DropSequence, self.drop_sequence())
@@ -3473,6 +3481,9 @@ impl Parser {
                 Token::Ident(s) if s == "policy" => emitted(I::AlterPolicy, self.alter_policy()),
                 Token::Ident(s) if s == "function" || s == "procedure" || s == "routine" => {
                     self.alter_routine_statement()
+                }
+                Token::Ident(s) if s == "aggregate" => {
+                    emitted(I::AlterAggregate, self.alter_aggregate())
                 }
                 // PostgreSQL's own synopsis lists the row-security subcommands
                 // as their own entry in the command inventory, so a statement
@@ -5019,6 +5030,12 @@ impl Parser {
                     Self::routine_command_identity(object, true, false),
                     self.create_routine(),
                 )
+            }
+            Token::Keyword(Keyword::Or) if self.peeked_create_aggregate() => {
+                emitted(I::CreateAggregate, self.create_aggregate())
+            }
+            Token::Ident(word) if word == "aggregate" => {
+                emitted(I::CreateAggregate, self.create_aggregate())
             }
             Token::Keyword(Keyword::Index | Keyword::Unique) => {
                 emitted(I::CreateIndex, self.create_index())
@@ -13640,6 +13657,367 @@ impl Parser {
             return Ok(None);
         }
         Ok(Some(AlterRoutineAction::Options(options)))
+    }
+
+    // ---------------------------------------------------------------------
+    // Aggregates. `CREATE`/`ALTER`/`DROP AGGREGATE`. Like the routine grammar
+    // above, every word here (`aggregate`, `sfunc`, `stype`, `basetype`,
+    // `hypothetical`, …) is a plain lowercased ident, so none of them becomes
+    // reserved and a table may still be called `aggregate`.
+    // ---------------------------------------------------------------------
+
+    /// Whether the `CREATE` at the cursor creates an aggregate, looking past an
+    /// `OR REPLACE`. Shaped like [`Parser::peeked_create_routine`], which has
+    /// the same job for routines.
+    fn peeked_create_aggregate(&self) -> bool {
+        let mut offset = self.create_object_keyword_offset();
+        if *self.peek_n(offset) == Token::Keyword(Keyword::Or) {
+            offset += 2;
+        }
+        matches!(self.peek_n(offset), Token::Ident(word) if word.eq_ignore_ascii_case("aggregate"))
+    }
+
+    /// Refuse the ordered-set and hypothetical-set spellings, whose argument
+    /// list carries a top-level `ORDER BY` (`my_rank(VARIADIC "any" ORDER BY
+    /// VARIADIC "any")`). Those aggregates accumulate a sorted input, which this
+    /// engine's aggregate path cannot do, so the statement is refused up front
+    /// with `0A000` rather than silently dropping the sort — the same choice
+    /// [`Parser::func_call`] makes for a call-site aggregate `ORDER BY`.
+    ///
+    /// The cursor is left where it was: this only looks. A `(` that never
+    /// closes is left for the argument-list parser to report.
+    fn reject_ordered_set_aggregate(&self) -> Result<(), ParseError> {
+        if *self.peek() != Token::LParen {
+            return Ok(());
+        }
+        let mut depth = 0usize;
+        let mut offset = 0usize;
+        loop {
+            match self.peek_n(offset) {
+                Token::LParen => depth += 1,
+                Token::RParen => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Ok(());
+                    }
+                }
+                // `ORDER` only ever separates the direct arguments from the
+                // ordered ones at the top level of the list; deeper down it
+                // would be inside a type modifier, which cannot hold one.
+                Token::Keyword(Keyword::Order) if depth == 1 => {
+                    return Err(ParseError::new_sqlstate(
+                        "0A000",
+                        "ordered-set aggregates are not supported",
+                        self.peek_pos(),
+                    ));
+                }
+                Token::Eof | Token::Semicolon => return Ok(()),
+                _ => {}
+            }
+            offset += 1;
+        }
+    }
+
+    /// `( * )` or `( argtype [, …] )` — the argument spelling shared by
+    /// `CREATE`, `DROP` and `ALTER AGGREGATE`.
+    fn aggregate_args(&mut self) -> Result<crate::ast::AggregateArgs, ParseError> {
+        use crate::ast::AggregateArgs;
+
+        self.reject_ordered_set_aggregate()?;
+        if *self.peek() == Token::LParen && *self.peek2() == Token::Star {
+            self.bump();
+            self.bump();
+            self.expect(&Token::RParen)?;
+            return Ok(AggregateArgs::Star);
+        }
+        Ok(AggregateArgs::Args(self.routine_arg_list()?))
+    }
+
+    /// Is the `(` at the cursor the old-style definition list — the spelling
+    /// that has no argument list at all and takes its argument from `BASETYPE`?
+    ///
+    /// The two forms are told apart exactly as `PostgreSQL`'s grammar does, by
+    /// looking for an `option =` pair: `a (int4)` is a one-argument aggregate,
+    /// `a (basetype = int4, …)` is the old style.
+    fn at_old_style_aggregate_options(&self) -> bool {
+        *self.peek() == Token::LParen
+            && matches!(self.peek2(), Token::Ident(_))
+            && *self.peek_n(2) == Token::Eq
+    }
+
+    /// The right-hand side of an aggregate option, rendered back to text the
+    /// way `PostgreSQL`'s `defGetString` renders it.
+    ///
+    /// `PostgreSQL` parses every option value as one `def_arg` — a type name, a
+    /// keyword, a signed number or a string — and then reads it with
+    /// `defGetString`/`defGetQualifiedName`. Both keep only the *name* of a
+    /// type and discard its parenthesised modifiers, so `SFUNC =
+    /// balkifnull(int8, int4)` names the plain function `balkifnull`; and both
+    /// hand back a string literal without its quotes, so `initcond = '0'` and
+    /// `initcond = 0` are the one value `0`.
+    fn aggregate_option_value(&mut self) -> Result<String, ParseError> {
+        let position = self.peek_pos();
+        if let Token::StringLit(text) = self.peek() {
+            let text = text.clone();
+            self.bump();
+            return Ok(text);
+        }
+        if matches!(
+            self.peek(),
+            Token::Minus | Token::IntLit(_) | Token::FloatLit(_)
+        ) {
+            let negative = *self.peek() == Token::Minus;
+            if negative {
+                self.bump();
+            }
+            let text = match self.bump() {
+                Token::IntLit(text) | Token::FloatLit(text) => text,
+                other => {
+                    return Err(ParseError::new(
+                        format!("expected a number in an aggregate option, found {other:?}"),
+                        position,
+                    ));
+                }
+            };
+            return Ok(if negative { format!("-{text}") } else { text });
+        }
+        // `finalfunc_extra = true` and `basetype = ANY` spell their value with a
+        // word this lexer reserves; the written word is what the value means.
+        if matches!(self.peek(), Token::Keyword(_)) {
+            let word = self.keyword_label();
+            self.bump();
+            return Ok(word);
+        }
+        // `SORTOP = >` names an operator, whose spelling the lexer splits over
+        // dozens of token kinds. Read it back out of the source the way
+        // [`Parser::keyword_label`] reads a word.
+        let rest = &self.source[position..];
+        let operator_end = rest
+            .find(|c: char| !OPERATOR_CHARS.contains(c))
+            .unwrap_or(rest.len());
+        if operator_end > 0 {
+            let text = rest[..operator_end].to_string();
+            while self.peek_pos() < position + operator_end && *self.peek() != Token::Eof {
+                self.bump();
+            }
+            return Ok(text);
+        }
+        let name = self.routine_type()?.name;
+        if *self.peek() == Token::LParen {
+            // A parenthesised list here is PostgreSQL's type-modifier syntax,
+            // which `defGetString` drops. Parse it so the statement still scans.
+            let _ = self.routine_arg_list()?;
+        }
+        Ok(name)
+    }
+
+    /// The right-hand side of `SFUNC`/`FINALFUNC`: a function name, plus the
+    /// optional argument list `PostgreSQL` reads as type modifiers and drops.
+    fn aggregate_function_name(&mut self) -> Result<String, ParseError> {
+        let name = self.routine_name()?;
+        if *self.peek() == Token::LParen {
+            let _ = self.routine_arg_list()?;
+        }
+        Ok(name)
+    }
+
+    /// The right-hand side of `BASETYPE`. `'ANY'`, `"any"` and `ANY` are all
+    /// `PostgreSQL`'s spelling of "this aggregate declares no argument type".
+    fn aggregate_base_type(&mut self) -> Result<Option<crate::ast::RoutineType>, ParseError> {
+        use crate::ast::RoutineType;
+
+        if let Token::StringLit(text) = self.peek() {
+            let text = text.clone();
+            self.bump();
+            if text.eq_ignore_ascii_case("any") {
+                return Ok(None);
+            }
+            return Ok(Some(RoutineType::named(text)));
+        }
+        if *self.peek() == Token::Keyword(Keyword::Any) {
+            self.bump();
+            return Ok(None);
+        }
+        let ty = self.routine_type()?;
+        if ty.resolved.is_none() && ty.name.eq_ignore_ascii_case("any") {
+            return Ok(None);
+        }
+        Ok(Some(ty))
+    }
+
+    /// One `option = value` pair, or the bare `HYPOTHETICAL` marker.
+    ///
+    /// Option names arrive lowercased by the lexer, so the match is on the
+    /// lowercase spelling and every unquoted casing of `SFUNC` folds onto
+    /// [`AggregateOption::SFunc`]. A *quoted* mixed-case spelling keeps its case
+    /// and therefore misses every arm — which is what `PostgreSQL` does too,
+    /// reporting `"Sfunc1"` as an attribute it does not recognise.
+    fn aggregate_option(&mut self) -> Result<crate::ast::AggregateOption, ParseError> {
+        use crate::ast::AggregateOption;
+
+        let position = self.peek_pos();
+        let Token::Ident(name) = self.peek().clone() else {
+            return Err(ParseError::new(
+                format!("expected an aggregate option name, found {:?}", self.peek()),
+                position,
+            ));
+        };
+        self.bump();
+        // `HYPOTHETICAL` is the one option with no `= value`.
+        if name.eq_ignore_ascii_case("hypothetical") && *self.peek() != Token::Eq {
+            return Ok(AggregateOption::Hypothetical);
+        }
+        self.expect(&Token::Eq)?;
+        match name.as_str() {
+            // The numbered spellings are PostgreSQL 7 survivals meaning exactly
+            // what the unnumbered ones mean.
+            "sfunc" | "sfunc1" => Ok(AggregateOption::SFunc(self.aggregate_function_name()?)),
+            "finalfunc" => Ok(AggregateOption::FinalFunc(self.aggregate_function_name()?)),
+            "stype" | "stype1" => Ok(AggregateOption::SType(self.routine_type()?)),
+            "basetype" => Ok(AggregateOption::BaseType(self.aggregate_base_type()?)),
+            "initcond" | "initcond1" => {
+                if *self.peek() == Token::Keyword(Keyword::Null) {
+                    self.bump();
+                    return Ok(AggregateOption::InitCond(None));
+                }
+                Ok(AggregateOption::InitCond(Some(
+                    self.aggregate_option_value()?,
+                )))
+            }
+            _ => Ok(AggregateOption::Unimplemented {
+                name,
+                value: self.aggregate_option_value()?,
+            }),
+        }
+    }
+
+    /// `( option = value [, …] )` — the definition list that ends every
+    /// `CREATE AGGREGATE`. An empty list parses: which options an aggregate
+    /// must carry is a rule the executor applies, not the grammar.
+    fn aggregate_options(&mut self) -> Result<Vec<crate::ast::AggregateOption>, ParseError> {
+        self.expect(&Token::LParen)?;
+        let mut options = Vec::new();
+        if *self.peek() == Token::RParen {
+            self.bump();
+            return Ok(options);
+        }
+        loop {
+            options.push(self.aggregate_option()?);
+            if *self.peek() == Token::Comma {
+                self.bump();
+                continue;
+            }
+            break;
+        }
+        self.expect(&Token::RParen)?;
+        Ok(options)
+    }
+
+    /// `CREATE [OR REPLACE] AGGREGATE name (…) ( option = value [, …] )`, in
+    /// all three of `PostgreSQL`'s spellings: an argument list, `(*)` for the
+    /// zero-argument form, or the old style that has no argument list and names
+    /// its argument with `BASETYPE`.
+    fn create_aggregate(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::{CreateAggregateStmt, Statement};
+
+        self.expect(&Token::Keyword(Keyword::Create))?;
+        let or_replace = if self.eat_keyword(Keyword::Or) {
+            self.expect_ident_eq("replace")?;
+            true
+        } else {
+            false
+        };
+        self.expect_ident_eq("aggregate")?;
+        let name = self.routine_name()?;
+        let args = if self.at_old_style_aggregate_options() {
+            None
+        } else {
+            Some(self.aggregate_args()?)
+        };
+        let options = self.aggregate_options()?;
+        self.expect_statement_end("CREATE AGGREGATE")?;
+        Ok(Statement::CreateAggregate(Box::new(CreateAggregateStmt {
+            name,
+            or_replace,
+            args,
+            options,
+        })))
+    }
+
+    /// An aggregate named for `DROP`/`ALTER`: `name(*)` or `name(argtypes)`.
+    /// The parentheses are not optional — `PostgreSQL` has no bare-name
+    /// spelling for an aggregate, unlike a routine.
+    fn aggregate_signature(&mut self) -> Result<crate::ast::AggregateSignature, ParseError> {
+        let name = self.routine_name()?;
+        let args = self.aggregate_args()?;
+        Ok(crate::ast::AggregateSignature { name, args })
+    }
+
+    /// `DROP AGGREGATE [IF EXISTS] sig [, …] [CASCADE | RESTRICT]`.
+    fn drop_aggregate(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::Statement;
+
+        self.expect(&Token::Keyword(Keyword::Drop))?;
+        self.expect_ident_eq("aggregate")?;
+        let if_exists = self.eat_if_exists()?;
+        let mut aggregates = Vec::new();
+        loop {
+            aggregates.push(self.aggregate_signature()?);
+            if *self.peek() == Token::Comma {
+                self.bump();
+                continue;
+            }
+            break;
+        }
+        let cascade = self.eat_ident_eq("cascade");
+        if !cascade {
+            let _ = self.eat_ident_eq("restrict");
+        }
+        self.expect_statement_end("DROP AGGREGATE")?;
+        Ok(Statement::DropAggregate {
+            if_exists,
+            aggregates,
+            cascade,
+        })
+    }
+
+    /// `ALTER AGGREGATE sig { RENAME TO | OWNER TO | SET SCHEMA } name`.
+    fn alter_aggregate(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::Statement;
+
+        self.expect_ident_eq("alter")?;
+        self.expect_ident_eq("aggregate")?;
+        let aggregate = self.aggregate_signature()?;
+        let action = self.alter_aggregate_action()?;
+        self.expect_statement_end("ALTER AGGREGATE")?;
+        Ok(Statement::AlterAggregate { aggregate, action })
+    }
+
+    /// The action of an `ALTER AGGREGATE`. `PostgreSQL` gives an aggregate only
+    /// these three, not the definition options an `ALTER FUNCTION` accepts.
+    fn alter_aggregate_action(&mut self) -> Result<crate::ast::AlterRoutineAction, ParseError> {
+        use crate::ast::AlterRoutineAction;
+
+        if self.eat_ident_eq("rename") {
+            self.expect(&Token::Keyword(Keyword::To))?;
+            return Ok(AlterRoutineAction::RenameTo(self.expect_object_name()?));
+        }
+        if self.eat_ident_eq("owner") {
+            self.expect(&Token::Keyword(Keyword::To))?;
+            return Ok(AlterRoutineAction::OwnerTo(self.expect_object_name()?));
+        }
+        if *self.peek() == Token::Keyword(Keyword::Set) && self.peek2_is_schema() {
+            self.bump();
+            self.bump();
+            return Ok(AlterRoutineAction::SetSchema(self.expect_object_name()?));
+        }
+        Err(ParseError::new(
+            format!(
+                "expected RENAME TO, OWNER TO or SET SCHEMA in ALTER AGGREGATE, found {:?}",
+                self.peek()
+            ),
+            self.peek_pos(),
+        ))
     }
 
     /// `CALL name ( [arg, …] )`.
