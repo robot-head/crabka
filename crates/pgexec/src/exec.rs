@@ -23843,6 +23843,15 @@ impl ViewProbe {
     ) -> bool {
         use crabka_pgparser::token::Token;
 
+        // A view that does not read the relation at all cannot read its column,
+        // whatever else its body does. Without this gate the over-approximations
+        // below answer for every view in the catalog: once view bodies could
+        // contain joins and subqueries, a single `SELECT *` view made every
+        // unrelated `ALTER TABLE … DROP COLUMN` report it as a dependent and
+        // refuse the drop.
+        if !self.reads_relation(target) {
+            return false;
+        }
         let Some(tokens) = self.tokens.clone() else {
             return true;
         };
