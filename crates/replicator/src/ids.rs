@@ -3,10 +3,10 @@
 //! MirrorMaker-2 offset translation juggles three different `i64` offsets that
 //! all live in different address spaces:
 //!
-//! - [`UpstreamOffset`]: an offset on the **source** cluster, as recorded in an
+//! - [`UpstreamOffset`][]: an offset on the **source** cluster, as recorded in an
 //!   offset-sync or checkpoint.
-//! - [`DownstreamOffset`]: the corresponding offset on the **target** cluster.
-//! - [`CommittedOffset`]: a consumer group's committed **source** offset that
+//! - [`DownstreamOffset`][]: the corresponding offset on the **target** cluster.
+//! - [`CommittedOffset`][]: a consumer group's committed **source** offset that
 //!   translation moves to the target.
 //!
 //! A call site can transpose these values. For example, it can build an

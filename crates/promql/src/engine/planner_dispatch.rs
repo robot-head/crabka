@@ -37,11 +37,11 @@ impl<S: MetricStore> PromqlEngine<S> {
     /// `plan_instant_expr_is_total_over_construct_sweep` test and the green
     /// conformance corpus prove this. Supported node kinds:
     ///
-    /// - [`Expr::Paren`]: recurse into the inner expression.
-    /// - [`Expr::VectorSelector`]: a bare instant-vector selector over
+    /// - [`Expr::Paren`][]: recurse into the inner expression.
+    /// - [`Expr::VectorSelector`][]: a bare instant-vector selector over
     ///   float-only series (`SeriesDivide -> SeriesNormalize ->
     ///   InstantManipulate`). Histogram-bearing selectors return `None`.
-    /// - [`Expr::Call`]: a rate-family call or a non-experimental `*_over_time`
+    /// - [`Expr::Call`][]: a rate-family call or a non-experimental `*_over_time`
     ///   call over a bare matrix selector. A FLOAT-only selector lowers onto the
     ///   operator chain (`... -> RangeManipulate -> rate/over_time-UDF`). A
     ///   HISTOGRAM-bearing selector instead assembles the windowed range vector
@@ -50,7 +50,7 @@ impl<S: MetricStore> PromqlEngine<S> {
     ///   parity-exact. The experimental `*_over_time` members
     ///   (`mad`/`first`/`ts_of_*`), subquery arguments, anchored and smoothed
     ///   selectors, and present-but-empty-valued labels return `None`.
-    /// - [`Expr::Aggregate`]: a simple float aggregation
+    /// - [`Expr::Aggregate`][]: a simple float aggregation
     ///   (`sum|avg|min|max|count|group` with `by`/`without`) over a
     ///   planner-supported, float-only inner expression. Param aggregations
     ///   (`topk`/`bottomk`/`quantile`/`count_values`/`stddev`/`stdvar`),

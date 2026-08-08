@@ -18,7 +18,7 @@ pub(crate) struct RequestContext<'a> {
     pub client_id: &'a str,
     /// `true` when the connection can serve the fetch records region with
     /// kernel `sendfile(2)`. That means a plaintext `TcpStream` on a
-    /// SENDFILE-alias platform: Linux, Apple, FreeBSD, or DragonFly. The fetch
+    /// SENDFILE-alias platform: Linux, Apple, FreeBSD, or `DragonFly`. The fetch
     /// handler uses this to emit the zero-copy `RecordsPayload::FileRegions`
     /// instead of `Raw` for large records runs (Increments D and E). It is
     /// `false` on TLS, on Windows, and for every non-fetch handler, which all

@@ -12,7 +12,7 @@
 //!
 //! Three scenarios, each independently `#[ignore]`d:
 //!
-//! 1. [`kip320_wire_conformance_offset_for_leader_epoch`]: wire-conformance.
+//! 1. [`kip320_wire_conformance_offset_for_leader_epoch`][]: wire-conformance.
 //!    The test starts a single Crabka broker and produces across two leader
 //!    epochs. A small Java helper drives the official
 //!    `org.apache.kafka.clients.consumer.KafkaConsumer` against Crabka. The
@@ -27,7 +27,7 @@
 //!    `OffsetForLeaderEpoch` answer over the wire with the Task-2 client
 //!    helper.
 //!
-//! 2. [`kip320_jvm_follower_truncates_from_crabka_leader`]: induced divergence.
+//! 2. [`kip320_jvm_follower_truncates_from_crabka_leader`][]: induced divergence.
 //!    The test runs a mixed JVM+Crabka cluster: one
 //!    `mirror.gcr.io/apache/kafka:4.0.0` broker and a Crabka broker that share
 //!    a Crabka-led `KRaft` metadata quorum, per the Slice-6 mixed-quorum work
@@ -43,7 +43,7 @@
 //!    `kafka-console-consumer` recovers and continues without a fatal
 //!    deserialization/`LogTruncationException`.
 //!
-//! 3. [`kip320_crabka_follower_truncates_from_jvm_leader`]: the reverse
+//! 3. [`kip320_crabka_follower_truncates_from_jvm_leader`][]: the reverse
 //!    direction, where the harness allows it. A Crabka follower truncates a
 //!    divergent suffix to converge on a JVM leader.
 //!

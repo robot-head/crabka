@@ -35,7 +35,7 @@ impl SchemaKind {
 
 /// Maps `(topic, role)` to a registry subject.
 ///
-/// This trait is the seam for Record and TopicRecord strategies, which can come
+/// This trait is the seam for Record and `TopicRecord` strategies, which can come
 /// later. Only `TopicNameStrategy` ships now.
 pub trait SubjectStrategy: Send + Sync + 'static {
     fn subject(&self, topic: &str, role: Role) -> String;

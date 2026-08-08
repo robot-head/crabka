@@ -7,11 +7,11 @@
 //! exhaustively.
 //!
 //! Two entry points share one cast matrix:
-//!   * [`cast_allowed`]: a *static* (plan-time) predicate on `(from, to)` column
+//!   * [`cast_allowed`][]: a *static* (plan-time) predicate on `(from, to)` column
 //!     types, so [`crate::ops`]-free callers can reject an undefined cast with
 //!     SQLSTATE 42846 before any row is produced (and so `RowDescription` knows
 //!     the result type).
-//!   * [`cast`]: the *runtime* value conversion of one (possibly NULL) `Datum`.
+//!   * [`cast`][]: the *runtime* value conversion of one (possibly NULL) `Datum`.
 //!
 //! The defined casts (NULL → NULL for every one of them):
 //!   * identity `T → T`;

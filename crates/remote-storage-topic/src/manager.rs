@@ -9,7 +9,7 @@
 //!
 //! Lifecycle:
 //!
-//! - [`TopicBasedRemoteLogMetadataManager::start`]: load any on-disk
+//! - [`TopicBasedRemoteLogMetadataManager::start`][]: load any on-disk
 //!   snapshot into the cache and spawn the consumer pump subscribed to
 //!   NOTHING. The broker then drives the consumed set with
 //!   [`TopicBasedRemoteLogMetadataManager::reconcile_assignment`]. That call

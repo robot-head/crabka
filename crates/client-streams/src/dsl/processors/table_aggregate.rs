@@ -1,10 +1,10 @@
 //! `KGroupedTable` processors (`KTable.groupBy` aggregation).
 //!
-//! - [`KTableRepartitionMapProcessor`]: it takes a `Change<V>` and emits a keyed
+//! - [`KTableRepartitionMapProcessor`][]: it takes a `Change<V>` and emits a keyed
 //!   `Change<VR>`. It maps each present side of the change through the user
 //!   mapper. On a grouping-key change it forwards a subtract-only record to the
 //!   old key and an add-only record to the new key.
-//! - [`KTableAggregateProcessor`]: it takes a `Change<VR>` and emits a
+//! - [`KTableAggregateProcessor`][]: it takes a `Change<VR>` and emits a
 //!   `Change<T>`. It subtracts the old value's contribution, then adds the new
 //!   value's contribution, over a `KeyValueStore`.
 

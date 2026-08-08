@@ -7,12 +7,12 @@
 //! `--schema-registry-url` is configured.
 //!
 //! Sub-modules:
-//! - [`client`]: HTTP client against a Confluent Schema Registry REST API.
-//! - [`wire`]: Confluent binary framing, which is the 5-byte magic and id
+//! - [`client`][]: HTTP client against a Confluent Schema Registry REST API.
+//! - [`wire`][]: Confluent binary framing, which is the 5-byte magic and id
 //!   header plus the Protobuf message-index prefix.
-//! - [`mod@format`]: per-format serialize, deserialize, and validate dispatch
+//! - [`mod@format`][]: per-format serialize, deserialize, and validate dispatch
 //!   for Avro, JSON Schema, and Protobuf.
-//! - [`codec`]: the [`crate::codec::RecordCodec`] impl that joins the above.
+//! - [`codec`][]: the [`crate::codec::RecordCodec`] impl that joins the above.
 
 pub mod client;
 pub mod codec;

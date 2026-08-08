@@ -9,9 +9,9 @@
 //!
 //! # Key Types
 //!
-//! - [`WalFrame`]: the `GRW1` record framing.
-//! - [`apply_frame`]: replay application with the engine's merge rules.
-//! - [`replay_committed_frames`]: pure replay over committed frame bytes.
+//! - [`WalFrame`][]: the `GRW1` record framing.
+//! - [`apply_frame`][]: replay application with the engine's merge rules.
+//! - [`replay_committed_frames`][]: pure replay over committed frame bytes.
 
 pub mod apply;
 pub mod checkpoint;

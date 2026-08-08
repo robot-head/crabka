@@ -16,7 +16,7 @@
 //!
 //! - [`Message`] / [`Magic`]: per-message wire format, with a CRC and the
 //!   message fields.
-//! - [`ParsedRecord`]: cross-format view of a single offset-tagged
+//! - [`ParsedRecord`][]: cross-format view of a single offset-tagged
 //!   record.
 //! - [`decode_message_set`] / [`encode_flat_message_set`] /
 //!   [`encode_compressed_message_set`]: top-level codec.

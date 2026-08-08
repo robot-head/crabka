@@ -2666,7 +2666,7 @@ fn label_matcher_value_escape(value: &str) -> String {
 /// errors are `Decode`, `Plan`, and `Unsupported`, and they include limit and
 /// range violations that become `Plan`. These keep their user-facing message at
 /// 400. The internal failures are `Exec`, `Store`, and `Symbolize`. These
-/// return a generic 500 and log the detail with tracing, so raw DataFusion text
+/// return a generic 500 and log the detail with tracing, so raw `DataFusion` text
 /// and other internal text never reaches the client.
 fn profile_error_response(err: ProfileError) -> Response {
     let status = match &err {

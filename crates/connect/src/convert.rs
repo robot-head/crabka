@@ -5,10 +5,10 @@
 //! a [`Converter`] to each of a record's key and value to cross the wire
 //! boundary. Two converters ship here:
 //!
-//! - [`ByteIdentity`]: `T = Bytes`, a byte-for-byte passthrough that preserves
+//! - [`ByteIdentity`][]: `T = Bytes`, a byte-for-byte passthrough that preserves
 //!   exact wire bytes. That is the Kafka-compatibility constraint that always
 //!   matters.
-//! - [`SchemaConverter`]: bridges the Confluent schema-registry serdes from
+//! - [`SchemaConverter`][]: bridges the Confluent schema-registry serdes from
 //!   `crabka-schema-serde`, so a connector can read and write typed Avro,
 //!   Protobuf, and JSON records.
 

@@ -133,7 +133,7 @@ impl SpanMetricsRegistry {
     /// are **cumulative**. The registry accumulates across intervals and emits
     /// the running total each time, which is Tempo's persistent-registry
     /// semantics. The `_total` series are therefore monotonic, and the
-    /// consuming PromQL or Mimir `rate()` and `increase()` work.
+    /// consuming `PromQL` or Mimir `rate()` and `increase()` work.
     ///
     /// An earlier `drain` reset the accumulator every interval and emitted
     /// per-interval deltas under `_total` names. `PromQL` reads that as a

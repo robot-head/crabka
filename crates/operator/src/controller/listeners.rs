@@ -612,7 +612,7 @@ pub fn effective_inter_broker_listener_name(
 /// `statefulset.kubernetes.io/pod-name` label (K8s 1.28+). This pins the
 /// Service to the one pod that hosts this broker.
 ///
-/// `pod_name` is the pod name that the StatefulSet allocated, for example
+/// `pod_name` is the pod name that the `StatefulSet` allocated, for example
 /// `demo-controller-0`. The caller computes it from the pool and the
 /// ordinal.
 ///

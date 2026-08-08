@@ -1,4 +1,4 @@
-//! Execution-level tests for the KStream and KTable DSL.
+//! Execution-level tests for the `KStream` and `KTable` DSL.
 //!
 //! Each test builds a counting app with `StreamsBuilder`, runs it through the
 //! broker-free `TopologyTestDriver`, and asserts the forwarded running count

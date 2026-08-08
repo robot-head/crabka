@@ -9,10 +9,10 @@
 //! `TopicBasedRemoteLogMetadataManager`, and swaps it in. These tests
 //! exercise that path end-to-end with the `Local` tiered-storage backend:
 //!
-//! * [`topic_rlmm_activates_against_loopback`]: the bootstrap completes. The
+//! * [`topic_rlmm_activates_against_loopback`][]: the bootstrap completes. The
 //!   `tiered_storage_rlmm_topic_backed` gauge flips to 1 and the
 //!   `__remote_log_metadata` topic exists on the broker.
-//! * [`topic_rlmm_copy_then_fetch_round_trip`]: the test tiers a sealed
+//! * [`topic_rlmm_copy_then_fetch_round_trip`][]: the test tiers a sealed
 //!   segment and reads the records back at offset 0. This proves that the RLM
 //!   copy task's `CopySegment*` events round-trip through
 //!   `__remote_log_metadata` over the loopback.

@@ -36,7 +36,7 @@ pub struct S3Config {
     /// slash.
     pub prefix: Option<String>,
     /// AWS region. AWS S3 requires it. Use the placeholder `"us-east-1"` for
-    /// MinIO and R2.
+    /// `MinIO` and R2.
     pub region: String,
     /// Optional custom endpoint URL, for example `http://minio:9000` or an R2
     /// endpoint.

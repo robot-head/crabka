@@ -130,7 +130,7 @@ pub struct Topology {
     /// Materialized KV stores that can use a record cache. This is JVM
     /// `Materialized` caching, which is on by default.
     /// [`Topology::mark_store_caching`] fills this set at the materialized
-    /// KTable and aggregate lowering sites. `instantiate` reads it and wraps the
+    /// `KTable` and aggregate lowering sites. `instantiate` reads it and wraps the
     /// store in a [`NamedCache`] when the cache budget is positive.
     caching_stores: std::collections::HashSet<String>,
 }
@@ -1128,7 +1128,7 @@ impl Topology {
     /// Mark a materialized store as record-cache eligible.
     ///
     /// This is JVM `Materialized` caching, which is on by default. The
-    /// materialized KTable and aggregate lowering sites call this method with
+    /// materialized `KTable` and aggregate lowering sites call this method with
     /// the `Materialized`'s `caching_enabled()`. `on == false`, which
     /// `with_caching(false)` gives, leaves the store uncached.
     pub(crate) fn mark_store_caching(&mut self, name: &str, on: bool) {

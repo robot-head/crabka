@@ -132,7 +132,7 @@ impl SharePartitionLeaderManager {
     /// share path carries only `topic_id`. It then compares the partition
     /// leader to `node_id`.
     ///
-    /// The ShareFetch and ShareAcknowledge handlers call this method.
+    /// The `ShareFetch` and `ShareAcknowledge` handlers call this method.
     pub(crate) fn topic_leader_is_self(&self, topic_id: uuid::Uuid, partition: i32) -> bool {
         let image = self.controller.current_image();
         let Some(topic) = image.topics().find(|t| t.topic_id == topic_id) else {
@@ -169,7 +169,7 @@ impl SharePartitionLeaderManager {
     /// `DashMap` guard before the load `.await`. A concurrent loader that loses
     /// the insert race adopts the cell of the winner.
     ///
-    /// The ShareFetch and ShareAcknowledge handlers call this method.
+    /// The `ShareFetch` and `ShareAcknowledge` handlers call this method.
     pub(crate) async fn get_or_load(
         &self,
         group: &str,

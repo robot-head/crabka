@@ -32,8 +32,8 @@ use crabka_protocol::{
 
 const OFFSET_ABSENT_SENTINEL: i64 = -1; // OffsetFetch returns -1 when no offset is committed.
 
-/// Resolve a topic's UUID with Metadata. Under KIP-516, OffsetCommit and
-/// OffsetFetch negotiate to v10/v8+, which key by `topic_id` on the wire.
+/// Resolve a topic's UUID with Metadata. Under KIP-516, `OffsetCommit` and
+/// `OffsetFetch` negotiate to v10/v8+, which key by `topic_id` on the wire.
 async fn topic_id_for(p: &support::InProcess, name: &str) -> WireUuid {
     let resp = p
         .client

@@ -8,13 +8,13 @@
 //! value forwarded between nodes is wrapped in `Change<V>`, and that keeps the
 //! changelog and the wire topology byte-unchanged.
 //!
-//! - [`KTableSourceProcessor`]: `V` in → `Change<V>` out. It reads the prior
+//! - [`KTableSourceProcessor`][]: `V` in → `Change<V>` out. It reads the prior
 //!   store value as `old`.
-//! - [`KTableToStreamProcessor`]: `Change<V>` in → `V` out. It extracts `new`
+//! - [`KTableToStreamProcessor`][]: `Change<V>` in → `V` out. It extracts `new`
 //!   and drops tombstones, because `toStream` produces a plain `KStream`.
 //! - [`KTableMapValuesProcessor`] and [`KTableMapValuesViewProcessor`]:
 //!   `Change<V>` in → `Change<V2>` out. They `map` both sides.
-//! - [`KTableFilterProcessor`]: `Change<V>` in → `Change<V>` out. It re-applies
+//! - [`KTableFilterProcessor`][]: `Change<V>` in → `Change<V>` out. It re-applies
 //!   the predicate to both sides and **emits tombstones** for rows that stop
 //!   matching.
 

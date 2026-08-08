@@ -1,4 +1,4 @@
-//! The high-level KStream and KTable DSL.
+//! The high-level `KStream` and `KTable` DSL.
 //!
 //! The DSL records a typed logical graph. It can then apply the JVM-compatible
 //! topology optimizations, and it lowers the graph to the Processor-API
