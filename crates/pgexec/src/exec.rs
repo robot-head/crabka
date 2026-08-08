@@ -5291,7 +5291,16 @@ impl DmlSource {
             });
         }
         let read = write_ctx.read_ctx(ctes);
-        let rel = build_from(&read, from, None, None, None)?;
+        // The target relation is not in the FROM/USING items' scope — SQL puts
+        // it out of their reach, and `LATERAL` cannot bring it back — so a name
+        // only the target supplies is that prohibition, not a missing entry.
+        let kind = if from.iter().any(item_is_lateral) {
+            OuterReference::LateralTarget
+        } else {
+            OuterReference::Target
+        };
+        let rel = build_from(&read, from, None, None, None)
+            .map_err(|error| explain_outer_reference(error, &scope, kind))?;
         scope.columns.extend(rel.scope.columns);
         Ok(Self {
             scope,
@@ -10180,6 +10189,15 @@ fn build_from(
     let first = iter
         .next()
         .ok_or_else(|| ExecError::Unsupported("build_from on empty FROM".into()))?;
+    // Nothing of this query level is in scope for its first item, so the only
+    // aggregate the level rule can reject there is one that reads no variable at
+    // all — which an empty scope answers exactly.
+    reject_from_clause_aggregates(
+        read_ctx,
+        first,
+        &crabka_pgparser::ast::JoinConstraint::None,
+        &Scope::empty(),
+    )?;
     let mut acc = build_table_expr(read_ctx, first, bounds, scan_plan, filter)?;
     for te in iter {
         // A comma-FROM (multiple tables) is a cross join — no single-table
@@ -10196,6 +10214,136 @@ fn build_from(
     Ok(acc)
 }
 
+/// The relationship between a reference that failed to resolve and the scope one
+/// query level out that could have supplied it — all that separates
+/// `PostgreSQL`'s wordings for an out-of-reach FROM-clause entry.
+#[derive(Clone, Copy)]
+enum OuterReference {
+    /// A sibling FROM item of the same query level. `LATERAL` would bring it
+    /// into view, so `PostgreSQL` offers that as the remedy.
+    Sibling,
+    /// The relation an `UPDATE`/`DELETE` is targeting, named from a `FROM` or
+    /// `USING` item that was not written `LATERAL`. No remedy exists.
+    Target,
+    /// The same target, named from an item that *was* written `LATERAL`. The
+    /// name is then found and rejected rather than never found, which in
+    /// `PostgreSQL` is a different check and a differently shaped message.
+    LateralTarget,
+}
+
+/// Was `LATERAL` written on this FROM item?
+///
+/// Only the keyword counts, not the implicit laterality of a function item: it
+/// is what `PostgreSQL` uses to decide whether the target relation's name is
+/// looked up at all, and so which of the two prohibitions reports it.
+fn item_is_lateral(te: &crabka_pgparser::ast::TableExpr) -> bool {
+    use crabka_pgparser::ast::TableExpr;
+    match te {
+        TableExpr::Derived { lateral, .. } | TableExpr::Function { lateral, .. } => *lateral,
+        TableExpr::JsonTable(table) => table.lateral,
+        TableExpr::Table { .. } => false,
+        TableExpr::Join { left, right, .. } => item_is_lateral(left) || item_is_lateral(right),
+    }
+}
+
+impl OuterReference {
+    fn note(self) -> crate::error::FromEntryNote {
+        use crate::error::FromEntryNote;
+        match self {
+            Self::Sibling => FromEntryNote::MarkSubqueryLateral,
+            Self::Target => FromEntryNote::TargetRelation,
+            Self::LateralTarget => FromEntryNote::LateralTargetRelation,
+        }
+    }
+}
+
+/// The qualifier of the one visible column in `scope` named `name`.
+///
+/// `None` when no column or more than one carries the name: `PostgreSQL` names a
+/// single inaccessible match and says "there are columns named …" for several,
+/// and the several case is not one this engine reaches yet.
+fn sole_owner(scope: &Scope, name: &str) -> Option<String> {
+    let mut owner = None;
+    for column in &scope.columns {
+        if column.name != name {
+            continue;
+        }
+        // A USING/NATURAL-coalesced column belongs to the join rather than to
+        // one table, so there is no name to put in the explanation.
+        let qualifier = column.qualifier.as_deref()?;
+        if qualifier.starts_with('$') {
+            continue;
+        }
+        if owner.is_some() {
+            return None;
+        }
+        owner = Some(qualifier.to_owned());
+    }
+    owner
+}
+
+/// Re-word a resolution failure that `outer` explains.
+///
+/// gres resolves a FROM item against its own scope alone, so a reference to an
+/// entry one query level out fails with the bare "missing FROM-clause entry" or
+/// "column does not exist". `PostgreSQL` searches the whole range table before
+/// reporting and says so when it finds the name somewhere the reference cannot
+/// see. Only the error already on its way out is rewritten — a name `outer` does
+/// not supply passes through untouched.
+fn explain_outer_reference(error: ExecError, outer: &Scope, kind: OuterReference) -> ExecError {
+    match error {
+        ExecError::MissingFromEntry(table)
+            if outer
+                .columns
+                .iter()
+                .any(|column| column.qualifier.as_deref() == Some(table.as_str())) =>
+        {
+            ExecError::InvalidFromEntry {
+                table,
+                note: kind.note(),
+            }
+        }
+        ExecError::UndefinedColumn(column) => match sole_owner(outer, &column) {
+            // Written `LATERAL`, the target relation's name does resolve, and
+            // what rejects it names the relation rather than the column.
+            Some(table) if matches!(kind, OuterReference::LateralTarget) => {
+                ExecError::InvalidFromEntry {
+                    table,
+                    note: kind.note(),
+                }
+            }
+            Some(table) => ExecError::InaccessibleColumn {
+                column,
+                table,
+                lateral_would_help: matches!(kind, OuterReference::Sibling),
+            },
+            None => ExecError::UndefinedColumn(column),
+        },
+        other => other,
+    }
+}
+
+/// Reject an aggregate in `te` — or in the join constraint attaching it — that
+/// `PostgreSQL` assigns to the query level whose FROM clause `outer` describes.
+///
+/// Runs once per FROM item rather than once per row: a lateral item over a
+/// ten-thousand-row outer relation is rebuilt ten thousand times, and the level
+/// an aggregate inside it belongs to is a property of the text, not the row.
+fn reject_from_clause_aggregates(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    te: &crabka_pgparser::ast::TableExpr,
+    constraint: &crabka_pgparser::ast::JoinConstraint,
+    outer: &Scope,
+) -> Result<(), ExecError> {
+    FromClauseAggregatePass {
+        levels: AggregateLevels {
+            read_ctx,
+            statement: outer,
+        },
+    }
+    .check(te, constraint)
+}
+
 /// Join one more FROM item onto the accumulated relation.
 ///
 /// An ordinary item materializes once and joins; a lateral one is rebuilt for
@@ -10209,9 +10357,21 @@ fn append_from_item(
     constraint: &crabka_pgparser::ast::JoinConstraint,
     filter: Option<&Expr>,
 ) -> Result<Relation, ExecError> {
+    reject_from_clause_aggregates(read_ctx, te, constraint, &acc.scope)?;
     if !is_lateral_item(te, &acc.scope) {
         let mut acc = acc;
-        let mut next = build_table_expr(read_ctx, te, None, None, None)?;
+        // Without `LATERAL` the items already in `acc` are out of this one's
+        // reach, so a name only they supply is the thing to report, not a name
+        // that is simply missing. An item that *was* written `LATERAL` somewhere
+        // inside is excluded: `PostgreSQL` offers the remedy only when it is not
+        // already taken, and a failure under one is this engine's own.
+        let mut next = build_table_expr(read_ctx, te, None, None, None).map_err(|error| {
+            if item_is_lateral(te) {
+                error
+            } else {
+                explain_outer_reference(error, &acc.scope, OuterReference::Sibling)
+            }
+        })?;
         if let Some(filter) = filter {
             push_local_where(&mut acc, &mut next, kind, filter, read_ctx.eval_ctx)?;
         }
@@ -10404,9 +10564,10 @@ fn lateral_join(
             // A lateral reference on the nullable side would have to be evaluated
             // for rows that do not exist yet, so PostgreSQL rejects the reference
             // rather than the join.
-            return Err(ExecError::InvalidColumnReference(format!(
-                "invalid reference to FROM-clause entry for table \"{relation}\""
-            )));
+            return Err(ExecError::InvalidFromEntry {
+                table: relation,
+                note: crate::error::FromEntryNote::CombiningJoinType,
+            });
         }
         // Nothing was correlated, so the item is an ordinary relation.
         let right = build_table_expr(read_ctx, &specialized, None, None, None)?;
@@ -12276,7 +12437,12 @@ fn defers_statement_level_aggregate(
     select: &SelectStmt,
     outer: &Scope,
 ) -> bool {
-    let pass = OuterAggregatePass { read_ctx, outer };
+    let pass = OuterAggregatePass {
+        levels: AggregateLevels {
+            read_ctx,
+            statement: outer,
+        },
+    };
     select.projection.iter().any(|item| match item {
         SelectItem::Expr { expr, .. } => pass.expr(expr, &[]),
         SelectItem::Wildcard | SelectItem::QualifiedWildcard(_) => false,
@@ -12312,14 +12478,11 @@ fn defers_statement_level_aggregate(
 /// defer keeps the missing-FROM-clause error the statement already gets, and an
 /// old error beats a new wrong answer.
 struct OuterAggregatePass<'a, 'b> {
-    read_ctx: &'a crate::subquery::SubCtx<'b>,
-    /// Level zero — the statement's own FROM, the level no aggregate below it
-    /// may belong to.
-    outer: &'a Scope,
+    levels: AggregateLevels<'a, 'b>,
 }
 
-/// Which levels an aggregate's arguments read, to the one resolution
-/// [`OuterAggregatePass`] needs.
+/// Which levels an aggregate's arguments read, to the one resolution the passes
+/// over [`AggregateLevels`] need.
 #[derive(Default)]
 struct AggregateReach {
     /// A variable resolving to the statement's own FROM.
@@ -12328,6 +12491,20 @@ struct AggregateReach {
     enclosing: bool,
     /// A variable belonging to no level this pass could describe.
     unknown: bool,
+}
+
+/// `PostgreSQL`'s `check_agg_arguments` reduced to the question both aggregate
+/// passes ask: does an aggregate written under some enclosing sub-selects take
+/// its level from `statement`'s own FROM clause?
+///
+/// The two callers differ only in what they do with an unattributable name —
+/// [`OuterAggregatePass`] declines to defer, [`FromClauseAggregatePass`] declines
+/// to reject — so the walk itself reports what it found and leaves the policy to
+/// them.
+struct AggregateLevels<'a, 'b> {
+    read_ctx: &'a crate::subquery::SubCtx<'b>,
+    /// The statement's own FROM: the level whose variables settle the question.
+    statement: &'a Scope,
 }
 
 impl OuterAggregatePass<'_, '_> {
@@ -12459,6 +12636,19 @@ impl OuterAggregatePass<'_, '_> {
         call: &FuncCall,
         enclosing: &[&[crabka_pgparser::ast::TableExpr]],
     ) -> bool {
+        let reach = self.levels.reach_of(call, enclosing);
+        reach.unknown || (reach.statement && !reach.enclosing)
+    }
+}
+
+impl AggregateLevels<'_, '_> {
+    /// Which levels the arguments of `call`, written under the `enclosing`
+    /// sub-selects (outermost first), read.
+    fn reach_of(
+        &self,
+        call: &FuncCall,
+        enclosing: &[&[crabka_pgparser::ast::TableExpr]],
+    ) -> AggregateReach {
         let mut covered = Shadow::default();
         for from in enclosing {
             covered.extend_by(
@@ -12479,7 +12669,7 @@ impl OuterAggregatePass<'_, '_> {
         if let Some(filter) = &call.filter {
             self.reach(filter, &covered, &Shadow::default(), &mut reach);
         }
-        reach.unknown || (reach.statement && !reach.enclosing)
+        reach
     }
 
     /// Record which levels `expr` — an aggregate argument — reads.
@@ -12504,7 +12694,7 @@ impl OuterAggregatePass<'_, '_> {
             // Past every level in between. A name the statement's own FROM does
             // not supply is read at no level this decision turns on, so leaving
             // a FROM in between undescribed costs nothing for it.
-            if self.outer.resolve(qualifier, name).is_err() {
+            if self.statement.resolve(qualifier, name).is_err() {
                 return;
             }
             // It resolves here — unless a FROM in between that could not be
@@ -12552,6 +12742,385 @@ impl OuterAggregatePass<'_, '_> {
         for expr in query.order_by.iter().map(|item| &item.expr) {
             self.reach(expr, covered, &inner, reach);
         }
+    }
+}
+
+/// Where an aggregate that belongs to the query level owning a FROM clause was
+/// written, which is all that separates `PostgreSQL`'s three messages for it.
+#[derive(Clone, Copy)]
+enum FromAggregateSite {
+    /// A sub-select used as a FROM item.
+    Subselect,
+    /// The arguments of a function (or `JSON_TABLE`) used as a FROM item.
+    Function,
+    /// A join's `ON` condition.
+    JoinCondition,
+}
+
+impl FromAggregateSite {
+    /// `PostgreSQL` words each site separately rather than through
+    /// `ParseExprKindName`, so the strings are spelled out here too.
+    fn message(self) -> &'static str {
+        match self {
+            Self::Subselect => {
+                "aggregate functions are not allowed in FROM clause of their own query level"
+            }
+            Self::Function => "aggregate functions are not allowed in functions in FROM",
+            Self::JoinCondition => "aggregate functions are not allowed in JOIN conditions",
+        }
+    }
+}
+
+/// The expression-kind context one aggregate is judged in: the FROM-clause
+/// construct it was reached through, and whether it is written at the level that
+/// owns the clause rather than inside a sub-select somewhere below it.
+#[derive(Clone, Copy)]
+struct FromAggregateContext {
+    site: FromAggregateSite,
+    /// An aggregate reading no variable keeps the level it is written at, so
+    /// this is what decides whether that level is the one being checked.
+    owning_level: bool,
+}
+
+impl FromAggregateContext {
+    /// The same site, one query level down.
+    fn nested(self) -> Self {
+        Self {
+            owning_level: false,
+            ..self
+        }
+    }
+}
+
+/// Rejects an aggregate that `PostgreSQL` assigns to the query level whose FROM
+/// clause is being built.
+///
+/// `check_agglevels_and_constraints` walks up to the level the aggregate's
+/// arguments give it and asks what *that* level is transforming; a level in the
+/// middle of its own FROM clause refuses. So
+/// `SELECT 1 FROM t a, LATERAL (SELECT max(a.i) FROM u) ss` is an error while
+/// `SELECT 1 FROM t a, LATERAL (SELECT max(u.i) FROM u) ss` is not — only the
+/// first aggregate reads a variable of the level that owns the FROM clause. It
+/// is the level, not the `LATERAL` keyword, that decides: `max(a.i + u.i)`
+/// takes the *innermost* level its arguments read and so is allowed.
+///
+/// Levels below this one need no walk of their own here. A nested FROM item is
+/// its own FROM clause, checked when that query builds, so the pass only ever
+/// asks whether the level lands exactly here.
+struct FromClauseAggregatePass<'a, 'b> {
+    levels: AggregateLevels<'a, 'b>,
+}
+
+/// Does `te` write any aggregate call at all?
+///
+/// A pure AST walk with no catalog reads, which is what keeps
+/// [`FromClauseAggregatePass`] free for the FROM clauses — nearly all of them —
+/// that cannot trip the rule.
+fn from_item_calls_aggregate(te: &crabka_pgparser::ast::TableExpr) -> bool {
+    use crabka_pgparser::ast::{JoinConstraint, TableExpr};
+    match te {
+        TableExpr::Table { .. } => false,
+        TableExpr::Derived { subquery, .. } => query_calls_aggregate(subquery),
+        TableExpr::Function { functions, .. } => functions
+            .iter()
+            .flat_map(|call| &call.args)
+            .any(expr_calls_aggregate),
+        TableExpr::JsonTable(table) => table.exprs().into_iter().any(expr_calls_aggregate),
+        TableExpr::Join {
+            left,
+            right,
+            constraint,
+            ..
+        } => {
+            from_item_calls_aggregate(left)
+                || from_item_calls_aggregate(right)
+                || matches!(constraint, JoinConstraint::On(on) if expr_calls_aggregate(on))
+        }
+    }
+}
+
+/// The [`from_item_calls_aggregate`] pre-filter over one expression, following
+/// sub-selects because an aggregate inside one can still belong out here.
+fn expr_calls_aggregate(expr: &Expr) -> bool {
+    if let Expr::Func(call) = expr
+        && crate::agg::is_aggregate_name(&call.name)
+    {
+        return true;
+    }
+    expr_children(expr).into_iter().any(expr_calls_aggregate)
+        || direct_subquery(expr).is_some_and(query_calls_aggregate)
+}
+
+/// The [`from_item_calls_aggregate`] pre-filter over one query expression.
+fn query_calls_aggregate(query: &crabka_pgparser::ast::QueryExpr) -> bool {
+    use crabka_pgparser::ast::{CteBody, QueryBody, SetExpr};
+    fn body(set: &SetExpr) -> bool {
+        match set {
+            SetExpr::Query(QueryBody::Select(select)) => {
+                select_exprs(select).into_iter().any(expr_calls_aggregate)
+                    || select.from.iter().any(from_item_calls_aggregate)
+            }
+            SetExpr::Query(QueryBody::Values(values)) => {
+                values.rows.iter().flatten().any(expr_calls_aggregate)
+            }
+            SetExpr::Query(QueryBody::Nested(nested)) => query_calls_aggregate(nested),
+            SetExpr::SetOp { left, right, .. } => body(left) || body(right),
+        }
+    }
+    body(&query.body)
+        || query
+            .order_by
+            .iter()
+            .map(|item| &item.expr)
+            .chain(&query.limit)
+            .chain(&query.offset)
+            .any(expr_calls_aggregate)
+        || query
+            .with
+            .iter()
+            .flat_map(|with| &with.ctes)
+            .any(|cte| match &cte.body {
+                CteBody::Query(body) => query_calls_aggregate(body),
+                CteBody::Dml(_) => false,
+            })
+}
+
+impl FromClauseAggregatePass<'_, '_> {
+    /// Check one FROM item, and the join constraint that attaches it, against
+    /// the level rule.
+    fn check(
+        &self,
+        te: &crabka_pgparser::ast::TableExpr,
+        constraint: &crabka_pgparser::ast::JoinConstraint,
+    ) -> Result<(), ExecError> {
+        if let crabka_pgparser::ast::JoinConstraint::On(on) = constraint {
+            self.expr(on, &[], Self::owning(FromAggregateSite::JoinCondition))?;
+        }
+        self.table_expr(te)
+    }
+
+    fn owning(site: FromAggregateSite) -> FromAggregateContext {
+        FromAggregateContext {
+            site,
+            owning_level: true,
+        }
+    }
+
+    /// A FROM item is transformed at the level that owns it, so nothing its own
+    /// FROM clause introduces is in scope for it yet — which is why `enclosing`
+    /// starts empty however deep the join tree is.
+    fn table_expr(&self, te: &crabka_pgparser::ast::TableExpr) -> Result<(), ExecError> {
+        use crabka_pgparser::ast::{JoinConstraint, TableExpr};
+        if !from_item_calls_aggregate(te) {
+            return Ok(());
+        }
+        match te {
+            TableExpr::Table { .. } => Ok(()),
+            // A sub-select that is not `LATERAL` cannot see this query level at
+            // all, so a reference reaching it is a scope error and never gets as
+            // far as being levelled — `PostgreSQL` reports the reference.
+            TableExpr::Derived {
+                subquery,
+                lateral: true,
+                ..
+            } => self.query(
+                subquery,
+                &[],
+                Self::owning(FromAggregateSite::Subselect).nested(),
+            ),
+            TableExpr::Derived { .. } => Ok(()),
+            TableExpr::Function { functions, .. } => functions
+                .iter()
+                .flat_map(|call| &call.args)
+                .try_for_each(|arg| self.expr(arg, &[], Self::owning(FromAggregateSite::Function))),
+            TableExpr::JsonTable(table) => table.exprs().into_iter().try_for_each(|expr| {
+                self.expr(expr, &[], Self::owning(FromAggregateSite::Function))
+            }),
+            TableExpr::Join {
+                left,
+                right,
+                constraint,
+                ..
+            } => {
+                self.table_expr(left)?;
+                self.table_expr(right)?;
+                match constraint {
+                    JoinConstraint::On(on) => {
+                        self.expr(on, &[], Self::owning(FromAggregateSite::JoinCondition))
+                    }
+                    JoinConstraint::Using(_) | JoinConstraint::Natural | JoinConstraint::None => {
+                        Ok(())
+                    }
+                }
+            }
+        }
+    }
+
+    fn expr(
+        &self,
+        expr: &Expr,
+        enclosing: &[&[crabka_pgparser::ast::TableExpr]],
+        ctx: FromAggregateContext,
+    ) -> Result<(), ExecError> {
+        if let Expr::Func(call) = expr
+            && crate::agg::is_aggregate_name(&call.name)
+            && self.belongs_to_this_level(call, enclosing, ctx)
+        {
+            return Err(ExecError::FunctionError {
+                sqlstate: "42803",
+                message: ctx.site.message().into(),
+            });
+        }
+        expr_children(expr)
+            .into_iter()
+            .try_for_each(|child| self.expr(child, enclosing, ctx))?;
+        match direct_subquery(expr) {
+            Some(query) => self.query(query, enclosing, ctx.nested()),
+            None => Ok(()),
+        }
+    }
+
+    fn query(
+        &self,
+        query: &crabka_pgparser::ast::QueryExpr,
+        enclosing: &[&[crabka_pgparser::ast::TableExpr]],
+        ctx: FromAggregateContext,
+    ) -> Result<(), ExecError> {
+        use crabka_pgparser::ast::{CteBody, QueryBody, SetExpr};
+        // A tail ORDER BY / LIMIT is evaluated at the query's own level, so it
+        // walks under whatever FROM its body introduces. A set operation has no
+        // single such FROM; its branches each describe their own.
+        let body_from = match &query.body {
+            SetExpr::Query(QueryBody::Select(select)) => select.from.as_slice(),
+            _ => &[],
+        };
+        let inner = [enclosing, &[body_from]].concat();
+        self.set_expr(&query.body, enclosing, ctx)?;
+        query
+            .order_by
+            .iter()
+            .map(|item| &item.expr)
+            .chain(&query.limit)
+            .chain(&query.offset)
+            .try_for_each(|expr| self.expr(expr, &inner, ctx))?;
+        query
+            .with
+            .iter()
+            .flat_map(|with| &with.ctes)
+            .try_for_each(|cte| match &cte.body {
+                CteBody::Query(body) => self.query(body, enclosing, ctx),
+                // A data-modifying CTE is a write path, not a FROM item this
+                // level's rule reaches.
+                CteBody::Dml(_) => Ok(()),
+            })
+    }
+
+    fn set_expr(
+        &self,
+        body: &crabka_pgparser::ast::SetExpr,
+        enclosing: &[&[crabka_pgparser::ast::TableExpr]],
+        ctx: FromAggregateContext,
+    ) -> Result<(), ExecError> {
+        use crabka_pgparser::ast::{QueryBody, SetExpr};
+        match body {
+            SetExpr::Query(QueryBody::Select(select)) => {
+                let inner = [enclosing, &[select.from.as_slice()]].concat();
+                select_exprs(select)
+                    .into_iter()
+                    .try_for_each(|expr| self.expr(expr, &inner, ctx))?;
+                // A FROM item of this sub-select belongs to *its* level, so it
+                // keeps the enclosing chain the sub-select itself sits in.
+                select
+                    .from
+                    .iter()
+                    .try_for_each(|item| self.nested_table_expr(item, enclosing, ctx))
+            }
+            SetExpr::Query(QueryBody::Values(values)) => values
+                .rows
+                .iter()
+                .flatten()
+                .try_for_each(|expr| self.expr(expr, enclosing, ctx)),
+            SetExpr::Query(QueryBody::Nested(nested)) => self.query(nested, enclosing, ctx),
+            SetExpr::SetOp { left, right, .. } => {
+                self.set_expr(left, enclosing, ctx)?;
+                self.set_expr(right, enclosing, ctx)
+            }
+        }
+    }
+
+    /// A FROM item of a sub-select *inside* the item being checked. Its own
+    /// aggregates are the inner level's business — this walk is only looking for
+    /// one whose arguments reach back out to the level owning the FROM clause,
+    /// so the site stays the one the outermost item fixed.
+    fn nested_table_expr(
+        &self,
+        te: &crabka_pgparser::ast::TableExpr,
+        enclosing: &[&[crabka_pgparser::ast::TableExpr]],
+        ctx: FromAggregateContext,
+    ) -> Result<(), ExecError> {
+        use crabka_pgparser::ast::{JoinConstraint, TableExpr};
+        let ctx = ctx.nested();
+        match te {
+            TableExpr::Table { .. } => Ok(()),
+            TableExpr::Derived {
+                subquery,
+                lateral: true,
+                ..
+            } => self.query(subquery, enclosing, ctx),
+            TableExpr::Derived { .. } => Ok(()),
+            TableExpr::Function { functions, .. } => functions
+                .iter()
+                .flat_map(|call| &call.args)
+                .try_for_each(|arg| self.expr(arg, enclosing, ctx)),
+            TableExpr::JsonTable(table) => table
+                .exprs()
+                .into_iter()
+                .try_for_each(|expr| self.expr(expr, enclosing, ctx)),
+            TableExpr::Join {
+                left,
+                right,
+                constraint,
+                ..
+            } => {
+                self.nested_table_expr(left, enclosing, ctx)?;
+                self.nested_table_expr(right, enclosing, ctx)?;
+                match constraint {
+                    JoinConstraint::On(on) => {
+                        let inner = [
+                            enclosing,
+                            &[std::slice::from_ref(left.as_ref())],
+                            &[std::slice::from_ref(right.as_ref())],
+                        ]
+                        .concat();
+                        self.expr(on, &inner, ctx)
+                    }
+                    JoinConstraint::Using(_) | JoinConstraint::Natural | JoinConstraint::None => {
+                        Ok(())
+                    }
+                }
+            }
+        }
+    }
+
+    /// Does this aggregate take its level from the query that owns the FROM
+    /// clause being built?
+    fn belongs_to_this_level(
+        &self,
+        call: &FuncCall,
+        enclosing: &[&[crabka_pgparser::ast::TableExpr]],
+        ctx: FromAggregateContext,
+    ) -> bool {
+        let reach = self.levels.reach_of(call, enclosing);
+        // A name no level could be found for leaves the aggregate's level
+        // unsettled, and an aggregate this pass cannot place is one it must not
+        // reject — the statement keeps whatever error it already had.
+        if reach.unknown || reach.enclosing {
+            return false;
+        }
+        // A variable of the owning query's own FROM fixes the level outright.
+        // With no variable at all the aggregate keeps the level it is written
+        // at, which settles it only for one written in the FROM clause itself.
+        reach.statement || ctx.owning_level
     }
 }
 
@@ -27139,6 +27708,272 @@ mod tests {
         run(&engine, "CREATE TABLE lat (id int4, n int4)").await;
         run(&engine, "INSERT INTO lat VALUES (1,2)").await;
         assert!(sqlstate(&engine, "SELECT * FROM lat t, (SELECT t.n AS x) u").await == "42P01");
+    }
+
+    /// The full error one statement fails with: SQLSTATE, message, DETAIL, HINT.
+    async fn failure(
+        engine: &SqlEngine,
+        sql: &str,
+    ) -> (String, String, Option<String>, Option<String>) {
+        let error = engine
+            .connect()
+            .simple_query(sql)
+            .await
+            .expect_err("expected an error");
+        let diagnostics = error.diagnostics.unwrap_or_default();
+        (
+            error.code,
+            error.message,
+            diagnostics.detail,
+            diagnostics.hint,
+        )
+    }
+
+    async fn agg_level_fixture() -> SqlEngine {
+        let engine = SqlEngine::new();
+        run(&engine, "CREATE TABLE al4 (f1 int4)").await;
+        run(&engine, "INSERT INTO al4 VALUES (0), (5), (-5)").await;
+        run(&engine, "CREATE TABLE al8 (q1 int8, q2 int8)").await;
+        run(&engine, "INSERT INTO al8 VALUES (5,6), (5,7), (8,5)").await;
+        engine
+    }
+
+    /// `PostgreSQL` gives an aggregate the query level of the innermost variable
+    /// its arguments read, then rejects it when that level is the one whose FROM
+    /// clause the aggregate is written in. It is the level that decides, not the
+    /// `LATERAL` keyword: `max(a.f1 + b.q1)` reads the sub-select's own `b` and
+    /// is therefore allowed in the very position `max(a.f1)` is not.
+    #[tokio::test]
+    async fn an_aggregate_may_not_take_its_level_from_the_from_clause_it_is_written_in() {
+        use assert2::assert;
+        let engine = agg_level_fixture().await;
+        let rejected: [(&str, &str); 12] = [
+            // The argument reads the level that owns the FROM clause.
+            (
+                "SELECT 1 FROM al4 a, LATERAL (SELECT max(a.f1) FROM al8 b) ss",
+                "aggregate functions are not allowed in FROM clause of their own query level",
+            ),
+            // Anywhere in the sub-select, not just its select list.
+            (
+                "SELECT 1 FROM al4 a, LATERAL (SELECT 1 FROM al8 b HAVING max(a.f1) > 0) ss",
+                "aggregate functions are not allowed in FROM clause of their own query level",
+            ),
+            (
+                "SELECT 1 FROM al4 a, LATERAL (SELECT 1 FROM al8 b WHERE max(a.f1) > 0) ss",
+                "aggregate functions are not allowed in FROM clause of their own query level",
+            ),
+            (
+                "SELECT 1 FROM al4 a, LATERAL (SELECT max(a.f1) FROM al8 b LIMIT 1) ss",
+                "aggregate functions are not allowed in FROM clause of their own query level",
+            ),
+            (
+                "SELECT 1 FROM al4 a, LATERAL (SELECT max(a.f1) FROM al8 b GROUP BY b.q1) ss",
+                "aggregate functions are not allowed in FROM clause of their own query level",
+            ),
+            // Through a set operation and through a CTE.
+            (
+                "SELECT 1 FROM al4 a, LATERAL (SELECT max(a.f1) FROM al8 b UNION ALL SELECT 1) ss",
+                "aggregate functions are not allowed in FROM clause of their own query level",
+            ),
+            (
+                "SELECT 1 FROM al4 a, LATERAL \
+                 (WITH w AS (SELECT max(a.f1) AS m FROM al8 b) SELECT * FROM w) ss",
+                "aggregate functions are not allowed in FROM clause of their own query level",
+            ),
+            // Written two query levels down, but still levelled out here.
+            (
+                "SELECT 1 FROM al4 a, LATERAL (SELECT (SELECT max(a.f1)) AS m) ss",
+                "aggregate functions are not allowed in FROM clause of their own query level",
+            ),
+            (
+                "SELECT 1 FROM al4 a, LATERAL \
+                 (SELECT * FROM al4 c, LATERAL (SELECT max(a.f1) FROM al8 b) ss2) ss",
+                "aggregate functions are not allowed in FROM clause of their own query level",
+            ),
+            // A function FROM item is its own expression kind, with its own wording.
+            (
+                "SELECT * FROM al4 a, generate_series(1, max(a.f1)) g",
+                "aggregate functions are not allowed in functions in FROM",
+            ),
+            (
+                "SELECT * FROM al4 a, LATERAL generate_series(1, (SELECT max(a.f1))) g",
+                "aggregate functions are not allowed in functions in FROM",
+            ),
+            // So is a JOIN condition.
+            (
+                "SELECT * FROM al4 a JOIN al4 b ON a.f1 = max(b.f1)",
+                "aggregate functions are not allowed in JOIN conditions",
+            ),
+        ];
+        for (sql, message) in rejected {
+            assert!(failure(&engine, sql).await.0 == "42803", "{sql}");
+            assert!(failure(&engine, sql).await.1 == message, "{sql}");
+        }
+
+        // Every one of these takes its level from the sub-select it is written
+        // in, and so is legal in exactly the position the cases above are not.
+        let accepted: [&str; 7] = [
+            "SELECT 1 FROM al4 a, LATERAL (SELECT max(b.q1) FROM al8 b) ss",
+            // The *innermost* level its arguments read wins.
+            "SELECT 1 FROM al4 a, LATERAL (SELECT max(a.f1 + b.q1) FROM al8 b) ss",
+            "SELECT 1 FROM al4 a, LATERAL (SELECT max(b.q1) FILTER (WHERE a.f1 > 0) FROM al8 b) ss",
+            // No variable at all: the aggregate keeps the level it is written at.
+            "SELECT 1 FROM al4 a, LATERAL (SELECT max(1)) ss",
+            "SELECT 1 FROM al4 a, LATERAL (SELECT count(*) FROM al8 b) ss",
+            // A variable local to a sub-select of the argument is ignored.
+            "SELECT 1 FROM al4 a, LATERAL \
+             (SELECT max((SELECT z.f1 FROM al4 z WHERE z.f1 = 5)) FROM al8 b) ss",
+            // The aggregate reads the derived table, not the outer relation.
+            "SELECT 1 FROM al4 a, LATERAL (SELECT max(y.f1) FROM al8 b, LATERAL (SELECT b.q1 AS f1) y) ss",
+        ];
+        for sql in accepted {
+            assert!(!cells(&engine, sql).await.is_empty(), "{sql}");
+        }
+
+        // Without LATERAL the sub-select cannot see the entry at all, so the
+        // reference is what PostgreSQL reports — the aggregate never gets a level.
+        assert!(
+            failure(
+                &engine,
+                "SELECT 1 FROM al4 a, (SELECT max(a.f1) FROM al8 b) ss"
+            )
+            .await
+            .1 == "invalid reference to FROM-clause entry for table \"a\""
+        );
+    }
+
+    /// An entry that exists at this query level but is out of the referring
+    /// part's reach is a different error from one that is simply absent, and
+    /// `PostgreSQL` explains which in DETAIL — offering `LATERAL` as the remedy
+    /// only where `LATERAL` could help.
+    #[tokio::test]
+    async fn an_out_of_reach_from_entry_is_reported_apart_from_a_missing_one() {
+        use assert2::assert;
+        let engine = agg_level_fixture().await;
+        run(&engine, "CREATE TABLE xx1 (x1 int4, x2 int4)").await;
+        run(&engine, "INSERT INTO xx1 VALUES (0,0)").await;
+
+        let entry = |table: &str| {
+            format!(
+                "There is an entry for table \"{table}\", but it cannot be referenced from this \
+                 part of the query."
+            )
+        };
+        let mark_lateral = "To reference that table, you must mark this subquery with LATERAL.";
+
+        // A sibling FROM item, qualified: LATERAL would bring it into view.
+        for sql in [
+            "SELECT f1, g FROM al4 a, (SELECT a.f1 AS g) ss",
+            "SELECT f1, g FROM al4 a CROSS JOIN (SELECT a.f1 AS g) ss",
+            "SELECT * FROM al4 a JOIN (SELECT a.f1 AS g) ss ON true",
+            "SELECT * FROM al4 a, al8 b, (SELECT a.f1 + b.q1 AS g) ss",
+        ] {
+            assert!(
+                failure(&engine, sql).await
+                    == (
+                        "42P01".into(),
+                        "invalid reference to FROM-clause entry for table \"a\"".into(),
+                        Some(entry("a")),
+                        Some(mark_lateral.into()),
+                    ),
+                "{sql}"
+            );
+        }
+
+        // The same sibling, unqualified: the column is what is named.
+        assert!(
+            failure(&engine, "SELECT f1, g FROM al4 a, (SELECT f1 AS g) ss").await
+                == (
+                    "42703".into(),
+                    "column \"f1\" does not exist".into(),
+                    Some(
+                        "There is a column named \"f1\" in table \"a\", but it cannot be \
+                         referenced from this part of the query."
+                            .into()
+                    ),
+                    Some(
+                        "To reference that column, you must mark this subquery with LATERAL."
+                            .into()
+                    ),
+                )
+        );
+
+        // An UPDATE/DELETE target is out of reach of its own FROM/USING items,
+        // and no LATERAL can bring it back — so no remedy is offered.
+        assert!(
+            failure(
+                &engine,
+                "UPDATE xx1 SET x2 = f1 FROM (SELECT * FROM al4 WHERE f1 = xx1.x1) ss"
+            )
+            .await
+                == (
+                    "42P01".into(),
+                    "invalid reference to FROM-clause entry for table \"xx1\"".into(),
+                    Some(entry("xx1")),
+                    None,
+                )
+        );
+        assert!(
+            failure(
+                &engine,
+                "DELETE FROM xx1 USING (SELECT * FROM al4 WHERE f1 = x1) ss"
+            )
+            .await
+                == (
+                    "42703".into(),
+                    "column \"x1\" does not exist".into(),
+                    Some(
+                        "There is a column named \"x1\" in table \"xx1\", but it cannot be \
+                         referenced from this part of the query."
+                            .into()
+                    ),
+                    None,
+                )
+        );
+        // Written LATERAL, the target's name resolves and is then disallowed,
+        // which PostgreSQL reports as the entry, with the sentence as a HINT.
+        assert!(
+            failure(
+                &engine,
+                "UPDATE xx1 SET x2 = f1 FROM LATERAL (SELECT * FROM al4 WHERE f1 = x1) ss"
+            )
+            .await
+                == (
+                    "42P10".into(),
+                    "invalid reference to FROM-clause entry for table \"xx1\"".into(),
+                    None,
+                    Some(entry("xx1")),
+                )
+        );
+
+        // A lateral item on the nullable side of a join is disallowed outright.
+        assert!(
+            failure(
+                &engine,
+                "SELECT * FROM al4 a RIGHT JOIN LATERAL (SELECT a.f1 AS g) ss ON true"
+            )
+            .await
+                == (
+                    "42P10".into(),
+                    "invalid reference to FROM-clause entry for table \"a\"".into(),
+                    Some(
+                        "The combining JOIN type must be INNER or LEFT for a LATERAL reference."
+                            .into()
+                    ),
+                    None,
+                )
+        );
+
+        // A name no entry supplies keeps the bald statement of error.
+        assert!(
+            failure(&engine, "SELECT * FROM (SELECT a.f1 AS g) ss, al4 a").await
+                == (
+                    "42P01".into(),
+                    "missing FROM-clause entry for table \"a\"".into(),
+                    None,
+                    None,
+                )
+        );
     }
 
     #[tokio::test]

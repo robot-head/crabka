@@ -23,6 +23,25 @@ pub enum ExecError {
     AmbiguousColumn(String),
     /// A qualified reference named a table not in the FROM clause (42P01).
     MissingFromEntry(String),
+    /// A qualified reference named a FROM-clause entry that *is* at this query
+    /// level but is not visible from the part of the query making the reference
+    /// (42P01) — a sibling FROM item read without `LATERAL`, the target of an
+    /// `UPDATE`/`DELETE`, or a lateral item on the nullable side of a join.
+    InvalidFromEntry {
+        table: String,
+        note: FromEntryNote,
+    },
+    /// An unqualified reference named a column that a FROM-clause entry of this
+    /// query level does have, but which is not visible from the part of the
+    /// query naming it (42703). The primary message is
+    /// [`ExecError::UndefinedColumn`]'s; only the explanation differs.
+    InaccessibleColumn {
+        column: String,
+        table: String,
+        /// Whether marking the sub-select `LATERAL` would make the column
+        /// visible, which is what decides whether `PostgreSQL` offers a remedy.
+        lateral_would_help: bool,
+    },
     /// The same table name/alias appears twice in one FROM clause (42712).
     DuplicateAlias(String),
     /// In-grammar but unimplemented (0A000), for example $1 parameters.
@@ -544,6 +563,32 @@ impl VirtualGeneratedSubcommand {
     }
 }
 
+/// Why an [`ExecError::InvalidFromEntry`] entry is out of reach, which is the
+/// only thing separating `PostgreSQL`'s four wordings of it.
+///
+/// The message line is identical in all four; what changes is whether the
+/// explanation arrives as `DETAIL` or as `HINT`, and whether a remedy is offered
+/// at all. `PostgreSQL` splits them across two call sites — `errorMissingRTE`
+/// for a reference that never entered the namespace and `check_lateral_ref_ok`
+/// for one that entered it but is disallowed — so the split is reproduced here
+/// rather than derived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FromEntryNote {
+    /// A sibling FROM item of the same query level: `LATERAL` would bring it
+    /// into view, so the situation is the `DETAIL` and the remedy the `HINT`.
+    MarkSubqueryLateral,
+    /// The relation an `UPDATE`/`DELETE` is targeting, which no `LATERAL` can
+    /// reach. The same sentence, with no remedy to add.
+    TargetRelation,
+    /// The `UPDATE`/`DELETE` target reached from an item already written
+    /// `LATERAL`. `PostgreSQL` states the very same sentence as a `HINT` here,
+    /// because the check that rejects it is a different one.
+    LateralTargetRelation,
+    /// A `LATERAL` item on the nullable side of a `RIGHT`/`FULL` join, which
+    /// SQL:2008 forbids outright.
+    CombiningJoinType,
+}
+
 /// The payload of [`ExecError::GucValueOutOfRange`], boxed to keep the error
 /// enum narrow. Every field is already rendered in the parameter's base units.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -871,6 +916,55 @@ impl ExecError {
                 "42P01",
                 format!("missing FROM-clause entry for table \"{t}\""),
             ),
+            ExecError::InvalidFromEntry { table, note } => {
+                // `PostgreSQL` reaches this message from two checks with two
+                // SQLSTATEs: `errorMissingRTE` (undefined_table) for a name that
+                // never entered the namespace, `check_lateral_ref_ok`
+                // (invalid_column_reference) for one that entered it and was
+                // then disallowed.
+                let sqlstate = match note {
+                    FromEntryNote::MarkSubqueryLateral | FromEntryNote::TargetRelation => "42P01",
+                    FromEntryNote::LateralTargetRelation | FromEntryNote::CombiningJoinType => {
+                        "42P10"
+                    }
+                };
+                let error = PgError::error(
+                    sqlstate,
+                    format!("invalid reference to FROM-clause entry for table \"{table}\""),
+                );
+                let unreachable = format!(
+                    "There is an entry for table \"{table}\", but it cannot be referenced from \
+                     this part of the query."
+                );
+                match note {
+                    FromEntryNote::MarkSubqueryLateral => error
+                        .with_detail(unreachable)
+                        .with_hint("To reference that table, you must mark this subquery with LATERAL."),
+                    FromEntryNote::TargetRelation => error.with_detail(unreachable),
+                    FromEntryNote::LateralTargetRelation => error.with_hint(unreachable),
+                    FromEntryNote::CombiningJoinType => error.with_detail(
+                        "The combining JOIN type must be INNER or LEFT for a LATERAL reference.",
+                    ),
+                }
+            }
+            ExecError::InaccessibleColumn {
+                column,
+                table,
+                lateral_would_help,
+            } => {
+                let error = PgError::error("42703", format!("column \"{column}\" does not exist"))
+                    .with_detail(format!(
+                        "There is a column named \"{column}\" in table \"{table}\", but it cannot \
+                         be referenced from this part of the query."
+                    ));
+                if lateral_would_help {
+                    error.with_hint(
+                        "To reference that column, you must mark this subquery with LATERAL.",
+                    )
+                } else {
+                    error
+                }
+            }
             ExecError::DuplicateAlias(t) => PgError::error(
                 "42712",
                 format!("table name \"{t}\" specified more than once"),
