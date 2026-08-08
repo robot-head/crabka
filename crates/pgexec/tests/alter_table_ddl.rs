@@ -924,3 +924,72 @@ async fn back_validation_respects_the_transactions_own_deletes() {
     assert!(query(&mut s, "SELECT a FROM t").await == vec![text_row(&["7"])]);
     assert!(err_code(&mut s, "INSERT INTO t VALUES (-2)").await == "23514");
 }
+
+/// A `CHECK` written on an inheriting child may constrain a column the child
+/// inherits rather than one it declares — that is the point of the clause — so
+/// the predicate is analysed against the merged column list, and the
+/// constraint's generated name is derived from the same list.
+///
+/// The name matters because it is what a violation reports and what `ALTER
+/// TABLE … DROP CONSTRAINT` has to be given: `PostgreSQL` names a `CHECK` after
+/// the single column its predicate references, falling back to
+/// `<table>_check` when it references none or several.
+#[tokio::test]
+async fn a_check_on_an_inheriting_child_sees_the_inherited_columns() {
+    let (_engine, mut s) = engine_with(&["CREATE TABLE parent (a int)"]).await;
+    run(
+        &mut s,
+        "CREATE TABLE only_inherited (CHECK (a > 0)) INHERITS (parent)",
+    )
+    .await;
+    run(
+        &mut s,
+        "CREATE TABLE mixed (b int, CHECK (a > 0 AND b > 0)) INHERITS (parent)",
+    )
+    .await;
+    assert!(
+        err_message(
+            &mut s,
+            "CREATE TABLE unknown_col (CHECK (nosuch > 0)) INHERITS (parent)"
+        )
+        .await
+            == "column \"nosuch\" does not exist"
+    );
+    assert!(
+        query(
+            &mut s,
+            "SELECT conrelid::regclass::text, conname FROM pg_constraint
+              WHERE conrelid IN ('only_inherited'::regclass, 'mixed'::regclass)
+              ORDER BY 1, 2"
+        )
+        .await
+            == vec![
+                text_row(&["mixed", "mixed_check"]),
+                text_row(&["only_inherited", "only_inherited_a_check"]),
+            ]
+    );
+    run(&mut s, "INSERT INTO only_inherited VALUES (5)").await;
+    assert!(err_code(&mut s, "INSERT INTO only_inherited VALUES (-5)").await == "23514");
+    run(&mut s, "INSERT INTO mixed VALUES (5, 5)").await;
+    assert!(err_code(&mut s, "INSERT INTO mixed VALUES (5, -5)").await == "23514");
+    assert!(
+        query(&mut s, "SELECT a FROM parent ORDER BY a").await
+            == vec![text_row(&["5"]), text_row(&["5"])]
+    );
+}
+
+/// Naming one column twice in an `INSERT` column list leaves the statement's
+/// intent undecidable, so `PostgreSQL` refuses it rather than letting the
+/// second value win.
+#[tokio::test]
+async fn an_insert_column_list_may_not_name_a_column_twice() {
+    let (_engine, mut s) = engine_with(&["CREATE TABLE t (a int, b int)"]).await;
+    let error = s
+        .simple_query("INSERT INTO t (a, b, a) VALUES (1, 2, 3)")
+        .await
+        .expect_err("expected error");
+    assert!(error.code == "42701");
+    assert!(error.message == "column \"a\" specified more than once");
+    run(&mut s, "INSERT INTO t (a, b) VALUES (1, 2)").await;
+    assert!(query(&mut s, "SELECT a, b FROM t").await == vec![text_row(&["1", "2"])]);
+}

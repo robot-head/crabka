@@ -99,6 +99,10 @@ enum CatalogFunc {
     EncodingToChar,
     CharToEncoding,
     IsPublishable,
+    /// `pg_relation_is_updatable` and `pg_column_is_updatable`, the pair
+    /// `information_schema` derives its updatability columns from.
+    RelationIsUpdatable,
+    ColumnIsUpdatable,
     InRecovery,
     TablespaceLocation,
     TriggerDepth,
@@ -156,6 +160,8 @@ fn catalog_func(name: &str) -> Option<CatalogFunc> {
         "pg_encoding_to_char" => EncodingToChar,
         "pg_char_to_encoding" => CharToEncoding,
         "pg_relation_is_publishable" => IsPublishable,
+        "pg_relation_is_updatable" => CatalogFunc::RelationIsUpdatable,
+        "pg_column_is_updatable" => CatalogFunc::ColumnIsUpdatable,
         "pg_is_in_recovery" => InRecovery,
         "pg_tablespace_location" => TablespaceLocation,
         "pg_trigger_depth" => TriggerDepth,
@@ -246,7 +252,12 @@ pub(crate) fn catalog_func_result_type(
         }
     }
     Ok(match f {
-        IsVisible | HasPrivilege | HasRole | IsPublishable | InRecovery => ColumnType::Bool,
+        IsVisible
+        | HasPrivilege
+        | HasRole
+        | IsPublishable
+        | InRecovery
+        | CatalogFunc::ColumnIsUpdatable => ColumnType::Bool,
         RelationSize | TableSize | IndexesSize | TotalRelationSize | ClusterSize | SizeBytes => {
             ColumnType::Int8
         }
@@ -254,7 +265,8 @@ pub(crate) fn catalog_func_result_type(
         | CharToEncoding
         | CatalogFunc::TriggerDepth
         | CatalogFunc::EventRewriteOid
-        | CatalogFunc::EventRewriteReason => ColumnType::Int4,
+        | CatalogFunc::EventRewriteReason
+        | CatalogFunc::RelationIsUpdatable => ColumnType::Int4,
         CatalogFunc::NotificationQueueUsage => ColumnType::Float8,
         StartTime => ColumnType::Timestamptz,
         CurrentSchemas => ColumnType::Array(ElemType::Text),
@@ -280,6 +292,8 @@ fn arity_ok(f: CatalogFunc, n: usize) -> bool {
         | CharToEncoding | IsPublishable | TablespaceLocation | TableSize | IndexesSize
         | TotalRelationSize => n == 1,
         SerialSequence | ColDescription | ShobjDescription | HasRole => n == 2 || n == 3,
+        CatalogFunc::RelationIsUpdatable => n == 2,
+        CatalogFunc::ColumnIsUpdatable => n == 3,
         ObjDescription | RelationSize => n == 1 || n == 2,
         ClusterSize => n == 1,
         BackendPid
@@ -447,8 +461,103 @@ fn eval_catalog_reading(f: CatalogFunc, vals: &[Datum], ctx: &EvalCtx) -> Result
         // tablespaces); crabka carries no comments on those.
         ShobjDescription => Ok(Datum::Null),
         CatalogFunc::RoutineDef(kind) => routine_def(kv, kind, &vals[0]),
+        CatalogFunc::RelationIsUpdatable => relation_is_updatable(kv, scope, vals),
+        CatalogFunc::ColumnIsUpdatable => column_is_updatable(kv, scope, vals),
         _ => Ok(Datum::Null),
     }
+}
+
+// ------------------------------------------------------------- updatability
+
+/// `pg_relation_is_updatable(regclass, boolean)` — the bitmask of write commands
+/// a relation admits, as [`crate::viewwrite`] computes it.
+///
+/// The function is strict, and an oid no relation answers to reports 0 rather
+/// than failing: `999999::regclass` is a legal `regclass` value, so PostgreSQL
+/// reaches the function body and finds nothing to open. A name, by contrast,
+/// goes through the `regclass` input function and raises 42P01 for a relation
+/// the search path cannot reach — which is what [`resolve_relation_oid`] does.
+fn relation_is_updatable(
+    kv: &dyn Kv,
+    scope: &ResolutionScope,
+    vals: &[Datum],
+) -> Result<Datum, ExecError> {
+    if vals.iter().any(|value| matches!(value, Datum::Null)) {
+        return Ok(Datum::Null);
+    }
+    let include_triggers = flag_arg(&vals[1])?;
+    let oid = resolve_relation_oid(kv, scope, &vals[0])?;
+    let Some(name) = updatable_relation_name(kv, oid)? else {
+        return Ok(Datum::Int4(0));
+    };
+    Ok(Datum::Int4(crate::viewwrite::relation_updatable_events(
+        kv,
+        &name,
+        include_triggers,
+        None,
+        0,
+    )))
+}
+
+/// `pg_column_is_updatable(regclass, smallint, boolean)` — whether one column
+/// can be assigned to through the relation.
+///
+/// A system column is never updatable, which is the `attnum <= 0` guard; a
+/// column past the end of a *table* still answers true, because PostgreSQL
+/// settles a table before it ever looks at the column number.
+///
+/// `include_triggers` does change the answer, and is honoured: an `INSTEAD OF`
+/// trigger can supply the `UPDATE` half of the `UPDATE | DELETE` this predicate
+/// requires, which an unassignable column cannot supply for itself.
+fn column_is_updatable(
+    kv: &dyn Kv,
+    scope: &ResolutionScope,
+    vals: &[Datum],
+) -> Result<Datum, ExecError> {
+    if vals.iter().any(|value| matches!(value, Datum::Null)) {
+        return Ok(Datum::Null);
+    }
+    let include_triggers = flag_arg(&vals[2])?;
+    let attnum = int_arg(&vals[1])?;
+    let Ok(attnum) = i32::try_from(attnum) else {
+        return Ok(Datum::Bool(false));
+    };
+    let oid = resolve_relation_oid(kv, scope, &vals[0])?;
+    let Some(name) = updatable_relation_name(kv, oid)? else {
+        return Ok(Datum::Bool(false));
+    };
+    Ok(Datum::Bool(crate::viewwrite::column_is_updatable(
+        kv,
+        &name,
+        attnum,
+        include_triggers,
+    )))
+}
+
+/// The `include_triggers` flag both predicates take.
+fn flag_arg(value: &Datum) -> Result<bool, ExecError> {
+    match value {
+        Datum::Bool(flag) => Ok(*flag),
+        other => Err(ExecError::TypeMismatch(format!(
+            "updatability test expects a boolean, not {}",
+            other.column_type().map_or("unknown", ColumnType::name)
+        ))),
+    }
+}
+
+/// The catalog name behind a relation oid, for the two kinds the updatability
+/// analysis can say anything about. A sequence or an index resolves to `None`,
+/// which both predicates report as "not updatable" exactly as PostgreSQL does
+/// for a relkind it has no rewrite rules for.
+fn updatable_relation_name(kv: &dyn Kv, oid: i32) -> Result<Option<RelationName>, ExecError> {
+    for table in crabka_pgcatalog::list_tables(kv)? {
+        if crate::catalog_rel::table_relation_oid(table.id)? == oid {
+            return Ok(Some(table.name));
+        }
+    }
+    Ok(crate::catalog_rel::view_oids(kv)?
+        .into_iter()
+        .find_map(|(name, view_oid)| (view_oid == oid).then_some(name)))
 }
 
 fn trigger_def(kv: &dyn Kv, reference: &Datum) -> Result<Datum, ExecError> {
@@ -1669,36 +1778,6 @@ fn lookup_view(
 /// the source text, which is still a valid view definition.
 pub(crate) fn view_definition_text(view: &View, pretty: bool) -> String {
     view_definition(view, pretty, None)
-}
-
-/// Is a view auto-updatable, which is PostgreSQL's
-/// `is_updatable`/`is_insertable_into`?
-///
-/// A view is auto-updatable when its body is a plain `SELECT` over exactly one
-/// relation with no `DISTINCT`, grouping, set operation, `LIMIT`/`OFFSET` or
-/// window function, which is PostgreSQL's own `view_query_is_auto_updatable`
-/// test minus the checks for object kinds crabka has none of.
-pub(crate) fn view_is_auto_updatable(view: &View) -> bool {
-    use crabka_pgparser::ast::{DistinctClause, QueryBody, SetExpr, Statement, TableExpr};
-    let Ok(statements) = crabka_pgparser::parse(&view.definition) else {
-        return false;
-    };
-    let [Statement::Query(query)] = statements.as_slice() else {
-        return false;
-    };
-    let SetExpr::Query(QueryBody::Select(select)) = &query.body else {
-        return false;
-    };
-    matches!(select.from.as_slice(), [TableExpr::Table { .. }])
-        && matches!(select.distinct, DistinctClause::All)
-        && select.group_by.is_empty()
-        && select.having.is_none()
-        && select.window_calls.is_empty()
-        && select.limit.is_none()
-        && select.offset.is_none()
-        && query.limit.is_none()
-        && query.offset.is_none()
-        && query.with.is_none()
 }
 
 /// [`view_definition_text`] with an explicit select-list wrap column.

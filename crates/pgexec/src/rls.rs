@@ -675,13 +675,22 @@ pub(crate) enum CheckSubject {
 }
 
 impl CheckSubject {
-    /// The source text this subject checks against, and whether it came from
-    /// the policy's `USING` clause (which the error message names).
+    /// The source text this subject checks against, and whether the error
+    /// message calls it a `USING` expression.
+    ///
+    /// The two questions are not the same, and `PostgreSQL` is explicit about
+    /// the difference (`src/test/regress/expected/rowsecurity.out`): a policy
+    /// that declares no `WITH CHECK` has its `USING` qual read as the check,
+    /// but the violation is *not* reported as a `USING` expression, "because
+    /// it's an RLS UPDATE check that originated as a USING qual … as opposed to
+    /// an explicit USING qual that is ordinarily a security barrier". Only the
+    /// second — the explicit `USING` judged against a row the statement found —
+    /// is named that way.
     fn qual_of(self, policy: &Policy) -> Option<(&str, bool)> {
         match self {
             Self::NewRow => match policy.with_check.as_deref() {
                 Some(source) => Some((source, false)),
-                None => policy.using.as_deref().map(|source| (source, true)),
+                None => policy.using.as_deref().map(|source| (source, false)),
             },
             Self::TargetRow => policy.using.as_deref().map(|source| (source, true)),
         }
@@ -869,17 +878,94 @@ impl RowSecurityCheck {
     }
 }
 
-/// OR-fold the permissive checks, keeping the policy's name when exactly one
-/// contributed.
+/// Every per-row check a write must pass before its row reaches storage.
+///
+/// Two checks with the same shape and the same evaluation point, bundled so no
+/// write path can apply one and forget the other: the relation's row-security
+/// `WITH CHECK`, and the `WITH CHECK OPTION` of each view the statement was
+/// rewritten through. Both judge the row *after* `BEFORE ROW` triggers have had
+/// their say — see [`RowSecurityCheck`] for why that timing is not negotiable —
+/// so [`crate::trigger::fire_before_row`] is the only caller of either.
+pub(crate) struct WriteChecks {
+    security: RowSecurityCheck,
+    /// Innermost view first, which is the order `PostgreSQL` reports a row that
+    /// fails more than one view's option.
+    views: Vec<crate::viewwrite::ViewCheck>,
+}
+
+impl WriteChecks {
+    /// A write that reaches no view, carrying only the relation's own policies.
+    pub(crate) const fn plain(security: RowSecurityCheck) -> Self {
+        Self {
+            security,
+            views: Vec::new(),
+        }
+    }
+
+    /// The same, plus the check options collected while rewriting through a
+    /// chain of views.
+    pub(crate) fn through_views(
+        security: RowSecurityCheck,
+        views: Vec<crate::viewwrite::ViewCheck>,
+    ) -> Self {
+        Self { security, views }
+    }
+
+    /// A write that neither row security nor a view check reaches, for the
+    /// stated reason.
+    pub(crate) const fn exempt(why: CheckExemption) -> Self {
+        Self::plain(RowSecurityCheck::exempt(why))
+    }
+
+    /// Raise unless the row this statement is about to write satisfies both.
+    ///
+    /// The view options run first, because a row that a view's own
+    /// qualification excludes was never a row of that view — `PostgreSQL`
+    /// reports the check-option violation rather than a policy one.
+    ///
+    /// # Errors
+    ///
+    /// 44000 for a failed check option, or whatever [`RowSecurityCheck::permit_row`]
+    /// raises.
+    pub(crate) fn permit_row(
+        &self,
+        table: &Table,
+        row: &[Datum],
+        ctx: &crate::clock::EvalCtx,
+    ) -> Result<(), ExecError> {
+        // The scope is built only when there is a check to evaluate against it.
+        // `Scope::single` clones the relation's whole binding list, and this
+        // runs once per written row on every write path in the engine — the
+        // overwhelming majority of which reach no view at all.
+        if !self.views.is_empty() {
+            let scope = Scope::single(table, &table.name.name);
+            for check in &self.views {
+                if !crate::exec::row_matches(Some(&check.qual), &scope, row, ctx)? {
+                    return Err(ExecError::ViewCheckOptionViolation {
+                        view: check.view.clone(),
+                        row: crate::viewwrite::failing_row(row, ctx),
+                    });
+                }
+            }
+        }
+        self.security.permit_row(table, row, ctx)
+    }
+}
+
+/// OR-fold the permissive checks into one nameless check.
+///
+/// Nameless even when exactly one policy contributed, which is `PostgreSQL`'s
+/// deliberate choice and not an omission: failing the permissive fold means *no*
+/// policy granted permission to write the row, rather than some particular
+/// policy having been violated, so there is no one policy to blame. A
+/// restrictive policy is the opposite — it is the only thing that can reject a
+/// row the fold already admitted — and each keeps its own name.
 ///
 /// The `FALSE` seed is the same identity [`combine_policy_quals`] relies on:
 /// row security with nothing permissive applicable rejects every row without
 /// anyone writing that case.
 fn fold_permissive_checks(permissive: Vec<PolicyCheckQual>) -> PolicyCheckQual {
-    let single = match permissive.as_slice() {
-        [only] => (only.policy.clone(), only.from_using),
-        _ => (None, false),
-    };
+    let from_using = matches!(permissive.as_slice(), [only] if only.from_using);
     let qual = permissive
         .into_iter()
         .fold(Expr::BoolLiteral(false), |left, right| {
@@ -887,8 +973,8 @@ fn fold_permissive_checks(permissive: Vec<PolicyCheckQual>) -> PolicyCheckQual {
         });
     PolicyCheckQual {
         qual,
-        policy: single.0,
-        from_using: single.1,
+        policy: None,
+        from_using,
     }
 }
 
@@ -1387,7 +1473,8 @@ mod tests {
 
     /// The write-side `WITH CHECK` qual falls back to `USING` when a policy has
     /// no `WITH CHECK` of its own, and a row is judged by it the same way a read
-    /// is.
+    /// is — reported as an ordinary check violation, naming neither the policy
+    /// nor a `USING` expression, exactly as `PostgreSQL` reports it.
     #[test]
     fn write_check_falls_back_to_using() {
         let kv = store(&[policy("visible", true, "id > 2", &[])]);
@@ -1407,8 +1494,7 @@ mod tests {
             .expect_err("a row the USING qual hides may not be written");
         assert!(
             rejected.into_pg().message
-                == "new row violates row-level security policy \"visible\" (USING expression) \
-                    for table \"document\""
+                == "new row violates row-level security policy for table \"document\""
         );
         assert!(
             check

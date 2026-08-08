@@ -691,10 +691,32 @@ pub struct View {
 /// structural reason rather than a pending one: a view body is materialized
 /// before the reader's own qualifier runs, so there is no reordering for a
 /// barrier to forbid.
+///
+/// [`Self::check_option`] is enforced on writes rewritten through the view: a
+/// row written through it must satisfy the view's own qualification, and
+/// `CASCADED` extends that to every view underneath. Storing it as an `Option`
+/// rather than a level plus a flag is what makes "the view has no check option"
+/// distinguishable from "the view has a `LOCAL` one", which is the difference
+/// between a parent's cascade reaching this level and stopping here.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ViewOptions {
     pub security_invoker: bool,
     pub security_barrier: bool,
+    pub check_option: Option<ViewCheckOption>,
+}
+
+/// How far a view's `WITH CHECK OPTION` reaches.
+///
+/// Spelled here rather than borrowed from the parser because this crate is the
+/// durable catalog and depends on no SQL grammar: it stores a view's body as
+/// text and never parses one. The executor converts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewCheckOption {
+    /// Only this view's own qualification is checked.
+    Local,
+    /// This view's qualification and every underlying view's, whether or not
+    /// those views declare an option of their own.
+    Cascaded,
 }
 
 impl Table {
@@ -6239,6 +6261,7 @@ mod tests {
         let options = ViewOptions {
             security_invoker: true,
             security_barrier: false,
+            check_option: None,
         };
         create_view(
             &kv,

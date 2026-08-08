@@ -1552,7 +1552,7 @@ fn queue_catalog_trigger(
 #[derive(Clone, Copy)]
 pub(crate) struct WriteTarget<'a> {
     pub table: &'a Table,
-    pub check: &'a crate::rls::RowSecurityCheck,
+    pub check: &'a crate::rls::WriteChecks,
 }
 
 /// Fire the relation's `BEFORE ROW` triggers, then judge the row they leave

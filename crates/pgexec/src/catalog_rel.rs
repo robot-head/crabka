@@ -2987,12 +2987,24 @@ fn column_usage_row(
     row
 }
 
+/// The SQL standard's `is_updatable` asks whether a row can be updated *and*
+/// deleted through the view, so it needs both bits; `is_insertable_into` asks
+/// only about `INSERT`. Both pass `include_triggers = false`, because the
+/// standard's question is about the view definition rather than about what an
+/// `INSTEAD OF` trigger might do — the three `is_trigger_*` columns answer that.
 fn information_schema_view_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    use crate::viewwrite::{DELETE_EVENT, INSERT_EVENT, UPDATE_EVENT};
+    const ROW_WRITABLE: i32 = UPDATE_EVENT | DELETE_EVENT;
     crabka_pgcatalog::list_views(kv)?
         .into_iter()
         .map(|view| {
-            let updatable = crate::catalog_fn::view_is_auto_updatable(&view);
-            let flag = if updatable { "YES" } else { "NO" };
+            let auto = crate::viewwrite::relation_updatable_events(kv, &view.name, false, None, 0);
+            let yes_or_no = |held: bool| if held { "YES" } else { "NO" };
+            let check_option = match view.options.check_option {
+                Some(crabka_pgcatalog::ViewCheckOption::Local) => "LOCAL",
+                Some(crabka_pgcatalog::ViewCheckOption::Cascaded) => "CASCADED",
+                None => "NONE",
+            };
             let view_id = crate::catalog_rel::view_oids(kv)?
                 .get(&view.name)
                 .copied()
@@ -3013,9 +3025,9 @@ fn information_schema_view_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecErro
             let mut row = relation_identity(&view.name).to_vec();
             row.extend([
                 text(&crate::catalog_fn::view_definition_text(&view, false)),
-                text("NONE"),
-                text(flag),
-                text(flag),
+                text(check_option),
+                text(yes_or_no(auto & ROW_WRITABLE == ROW_WRITABLE)),
+                text(yes_or_no(auto & INSERT_EVENT == INSERT_EVENT)),
                 text(instead(|events| events.update)),
                 text(instead(|events| events.delete)),
                 text(instead(|events| events.insert)),

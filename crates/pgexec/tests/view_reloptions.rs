@@ -111,6 +111,7 @@ async fn create_view_records_its_reloptions() {
                 == ViewOptions {
                     security_invoker,
                     security_barrier,
+                    check_option: None,
                 },
             "case: {sql}"
         );
@@ -142,6 +143,7 @@ async fn or_replace_rewrites_the_reloptions() {
             == ViewOptions {
                 security_invoker: true,
                 security_barrier: false,
+                check_option: None,
             }
     );
     assert!(query(&mut session, "SELECT n FROM v").await == rows(&["2"]));

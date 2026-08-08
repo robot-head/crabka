@@ -275,8 +275,11 @@ pub struct TruncateTarget {
     pub only: bool,
 }
 
-/// The reloptions a `CREATE VIEW … WITH (…)` list may set. Both default to
-/// false, which is what `PostgreSQL` gives a view written without the clause.
+/// The reloptions a view carries, gathered from wherever they were written:
+/// the `WITH (…)` list on `CREATE VIEW`, and — for `check_option` alone — the
+/// trailing `WITH … CHECK OPTION` clause, which is the same setting under a
+/// second spelling. The defaults are what `PostgreSQL` gives a view written
+/// with none of them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ViewOptions {
     /// `security_invoker` — the view's body is checked against the *querying*
@@ -286,6 +289,25 @@ pub struct ViewOptions {
     /// before the view's own, so a leaky function cannot observe rows the view
     /// was written to hide.
     pub security_barrier: bool,
+    /// `WITH [LOCAL | CASCADED] CHECK OPTION`, or the `check_option` reloption
+    /// that spells the same thing. `None` is a view that accepts whatever row
+    /// a write through it produces, including one it can no longer see.
+    pub check_option: Option<ViewCheckOption>,
+}
+
+/// `WITH [LOCAL | CASCADED] CHECK OPTION` — a row written through the view
+/// must satisfy the view's own qualification, so an `INSERT` or `UPDATE`
+/// through the view cannot produce a row the view would not show back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewCheckOption {
+    /// Only this view's own qualification is checked. A view underneath it is
+    /// still checked if *that* view asked to be, so `LOCAL` narrows what this
+    /// view adds rather than switching the whole stack off.
+    Local,
+    /// This view's qualification and those of every view beneath it are all
+    /// checked. Both the SQL standard and `PostgreSQL` default here, so a bare
+    /// `WITH CHECK OPTION` means `Cascaded`.
+    Cascaded,
 }
 
 /// One reloption a view's `WITH (…)`/`SET (…)`/`RESET (…)` list may name.
@@ -297,9 +319,22 @@ pub struct ViewOptions {
 pub enum ViewOptionName {
     SecurityInvoker,
     SecurityBarrier,
-    /// Accepted and dropped, as it is on `CREATE VIEW`: nothing here enforces a
-    /// view's `WITH CHECK OPTION` yet.
+    /// The reloption spelling of `WITH [LOCAL | CASCADED] CHECK OPTION`; see
+    /// [`ViewCheckOption`]. `RESET` returns it to unset, not to a level.
     CheckOption,
+}
+
+/// One entry in a view's `WITH (…)`/`SET (…)` list, carried with its value.
+///
+/// The value's type follows the option and not the list: two of the three
+/// reloptions are booleans while `check_option` is an enum, so a name paired
+/// with a lone `bool` would leave `check_option = local` unrepresentable and
+/// `security_barrier = cascaded` representable — exactly backwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewOptionSetting {
+    SecurityInvoker(bool),
+    SecurityBarrier(bool),
+    CheckOption(ViewCheckOption),
 }
 
 /// What one `ALTER VIEW` statement does. `PostgreSQL` allows a single
@@ -308,9 +343,11 @@ pub enum ViewOptionName {
 pub enum AlterViewAction {
     /// `OWNER TO role` — moves the identity the view's body runs under.
     OwnerTo(String),
-    /// `SET (name = value, …)`; a bare name is `true`, as in `CREATE VIEW`.
-    SetOptions(Vec<(ViewOptionName, bool)>),
-    /// `RESET (name, …)` — each named option returns to its default, `false`.
+    /// `SET (name = value, …)`; a bare boolean name is `true`, as in
+    /// `CREATE VIEW`.
+    SetOptions(Vec<ViewOptionSetting>),
+    /// `RESET (name, …)` — each named option returns to its default: `false`
+    /// for the booleans, unset for `check_option`.
     ResetOptions(Vec<ViewOptionName>),
 }
 
@@ -446,8 +483,9 @@ pub enum Statement {
         /// The optional `VIEW name (a, b, c)` alias list, which renames the
         /// query's output columns positionally.
         columns: Option<Vec<String>>,
-        /// `WITH (security_invoker, security_barrier)` — the reloptions written
-        /// on the view, all defaulting to false.
+        /// The reloptions written on the view, from the `WITH (…)` list before
+        /// `AS` and the `WITH … CHECK OPTION` clause after the query. The
+        /// trailing clause is not part of `definition`.
         options: ViewOptions,
     },
     DropTable {

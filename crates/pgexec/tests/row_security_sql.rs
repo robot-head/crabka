@@ -370,7 +370,7 @@ async fn with_check_rejects_an_insert_and_an_update() {
     )
     .await;
     assert!(sqlstate == "42501");
-    assert!(message == "new row violates row-level security policy \"own\" for table \"document\"");
+    assert!(message == "new row violates row-level security policy for table \"document\"");
 
     // Writing a row it may see is fine.
     run(&mut bob, "INSERT INTO document VALUES (6, 'bob', 'mine')").await;
@@ -384,11 +384,16 @@ async fn with_check_rejects_an_insert_and_an_update() {
     )
     .await;
     assert!(sqlstate == "42501");
-    assert!(message == "new row violates row-level security policy \"own\" for table \"document\"");
+    assert!(message == "new row violates row-level security policy for table \"document\"");
 }
 
-/// A policy with `USING` and no `WITH CHECK` uses its `USING` as the check, and
-/// says so.
+/// A policy with `USING` and no `WITH CHECK` uses its `USING` as the check —
+/// and the violation reads exactly like any other.
+///
+/// `PostgreSQL` is explicit that this one is *not* reported as a `USING`
+/// expression: the qual originated as a `USING` clause for row security in
+/// general, rather than being an explicit `USING` acting as a security barrier
+/// against a row the statement found.
 #[tokio::test]
 async fn a_policy_without_with_check_falls_back_to_its_using_qual() {
     let (engine, mut alice) = owned_engine().await;
@@ -405,11 +410,89 @@ async fn a_policy_without_with_check_falls_back_to_its_using_qual() {
     )
     .await;
     assert!(sqlstate == "42501");
-    assert!(
-        message
-            == "new row violates row-level security policy \"own\" (USING expression) for table \
-                \"document\""
-    );
+    assert!(message == "new row violates row-level security policy for table \"document\"");
+}
+
+/// **Who a check violation blames.**
+///
+/// A permissive policy is never named: failing the permissive fold means *no*
+/// policy granted permission to write the row, rather than any one policy
+/// having been violated, so there is nothing to name. A restrictive policy is
+/// the only thing that can reject a row the fold already admitted, so each is
+/// checked on its own and named when it does.
+///
+/// The route the write took makes no difference — a statement rewritten through
+/// an automatically updatable view reaches the same check on the same relation,
+/// and has to report it the same way.
+#[tokio::test]
+async fn a_check_violation_names_a_restrictive_policy_and_never_a_permissive_one() {
+    let (engine, mut alice) = owned_engine().await;
+    run(
+        &mut alice,
+        "CREATE VIEW docv AS SELECT * FROM document;
+         GRANT SELECT, INSERT, UPDATE, DELETE ON docv TO bob;
+         CREATE POLICY own ON document USING (holder = current_user)
+           WITH CHECK (holder = current_user);
+         ALTER TABLE document ENABLE ROW LEVEL SECURITY;
+         -- FORCE, because the view runs as its owner and the owner owns the
+         -- relation: without it the policy would not reach the view route at
+         -- all, and the two routes would not be comparable.
+         ALTER TABLE document FORCE ROW LEVEL SECURITY",
+    )
+    .await;
+    let mut bob = as_bob(&engine).await;
+
+    // One permissive policy, rejecting the row: nameless.
+    for target in ["document", "docv"] {
+        let (sqlstate, message) = error_of(
+            &mut bob,
+            &format!("INSERT INTO {target} VALUES (6, 'alice', 'stolen')"),
+        )
+        .await;
+        assert!(sqlstate == "42501", "{target}");
+        assert!(
+            message == "new row violates row-level security policy for table \"document\"",
+            "{target}"
+        );
+    }
+
+    // Several permissive policies, all rejecting the row: still nameless, since
+    // the violation is of the fold rather than of either policy.
+    run(
+        &mut alice,
+        "DROP POLICY own ON document;
+         CREATE POLICY one ON document USING (id > 100) WITH CHECK (id > 100);
+         CREATE POLICY two ON document USING (id > 200) WITH CHECK (id > 200)",
+    )
+    .await;
+    let (_, message) = error_of(&mut bob, "INSERT INTO document VALUES (6, 'bob', 'x')").await;
+    assert!(message == "new row violates row-level security policy for table \"document\"");
+
+    // A restrictive policy rejecting a row the permissive fold admitted: named.
+    run(
+        &mut alice,
+        "DROP POLICY one ON document;
+         DROP POLICY two ON document;
+         CREATE POLICY anyone ON document USING (true) WITH CHECK (true);
+         CREATE POLICY not_bad ON document AS RESTRICTIVE
+           USING (title <> 'bad') WITH CHECK (title <> 'bad')",
+    )
+    .await;
+    for target in ["document", "docv"] {
+        let (sqlstate, message) = error_of(
+            &mut bob,
+            &format!("INSERT INTO {target} VALUES (7, 'bob', 'bad')"),
+        )
+        .await;
+        assert!(sqlstate == "42501", "{target}");
+        assert!(
+            message
+                == "new row violates row-level security policy \"not_bad\" for table \"document\"",
+            "{target}"
+        );
+    }
+    run(&mut bob, "INSERT INTO docv VALUES (8, 'bob', 'fine')").await;
+    assert!(query(&mut alice, "SELECT id FROM document WHERE id = 8").await == rows(&["8"]));
 }
 
 /// **A `BEFORE ROW` trigger may not launder a row past `WITH CHECK`.**
@@ -450,7 +533,7 @@ async fn a_before_row_trigger_cannot_launder_a_row_past_with_check() {
     let (sqlstate, message) =
         error_of(&mut bob, "INSERT INTO document VALUES (6, 'bob', 'mine')").await;
     assert!(sqlstate == "42501");
-    assert!(message == "new row violates row-level security policy \"own\" for table \"document\"");
+    assert!(message == "new row violates row-level security policy for table \"document\"");
     assert!(query(&mut alice, "SELECT count(*) FROM document").await == rows(&["5"]));
 }
 
@@ -476,10 +559,17 @@ async fn on_conflict_do_update_refuses_an_invisible_target_row() {
     )
     .await;
     assert!(sqlstate == "42501");
+    // PostgreSQL words this one `new row violates row-level security policy for
+    // table "document"`: it reserves "target row" for MERGE, and reports a
+    // `USING` expression only when an explicit security-barrier qual rejected
+    // the row. Closing that needs the SELECT-policy/UPDATE-policy split its
+    // conflict check draws, which this engine's policy model does not have —
+    // so what is pinned here is the engine's own wording, deliberately, rather
+    // than a string mistaken for PostgreSQL's.
     assert!(
         message
-            == "target row violates row-level security policy \"high\" (USING expression) for \
-                table \"document\""
+            == "target row violates row-level security policy (USING expression) for table \
+                \"document\""
     );
     assert!(query(&mut alice, "SELECT title FROM document WHERE id = 1").await == rows(&["a"]));
 

@@ -1203,35 +1203,154 @@ async fn information_schema_describes_constraints_and_views() {
     assert2::assert!(views == vec![some(&["shop_v", "NONE", "YES", "YES"])]);
 }
 
-/// A view that is not a simple single-relation `SELECT` is not auto-updatable,
-/// which is the test `PostgreSQL`'s `is_updatable` column reports.
-#[tokio::test]
-async fn only_simple_views_report_as_auto_updatable() {
+/// [`fixture`] plus one view per shape the updatability analysis distinguishes,
+/// and the two non-updatable relation kinds `regclass` also accepts.
+///
+/// The values every test below expects were read off `PostgreSQL` 18.4 for this
+/// exact schema, so a case may only be retyped from a fresh oracle reading.
+async fn updatable_view_fixture() -> SqlEngine {
     let engine = fixture().await;
-    run(
-        &engine,
+    for ddl in [
+        // Auto-updatable and nothing else: the baseline.
         "CREATE VIEW shop_d AS SELECT DISTINCT code FROM shop",
-    )
-    .await;
-    run(
-        &engine,
         "CREATE VIEW shop_g AS SELECT code, count(*) FROM shop GROUP BY code",
-    )
-    .await;
+        // Only an expression is projected, so no column can be assigned to and
+        // the view admits DELETE alone.
+        "CREATE VIEW shop_e AS SELECT upper(code) AS u FROM shop",
+        // One assignable column is enough to admit INSERT and UPDATE too, even
+        // beside an expression that is not assignable.
+        "CREATE VIEW shop_m AS SELECT id, upper(code) AS u FROM shop",
+        // A view over a DELETE-only view is held to the same limit.
+        "CREATE VIEW shop_n AS SELECT u FROM shop_e",
+        "CREATE VIEW shop_co AS SELECT id, code FROM shop WHERE id > 0 \
+         WITH CASCADED CHECK OPTION",
+        "CREATE VIEW shop_lo AS SELECT id, code FROM shop WHERE id > 0 \
+         WITH LOCAL CHECK OPTION",
+        "CREATE SEQUENCE shop_seq",
+    ] {
+        run(&engine, ddl).await;
+    }
+    engine
+}
+
+/// `information_schema.views` reports the declared `WITH CHECK OPTION` level and
+/// the standard's two updatability columns.
+///
+/// `is_updatable` is not "is this view auto-updatable": the standard asks
+/// whether a row can be both updated *and* deleted through the view, so a view
+/// projecting only expressions — which admits DELETE and nothing else — reports
+/// `NO` despite being a perfectly simple single-relation `SELECT`.
+#[tokio::test]
+async fn the_standard_view_catalog_reports_check_option_and_updatability() {
+    let engine = updatable_view_fixture().await;
     let listed = grid(
         &engine,
-        "SELECT table_name, is_updatable FROM information_schema.views \
-         WHERE table_name IN ('shop_v', 'shop_d', 'shop_g') ORDER BY table_name",
+        "SELECT table_name, check_option, is_updatable, is_insertable_into \
+         FROM information_schema.views WHERE table_schema = 'public' ORDER BY table_name",
     )
     .await;
     assert2::assert!(
         listed
             == vec![
-                some(&["shop_d", "NO"]),
-                some(&["shop_g", "NO"]),
-                some(&["shop_v", "YES"]),
+                some(&["shop_co", "CASCADED", "YES", "YES"]),
+                some(&["shop_d", "NONE", "NO", "NO"]),
+                some(&["shop_e", "NONE", "NO", "NO"]),
+                some(&["shop_g", "NONE", "NO", "NO"]),
+                some(&["shop_lo", "LOCAL", "YES", "YES"]),
+                some(&["shop_m", "NONE", "YES", "YES"]),
+                some(&["shop_n", "NONE", "NO", "NO"]),
+                some(&["shop_v", "NONE", "YES", "YES"]),
             ]
     );
+}
+
+/// `pg_relation_is_updatable` reports the write commands a relation admits as
+/// `PostgreSQL`'s bitmask: 4 UPDATE, 8 INSERT, 16 DELETE.
+#[tokio::test]
+async fn the_relation_updatability_bitmask_matches_postgresql() {
+    // A table admits all three (28). A view admits DELETE alone (16) when its
+    // select list assigns to nothing, and none of the three (0) when its body is
+    // too complex to rewrite at all. An index or a sequence is never updatable.
+    const CASES: [(&str, &str); 11] = [
+        ("shop", "28"),
+        ("shop_v", "28"),
+        ("shop_co", "28"),
+        ("shop_lo", "28"),
+        ("shop_m", "28"),
+        ("shop_e", "16"),
+        ("shop_n", "16"),
+        ("shop_d", "0"),
+        ("shop_g", "0"),
+        ("shop_code_idx", "0"),
+        ("shop_seq", "0"),
+    ];
+    let engine = updatable_view_fixture().await;
+    let mut answered = Vec::new();
+    for (relation, _) in CASES {
+        let sql = format!("SELECT pg_catalog.pg_relation_is_updatable('{relation}', false)");
+        answered.push((relation, column(&engine, &sql).await));
+    }
+    let expected = CASES
+        .map(|(relation, mask)| (relation, some(&[mask])))
+        .to_vec();
+    assert2::assert!(answered == expected);
+}
+
+/// `pg_column_is_updatable` asks the same question of one column, which is what
+/// separates the two expression views from each other.
+#[tokio::test]
+async fn column_updatability_follows_the_projected_column_to_its_table() {
+    // A table settles the question before it reads the column number, so even a
+    // number past the end of its column list answers true — but a system column
+    // (attnum <= 0) never does.
+    const CASES: [(&str, i32, &str); 12] = [
+        ("shop", 1, "t"),
+        ("shop", 99, "t"),
+        ("shop", 0, "f"),
+        ("shop", -1, "f"),
+        ("shop_v", 2, "t"),
+        // `id` is assignable; `upper(code)` is not.
+        ("shop_m", 1, "t"),
+        ("shop_m", 2, "f"),
+        ("shop_e", 1, "f"),
+        // The column exists in the view above, but not in the one below it.
+        ("shop_n", 1, "f"),
+        ("shop_d", 1, "f"),
+        ("shop_g", 1, "f"),
+        ("shop_seq", 1, "f"),
+    ];
+    let engine = updatable_view_fixture().await;
+    let mut answered = Vec::new();
+    for (relation, attnum, _) in CASES {
+        let sql = format!(
+            "SELECT pg_catalog.pg_column_is_updatable('{relation}', {attnum}::int2, false)"
+        );
+        answered.push((relation, attnum, column(&engine, &sql).await));
+    }
+    let expected = CASES
+        .map(|(relation, attnum, held)| (relation, attnum, some(&[held])))
+        .to_vec();
+    assert2::assert!(answered == expected);
+}
+
+/// Both predicates are strict, and both tolerate an oid no relation answers to:
+/// `999999::regclass` is a legal value, so `PostgreSQL` reaches the function body
+/// and finds nothing to open rather than raising 42P01.
+#[tokio::test]
+async fn the_updatability_predicates_are_strict_and_tolerate_a_stale_oid() {
+    let engine = updatable_view_fixture().await;
+    let answered = grid(
+        &engine,
+        "SELECT pg_catalog.pg_relation_is_updatable(NULL, false) IS NULL, \
+                pg_catalog.pg_relation_is_updatable('shop_v', NULL) IS NULL, \
+                pg_catalog.pg_column_is_updatable(NULL, 1::int2, false) IS NULL, \
+                pg_catalog.pg_column_is_updatable('shop_v', NULL, false) IS NULL, \
+                pg_catalog.pg_column_is_updatable('shop_v', 1::int2, NULL) IS NULL, \
+                pg_catalog.pg_relation_is_updatable(999999, false), \
+                pg_catalog.pg_column_is_updatable(999999, 1::int2, false)",
+    )
+    .await;
+    assert2::assert!(answered == vec![some(&["t", "t", "t", "t", "t", "0", "f"])]);
 }
 
 /// The identity and formatting functions clients call before anything else.

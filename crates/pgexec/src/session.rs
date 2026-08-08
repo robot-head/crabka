@@ -3314,6 +3314,7 @@ impl SqlSession {
         statement: &WriteStatementContext<'a>,
     ) -> crate::exec::WriteContext<'a> {
         crate::exec::WriteContext {
+            view_checks: &[],
             catalog_kv: self.catalog_kv.as_ref(),
             kv: self.kv.as_ref(),
             global: self.catalog_kv.as_ref(),
@@ -8430,6 +8431,7 @@ impl SqlSession {
             let ctes = crate::cte::CteContext::empty();
             let policy_stack = crate::rls::PolicyStack::default();
             let write_ctx = crate::exec::WriteContext {
+                view_checks: &[],
                 catalog_kv: catalog_kv.as_ref(),
                 kv: kv.as_ref(),
                 global: catalog_kv.as_ref(),

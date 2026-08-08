@@ -21,7 +21,7 @@ use crate::{
     CheckConstraint, Column, ColumnDefault, ExclusionOperator, ForeignDataWrapper, ForeignKey,
     ForeignServer, ForeignTableMeta, GeneratedColumn, GeneratedKind, HashSharding, IdentityKind,
     Index, IndexConstraint, IndexMethod, IndexPlacement, MatchType, ReferentialAction, Sequence,
-    ShardingStrategy, TableOptions, UserMapping, View, ViewOptions,
+    ShardingStrategy, TableOptions, UserMapping, View, ViewCheckOption, ViewOptions,
 };
 
 /// Everything [`deserialize_schema`] recovers from a stored table schema:
@@ -2180,7 +2180,7 @@ pub fn deserialize_user_mapping(bytes: &[u8]) -> Result<UserMapping, KvError> {
 
 // ── Views ─────────────────────────────────────────────────────────────────────
 
-const VIEW_VERSION: u8 = 3;
+const VIEW_VERSION: u8 = 4;
 
 /// Serialize a view definition and its resolved output schema.
 ///
@@ -2204,6 +2204,11 @@ pub fn serialize_view(view: &View) -> Vec<u8> {
     }
     out.push(u8::from(view.options.security_invoker));
     out.push(u8::from(view.options.security_barrier));
+    out.push(match view.options.check_option {
+        None => 0,
+        Some(ViewCheckOption::Local) => 1,
+        Some(ViewCheckOption::Cascaded) => 2,
+    });
     out
 }
 
@@ -2247,6 +2252,16 @@ pub fn deserialize_view(bytes: &[u8]) -> Result<View, KvError> {
     let options = ViewOptions {
         security_invoker: take_u8(&mut cur)? != 0,
         security_barrier: take_u8(&mut cur)? != 0,
+        check_option: match take_u8(&mut cur)? {
+            0 => None,
+            1 => Some(ViewCheckOption::Local),
+            2 => Some(ViewCheckOption::Cascaded),
+            other => {
+                return Err(KvError::CorruptRow(format!(
+                    "unknown view check option {other}"
+                )));
+            }
+        },
     };
     if !cur.is_empty() {
         return Err(KvError::CorruptRow("trailing bytes in view record".into()));
@@ -3276,6 +3291,7 @@ mod tests {
                 options: ViewOptions {
                     security_invoker: true,
                     security_barrier: true,
+                    check_option: Some(ViewCheckOption::Cascaded),
                 },
             };
             assert!(deserialize_view(&serialize_view(&view)).expect("round trip") == view);

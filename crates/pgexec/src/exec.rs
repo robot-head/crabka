@@ -150,6 +150,7 @@ pub(crate) fn lock_acquire_error(error: crate::lockmgr::AcquireError) -> ExecErr
     }
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct WriteContext<'a> {
     pub catalog_kv: &'a dyn Kv,
     pub kv: &'a dyn Kv,
@@ -198,6 +199,15 @@ pub(crate) struct WriteContext<'a> {
     pub deferred_fk: Option<&'a std::sync::Mutex<crate::fk::DeferredConstraints>>,
     /// The row-security recursion guard for the queries that feed this write.
     pub policy_stack: &'a crate::rls::PolicyStack,
+    /// The `WITH CHECK OPTION`s of the views this statement was rewritten
+    /// through, empty for a statement that named a relation directly.
+    ///
+    /// It rides on the write context rather than being threaded as an argument
+    /// because the rewrite hands the base-relation statement back to
+    /// [`execute_write_body`], and from there the checks have to reach whichever
+    /// of the seven write paths that statement takes — every one of which
+    /// already builds its per-row check through [`WriteContext::row_check`].
+    pub view_checks: &'a [crate::viewwrite::ViewCheck],
 }
 
 impl<'a> WriteContext<'a> {
@@ -239,7 +249,7 @@ impl<'a> WriteContext<'a> {
         &self,
         table: &Table,
         command: crabka_pgcatalog::policy::PolicyCommand,
-    ) -> Result<crate::rls::RowSecurityCheck, ExecError> {
+    ) -> Result<crate::rls::WriteChecks, ExecError> {
         crate::privilege::require(
             &self.privileges(),
             &table.name,
@@ -247,12 +257,16 @@ impl<'a> WriteContext<'a> {
             crate::privilege::RelationKind::Table,
             crate::privilege::Privilege::for_written_row(command),
         )?;
-        crate::rls::RowSecurityCheck::compile(
+        let security = crate::rls::RowSecurityCheck::compile(
             &self.rls(),
             table,
             command,
             crate::rls::CheckSubject::NewRow,
-        )
+        )?;
+        Ok(crate::rls::WriteChecks::through_views(
+            security,
+            self.view_checks.to_vec(),
+        ))
     }
 
     fn rls(&self) -> crate::rls::RlsCtx<'_> {
@@ -545,9 +559,15 @@ pub(crate) fn execute_ddl(
                     Some(spec) => {
                         partition_definition(kv, name, spec, constraints, like, &ddl_ctx)?
                     }
-                    None if inheritance_parents.is_empty() => {
-                        create_table_definition(kv, name, columns, constraints, like, &ddl_ctx)?
-                    }
+                    None if inheritance_parents.is_empty() => create_table_definition(
+                        kv,
+                        name,
+                        columns,
+                        constraints,
+                        like,
+                        &[],
+                        &ddl_ctx,
+                    )?,
                     None => inherited_table_definition(
                         kv,
                         name,
@@ -915,14 +935,20 @@ pub(crate) fn execute_ddl(
             // `OR REPLACE` over an existing VIEW redefines it in place, provided
             // the new query keeps every existing output column. A non-view
             // relation of that name is still 42P07, as it is without OR REPLACE.
-            // The reloptions are recorded on the view and nothing reads them
-            // yet — see `crabka_pgcatalog::ViewOptions` for why owner-rights
-            // semantics are a step of their own now that the view's own ACL is
-            // enforced.
             let options = crabka_pgcatalog::ViewOptions {
                 security_invoker: options.security_invoker,
                 security_barrier: options.security_barrier,
+                check_option: options.check_option.map(catalog_check_option),
             };
+            // A check option is a promise about writes, so it may only be made
+            // by a view writes can be rewritten through. PostgreSQL raises this
+            // at CREATE time rather than leaving a view whose option can never
+            // fire, and puts the disqualifying clause in the HINT.
+            if options.check_option.is_some()
+                && let Some(detail) = crate::viewwrite::query_refusal(query)
+            {
+                return Err(ExecError::CheckOptionUnsupported(detail));
+            }
             let ops = if *or_replace && crabka_pgcatalog::get_view(kv, name).is_ok() {
                 let existing = crabka_pgcatalog::get_view(kv, name)?;
                 check_view_columns_replaceable(&existing.columns, &columns, name)?;
@@ -1187,7 +1213,7 @@ pub(crate) fn execute_ddl(
             if_exists,
             action,
         } => {
-            use crabka_pgparser::ast::{AlterViewAction, ViewOptionName};
+            use crabka_pgparser::ast::{AlterViewAction, ViewOptionName, ViewOptionSetting};
 
             let name = &match resolve_relation(kv, resolution, name, SchemaDisposition::Utility) {
                 Ok(name) => name,
@@ -1230,19 +1256,21 @@ pub(crate) fn execute_ddl(
                     view.owner = resolve_new_owner(kv, fctx, role)?;
                 }
                 // `SET` moves only the options written; `RESET` returns the
-                // ones written to their default, which for both booleans is
-                // false. `check_option` is dropped by both, as `CREATE VIEW`
-                // drops it.
+                // ones written to their default — false for the booleans and
+                // unset for the check option, which is what makes a parent's
+                // cascade stop reaching a view whose option has been reset.
                 AlterViewAction::SetOptions(settings) => {
-                    for (option, value) in settings {
-                        match option {
-                            ViewOptionName::SecurityInvoker => {
+                    for setting in settings {
+                        match setting {
+                            ViewOptionSetting::SecurityInvoker(value) => {
                                 view.options.security_invoker = *value;
                             }
-                            ViewOptionName::SecurityBarrier => {
+                            ViewOptionSetting::SecurityBarrier(value) => {
                                 view.options.security_barrier = *value;
                             }
-                            ViewOptionName::CheckOption => {}
+                            ViewOptionSetting::CheckOption(level) => {
+                                view.options.check_option = Some(catalog_check_option(*level));
+                            }
                         }
                     }
                 }
@@ -1255,7 +1283,7 @@ pub(crate) fn execute_ddl(
                             ViewOptionName::SecurityBarrier => {
                                 view.options.security_barrier = false;
                             }
-                            ViewOptionName::CheckOption => {}
+                            ViewOptionName::CheckOption => view.options.check_option = None,
                         }
                     }
                 }
@@ -2376,13 +2404,21 @@ fn parse_sequence_i64(value: &str) -> Result<i64, ExecError> {
 /// catalog positions (42703 on miss), or all columns in declared order.
 fn resolve_targets(t: &Table, columns: &Option<Vec<String>>) -> Result<Vec<usize>, ExecError> {
     match columns {
-        Some(cols) => cols
-            .iter()
-            .map(|c| {
-                t.column_index(c)
-                    .ok_or_else(|| ExecError::UndefinedColumn(c.clone()))
-            })
-            .collect::<Result<_, _>>(),
+        Some(cols) => {
+            let mut seen = std::collections::HashSet::new();
+            if let Some(repeated) = cols.iter().find(|column| !seen.insert(*column)) {
+                // 42701: naming a column twice makes the statement's intent
+                // undecidable, and PostgreSQL says so rather than letting the
+                // second value quietly win.
+                return Err(ExecError::DuplicateOutputColumn(repeated.clone()));
+            }
+            cols.iter()
+                .map(|c| {
+                    t.column_index(c)
+                        .ok_or_else(|| ExecError::UndefinedColumn(c.clone()))
+                })
+                .collect::<Result<_, _>>()
+        }
         None => Ok((0..t.columns.len()).collect()),
     }
 }
@@ -3082,7 +3118,7 @@ impl crate::fk::FkCascade for StatementCascade<'_, '_> {
                 write_ctx.catalog_kv,
                 crate::trigger::WriteTarget {
                     table,
-                    check: &crate::rls::RowSecurityCheck::exempt(
+                    check: &crate::rls::WriteChecks::exempt(
                         crate::rls::CheckExemption::ReferentialAction,
                     ),
                 },
@@ -3125,7 +3161,7 @@ impl crate::fk::FkCascade for StatementCascade<'_, '_> {
             write_ctx.catalog_kv,
             crate::trigger::WriteTarget {
                 table,
-                check: &crate::rls::RowSecurityCheck::exempt(
+                check: &crate::rls::WriteChecks::exempt(
                     crate::rls::CheckExemption::ReferentialAction,
                 ),
             },
@@ -3971,6 +4007,22 @@ async fn partitioned_insert(
     ))
 }
 
+/// The catalog's spelling of a parsed check-option level.
+///
+/// The two enums are deliberately separate: `crabka_pgcatalog` is the durable
+/// catalog and depends on no SQL grammar, so the executor is where the syntax
+/// becomes storage.
+const fn catalog_check_option(
+    level: crabka_pgparser::ast::ViewCheckOption,
+) -> crabka_pgcatalog::ViewCheckOption {
+    match level {
+        crabka_pgparser::ast::ViewCheckOption::Local => crabka_pgcatalog::ViewCheckOption::Local,
+        crabka_pgparser::ast::ViewCheckOption::Cascaded => {
+            crabka_pgcatalog::ViewCheckOption::Cascaded
+        }
+    }
+}
+
 fn is_view_ref(
     kv: &dyn Kv,
     resolution: &crate::relname::ResolutionScope,
@@ -3984,10 +4036,404 @@ fn is_view_ref(
     }
 }
 
+/// A write statement rewritten onto the relation underneath a chain of views.
+struct RewrittenViewWrite {
+    stmt: Statement,
+    /// The role the rewritten write is decided under — the innermost view's
+    /// owner, unless a `security_invoker` view keeps the caller's identity.
+    role: String,
+    /// The check options collected on the way down, ready for the row that
+    /// reaches storage.
+    checks: Vec<crate::viewwrite::ViewCheck>,
+}
+
+/// Enforce the check options this statement was rewritten through against a row
+/// an `INSTEAD OF` trigger produced.
+///
+/// The rewritten path gets this for free through
+/// [`crate::rls::WriteChecks`], which only the table write path reaches. A chain
+/// that bottoms out at a trigger-bearing view needs the same judgement made
+/// here, on the view's own rowtype, which is the row `PostgreSQL` judges too.
+fn permit_view_checks(
+    write_ctx: &WriteContext<'_>,
+    view: &Table,
+    row: &[Datum],
+) -> Result<(), ExecError> {
+    let ctx = write_ctx.eval_ctx;
+    let scope = Scope::single(view, &view.name.name);
+    for check in write_ctx.view_checks {
+        if !row_matches(Some(&check.qual), &scope, row, ctx)? {
+            return Err(ExecError::ViewCheckOptionViolation {
+                view: check.view.clone(),
+                row: crate::viewwrite::failing_row(row, ctx),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Rewrite `stmt` from the view it names onto the relation underneath.
+fn rewrite_view_write(
+    write_ctx: &WriteContext<'_>,
+    ctes: &crate::cte::CteContext,
+    stmt: &Statement,
+    name: &crabka_pgcatalog::RelationName,
+) -> Result<RewrittenViewWrite, ExecError> {
+    use crabka_pgparser::ast::{InsertSource, SelectItem};
+
+    let catalog_kv = write_ctx.catalog_kv;
+    let resolution = write_ctx.eval_ctx.resolution();
+    let stored = crabka_pgcatalog::get_view(catalog_kv, name)?;
+    let (write, alias) = match stmt {
+        Statement::Insert { .. } => (crate::viewwrite::ViewWrite::Insert, None),
+        Statement::Update { alias, .. } => (crate::viewwrite::ViewWrite::Update, alias.as_deref()),
+        Statement::Delete { alias, .. } => (crate::viewwrite::ViewWrite::Delete, alias.as_deref()),
+        _ => unreachable!("view DML only accepts INSERT, UPDATE, or DELETE"),
+    };
+    let qualifier = view_write_qualifier(name, alias).to_string();
+    let privileges = write_ctx.privileges();
+    let permit = |view: &crabka_pgcatalog::View, role: &str| {
+        crate::privilege::require(
+            &crate::privilege::PrivilegeCtx::new(catalog_kv, role),
+            &view.name,
+            &view.owner,
+            crate::privilege::RelationKind::View,
+            match write {
+                crate::viewwrite::ViewWrite::Insert => crate::privilege::Privilege::Insert,
+                crate::viewwrite::ViewWrite::Update => crate::privilege::Privilege::Update,
+                crate::viewwrite::ViewWrite::Delete => crate::privilege::Privilege::Delete,
+            },
+        )
+    };
+    let instead = |relation: &crabka_pgcatalog::RelationName| {
+        let id = crate::catalog_rel::view_oids(catalog_kv)?
+            .get(relation)
+            .copied()
+            .and_then(|oid| u32::try_from(oid).ok())
+            .unwrap_or(0);
+        crate::trigger::has_instead_row_trigger(
+            catalog_kv,
+            id,
+            crate::trigger::DmlEvent::Insert,
+            &[],
+        )
+        .and_then(|insert| {
+            Ok(insert
+                || crate::trigger::has_instead_row_trigger(
+                    catalog_kv,
+                    id,
+                    crate::trigger::DmlEvent::Update,
+                    &[],
+                )?
+                || crate::trigger::has_instead_row_trigger(
+                    catalog_kv,
+                    id,
+                    crate::trigger::DmlEvent::Delete,
+                    &[],
+                )?)
+        })
+    };
+    let view_ctx = crate::viewwrite::ViewWriteCtx {
+        kv: catalog_kv,
+        resolution,
+        instead_trigger: &instead,
+        permit: &permit,
+    };
+    let _ = &privileges;
+    let rewrite = crate::viewwrite::resolve(
+        &view_ctx,
+        &stored,
+        write,
+        &qualifier,
+        write_ctx.fctx.effective_role(),
+    )?;
+    let target = relation_ref_of(&rewrite.target);
+    let sub = |expr: &Expr| rewrite.rewrite_statement_expr(expr, &qualifier);
+    // Every column a statement names has to be one of the view's, exactly as
+    // PostgreSQL resolves it against the view's rowtype before rewriting. Left
+    // unchecked, a name the view does not project would resolve against the
+    // base relation the rewrite substitutes in, and a write would silently read
+    // a column the view hides.
+    let check_names = |exprs: &[&Expr], strict: bool| -> Result<(), ExecError> {
+        for expr in exprs {
+            rewrite.reject_foreign_columns(expr, &qualifier, strict)?;
+        }
+        Ok(())
+    };
+    let returning_items = |returning: &Option<crabka_pgparser::ast::Returning>| {
+        returning.as_ref().map(|returning| {
+            let items = returning
+                .items
+                .iter()
+                .flat_map(|item| match item {
+                    SelectItem::Wildcard => rewrite.wildcard_items(),
+                    SelectItem::QualifiedWildcard(written) if *written == qualifier => {
+                        rewrite.wildcard_items()
+                    }
+                    other => vec![other.clone()],
+                })
+                .map(|item| match item {
+                    // The output column keeps the name the *view* gave it.
+                    // Substitution replaces a bare `aa` with the base column it
+                    // was selected from, and a column reference names itself —
+                    // so without an explicit alias the rewrite would rename the
+                    // user's RETURNING column out from under them.
+                    SelectItem::Expr { expr, alias } => SelectItem::Expr {
+                        alias: alias.or_else(|| match &expr {
+                            Expr::Column { name, .. } => Some(name.clone()),
+                            _ => None,
+                        }),
+                        expr: sub(&expr),
+                    },
+                    other => other,
+                })
+                .collect();
+            crabka_pgparser::ast::Returning {
+                old_alias: returning.old_alias.clone(),
+                new_alias: returning.new_alias.clone(),
+                items,
+            }
+        })
+    };
+
+    let stmt = match stmt {
+        Statement::Insert {
+            columns,
+            source,
+            on_conflict,
+            returning,
+            ..
+        } => {
+            // With no column list the implicit target list is the view's
+            // leading columns, truncated to what the source supplies — the same
+            // rule `resolve_insert_targets` applies to a table, applied one
+            // level up so the truncation counts *view* columns.
+            let named: Vec<String> = match columns {
+                Some(written) => written.clone(),
+                None => {
+                    let width = match source {
+                        InsertSource::Values(rows) => rows.first().map_or(0, Vec::len),
+                        InsertSource::DefaultValues => 0,
+                        InsertSource::Query(query) => crate::query::describe_query_expr_with_ctes(
+                            catalog_kv, resolution, query, ctes,
+                        )?
+                        .len(),
+                    };
+                    rewrite
+                        .columns
+                        .iter()
+                        .take(width)
+                        .map(|column| column.name.clone())
+                        .collect()
+                }
+            };
+            let mapped = named
+                .iter()
+                .map(|column| rewrite.assignable(column, &name.name, write))
+                .collect::<Result<Vec<_>, _>>()?;
+            // Two of the view's columns may select the same base column
+            // (`SELECT a, b, a AS aa`), and an INSERT that names both would
+            // assign it twice. PostgreSQL reports that against the *base*
+            // column, and reports it here rather than letting the second value
+            // quietly win.
+            let mut assigned = std::collections::HashSet::new();
+            if let Some(repeated) = mapped.iter().find(|column| !assigned.insert(*column)) {
+                return Err(ExecError::Syntax(format!(
+                    "multiple assignments to same column \"{repeated}\""
+                )));
+            }
+            // An INSERT carries no alias, so its RETURNING has to name the
+            // relation underneath rather than the view the user wrote.
+            let returning =
+                returning_items(returning).map(|returning| crabka_pgparser::ast::Returning {
+                    items: returning
+                        .items
+                        .iter()
+                        .map(|item| match item {
+                            SelectItem::Expr { expr, alias } => SelectItem::Expr {
+                                expr: crate::viewwrite::ViewRewrite::unqualify_expr(
+                                    expr, &qualifier,
+                                ),
+                                alias: alias.clone(),
+                            },
+                            other => other.clone(),
+                        })
+                        .collect(),
+                    ..returning
+                });
+            let on_conflict = on_conflict
+                .as_ref()
+                .map(|clause| rewrite_view_conflict(clause, &rewrite, &qualifier, &name.name))
+                .transpose()?;
+            Statement::Insert {
+                table: target,
+                columns: Some(mapped),
+                source: source.clone(),
+                with: None,
+                on_conflict,
+                returning,
+            }
+        }
+        Statement::Update {
+            assignments,
+            from,
+            filter,
+            returning,
+            ..
+        } => {
+            check_names(&filter.iter().collect::<Vec<_>>(), from.is_empty())?;
+            let assignments = assignments
+                .iter()
+                .map(|assignment| {
+                    Ok(crabka_pgparser::ast::Assignment {
+                        targets: assignment
+                            .targets
+                            .iter()
+                            .map(|column| rewrite.assignable(column, &name.name, write))
+                            .collect::<Result<Vec<_>, ExecError>>()?,
+                        subscripts: assignment.subscripts.clone(),
+                        value: rewrite_assignment_value(&assignment.value, &sub),
+                    })
+                })
+                .collect::<Result<Vec<_>, ExecError>>()?;
+            Statement::Update {
+                table: target,
+                only: true,
+                with: None,
+                alias: Some(qualifier.clone()),
+                assignments,
+                from: from.clone(),
+                filter: rewrite.restrict(filter.as_ref().map(&sub)),
+                returning: returning_items(returning),
+            }
+        }
+        Statement::Delete {
+            using,
+            filter,
+            returning,
+            ..
+        } => {
+            check_names(&filter.iter().collect::<Vec<_>>(), using.is_empty())?;
+            Statement::Delete {
+                table: target,
+                only: true,
+                with: None,
+                alias: Some(qualifier.clone()),
+                using: using.clone(),
+                filter: rewrite.restrict(filter.as_ref().map(&sub)),
+                returning: returning_items(returning),
+            }
+        }
+        _ => unreachable!("view DML only accepts INSERT, UPDATE, or DELETE"),
+    };
+    Ok(RewrittenViewWrite {
+        stmt,
+        role: rewrite.run_as.clone(),
+        checks: rewrite.row_checks(&qualifier),
+    })
+}
+
+/// Rewrite an `ON CONFLICT` clause from the view's columns onto the relation
+/// underneath.
+///
+/// The arbiter's inference columns and the `DO UPDATE SET` targets are
+/// assignments and take the same refusal an ordinary target column does; the
+/// expressions go through the `excluded`-aware rewrite.
+fn rewrite_view_conflict(
+    clause: &crabka_pgparser::ast::OnConflict,
+    rewrite: &crate::viewwrite::ViewRewrite,
+    qualifier: &str,
+    view: &str,
+) -> Result<crabka_pgparser::ast::OnConflict, ExecError> {
+    use crabka_pgparser::ast::{OnConflict, OnConflictAction, OnConflictTarget};
+
+    let write = crate::viewwrite::ViewWrite::Insert;
+    // An INSERT has no alias to hang the statement's qualifier on, so a
+    // reference to the *stored* row moves onto the target's bare relation name;
+    // `excluded` keeps its own qualifier, which is not the statement's.
+    let target_name = rewrite.target.name.clone();
+    let sub = |expr: &Expr| {
+        crate::viewwrite::ViewRewrite::requalify_expr(
+            &rewrite.rewrite_conflict_expr(expr, qualifier),
+            qualifier,
+            &target_name,
+        )
+    };
+    let target = match &clause.target {
+        OnConflictTarget::Columns {
+            columns,
+            index_predicate,
+        } => OnConflictTarget::Columns {
+            columns: columns
+                .iter()
+                .map(|column| rewrite.assignable(column, view, write))
+                .collect::<Result<Vec<_>, ExecError>>()?,
+            index_predicate: index_predicate.as_ref().map(&sub),
+        },
+        other => other.clone(),
+    };
+    let action = match &clause.action {
+        OnConflictAction::DoNothing => OnConflictAction::DoNothing,
+        OnConflictAction::DoUpdate {
+            assignments,
+            filter,
+        } => OnConflictAction::DoUpdate {
+            assignments: assignments
+                .iter()
+                .map(|(column, expr)| Ok((rewrite.assignable(column, view, write)?, sub(expr))))
+                .collect::<Result<Vec<_>, ExecError>>()?,
+            filter: filter.as_ref().map(&sub),
+        },
+    };
+    Ok(OnConflict { target, action })
+}
+
+/// Apply a rewrite to an assignment's right-hand side, whichever spelling it
+/// has.
+fn rewrite_assignment_value(
+    value: &crabka_pgparser::ast::AssignmentValue,
+    sub: &impl Fn(&Expr) -> Expr,
+) -> crabka_pgparser::ast::AssignmentValue {
+    use crabka_pgparser::ast::AssignmentValue;
+    match value {
+        AssignmentValue::Expr(expr) => AssignmentValue::Expr(sub(expr)),
+        AssignmentValue::Row(exprs) => AssignmentValue::Row(exprs.iter().map(sub).collect()),
+        AssignmentValue::Subquery(query) => AssignmentValue::Subquery(query.clone()),
+    }
+}
+
+/// A `RelationRef` naming a resolved relation, for a statement this executor
+/// builds rather than parses.
+fn relation_ref_of(name: &crabka_pgcatalog::RelationName) -> crabka_pgparser::ast::RelationRef {
+    crabka_pgparser::ast::RelationRef {
+        schema: Some(name.schema.clone()),
+        name: name.name.clone(),
+    }
+}
+
+/// The statement's own qualifier for the view it names — its alias when it has
+/// one, otherwise the view's bare name. Every rewritten reference to the
+/// relation the write lands on carries this, and the rewritten statement aliases
+/// that relation with it, so a qualified reference the user wrote still
+/// resolves.
+fn view_write_qualifier<'a>(
+    name: &'a crabka_pgcatalog::RelationName,
+    alias: Option<&'a str>,
+) -> &'a str {
+    alias.unwrap_or(&name.name)
+}
+
+/// Dispatch a write that named a view.
+///
+/// Two paths, and which one applies is decided by whether the view carries an
+/// `INSTEAD OF` row trigger for this event: the trigger performs the write
+/// itself, or — when there is none — the statement is rewritten onto the
+/// relation underneath and handed back to [`execute_write_body`].
 async fn execute_view_dml(
     write_ctx: &WriteContext<'_>,
     ctes: &crate::cte::CteContext,
     stmt: &Statement,
+    writes: &mut StatementWrites,
 ) -> Result<(WriteOutcome, Vec<crabka_pgkv::WriteOp>), ExecError> {
     let reference = match stmt {
         Statement::Insert { table, .. }
@@ -4003,6 +4449,29 @@ async fn execute_view_dml(
     )?;
     let view = crate::trigger::relation_trigger_table(write_ctx.catalog_kv, &name)?;
     let ctx = write_ctx.eval_ctx;
+    let (event, updated) = match stmt {
+        Statement::Insert { .. } => (crate::trigger::DmlEvent::Insert, Vec::new()),
+        Statement::Update { assignments, .. } => (
+            crate::trigger::DmlEvent::Update,
+            assignments
+                .iter()
+                .flat_map(|assignment| assignment.targets.iter().cloned())
+                .collect(),
+        ),
+        _ => (crate::trigger::DmlEvent::Delete, Vec::new()),
+    };
+    if !crate::trigger::has_instead_row_trigger(write_ctx.catalog_kv, view.id, event, &updated)? {
+        let rewritten = rewrite_view_write(write_ctx, ctes, stmt, &name)?;
+        let inner = WriteContext {
+            fctx: ForeignCtx {
+                current_user: &rewritten.role,
+                ..write_ctx.fctx
+            },
+            view_checks: &rewritten.checks,
+            ..*write_ctx
+        };
+        return Box::pin(execute_write_body(&inner, ctes, &rewritten.stmt, writes)).await;
+    }
 
     match stmt {
         Statement::Insert {
@@ -4035,6 +4504,7 @@ async fn execute_view_dml(
                 else {
                     continue;
                 };
+                permit_view_checks(write_ctx, &view, &result)?;
                 count += 1;
                 if returning.is_some() {
                     returned.push(ReturnedRow {
@@ -4107,6 +4577,7 @@ async fn execute_view_dml(
                 else {
                     continue;
                 };
+                permit_view_checks(write_ctx, &view, &result)?;
                 count += 1;
                 if returning.is_some() {
                     returned.push(ReturnedRow::updated(
@@ -4227,7 +4698,7 @@ async fn execute_write_body(
         | Statement::Delete { table, .. }
             if is_view_ref(catalog_kv, resolution, table)? =>
         {
-            Box::pin(execute_view_dml(write_ctx, ctes, stmt)).await
+            Box::pin(execute_view_dml(write_ctx, ctes, stmt, writes)).await
         }
         Statement::Insert { table, .. } if is_partitioned_ref(catalog_kv, resolution, table)? => {
             partitioned_insert(write_ctx, ctes, stmt, writes).await
@@ -4646,7 +5117,7 @@ async fn execute_write_body(
                         catalog_kv,
                         crate::trigger::WriteTarget {
                             table: &t,
-                            check: &crate::rls::RowSecurityCheck::exempt(
+                            check: &crate::rls::WriteChecks::exempt(
                                 crate::rls::CheckExemption::RemovesRows,
                             ),
                         },
@@ -5859,7 +6330,7 @@ async fn apply_merge_row_action(
                 write_ctx.catalog_kv,
                 crate::trigger::WriteTarget {
                     table: t,
-                    check: &crate::rls::RowSecurityCheck::exempt(
+                    check: &crate::rls::WriteChecks::exempt(
                         crate::rls::CheckExemption::RemovesRows,
                     ),
                 },
@@ -8373,7 +8844,7 @@ fn execute_timestamp_insert(
             catalog_kv,
             crate::trigger::WriteTarget {
                 table,
-                check: &crate::rls::RowSecurityCheck::exempt(
+                check: &crate::rls::WriteChecks::exempt(
                     crate::rls::CheckExemption::ShardedRelation,
                 ),
             },
@@ -8466,7 +8937,7 @@ fn execute_timestamp_update(
             catalog_kv,
             crate::trigger::WriteTarget {
                 table,
-                check: &crate::rls::RowSecurityCheck::exempt(
+                check: &crate::rls::WriteChecks::exempt(
                     crate::rls::CheckExemption::ShardedRelation,
                 ),
             },
@@ -8542,9 +9013,7 @@ fn execute_timestamp_delete(
             catalog_kv,
             crate::trigger::WriteTarget {
                 table,
-                check: &crate::rls::RowSecurityCheck::exempt(
-                    crate::rls::CheckExemption::RemovesRows,
-                ),
+                check: &crate::rls::WriteChecks::exempt(crate::rls::CheckExemption::RemovesRows),
             },
             crate::trigger::DmlEvent::Delete,
             &[],
@@ -10250,7 +10719,7 @@ pub(crate) fn expr_children(expr: &Expr) -> Vec<&Expr> {
 }
 
 /// The mutable counterpart of [`expr_children`].
-fn expr_children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
+pub(crate) fn expr_children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
     let mut owned: Vec<&mut Expr> = Vec::new();
     match expr {
         Expr::Unary { expr, .. }
@@ -10335,7 +10804,7 @@ pub(crate) fn query_children(expr: &Expr) -> Vec<&crabka_pgparser::ast::QueryExp
 }
 
 /// The mutable counterpart of [`query_children`].
-fn query_children_mut(expr: &mut Expr) -> Vec<&mut crabka_pgparser::ast::QueryExpr> {
+pub(crate) fn query_children_mut(expr: &mut Expr) -> Vec<&mut crabka_pgparser::ast::QueryExpr> {
     match expr {
         Expr::ScalarSubquery(query) | Expr::ArraySubquery(query) | Expr::Exists(query) => {
             vec![query]
@@ -15221,12 +15690,21 @@ fn virtual_catalog_columns(name: &str) -> Vec<Column> {
             ("default_character_set_name", Text),
             ("sql_path", Text),
         ]),
+        // Not PostgreSQL's full 12-column list: the five NULL columns between
+        // `table_type` and `is_insertable_into`, and the two after it, are not
+        // synthesized here, so `is_insertable_into` sits at ordinal 5 rather
+        // than 10. Every consumer names the column, and none of the absent ones
+        // carries a value for an untyped relation.
         "information_schema.tables" => cols(&[
             ("table_catalog", Text),
             ("table_schema", Text),
             ("table_name", Text),
             ("table_type", Text),
+            ("is_insertable_into", Text),
         ]),
+        // As with `information_schema.tables`, a subset of PostgreSQL's list —
+        // `is_updatable` is its 44th column and is appended here rather than
+        // the 37 columns before it being synthesized.
         "information_schema.columns" => cols(&[
             ("table_schema", Text),
             ("table_name", Text),
@@ -15235,6 +15713,7 @@ fn virtual_catalog_columns(name: &str) -> Vec<Column> {
             ("data_type", Text),
             ("is_nullable", Text),
             ("column_default", Text),
+            ("is_updatable", Text),
         ]),
         "information_schema.triggers" => cols(&[
             ("trigger_catalog", Text),
@@ -15907,6 +16386,10 @@ fn information_schema_tables_rows(
                 } else {
                     "BASE TABLE"
                 },
+                // Every ordinary table takes an INSERT; a foreign one takes
+                // whichever the scanner admits, and this engine's scanners
+                // admit none, so the auto-updatable test answers for both.
+                table.foreign.is_none(),
             )
         })
         .collect::<Vec<_>>();
@@ -15914,7 +16397,13 @@ fn information_schema_tables_rows(
         crabka_pgcatalog::list_views(catalog_kv)?
             .into_iter()
             .filter(|view| !is_other_temp_schema(&view.name.schema, backend_id))
-            .map(|view| information_schema_table_row(&view.name, "VIEW")),
+            .map(|view| {
+                let insertable = crate::viewwrite::relation_updatable_events(
+                    catalog_kv, &view.name, false, None, 0,
+                ) & crate::viewwrite::INSERT_EVENT
+                    != 0;
+                information_schema_table_row(&view.name, "VIEW", insertable)
+            }),
     );
     Ok(rows)
 }
@@ -15922,13 +16411,21 @@ fn information_schema_tables_rows(
 fn information_schema_table_row(
     name: &crabka_pgcatalog::RelationName,
     table_type: &str,
+    insertable: bool,
 ) -> Vec<Datum> {
     vec![
         text(CURRENT_DATABASE),
         text(&name.schema),
         text(&name.name),
         text(table_type),
+        text(yes_no(insertable)),
     ]
+}
+
+/// The standard's `yes_or_no` domain, which every `information_schema` boolean
+/// is spelled in.
+const fn yes_no(flag: bool) -> &'static str {
+    if flag { "YES" } else { "NO" }
 }
 
 fn information_schema_columns_rows(
@@ -15941,24 +16438,61 @@ fn information_schema_columns_rows(
             continue;
         }
         for (idx, column) in table.columns.iter().enumerate() {
-            rows.push(vec![
-                text(&table.name.schema),
-                text(&table.name.name),
-                text(&column.name),
-                int(usize_i32(idx + 1)?),
-                // PostgreSQL reports the literal string `ARRAY` here for every
-                // array column (the element type lives in `udt_name`, which
-                // this synthesized view does not expose).
-                text(match column.ty {
-                    ColumnType::Array(_) => "ARRAY",
-                    ty => ty.name(),
-                }),
-                text(if column.not_null { "NO" } else { "YES" }),
-                column_default_datum(catalog_kv, column),
-            ]);
+            rows.push(information_schema_column_row(
+                catalog_kv,
+                &table.name,
+                column,
+                idx,
+                // Every column of an ordinary table is updatable, so the
+                // per-column predicate is not consulted for one.
+                true,
+            )?);
+        }
+    }
+    // A view's columns belong here too — `is_updatable` is a per-column answer
+    // and a view is where it stops being uniformly YES.
+    for view in crabka_pgcatalog::list_views(catalog_kv)? {
+        if is_other_temp_schema(&view.name.schema, backend_id) {
+            continue;
+        }
+        for (idx, column) in view.columns.iter().enumerate() {
+            let updatable = crate::viewwrite::column_is_updatable(
+                catalog_kv,
+                &view.name,
+                usize_i32(idx + 1)?,
+                false,
+            );
+            rows.push(information_schema_column_row(
+                catalog_kv, &view.name, column, idx, updatable,
+            )?);
         }
     }
     Ok(rows)
+}
+
+fn information_schema_column_row(
+    catalog_kv: &dyn Kv,
+    relation: &crabka_pgcatalog::RelationName,
+    column: &crabka_pgcatalog::Column,
+    index: usize,
+    updatable: bool,
+) -> Result<Vec<Datum>, ExecError> {
+    Ok(vec![
+        text(&relation.schema),
+        text(&relation.name),
+        text(&column.name),
+        int(usize_i32(index + 1)?),
+        // PostgreSQL reports the literal string `ARRAY` here for every array
+        // column (the element type lives in `udt_name`, which this synthesized
+        // view does not expose).
+        text(match column.ty {
+            ColumnType::Array(_) => "ARRAY",
+            ty => ty.name(),
+        }),
+        text(if column.not_null { "NO" } else { "YES" }),
+        column_default_datum(catalog_kv, column),
+        text(yes_no(updatable)),
+    ])
 }
 
 fn information_schema_trigger_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
@@ -19627,8 +20161,11 @@ fn inherited_table_definition(
     like: &[crabka_pgparser::ast::LikeClause],
     ctx: &crate::clock::EvalCtx,
 ) -> Result<TableDefinition, ExecError> {
-    let (local_columns, mut checks, sequences, indexes, foreign_keys) =
-        create_table_definition(kv, name, columns, constraints, like, ctx)?;
+    // The parents are read before the local definition, because a `CHECK`
+    // written on the child may constrain a column the child inherits rather
+    // than one it declares — `CREATE TABLE c (CHECK (a > 0)) INHERITS (p)` is
+    // the whole point of the clause, and validating it against the local
+    // columns alone reports the inherited column as undefined.
     let mut merged = Vec::<Column>::new();
     let mut inherited_checks = Vec::new();
     for parent_name in parents {
@@ -19651,6 +20188,8 @@ fn inherited_table_definition(
         }
         inherited_checks.extend(parent.checks);
     }
+    let (local_columns, mut checks, sequences, indexes, foreign_keys) =
+        create_table_definition(kv, name, columns, constraints, like, &merged, ctx)?;
     for column in local_columns {
         if merged.iter().any(|item| item.name == column.name) {
             return Err(ExecError::InvalidTableDefinition(format!(
@@ -19684,7 +20223,7 @@ fn partition_definition(
         return Err(ExecError::NotPartitioned(parent_name.to_string()));
     }
     let (_, extra_checks, sequences, indexes, foreign_keys) =
-        create_table_definition(kv, name, &[], constraints, like, ctx)?;
+        create_table_definition(kv, name, &[], constraints, like, &parent.columns, ctx)?;
     let mut columns = parent.columns.clone();
     for (column, qualifiers) in &spec.column_options {
         let target = columns
@@ -19879,6 +20418,10 @@ fn create_table_definition(
     columns: &[crabka_pgparser::ast::ColumnDef],
     constraints: &[crabka_pgparser::ast::TableConstraint],
     like: &[crabka_pgparser::ast::LikeClause],
+    // Columns the relation gets from an `INHERITS` parent. They are not part of
+    // the definition this returns — the caller merges them — but a `CHECK`
+    // written here may name one, so validation has to see them.
+    inherited: &[Column],
     ctx: &crate::clock::EvalCtx,
 ) -> Result<TableDefinition, ExecError> {
     let resolution = ctx.resolution();
@@ -19951,7 +20494,14 @@ fn create_table_definition(
             &primary_key_columns,
         )?);
     }
-    let column_names: Vec<String> = cols.iter().map(|c| c.name.clone()).collect();
+    // A `CHECK`'s generated name is `<table>_<column>_check` when the predicate
+    // references exactly one of the relation's columns, so the name depends on
+    // the columns the relation *has* — inherited ones included.
+    let column_names: Vec<String> = inherited
+        .iter()
+        .chain(&cols)
+        .map(|c| c.name.clone())
+        .collect();
     for column in columns {
         for constraint in &column.constraints {
             match &constraint.kind {
@@ -20080,11 +20630,19 @@ fn create_table_definition(
     }
     // Resolve every CHECK against the finished column list up front, so an
     // unknown column is a 42703 at DDL time rather than at the first INSERT.
+    // Inherited columns count: `CREATE TABLE c (CHECK (a > 0)) INHERITS (p)`
+    // constrains `p`'s column, which this relation declares nowhere.
+    let mut visible = inherited.to_vec();
+    for column in &cols {
+        if !visible.iter().any(|item| item.name == column.name) {
+            visible.push(column.clone());
+        }
+    }
     let table_for_validation = Table {
         id: 0,
         owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
         name: name.clone(),
-        columns: cols.clone(),
+        columns: visible,
         sharded: false,
         row_security: false,
         force_row_security: false,

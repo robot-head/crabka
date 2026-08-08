@@ -8069,14 +8069,28 @@ impl Parser {
         let name = self.relation_ref()?;
         // `VIEW name (a, b, c)` renames the query's output columns positionally.
         let columns = self.opt_column_aliases()?;
-        let options = self.view_options()?;
+        let mut options = self.view_options()?;
         self.expect(&Token::Keyword(Keyword::As))?;
         let definition_start = self.peek_pos();
         let query = self.query_expr()?;
+        // Taken before the trailing clause is read: `pg_get_viewdef` prints the
+        // check option from the catalog's reloptions, so a definition that also
+        // carried the clause text would emit it twice.
         let definition_end = self.peek_pos();
         let definition = self.source[definition_start..definition_end]
             .trim()
             .to_string();
+        let clause_pos = self.peek_pos();
+        if let Some(level) = self.view_check_option_clause()? {
+            if options.check_option.is_some() {
+                return Err(ParseError::new_sqlstate(
+                    "22023",
+                    "parameter \"check_option\" specified more than once",
+                    clause_pos,
+                ));
+            }
+            options.check_option = Some(level);
+        }
         Ok(Statement::CreateView {
             name,
             definition,
@@ -8090,57 +8104,137 @@ impl Parser {
 
     /// The optional `WITH (…)` reloption list on `CREATE VIEW`.
     ///
-    /// `PostgreSQL` gives a view three reloptions. Two are recorded —
-    /// `security_invoker` and `security_barrier` — and `check_option` is
-    /// accepted and dropped, because nothing here enforces a view's `WITH CHECK
-    /// OPTION` yet. Anything else is the same `unrecognized parameter` refusal
-    /// `PostgreSQL` raises, rather than a silent acceptance that would make a
-    /// misspelled `security_barrier` look like it took effect.
+    /// `PostgreSQL` gives a view three reloptions and all three are recorded:
+    /// `security_invoker`, `security_barrier`, and `check_option`, which is the
+    /// list spelling of the trailing `WITH … CHECK OPTION` clause. Anything
+    /// else is the same `unrecognized parameter` refusal `PostgreSQL` raises,
+    /// rather than a silent acceptance that would make a misspelled
+    /// `security_barrier` look like it took effect.
     fn view_options(&mut self) -> Result<crate::ast::ViewOptions, ParseError> {
+        use crate::ast::ViewOptionSetting;
+
         let mut options = crate::ast::ViewOptions::default();
         if !self.eat_keyword(Keyword::With) {
             return Ok(options);
         }
-        for (name, value) in self.view_option_settings()? {
-            match name {
-                crate::ast::ViewOptionName::SecurityInvoker => options.security_invoker = value,
-                crate::ast::ViewOptionName::SecurityBarrier => options.security_barrier = value,
-                crate::ast::ViewOptionName::CheckOption => {}
+        for setting in self.view_option_settings()? {
+            match setting {
+                ViewOptionSetting::SecurityInvoker(value) => options.security_invoker = value,
+                ViewOptionSetting::SecurityBarrier(value) => options.security_barrier = value,
+                ViewOptionSetting::CheckOption(level) => options.check_option = Some(level),
             }
         }
         Ok(options)
+    }
+
+    /// The `WITH [LOCAL | CASCADED] CHECK OPTION` that may close a
+    /// `CREATE VIEW`, or `None` when the statement ends after its query.
+    ///
+    /// Call this only once the definition text has been taken: the clause sits
+    /// after the query but is a property of the view, not of the query the
+    /// catalog stores.
+    fn view_check_option_clause(
+        &mut self,
+    ) -> Result<Option<crate::ast::ViewCheckOption>, ParseError> {
+        use crate::ast::ViewCheckOption;
+
+        if !self.eat_keyword(Keyword::With) {
+            return Ok(None);
+        }
+        let level = if self.eat_keyword(Keyword::Local) {
+            ViewCheckOption::Local
+        } else {
+            // `CASCADED` is the default in the SQL standard and in
+            // `PostgreSQL`, so the word itself is optional; only the narrower
+            // `LOCAL` has to be asked for.
+            self.eat_ident_eq("cascaded");
+            ViewCheckOption::Cascaded
+        };
+        self.expect_ident_eq("check")?;
+        self.expect_ident_eq("option")?;
+        Ok(Some(level))
     }
 
     /// A parenthesized `(name [= value], …)` reloption list, as `CREATE VIEW …
     /// WITH (…)` and `ALTER VIEW … SET (…)` both write it.
     ///
     /// Shared so the two spellings cannot drift: an option `CREATE VIEW`
-    /// refuses must not be one `ALTER VIEW` silently accepts.
-    fn view_option_settings(
-        &mut self,
-    ) -> Result<Vec<(crate::ast::ViewOptionName, bool)>, ParseError> {
+    /// refuses must not be one `ALTER VIEW` silently accepts, and a value one
+    /// rejects must not be one the other takes.
+    fn view_option_settings(&mut self) -> Result<Vec<crate::ast::ViewOptionSetting>, ParseError> {
+        use crate::ast::{ViewOptionName, ViewOptionSetting};
+
         self.expect(&Token::LParen)?;
         let mut settings = Vec::new();
         loop {
-            let name = self.view_option_name()?;
-            // `check_option` is an enum, not a boolean, so its value is taken
-            // and dropped rather than run through `parse_bool`.
-            let value = if name == crate::ast::ViewOptionName::CheckOption {
-                if *self.peek() == Token::Eq {
-                    self.bump();
-                    self.expect_ident()?;
+            // The value's grammar follows the name: two of the three are
+            // booleans, and `check_option` is an enum.
+            settings.push(match self.view_option_name()? {
+                ViewOptionName::SecurityInvoker => {
+                    ViewOptionSetting::SecurityInvoker(self.reloption_bool()?)
                 }
-                false
-            } else {
-                self.reloption_bool()?
-            };
-            settings.push((name, value));
+                ViewOptionName::SecurityBarrier => {
+                    ViewOptionSetting::SecurityBarrier(self.reloption_bool()?)
+                }
+                ViewOptionName::CheckOption => {
+                    ViewOptionSetting::CheckOption(self.reloption_check_option()?)
+                }
+            });
             if !self.eat_comma() {
                 break;
             }
         }
         self.expect(&Token::RParen)?;
         Ok(settings)
+    }
+
+    /// The `check_option` reloption's value, which names a level rather than
+    /// carrying a boolean.
+    ///
+    /// A bare `WITH (check_option)` is the `true` any other reloption's bare
+    /// name means, and `PostgreSQL` reports that `true` straight back as the
+    /// invalid enum value instead of complaining about a missing one — so the
+    /// refusal renders it the same way.
+    fn reloption_check_option(&mut self) -> Result<crate::ast::ViewCheckOption, ParseError> {
+        use crate::ast::ViewCheckOption;
+
+        if *self.peek() != Token::Eq {
+            return Err(Self::invalid_check_option("true", self.peek_pos()));
+        }
+        self.bump();
+        let start = self.peek_pos();
+        let written = match self.bump() {
+            Token::Ident(word) => word,
+            // `local` is a keyword to this lexer (`SET LOCAL`), `cascaded` is
+            // not; a quoted value is how `pg_dump` writes reloptions back.
+            Token::Keyword(Keyword::Local) => "local".into(),
+            Token::StringLit(text) => text,
+            other => {
+                return Err(ParseError::new(
+                    format!("expected a check_option value, found {other:?}"),
+                    start,
+                ));
+            }
+        };
+        match written.to_ascii_lowercase().as_str() {
+            "local" => Ok(ViewCheckOption::Local),
+            "cascaded" => Ok(ViewCheckOption::Cascaded),
+            other => Err(Self::invalid_check_option(other, start)),
+        }
+    }
+
+    /// `PostgreSQL`'s refusal for a `check_option` value outside the enum.
+    ///
+    /// `PostgreSQL` prints a `DETAIL` line alongside it — `Valid values are
+    /// "local" and "cascaded".` — which [`ParseError`] has no field for, so
+    /// only the primary message is carried. Folding the detail into the message
+    /// would put it on the wrong line of the client's error report.
+    fn invalid_check_option(written: &str, position: usize) -> ParseError {
+        ParseError::new_sqlstate(
+            "22023",
+            format!("invalid value for enum option \"check_option\": {written}"),
+            position,
+        )
     }
 
     /// One reloption name, refusing anything a view does not have.
@@ -13997,37 +14091,82 @@ mod tests {
     fn create_view_records_its_reloptions() {
         use assert2::assert;
 
-        use crate::ast::ViewOptions;
+        use crate::ast::{ViewCheckOption, ViewOptions};
         let cases = [
             ("CREATE VIEW v AS SELECT 1", ViewOptions::default()),
             (
                 "CREATE VIEW v WITH (security_invoker) AS SELECT 1",
                 ViewOptions {
                     security_invoker: true,
-                    security_barrier: false,
+                    ..ViewOptions::default()
                 },
             ),
             (
                 "CREATE VIEW v WITH (security_barrier = TRUE) AS SELECT 1",
                 ViewOptions {
-                    security_invoker: false,
                     security_barrier: true,
+                    ..ViewOptions::default()
                 },
             ),
             (
                 "CREATE VIEW v WITH (security_invoker = on, security_barrier = off) AS SELECT 1",
                 ViewOptions {
                     security_invoker: true,
-                    security_barrier: false,
+                    ..ViewOptions::default()
                 },
             ),
             (
-                // `check_option` is accepted and dropped: nothing enforces a
-                // view's WITH CHECK OPTION yet.
                 "CREATE VIEW v WITH (check_option = cascaded, security_barrier = 1) AS SELECT 1",
                 ViewOptions {
-                    security_invoker: false,
                     security_barrier: true,
+                    check_option: Some(ViewCheckOption::Cascaded),
+                    ..ViewOptions::default()
+                },
+            ),
+            (
+                "CREATE VIEW v WITH (check_option = LOCAL) AS SELECT 1",
+                ViewOptions {
+                    check_option: Some(ViewCheckOption::Local),
+                    ..ViewOptions::default()
+                },
+            ),
+            (
+                // `pg_dump` writes reloption values quoted.
+                "CREATE VIEW v WITH (check_option = 'local') AS SELECT 1",
+                ViewOptions {
+                    check_option: Some(ViewCheckOption::Local),
+                    ..ViewOptions::default()
+                },
+            ),
+            // The trailing clause is the other spelling of the same setting,
+            // and a bare `WITH CHECK OPTION` is `CASCADED`.
+            (
+                "CREATE VIEW v AS SELECT 1 WITH CHECK OPTION",
+                ViewOptions {
+                    check_option: Some(ViewCheckOption::Cascaded),
+                    ..ViewOptions::default()
+                },
+            ),
+            (
+                "CREATE VIEW v AS SELECT 1 WITH CASCADED CHECK OPTION",
+                ViewOptions {
+                    check_option: Some(ViewCheckOption::Cascaded),
+                    ..ViewOptions::default()
+                },
+            ),
+            (
+                "CREATE VIEW v AS SELECT 1 WITH LOCAL CHECK OPTION",
+                ViewOptions {
+                    check_option: Some(ViewCheckOption::Local),
+                    ..ViewOptions::default()
+                },
+            ),
+            (
+                "CREATE VIEW v WITH (security_barrier) AS SELECT 1 WITH LOCAL CHECK OPTION",
+                ViewOptions {
+                    security_barrier: true,
+                    check_option: Some(ViewCheckOption::Local),
+                    ..ViewOptions::default()
                 },
             ),
         ];
@@ -14048,12 +14187,83 @@ mod tests {
         }
     }
 
+    /// The trailing `WITH … CHECK OPTION` is a property of the view, not text
+    /// of its query: `pg_get_viewdef` reprints it from the reloptions, so a
+    /// definition that also held the clause would emit it twice.
+    #[test]
+    fn create_view_definition_excludes_the_check_option_clause() {
+        use assert2::assert;
+
+        for sql in [
+            "CREATE VIEW v AS SELECT id FROM t WHERE id > 1 WITH CHECK OPTION",
+            "CREATE VIEW v AS SELECT id FROM t WHERE id > 1 WITH LOCAL CHECK OPTION",
+            "CREATE VIEW v AS SELECT id FROM t WHERE id > 1 WITH CASCADED CHECK OPTION",
+        ] {
+            let Statement::CreateView { definition, .. } = one(sql) else {
+                panic!("expected CREATE VIEW from {sql}");
+            };
+            assert!(definition == "SELECT id FROM t WHERE id > 1", "case: {sql}");
+        }
+        // A leading `WITH` opens a CTE and a trailing one closes the view; the
+        // definition keeps the first and drops the second.
+        let sql = "CREATE VIEW v AS WITH c AS (SELECT 1 AS id) SELECT id FROM c WITH CHECK OPTION";
+        let Statement::CreateView { definition, .. } = one(sql) else {
+            panic!("expected CREATE VIEW from {sql}");
+        };
+        assert!(definition == "WITH c AS (SELECT 1 AS id) SELECT id FROM c");
+    }
+
+    /// `check_option`'s refusals, matching `PostgreSQL` word for word. The
+    /// `DETAIL` line `PostgreSQL` prints beside the first two — `Valid values
+    /// are "local" and "cascaded".` — has nowhere to live on `ParseError`, so
+    /// only the primary message is asserted.
+    #[test]
+    fn check_option_refusals_match_postgresql() {
+        use assert2::assert;
+
+        for (sql, want) in [
+            (
+                "CREATE VIEW v WITH (check_option = bogus) AS SELECT 1",
+                "invalid value for enum option \"check_option\": bogus",
+            ),
+            (
+                "ALTER VIEW v SET (check_option = bogus)",
+                "invalid value for enum option \"check_option\": bogus",
+            ),
+            (
+                // A bare reloption name means `true`, and that is the value
+                // `PostgreSQL` reports back as the invalid one.
+                "CREATE VIEW v WITH (check_option) AS SELECT 1",
+                "invalid value for enum option \"check_option\": true",
+            ),
+            (
+                "ALTER VIEW v SET (check_option)",
+                "invalid value for enum option \"check_option\": true",
+            ),
+            (
+                "CREATE VIEW v WITH (check_option = local) AS SELECT 1 WITH CASCADED CHECK OPTION",
+                "parameter \"check_option\" specified more than once",
+            ),
+            (
+                "CREATE VIEW v WITH (check_option = cascaded) AS SELECT 1 WITH CHECK OPTION",
+                "parameter \"check_option\" specified more than once",
+            ),
+        ] {
+            let error = crate::parse(sql).expect_err("refused");
+            assert!(error.message == want, "case: {sql}");
+            assert!(error.sqlstate() == "22023", "case: {sql}");
+        }
+    }
+
     /// `ALTER VIEW`'s three subcommands, and the ones it declines to swallow.
     #[test]
     fn alter_view_subcommands() {
         use assert2::assert;
 
-        use crate::ast::{AlterViewAction as Action, ViewOptionName as Name};
+        use crate::ast::{
+            AlterViewAction as Action, ViewCheckOption, ViewOptionName as Name,
+            ViewOptionSetting as Setting,
+        };
         let cases = [
             (
                 "ALTER VIEW v OWNER TO bob",
@@ -14071,18 +14281,24 @@ mod tests {
                 "ALTER VIEW v SET (security_invoker = true)",
                 "v",
                 false,
-                Action::SetOptions(vec![(Name::SecurityInvoker, true)]),
+                Action::SetOptions(vec![Setting::SecurityInvoker(true)]),
             ),
             (
-                // A bare name is `true`, and `check_option`'s enum value is
-                // taken and dropped, exactly as on `CREATE VIEW`.
+                // A bare boolean name is `true`, and `check_option` names a
+                // level, exactly as on `CREATE VIEW`.
                 "ALTER VIEW v SET (security_barrier, check_option = cascaded)",
                 "v",
                 false,
                 Action::SetOptions(vec![
-                    (Name::SecurityBarrier, true),
-                    (Name::CheckOption, false),
+                    Setting::SecurityBarrier(true),
+                    Setting::CheckOption(ViewCheckOption::Cascaded),
                 ]),
+            ),
+            (
+                "ALTER VIEW v SET (check_option = LOCAL)",
+                "v",
+                false,
+                Action::SetOptions(vec![Setting::CheckOption(ViewCheckOption::Local)]),
             ),
             (
                 "ALTER VIEW v RESET (security_invoker, security_barrier)",

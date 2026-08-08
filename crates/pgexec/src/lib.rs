@@ -122,6 +122,7 @@ mod usertype;
 mod values;
 mod viewdef;
 mod viewdeps;
+mod viewwrite;
 pub mod watchdog;
 mod window;
 mod xml_fn;

@@ -100,9 +100,11 @@ pub enum ExecError {
         column: String,
         table: String,
     },
-    /// A relation being defined would have two columns of the same name
-    /// (42701), for example `CREATE TABLE … AS SELECT id, id FROM t`. Unlike
-    /// [`ExecError::DuplicateColumn`] there is no relation to name yet.
+    /// A column list names the same column twice (42701) — a relation being
+    /// defined with two columns of one name (`CREATE TABLE … AS SELECT id, id
+    /// FROM t`), or an `INSERT` naming a target twice. Unlike
+    /// [`ExecError::DuplicateColumn`] there is no relation to name: the first
+    /// has none yet, and `PostgreSQL` leaves it out of the second.
     DuplicateOutputColumn(String),
     /// A named object already exists (42710).
     DuplicateObject(String),
@@ -289,6 +291,47 @@ pub enum ExecError {
     SequenceLimit(String),
     /// Object state does not satisfy a command precondition (55000).
     ObjectNotInPrerequisiteState(String),
+    /// A write named a view whose body is not simple enough to rewrite onto the
+    /// relation underneath it (55000).
+    ///
+    /// The `DETAIL` names the clause that disqualified the view and the `HINT`
+    /// names what would make the write work; both are `PostgreSQL`'s wording,
+    /// and the `DETAIL` is the only thing that tells a user *which* clause is
+    /// the problem, so it is carried rather than folded into the message.
+    ViewNotUpdatable {
+        /// `cannot insert into view "v"`, and its update/delete spellings.
+        message: String,
+        detail: &'static str,
+        hint: &'static str,
+    },
+    /// A write assigned to a view column that is not a column of the relation
+    /// underneath — a computed, system, or whole-row column (0A000).
+    ///
+    /// Distinct from [`Self::ViewNotUpdatable`] because the view *is* updatable:
+    /// SQL:1999 feature T111 admits a mix, and only the assignment is refused.
+    ViewColumnNotUpdatable {
+        /// `cannot insert into column "c" of view "v"`, and its update spelling.
+        message: String,
+        detail: &'static str,
+    },
+    /// `WITH CHECK OPTION` was written on a view that no write could ever be
+    /// rewritten through, so the option could never fire (0A000).
+    ///
+    /// Refused where the view is defined rather than where a write reaches it,
+    /// which is what stops a user from believing a check is in force. The
+    /// payload is the clause that disqualified the body, which `PostgreSQL`
+    /// reports as the `HINT`.
+    CheckOptionUnsupported(&'static str),
+    /// A row written through a view failed that view's `WITH CHECK OPTION`
+    /// (44000).
+    ViewCheckOptionViolation {
+        /// The view whose option rejected the row, which for a chain of views
+        /// is the innermost one that rejected it rather than the one written.
+        view: String,
+        /// The rendered row, already parenthesized — see
+        /// `crate::viewwrite::failing_row`.
+        row: String,
+    },
     /// `row_security = off` and the named relation has a row-security policy
     /// that would have applied (42501). `PostgreSQL` fails the statement rather
     /// than quietly returning a filtered result the caller did not ask for.
@@ -1038,6 +1081,26 @@ impl ExecError {
             ExecError::StackDepthExceeded => PgError::error("54001", "stack depth limit exceeded"),
             ExecError::SequenceLimit(m) => PgError::error("2200H", m),
             ExecError::ObjectNotInPrerequisiteState(m) => PgError::error("55000", m),
+            ExecError::ViewNotUpdatable {
+                message,
+                detail,
+                hint,
+            } => PgError::error("55000", message)
+                .with_detail(detail)
+                .with_hint(hint),
+            ExecError::ViewColumnNotUpdatable { message, detail } => {
+                PgError::error("0A000", message).with_detail(detail)
+            }
+            ExecError::CheckOptionUnsupported(hint) => PgError::error(
+                "0A000",
+                "WITH CHECK OPTION is supported only on automatically updatable views",
+            )
+            .with_hint(hint),
+            ExecError::ViewCheckOptionViolation { view, row } => PgError::error(
+                "44000",
+                format!("new row violates check option for view \"{view}\""),
+            )
+            .with_detail(format!("Failing row contains {row}.")),
             ExecError::PermissionDenied { kind, relation } => {
                 PgError::error("42501", format!("permission denied for {kind} {relation}"))
             }
