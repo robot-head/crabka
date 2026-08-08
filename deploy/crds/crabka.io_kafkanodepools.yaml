@@ -19,9 +19,11 @@ spec:
         properties:
           spec:
             description: |-
-              A pool of nodes (pods) that share role + image + resources.
-              One `StatefulSet` per pool; pods are addressed via the shared
-              headless `Service` owned by the parent `Kafka`.
+              A pool of nodes, which are pods, that share the role, the image, and
+              the resources.
+
+              There is one `StatefulSet` for each pool. Clients address the pods
+              through the shared headless `Service` that the parent `Kafka` owns.
             properties:
               clientDispatchQueueCapacity:
                 description: Kafka client request-dispatch queue capacity.
@@ -34,7 +36,9 @@ spec:
                 nullable: true
                 type: string
               image:
-                description: Container image. Falls back to operator `--default-broker-image`.
+                description: |-
+                  Container image. The operator uses `--default-broker-image` when
+                  this field is absent.
                 nullable: true
                 type: string
               nodeIdStart:
@@ -45,7 +49,7 @@ spec:
                 type: integer
               replicas:
                 default: 1
-                description: 'Number of pods. Validation: must equal 1.'
+                description: 'Number of pods. Validation: it must equal 1.'
                 format: int32
                 maximum: 1.0
                 minimum: 1.0
@@ -89,8 +93,8 @@ spec:
                 type: object
               roles:
                 description: |-
-                  Roles each node in this pool fulfills. Only
-                  the union `{Controller, Broker}` is supported.
+                  Roles that each node in this pool has. Only the union
+                  `{Controller, Broker}` is supported.
                 items:
                   enum:
                   - Controller
@@ -99,8 +103,8 @@ spec:
                 type: array
               storage:
                 description: |-
-                  Storage configuration. `None` (field absent) → emptyDir (the
-                  default). See [`Storage`].
+                  Storage configuration. `None`, which means that the field is
+                  absent, gives an emptyDir. That is the default. See [`Storage`].
                 nullable: true
                 properties:
                   class:
@@ -134,11 +138,11 @@ spec:
                 - type
                 type: object
               template:
-                description: Optional pod-level customization applied to every pod in this pool.
+                description: Optional pod-level customization for every pod in this pool.
                 nullable: true
                 properties:
                   affinity:
-                    description: Forwarded to `PodSpec.affinity`.
+                    description: The operator copies this to `PodSpec.affinity`.
                     nullable: true
                     properties:
                       nodeAffinity:
@@ -640,7 +644,7 @@ spec:
                         type: object
                     type: object
                   metadata:
-                    description: Extra labels / annotations on the pod template.
+                    description: Extra labels and annotations on the pod template.
                     nullable: true
                     properties:
                       annotations:
@@ -655,11 +659,11 @@ spec:
                   nodeSelector:
                     additionalProperties:
                       type: string
-                    description: Forwarded to `PodSpec.nodeSelector`.
+                    description: The operator copies this to `PodSpec.nodeSelector`.
                     nullable: true
                     type: object
                   tolerations:
-                    description: Forwarded to `PodSpec.tolerations`.
+                    description: The operator copies this to `PodSpec.tolerations`.
                     items:
                       description: The pod this Toleration is attached to tolerates any taint that matches the triple <key,value,effect> using the matching operator <operator>.
                       properties:
@@ -707,7 +711,7 @@ spec:
                       description: '`True`, `False`, or `Unknown`.'
                       type: string
                     type:
-                      description: e.g. `Ready`.
+                      description: For example, `Ready`.
                       type: string
                   required:
                   - lastTransitionTime
@@ -718,12 +722,12 @@ spec:
                   type: object
                 type: array
               readyReplicas:
-                description: Mirrors `StatefulSet.status.readyReplicas`.
+                description: The same value as `StatefulSet.status.readyReplicas`.
                 format: int32
                 nullable: true
                 type: integer
               replicas:
-                description: Mirrors `StatefulSet.status.replicas`.
+                description: The same value as `StatefulSet.status.replicas`.
                 format: int32
                 nullable: true
                 type: integer
