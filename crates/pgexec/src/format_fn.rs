@@ -303,8 +303,10 @@ pub(crate) fn eval_format(
                 Some(z) => zone_arg(z, &fc.name)?,
                 None => ctx.time_zone.clone(),
             };
-            dt.to_zoned(zone)
-                .map(|z| Datum::Timestamptz(z.timestamp()))
+            // A reading on a daylight-saving boundary resolves by PostgreSQL's
+            // rule, not jiff's default; see `datetime::zone_offset_for`.
+            datetime::zoned_instant(dt, &zone)
+                .map(Datum::Timestamptz)
                 .map_err(|_| {
                     ExecError::Type(TypeError::DatetimeFieldOverflow {
                         value: format!("{y}-{mo}-{d} {h}:{mi}:{sec}"),
@@ -519,8 +521,8 @@ fn to_timestamp_epoch(value: &Datum, name: &str) -> Result<Datum, ExecError> {
 fn to_timestamp_template(template: &str, input: &str, ctx: &EvalCtx) -> Result<Datum, ExecError> {
     let p = datetime::parse_by_template(template, input).map_err(map_type)?;
     let dt = civil_from_parsed(&p)?;
-    dt.to_zoned(ctx.time_zone.clone())
-        .map(|z| Datum::Timestamptz(z.timestamp()))
+    datetime::zoned_instant(dt, &ctx.time_zone)
+        .map(Datum::Timestamptz)
         .map_err(|_| {
             ExecError::Type(TypeError::DatetimeFieldOverflow {
                 value: input.to_string(),

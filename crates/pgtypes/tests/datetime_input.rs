@@ -8,8 +8,8 @@ use crabka_pgtypes::{
     TypeError,
     datetime::{
         DateOrder, date_to_text, interval_to_text, parse_date, parse_date_in, parse_interval,
-        parse_time, parse_timestamp, parse_timestamptz, time_to_text, timestamp_to_text,
-        timestamptz_to_text,
+        parse_time, parse_timestamp, parse_timestamptz, parse_timetz, time_to_text,
+        timestamp_to_text, timestamptz_to_text, timetz_to_text,
     },
 };
 use jiff::tz::TimeZone;
@@ -474,4 +474,229 @@ fn timestamptz_range_is_checked_on_the_instant_not_the_local_reading() {
         format!("{before}") == r#"timestamp out of range: "4714-11-23 15:59:59-08 BC""#,
         "got {before}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// `DecodeTimeOnly`: the second decoder, behind `time` and `timetz`.
+//
+// PostgreSQL does not read a time-only literal with the decoder it reads a
+// timestamp with. The difference shows on every run-together number, which is a
+// date to one decoder and a clock reading to the other.
+// ---------------------------------------------------------------------------
+
+fn time_outcome(input: &str) -> String {
+    outcome(parse_time(input), time_to_text)
+}
+
+fn timetz_outcome(input: &str) -> String {
+    outcome(parse_timetz(input, &utc()), timetz_to_text)
+}
+
+#[test]
+fn a_run_together_number_is_a_clock_reading_for_a_time_literal() {
+    check(
+        &[
+            ("040506", "OK|04:05:06"),
+            ("0405", "OK|04:05:00"),
+            ("T040506", "OK|04:05:06"),
+            ("T0405", "OK|04:05:00"),
+            ("040506.07", "OK|04:05:06.07"),
+            ("T040506.07", "OK|04:05:06.07"),
+            // A trailing zone is read and then discarded by this type, but a
+            // negative one arrives glued to the reading because `-` also
+            // delimits a date.
+            ("040506.789+08", "OK|04:05:06.789"),
+            ("040506.789-08", "OK|04:05:06.789"),
+            ("T040506.789 -08", "OK|04:05:06.789"),
+            ("15:36:39 UTC", "OK|15:36:39"),
+        ],
+        time_outcome,
+    );
+}
+
+#[test]
+fn a_run_together_number_keeps_its_zone_for_a_timetz_literal() {
+    check(
+        &[
+            ("040506+08", "OK|04:05:06+08"),
+            ("0405+08", "OK|04:05:00+08"),
+            ("T040506.07+08", "OK|04:05:06.07+08"),
+            ("040506.789-08", "OK|04:05:06.789-08"),
+            ("T040506.789 -08", "OK|04:05:06.789-08"),
+            ("15:36:39 UTC", "OK|15:36:39+00"),
+        ],
+        timetz_outcome,
+    );
+}
+
+#[test]
+fn a_time_literal_needs_a_whole_clock_reading_and_a_resolvable_zone() {
+    check(
+        &[
+            // A date with no time behind it has nothing to yield.
+            (
+                "2003-03-07",
+                r#"ERR|22007|invalid input syntax for type time: "2003-03-07""#,
+            ),
+            // A zone whose offset moves needs a date to resolve against.
+            (
+                "15:36:39 America/New_York",
+                r#"ERR|22007|invalid input syntax for type time: "15:36:39 America/New_York""#,
+            ),
+            // A bare zone supplies no clock reading at all.
+            (
+                "zulu",
+                r#"ERR|22007|invalid input syntax for type time: "zulu""#,
+            ),
+            // The date spellings have no clock reading to contribute either.
+            (
+                "today",
+                r#"ERR|22007|invalid input syntax for type time: "today""#,
+            ),
+            // With a date in front, the same named zone resolves.
+            ("2003-03-07 15:36:39 America/New_York", "OK|15:36:39"),
+        ],
+        time_outcome,
+    );
+}
+
+#[test]
+fn a_unit_keyword_stops_a_zone_name_a_bare_letter_run_does_not() {
+    // `m` is a keyword of PostgreSQL's own, so the digits after it start a new
+    // field and the literal has two fields that mean nothing; `x` is not, so the
+    // same shape is one field and a legal POSIX zone eight hours west.
+    check(
+        &[
+            (
+                "15:36:39 m2",
+                r#"ERR|22007|invalid input syntax for type time with time zone: "15:36:39 m2""#,
+            ),
+            (
+                "15:36:39 MSK m2",
+                r#"ERR|22007|invalid input syntax for type time with time zone: "15:36:39 MSK m2""#,
+            ),
+            ("15:36:39 X8", "OK|15:36:39-08"),
+            ("15:36:39 GMT+8", "OK|15:36:39-08"),
+        ],
+        timetz_outcome,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Reserved spellings.
+//
+// PostgreSQL splits these in two. `epoch`, `infinity` and `-infinity` name a
+// whole value and may share the literal with nothing else; `now`, `today`,
+// `tomorrow` and `yesterday` fill fields from the clock and compose with the
+// rest of the text.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn clock_relative_spellings_compose_with_a_time_from_the_text() {
+    let today = jiff::Zoned::now().with_time_zone(utc()).date();
+    let cases: &[(&str, jiff::Span, &str)] = &[
+        ("today 10:30", jiff::Span::new(), "10:30:00"),
+        ("10:30 today", jiff::Span::new(), "10:30:00"),
+        ("tomorrow 16:00:00", jiff::Span::new().days(1), "16:00:00"),
+        ("yesterday 12:34:56", jiff::Span::new().days(-1), "12:34:56"),
+        ("tomorrow", jiff::Span::new().days(1), "00:00:00"),
+    ];
+    for (input, shift, clock) in cases {
+        let day = today.checked_add(*shift).expect("in range");
+        let expected = format!("OK|{day} {clock}");
+        assert!(timestamp_outcome(input) == expected, "input {input}");
+    }
+}
+
+#[test]
+fn a_whole_value_spelling_may_not_share_the_literal() {
+    check(
+        &[
+            (
+                "1995-08-06 epoch",
+                r#"ERR|22007|invalid input syntax for type timestamp: "1995-08-06 epoch""#,
+            ),
+            (
+                "epoch 01:01:01",
+                r#"ERR|22007|invalid input syntax for type timestamp: "epoch 01:01:01""#,
+            ),
+            (
+                "1995-08-06 infinity",
+                r#"ERR|22007|invalid input syntax for type timestamp: "1995-08-06 infinity""#,
+            ),
+            (
+                "infinity 01:01:01",
+                r#"ERR|22007|invalid input syntax for type timestamp: "infinity 01:01:01""#,
+            ),
+            (
+                "-infinity 01:01:01",
+                r#"ERR|22007|invalid input syntax for type timestamp: "-infinity 01:01:01""#,
+            ),
+            (
+                "-infinity infinity",
+                r#"ERR|22007|invalid input syntax for type timestamp: "-infinity infinity""#,
+            ),
+            (
+                "now epoch",
+                r#"ERR|22007|invalid input syntax for type timestamp: "now epoch""#,
+            ),
+            (
+                "today infinity",
+                r#"ERR|22007|invalid input syntax for type timestamp: "today infinity""#,
+            ),
+            // A second Julian label has nothing left to label.
+            (
+                "J J 1520447",
+                r#"ERR|22007|invalid input syntax for type timestamp: "J J 1520447""#,
+            ),
+        ],
+        timestamp_outcome,
+    );
+}
+
+#[test]
+fn a_negative_run_together_zone_is_split_off_the_clock_reading() {
+    // `+` is not a date delimiter, so `040506+08` reaches the decoder already
+    // split; `-` is, so `040506-08` arrives as one field and has to be taken
+    // apart. Both spellings must land on the same instant.
+    let cases: &[(&str, &str)] = &[
+        ("20011227 040506+08", "2001-12-26 20:05:06+00"),
+        ("20011227 040506-08", "2001-12-27 12:05:06+00"),
+        ("20011227T040506-08", "2001-12-27 12:05:06+00"),
+        ("J2452271T040506-08", "2001-12-27 12:05:06+00"),
+        ("20011227 040506.789-08", "2001-12-27 12:05:06.789+00"),
+    ];
+    for (input, expected) in cases {
+        let parsed = parse_timestamptz(input, &utc()).unwrap_or_else(|e| panic!("{input}: {e}"));
+        assert!(
+            timestamptz_to_text(parsed, &utc()) == *expected,
+            "input {input}"
+        );
+    }
+}
+
+#[test]
+fn a_boundary_reading_resolves_to_the_later_instant() {
+    // Moscow left UTC+4 for UTC+3 at 02:00 on 2014-10-26, so 01:00 that day
+    // happened twice. PostgreSQL reads it at the offset in force AFTER the
+    // transition, which is the later of the two instants; reading it at the
+    // earlier one is an hour out.
+    let moscow = crabka_pgtypes::datetime::zone_by_name("Europe/Moscow").expect("zone");
+    let cases: &[(&str, &str)] = &[
+        ("2014-10-26 01:00:00", "2014-10-25 22:00:00+00"),
+        ("2014-10-26 01:00:01", "2014-10-25 22:00:01+00"),
+        // Outside the fold the reading is unambiguous either way.
+        ("2014-10-26 03:00:00", "2014-10-26 00:00:00+00"),
+        ("2014-10-25 23:00:00", "2014-10-25 19:00:00+00"),
+        // A spring-forward gap resolves to the later instant too, which is the
+        // pre-transition offset.
+        ("2011-03-27 02:00:00", "2011-03-26 23:00:00+00"),
+    ];
+    for (input, expected) in cases {
+        let parsed = parse_timestamptz(input, &moscow).unwrap_or_else(|e| panic!("{input}: {e}"));
+        assert!(
+            timestamptz_to_text(parsed, &utc()) == *expected,
+            "input {input}"
+        );
+    }
 }

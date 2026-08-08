@@ -11,7 +11,7 @@
 use jiff::{
     Span, Timestamp, ToSpan,
     civil::{Date, DateTime, Time},
-    tz::{Offset, TimeZone},
+    tz::{AmbiguousOffset, Offset, TimeZone},
 };
 
 use crate::TypeError;
@@ -21,8 +21,8 @@ mod tzdb;
 
 pub use self::{
     parse::{
-        DateOrder, DecodeError, Decoded, Parts, Special, Zone, decode, decode_numeric_time_zone,
-        resolve_guc_time_zone, resolve_time_zone,
+        DateOrder, DecodeError, DecodeMode, Decoded, Parts, Special, Zone, decode,
+        decode_numeric_time_zone, resolve_guc_time_zone, resolve_time_zone,
     },
     tzdb::zone_by_name,
 };
@@ -666,40 +666,60 @@ fn clock_now() -> Timestamp {
     Timestamp::now()
 }
 
-/// Resolve a reserved date spelling against the session zone.
-fn special_to_date(special: Special, tz: &TimeZone) -> Result<Date, TypeError> {
-    let today = || tz.to_datetime(clock_now()).date();
-    Ok(match special {
+/// The UTC offset a zone gives a civil reading, resolved the way `PostgreSQL`'s
+/// `DetermineTimeZoneOffset` resolves it.
+///
+/// A reading on a daylight-saving boundary has two candidate offsets, or none at
+/// all. `PostgreSQL` forms both interpretations and takes whichever lands on the
+/// *later* instant — its `beforetime > aftertime` test picks the offset in force
+/// before the transition, and otherwise the one after. Both branches come to the
+/// same thing: the *smaller* of the two offsets, since a smaller offset means a
+/// later instant for the same wall clock. So a spring-forward gap reads at the
+/// pre-transition offset and a fall-back fold reads at the post-transition one,
+/// which is the rule `Europe/Moscow` in October 2014 was added to the suite to
+/// pin down.
+///
+/// jiff's own strategies do not include this pairing — `Compatible` takes the
+/// earlier instant in a fold — so the choice is made here rather than by picking
+/// a [`jiff::tz::Disambiguation`].
+#[must_use]
+pub fn zone_offset_for(dt: DateTime, tz: &TimeZone) -> Offset {
+    match tz.to_ambiguous_timestamp(dt).offset() {
+        AmbiguousOffset::Unambiguous { offset } => offset,
+        AmbiguousOffset::Gap { before, after } | AmbiguousOffset::Fold { before, after } => {
+            before.min(after)
+        }
+    }
+}
+
+/// The instant a civil reading names in `tz`, under [`zone_offset_for`]'s rule.
+///
+/// # Errors
+///
+/// [`jiff::Error`] when the instant falls outside the representable range.
+pub fn zoned_instant(dt: DateTime, tz: &TimeZone) -> Result<Timestamp, jiff::Error> {
+    zone_offset_for(dt, tz).to_timestamp(dt)
+}
+
+/// Resolve a whole-value reserved date spelling.
+///
+/// The clock-relative spellings never reach here: they fill calendar fields
+/// inside the decoder and arrive as ordinary [`Parts`].
+fn special_to_date(special: Special) -> Date {
+    match special {
         Special::Infinity => DATE_INFINITY,
         Special::NegInfinity => DATE_NEG_INFINITY,
         Special::Epoch => Date::constant(1970, 1, 1),
-        Special::Now | Special::Today => today(),
-        Special::Tomorrow => today()
-            .tomorrow()
-            .map_err(|_| TypeError::DatetimeFieldOverflow {
-                value: "tomorrow".to_string(),
-            })?,
-        Special::Yesterday => {
-            today()
-                .yesterday()
-                .map_err(|_| TypeError::DatetimeFieldOverflow {
-                    value: "yesterday".to_string(),
-                })?
-        }
-    })
+    }
 }
 
-/// Resolve a reserved timestamp spelling against the session zone.
-fn special_to_datetime(special: Special, tz: &TimeZone) -> Result<DateTime, TypeError> {
-    Ok(match special {
+/// Resolve a whole-value reserved timestamp spelling.
+fn special_to_datetime(special: Special) -> DateTime {
+    match special {
         Special::Infinity => TIMESTAMP_INFINITY,
         Special::NegInfinity => TIMESTAMP_NEG_INFINITY,
         Special::Epoch => DateTime::constant(1970, 1, 1, 0, 0, 0, 0),
-        Special::Now => tz.to_datetime(clock_now()),
-        Special::Today | Special::Tomorrow | Special::Yesterday => {
-            special_to_date(special, tz)?.to_datetime(Time::midnight())
-        }
-    })
+    }
 }
 
 /// Parse a `date` literal in every spelling `PostgreSQL` accepts, reading an
@@ -710,8 +730,10 @@ pub fn parse_date(s: &str) -> Result<Date, TypeError> {
 
 /// [`parse_date`] with the session's `DateStyle` field order and zone.
 pub fn parse_date_in(s: &str, order: DateOrder, tz: &TimeZone) -> Result<Date, TypeError> {
-    match decode(s.trim(), order).map_err(|e| decode_error(e, "date", s))? {
-        Decoded::Special(special) => special_to_date(special, tz),
+    match decode(s.trim(), order, DecodeMode::DateTime, tz)
+        .map_err(|e| decode_error(e, "date", s))?
+    {
+        Decoded::Special(special) => Ok(special_to_date(special)),
         Decoded::Parts(parts) => {
             let date = parts.date.ok_or_else(|| TypeError::InvalidDatetimeFormat {
                 type_name: "date",
@@ -1006,23 +1028,18 @@ pub fn parse_time_in(s: &str, order: DateOrder, tz: &TimeZone) -> Result<Time, T
     // `time_in` names the type `time` in its errors, not the canonical
     // `time without time zone` that `pg_typeof` and `format_type` report.
     let type_name = "time";
-    let micros = match decode(s.trim(), order).map_err(|e| decode_error(e, type_name, s))? {
-        Decoded::Special(special) => match special {
-            // `allballs` decodes as a plain clock reading, so the only reserved
-            // spellings that reach here are the ones a bare clock cannot express.
-            Special::Now => tz
-                .to_datetime(clock_now())
-                .time()
-                .duration_since(Time::midnight())
-                .as_micros() as i64,
-            Special::Epoch | Special::Today | Special::Tomorrow | Special::Yesterday => 0,
-            Special::Infinity | Special::NegInfinity => {
-                return Err(TypeError::InvalidDatetimeFormat {
-                    type_name,
-                    value: s.to_string(),
-                });
-            }
-        },
+    let micros = match decode(s.trim(), order, DecodeMode::TimeOnly, tz)
+        .map_err(|e| decode_error(e, type_name, s))?
+    {
+        // `DecodeTimeOnly` takes `now` (which fills the clock and arrives as
+        // parts) and nothing else reserved, so every whole-value spelling that
+        // reaches here is malformed for this type.
+        Decoded::Special(_) => {
+            return Err(TypeError::InvalidDatetimeFormat {
+                type_name,
+                value: s.to_string(),
+            });
+        }
         Decoded::Parts(parts) => parts.micros_of_day,
     };
     // `24:00:00` is a legal `time` in PostgreSQL but has no jiff representation;
@@ -1111,14 +1128,9 @@ pub fn parse_timetz_in(s: &str, order: DateOrder, tz: &TimeZone) -> Result<TimeT
         type_name,
         value: s.to_string(),
     };
-    let parts = match decode(s.trim(), order).map_err(|e| decode_error(e, type_name, s))? {
-        Decoded::Special(Special::Now) => {
-            let zoned = clock_now().to_zoned(tz.clone());
-            return Ok(TimeTz {
-                time: zoned.datetime().time(),
-                offset: zoned.offset(),
-            });
-        }
+    let parts = match decode(s.trim(), order, DecodeMode::TimeOnly, tz)
+        .map_err(|e| decode_error(e, type_name, s))?
+    {
         Decoded::Special(_) => return Err(syntax()),
         Decoded::Parts(parts) => parts,
     };
@@ -1128,29 +1140,20 @@ pub fn parse_timetz_in(s: &str, order: DateOrder, tz: &TimeZone) -> Result<TimeT
         });
     }
     let time = time_from_micros_of_day(parts.micros_of_day);
-    // A named zone's offset depends on the date, so a `timetz` may only use one
-    // when the literal also carried a date.
     let offset = match parts.zone {
         Some(Zone::Offset(offset)) => offset,
-        Some(Zone::Named(zone)) => {
-            let date = parts.date.ok_or_else(syntax)?;
-            zone.to_offset(
-                date.to_datetime(time)
-                    .to_zoned(zone.clone())
-                    .map_err(|_| syntax())?
-                    .timestamp(),
-            )
-        }
+        // A zone whose offset moves needs a date to be resolved against; the
+        // decoder has already refused one that has neither a date nor a single
+        // offset for all time, so a dateless zone here resolves without one.
+        Some(Zone::Named(zone)) => match parts.date {
+            Some(date) => zone_offset_for(date.to_datetime(time), &zone),
+            None => zone.to_fixed_offset().map_err(|_| syntax())?,
+        },
         None => {
             let date = parts
                 .date
                 .unwrap_or_else(|| tz.to_datetime(clock_now()).date());
-            tz.to_offset(
-                date.to_datetime(time)
-                    .to_zoned(tz.clone())
-                    .map_err(|_| syntax())?
-                    .timestamp(),
-            )
+            zone_offset_for(date.to_datetime(time), tz)
         }
     };
     Ok(TimeTz { time, offset })
@@ -1323,8 +1326,10 @@ pub fn parse_timestamp(s: &str) -> Result<DateTime, TypeError> {
 pub fn parse_timestamp_in(s: &str, order: DateOrder, tz: &TimeZone) -> Result<DateTime, TypeError> {
     // `timestamp_in` names the type `timestamp`, as `time_in` names `time`.
     let type_name = "timestamp";
-    match decode(s.trim(), order).map_err(|e| decode_error(e, type_name, s))? {
-        Decoded::Special(special) => special_to_datetime(special, tz),
+    match decode(s.trim(), order, DecodeMode::DateTime, tz)
+        .map_err(|e| decode_error(e, type_name, s))?
+    {
+        Decoded::Special(special) => Ok(special_to_datetime(special)),
         Decoded::Parts(parts) => {
             let date = parts.date.ok_or_else(|| TypeError::InvalidDatetimeFormat {
                 type_name,
@@ -1453,12 +1458,13 @@ pub fn parse_timestamptz_in(
     let overflow = || TypeError::DatetimeFieldOverflow {
         value: s.to_string(),
     };
-    match decode(s.trim(), order).map_err(|e| decode_error(e, type_name, s))? {
+    match decode(s.trim(), order, DecodeMode::DateTime, tz)
+        .map_err(|e| decode_error(e, type_name, s))?
+    {
         Decoded::Special(special) => match special {
             Special::Infinity => Ok(timestamptz_infinity()),
             Special::NegInfinity => Ok(timestamptz_neg_infinity()),
-            Special::Now => Ok(clock_now()),
-            other => special_to_datetime(other, tz)?
+            Special::Epoch => special_to_datetime(special)
                 .to_zoned(tz.clone())
                 .map(|z| z.timestamp())
                 .map_err(|_| overflow()),
@@ -1471,14 +1477,8 @@ pub fn parse_timestamptz_in(
             let dt = combine_parts(date, parts.micros_of_day, s)?;
             let instant = match parts.zone {
                 Some(Zone::Offset(off)) => off.to_timestamp(dt).map_err(|_| overflow())?,
-                Some(Zone::Named(zone)) => zone
-                    .to_zoned(dt)
-                    .map(|z| z.timestamp())
-                    .map_err(|_| overflow())?,
-                None => dt
-                    .to_zoned(tz.clone())
-                    .map(|z| z.timestamp())
-                    .map_err(|_| overflow())?,
+                Some(Zone::Named(zone)) => zoned_instant(dt, &zone).map_err(|_| overflow())?,
+                None => zoned_instant(dt, tz).map_err(|_| overflow())?,
             };
             // The range check belongs on the INSTANT, not on the local reading:
             // `4714-11-23 16:00:00-08 BC` is a legal `timestamptz` precisely

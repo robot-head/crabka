@@ -13,7 +13,7 @@
 //! date, a `date` keeps only the date).
 
 use jiff::{
-    Span,
+    Span, Timestamp, Zoned,
     civil::Date,
     tz::{Offset, TimeZone},
 };
@@ -63,22 +63,41 @@ impl DateOrder {
     }
 }
 
-/// A reserved spelling that stands for something other than a fixed instant.
+/// Which of `PostgreSQL`'s two decoders is reading the literal.
+///
+/// `PostgreSQL` does not have one date/time decoder, it has two: `DecodeDateTime`
+/// behind `date`, `timestamp` and `timestamptz`, and `DecodeTimeOnly` behind
+/// `time` and `timetz`. They split the same fields differently, because a
+/// run-together number means opposite things to them — `040506` is a date to one
+/// and a clock reading to the other. `DecodeTimeOnly` gets that by passing
+/// `fmask | DTK_DATE_M` into every numeric decode, so the number decoders behave
+/// as though a date were already in hand and route the field to the clock. This
+/// enum carries the same decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DecodeMode {
+    /// `DecodeDateTime`: a bare run-together number is a date.
+    #[default]
+    DateTime,
+    /// `DecodeTimeOnly`: a bare run-together number is a clock reading.
+    TimeOnly,
+}
+
+/// A reserved spelling that stands for a whole value rather than for fields.
+///
+/// `PostgreSQL`'s `RESERV` keywords fall into two groups, and only this group
+/// replaces the entire value: its `DecodeDateTime` sets `*dtype` to the token
+/// itself and the caller never looks at the field struct. The other group —
+/// `now`, `today`, `tomorrow`, `yesterday` — *fills fields* and composes with the
+/// rest of the literal, so it is decoded into [`Parts`] instead of appearing
+/// here. That split is what makes `'today 10:30'` a valid timestamp while
+/// `'1995-08-06 epoch'` is a syntax error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Special {
     /// `infinity` / `+infinity`.
     Infinity,
     /// `-infinity`.
     NegInfinity,
-    /// `now`: the current transaction timestamp.
-    Now,
-    /// `today`: midnight of the current date.
-    Today,
-    /// `tomorrow`: midnight of the following date.
-    Tomorrow,
-    /// `yesterday`: midnight of the preceding date.
-    Yesterday,
-    /// `epoch`: 1970-01-01 00:00:00 UTC.
+    /// `epoch` — 1970-01-01 00:00:00 UTC.
     Epoch,
 }
 
@@ -318,14 +337,47 @@ fn split_signed_field(chars: &[char], i: &mut usize) -> Result<Field, DecodeErro
 }
 
 /// Whether a letter run is a keyword in its own right, so a digit right after it
-/// starts a new field and does not continue a zone name.
+/// starts a new field rather than continuing a zone name.
+///
+/// This is `PostgreSQL`'s `datebsearch(field, datetktbl)` test, and the set has to
+/// match that table rather than merely the spellings the decoder goes on to use.
+/// A word the table knows stops the field there and leaves the digits to be read
+/// separately, so `m2` is the unit `m` followed by `2` — two fields neither of
+/// which means anything in a literal — while `X8` is one field and a legal `POSIX`
+/// zone. That is the whole reason `'15:36:39 m2'` is malformed and `'15:36:39 X8'`
+/// is a zone eight hours west.
 fn is_non_zone_keyword(word: &str) -> bool {
+    // The single- and double-letter unit tokens, which are the ones a digit can
+    // realistically follow. The rest of the table is reached through the month,
+    // weekday and reserved-word lookups below.
     matches!(
         word,
-        "t" | "j" | "jd" | "on" | "at" | "of" | "am" | "pm" | "bc" | "ad"
+        "t" | "j"
+            | "jd"
+            | "julian"
+            | "on"
+            | "at"
+            | "of"
+            | "am"
+            | "pm"
+            | "bc"
+            | "ad"
+            | "d"
+            | "h"
+            | "m"
+            | "s"
+            | "y"
+            | "mm"
+            | "dow"
+            | "doy"
+            | "dst"
+            | "isodow"
+            | "isoyear"
+            | "allballs"
     ) || month_number(word).is_some()
         || is_weekday(word)
         || special_word(word).is_some()
+        || relative_word(word).is_some()
 }
 
 // ---------------------------------------------------------------------------
@@ -356,16 +408,63 @@ impl Tm {
     fn has_full_time(&self) -> bool {
         self.hour.is_some() && self.minute.is_some() && self.second.is_some()
     }
+
+    /// Whether any calendar slot has been filled — `PostgreSQL`'s `fmask &
+    /// DTK_DATE_M` read as a yes/no.
+    fn any_date(&self) -> bool {
+        self.year.is_some() || self.month.is_some() || self.day.is_some() || self.yday.is_some()
+    }
+
+    /// Whether any clock slot has been filled — `fmask & DTK_TIME_M`.
+    fn any_time(&self) -> bool {
+        self.hour.is_some() || self.minute.is_some() || self.second.is_some()
+    }
+}
+
+/// The slots a reserved spelling laid claim to.
+///
+/// `PostgreSQL` gives each `RESERV` keyword a `tmask` and refuses the literal
+/// when it overlaps the `fmask` built so far, in either direction: the keyword
+/// may not arrive after a field it would overwrite, and a field may not arrive
+/// after a keyword that already covered it. Both `'1995-08-06 epoch'` and `'epoch
+/// 01:01:01'` are rejected by that one rule.
+///
+/// Only the reserved spellings are tracked, because they are the only tokens
+/// whose claim is wider than the slot they fill: an ordinary field claims exactly
+/// the slot it lands in, and the slot-assignment rules already keep those from
+/// colliding.
+#[derive(Debug, Clone, Copy, Default)]
+struct Claimed {
+    date: bool,
+    time: bool,
+    zone: bool,
 }
 
 /// Decode a date/time literal into whichever parts it supplied.
 ///
-/// `order` decides only how an otherwise-ambiguous all-numeric date is read.
-pub fn decode(text: &str, order: DateOrder) -> Result<Decoded, DecodeError> {
+/// `order` decides only how an otherwise-ambiguous all-numeric date is read;
+/// `mode` picks between `PostgreSQL`'s two decoders (see [`DecodeMode`]); `tz` is
+/// the session zone the relative spellings (`now`, `today`, `tomorrow`,
+/// `yesterday`) are resolved against. The wall clock is read at most once, and
+/// only when one of those spellings is present.
+///
+/// # Errors
+///
+/// [`DecodeError`], one variant per SQLSTATE class the literal can fail with.
+pub fn decode(
+    text: &str,
+    order: DateOrder,
+    mode: DecodeMode,
+    tz: &TimeZone,
+) -> Result<Decoded, DecodeError> {
     let fields = split_fields(text)?;
     let mut tm = Tm::default();
     let mut zone: Option<Zone> = None;
     let mut special: Option<Special> = None;
+    let mut claimed = Claimed::default();
+    // Read lazily: a literal with no relative spelling in it must not pay for a
+    // clock read, and one with several must see a single consistent instant.
+    let mut wall: Option<Zoned> = None;
     let mut is_bc = false;
     let mut meridiem: Option<bool> = None;
     let mut want_julian = false;
@@ -377,9 +476,12 @@ pub fn decode(text: &str, order: DateOrder) -> Result<Decoded, DecodeError> {
     // the same literal with the weekday at the end is fine.
     let mut have_non_date = false;
 
-    for field in &fields {
+    for (index, field) in fields.iter().enumerate() {
         match field {
             Field::Time(text) => {
+                if claimed.time {
+                    return Err(DecodeError::Syntax);
+                }
                 decode_time(text, &mut tm)?;
                 have_non_date = true;
             }
@@ -397,18 +499,43 @@ pub fn decode(text: &str, order: DateOrder) -> Result<Decoded, DecodeError> {
                     zone = Some(Zone::Offset(decode_tz_offset(offset)?));
                 }
                 // Once month and day are known a punctuated field can only be a
-                // zone name — this is what makes `America/New_York` legal after a
-                // date and a syntax error without one.
-                else if tm.month.is_some() && tm.day.is_some() {
-                    zone = Some(lookup_zone_spec(text)?);
+                // zone: either a name with embedded punctuation, or a
+                // run-together clock reading with its offset glued on by the `-`
+                // that ordinarily delimits a date.
+                else if match mode {
+                    DecodeMode::DateTime => tm.month.is_some() && tm.day.is_some(),
+                    // A time-only literal takes a leading date only as a
+                    // preamble to a clock reading it must throw away, so the
+                    // field counts as a date exactly when something later in the
+                    // literal can still supply the time.
+                    DecodeMode::TimeOnly => {
+                        !(index == 0
+                            && fields.len() >= 2
+                            && (matches!(fields.last(), Some(Field::Date(_)))
+                                || matches!(fields.get(1), Some(Field::Time(_)))))
+                    }
+                } {
+                    if claimed.zone {
+                        return Err(DecodeError::Syntax);
+                    }
+                    if text.starts_with(|c: char| c.is_ascii_digit()) {
+                        let (reading, offset) = split_run_together_zone(text)?;
+                        zone = Some(Zone::Offset(offset));
+                        decode_number_field(reading, &mut tm, true)?;
+                    } else {
+                        zone = Some(lookup_zone_spec(text)?);
+                    }
                 } else {
-                    if have_non_date {
+                    if have_non_date || claimed.date {
                         return Err(DecodeError::Syntax);
                     }
                     decode_date(text, order, &mut tm, &mut have_text_month)?;
                 }
             }
             Field::Number(text) => {
+                if claimed.date || (mode == DecodeMode::TimeOnly && claimed.time) {
+                    return Err(DecodeError::Syntax);
+                }
                 if std::mem::take(&mut want_julian) {
                     // A fractional Julian day carries the time of day with it.
                     let (jd, fraction) = text.split_once('.').unwrap_or((text, ""));
@@ -422,19 +549,35 @@ pub fn decode(text: &str, order: DateOrder) -> Result<Decoded, DecodeError> {
                         tm.micro = micros % 1_000_000;
                     }
                 } else {
-                    decode_number_token(text, order, &mut tm, have_text_month)?;
+                    decode_number_token(text, order, mode, &mut tm, have_text_month)?;
                 }
             }
-            Field::Tz(text) => zone = Some(Zone::Offset(decode_tz_offset(text)?)),
-            Field::SignedWord(text) => match text.as_str() {
-                "-infinity" => special = Some(Special::NegInfinity),
-                "+infinity" => special = Some(Special::Infinity),
-                _ => return Err(DecodeError::Syntax),
-            },
+            Field::Tz(text) => {
+                if claimed.zone {
+                    return Err(DecodeError::Syntax);
+                }
+                zone = Some(Zone::Offset(decode_tz_offset(text)?));
+            }
+            Field::SignedWord(text) => {
+                let found = match text.as_str() {
+                    "-infinity" => Special::NegInfinity,
+                    "+infinity" => Special::Infinity,
+                    _ => return Err(DecodeError::Syntax),
+                };
+                claim_whole_value(&tm, zone.as_ref(), &mut claimed)?;
+                special = Some(found);
+            }
             Field::Word(word) => match word.as_str() {
                 // The ISO `T` separator and the noise words PostgreSQL drops.
                 "t" | "on" | "at" | "of" => {}
-                "j" | "jd" | "julian" => want_julian = true,
+                // A second `J` has nothing left to label, so `J J 1520447` is
+                // malformed rather than a Julian day with a noise word.
+                "j" | "jd" | "julian" => {
+                    if want_julian {
+                        return Err(DecodeError::Syntax);
+                    }
+                    want_julian = true;
+                }
                 "am" => {
                     meridiem = Some(false);
                     have_non_date = true;
@@ -472,7 +615,19 @@ pub fn decode(text: &str, order: DateOrder) -> Result<Decoded, DecodeError> {
                 }
                 _ => {
                     if let Some(found) = special_word(word) {
+                        claim_whole_value(&tm, zone.as_ref(), &mut claimed)?;
                         special = Some(found);
+                    } else if let Some(relative) = relative_word(word) {
+                        apply_relative(
+                            relative,
+                            mode,
+                            tz,
+                            &mut wall,
+                            &mut tm,
+                            &mut zone,
+                            &mut claimed,
+                        )?;
+                        have_non_date = true;
                     } else if let Some(month) = month_number(word) {
                         // A number already read into the month slot was really
                         // the day: `08 Jan 1999`. PostgreSQL demotes it as soon
@@ -497,6 +652,9 @@ pub fn decode(text: &str, order: DateOrder) -> Result<Decoded, DecodeError> {
                         // default abbreviation set, not the `EST` zone. Whole
                         // single-word zone names (`Japan`, `Navajo`, `Turkey`)
                         // fall through to the database.
+                        if claimed.zone {
+                            return Err(DecodeError::Syntax);
+                        }
                         zone = Some(found);
                     } else {
                         return Err(DecodeError::Syntax);
@@ -527,12 +685,163 @@ pub fn decode(text: &str, order: DateOrder) -> Result<Decoded, DecodeError> {
 
     let date = finish_date(&tm, is_bc, is_julian)?;
     let micros_of_day = finish_time(&tm)?;
+    if mode == DecodeMode::TimeOnly {
+        // `DecodeTimeOnly` insists on a whole clock reading, which is what makes
+        // `time '2003-03-07'` and `time 'zulu'` malformed rather than midnight.
+        if tm.hour.is_none() {
+            return Err(DecodeError::Syntax);
+        }
+        // A zone whose offset moves needs a date to be resolved against, and a
+        // time-only literal usually has none: `'15:36:39 America/New_York'` is
+        // malformed while `'15:36:39 UTC'` — a zone with one offset for all
+        // time — is not.
+        if let Some(Zone::Named(named)) = &zone
+            && date.is_none()
+            && named.to_fixed_offset().is_err()
+        {
+            return Err(DecodeError::Syntax);
+        }
+    }
     Ok(Decoded::Parts(Parts {
         date,
         micros_of_day,
         has_time: tm.hour.is_some(),
         zone,
     }))
+}
+
+/// A reserved spelling that fills fields from the wall clock instead of naming a
+/// whole value. These compose with the rest of the literal, so `'today 10:30'`
+/// is a date from the clock and a time from the text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Relative {
+    /// `now` — the current date, time and offset.
+    Now,
+    /// `today` — the current date, and nothing else.
+    Today,
+    /// `tomorrow` — the following date.
+    Tomorrow,
+    /// `yesterday` — the preceding date.
+    Yesterday,
+}
+
+/// Map a word to the clock-relative spelling it names.
+fn relative_word(word: &str) -> Option<Relative> {
+    Some(match word {
+        "now" => Relative::Now,
+        "today" => Relative::Today,
+        "tomorrow" => Relative::Tomorrow,
+        "yesterday" => Relative::Yesterday,
+        _ => return None,
+    })
+}
+
+/// Claim every slot on behalf of a whole-value spelling (`epoch`, `infinity`,
+/// `-infinity`), refusing the literal when any of them is already spoken for.
+///
+/// `PostgreSQL` gives these a `tmask` of `DTK_DATE_M | DTK_TIME_M | DTK_M(TZ)`,
+/// so they may neither follow nor precede anything that carries a date, a time or
+/// a zone.
+fn claim_whole_value(
+    tm: &Tm,
+    zone: Option<&Zone>,
+    claimed: &mut Claimed,
+) -> Result<(), DecodeError> {
+    if tm.any_date()
+        || tm.any_time()
+        || zone.is_some()
+        || claimed.date
+        || claimed.time
+        || claimed.zone
+    {
+        return Err(DecodeError::Syntax);
+    }
+    *claimed = Claimed {
+        date: true,
+        time: true,
+        zone: true,
+    };
+    Ok(())
+}
+
+/// Fill the fields a clock-relative spelling supplies, reading the wall clock at
+/// most once for the whole literal.
+///
+/// `DecodeTimeOnly` accepts only `now`, and takes just the time from it; the
+/// three date spellings have no clock reading to contribute and are malformed
+/// there, which is what makes `time 'today'` an error while `timestamp 'today'`
+/// is midnight.
+fn apply_relative(
+    relative: Relative,
+    mode: DecodeMode,
+    tz: &TimeZone,
+    wall: &mut Option<Zoned>,
+    tm: &mut Tm,
+    zone: &mut Option<Zone>,
+    claimed: &mut Claimed,
+) -> Result<(), DecodeError> {
+    if mode == DecodeMode::TimeOnly {
+        if relative != Relative::Now {
+            return Err(DecodeError::Syntax);
+        }
+        if tm.any_time() || claimed.time {
+            return Err(DecodeError::Syntax);
+        }
+        let time = wall_clock(tz, wall).time();
+        tm.hour = Some(i32::from(time.hour()));
+        tm.minute = Some(i32::from(time.minute()));
+        tm.second = Some(i32::from(time.second()));
+        tm.micro = i64::from(time.subsec_nanosecond()) / 1_000;
+        claimed.time = true;
+        return Ok(());
+    }
+    if tm.any_date() || claimed.date {
+        return Err(DecodeError::Syntax);
+    }
+    if relative == Relative::Now && (tm.any_time() || zone.is_some() || claimed.time) {
+        return Err(DecodeError::Syntax);
+    }
+    let zoned = wall_clock(tz, wall);
+    let date = match relative {
+        Relative::Now | Relative::Today => zoned.date(),
+        Relative::Tomorrow => zoned.date().tomorrow().map_err(|_| DecodeError::Syntax)?,
+        Relative::Yesterday => zoned.date().yesterday().map_err(|_| DecodeError::Syntax)?,
+    };
+    tm.year = Some(i32::from(date.year()));
+    tm.month = Some(i32::from(date.month()));
+    tm.day = Some(i32::from(date.day()));
+    tm.two_digit_year = false;
+    claimed.date = true;
+    if relative == Relative::Now {
+        let time = zoned.time();
+        tm.hour = Some(i32::from(time.hour()));
+        tm.minute = Some(i32::from(time.minute()));
+        tm.second = Some(i32::from(time.second()));
+        tm.micro = i64::from(time.subsec_nanosecond()) / 1_000;
+        *zone = Some(Zone::Offset(zoned.offset()));
+        claimed.time = true;
+        claimed.zone = true;
+    }
+    Ok(())
+}
+
+/// The wall clock in `tz`, read on first use and reused for the rest of the
+/// literal so `'yesterday'` and `'now'` in one text cannot straddle midnight.
+fn wall_clock<'a>(tz: &TimeZone, wall: &'a mut Option<Zoned>) -> &'a Zoned {
+    wall.get_or_insert_with(|| Timestamp::now().to_zoned(tz.clone()))
+}
+
+/// Split a run-together clock reading from the UTC offset glued to it — the
+/// `hhmmss-zz` shape that reaches the decoder as one punctuated field because `-`
+/// is also a date delimiter.
+///
+/// Only `-` glues: a `+` is not a date delimiter, so `040506+08` arrives already
+/// split and never comes here. That asymmetry is `PostgreSQL`'s, and it is why
+/// the two signs take different paths through the decoder.
+fn split_run_together_zone(text: &str) -> Result<(&str, Offset), DecodeError> {
+    let at = text.find('-').ok_or(DecodeError::Syntax)?;
+    let (reading, offset) = text.split_at(at);
+    Ok((reading, decode_tz_offset(offset)?))
 }
 
 /// Fill the calendar fields from a Julian day number.
@@ -726,7 +1035,7 @@ fn decode_date(
         }
     }
     for part in numeric {
-        decode_number(part, order, tm, *have_text_month)?;
+        decode_number(part, order, tm, *have_text_month, false)?;
     }
     // A punctuated date field has to have carried a WHOLE date. PostgreSQL
     // checks this at the end of `DecodeDate`, ahead of any range check, which is
@@ -738,30 +1047,38 @@ fn decode_date(
     Ok(())
 }
 
-/// Decode a standalone numeric field. This function chooses between the
-/// run-together forms (`19970210`, `173201`) and a single date or time
-/// component.
+/// Decode a standalone numeric field, choosing between the run-together forms
+/// (`19970210`, `173201`) and a single date or time component.
+///
+/// A time-only literal decodes every number as though the date were already in
+/// hand — `PostgreSQL` passes `fmask | DTK_DATE_M` here for exactly that reason —
+/// which is what sends `040506` to the clock rather than to the calendar.
 fn decode_number_token(
     text: &str,
     order: DateOrder,
+    mode: DecodeMode,
     tm: &mut Tm,
     have_text_month: bool,
 ) -> Result<(), DecodeError> {
+    let date_known = mode == DecodeMode::TimeOnly || tm.has_full_date();
     match text.find('.') {
         // `1997.041` — a year and a day-of-year, so read the whole field as a date.
-        Some(_) if !tm.has_full_date() => {
+        Some(_) if !date_known => {
             let mut text_month = have_text_month;
             decode_date(text, order, tm, &mut text_month)
         }
         // `040506.789` — a run-together time with fractional seconds.
-        Some(dot) if dot > 2 => decode_number_field(text, tm),
+        Some(dot) if dot > 2 => decode_number_field(text, tm, date_known),
+        // A time-only literal that got here with a fraction and two digits or
+        // fewer ahead of it has nowhere left to put the field.
+        Some(_) if mode == DecodeMode::TimeOnly => Err(DecodeError::Syntax),
         // A run-together `YYYYMMDD` or `HHMMSS` needs SIX digits. Five is a
         // year, which is what leaves `19971)24` a month-out-of-range complaint
         // rather than an unreadable field.
-        _ if text.len() >= 6 && !(tm.has_full_date() && tm.has_full_time()) => {
-            decode_number_field(text, tm)
+        _ if text.len() >= 6 && !(date_known && tm.has_full_time()) => {
+            decode_number_field(text, tm, date_known)
         }
-        _ => decode_number(text, order, tm, have_text_month),
+        _ => decode_number(text, order, tm, have_text_month, date_known),
     }
 }
 
@@ -772,6 +1089,7 @@ fn decode_number(
     order: DateOrder,
     tm: &mut Tm,
     have_text_month: bool,
+    date_known: bool,
 ) -> Result<(), DecodeError> {
     let (digits, fraction) = match text.split_once('.') {
         Some((whole, frac)) => (whole, Some(frac)),
@@ -782,7 +1100,7 @@ fn decode_number(
     if let Some(frac) = fraction {
         // More than two digits before the point is a run-together date or time.
         if len > 2 {
-            return decode_number_field(text, tm);
+            return decode_number_field(text, tm, date_known);
         }
         tm.micro = parse_fraction(frac)?;
         tm.second = Some(value);
@@ -801,7 +1119,11 @@ fn decode_number(
     }
 
     let mut assigned_year = false;
-    match (tm.year.is_some(), tm.month.is_some(), tm.day.is_some()) {
+    match (
+        date_known || tm.year.is_some(),
+        date_known || tm.month.is_some(),
+        date_known || tm.day.is_some(),
+    ) {
         (false, false, false) => {
             if len >= 3 || order == DateOrder::Ymd {
                 tm.year = Some(value);
@@ -838,7 +1160,7 @@ fn decode_number(
             assigned_year = true;
         }
         (true, false, true) => return Err(DecodeError::Syntax),
-        (true, true, true) => return decode_number_field(text, tm),
+        (true, true, true) => return decode_number_field(text, tm, date_known),
     }
     if assigned_year {
         tm.two_digit_year = len <= 2;
@@ -847,15 +1169,16 @@ fn decode_number(
 }
 
 /// Decode a run-together field: `YYYYMMDD`/`YYMMDD` when no date is known yet,
-/// otherwise `HHMMSS`/`HHMM`.
-fn decode_number_field(text: &str, tm: &mut Tm) -> Result<(), DecodeError> {
+/// otherwise `HHMMSS`/`HHMM`. `date_known` is `PostgreSQL`'s `fmask & DTK_DATE_M`
+/// test, which a time-only literal forces on so the field lands on the clock.
+fn decode_number_field(text: &str, tm: &mut Tm, date_known: bool) -> Result<(), DecodeError> {
     let (digits, fraction) = match text.split_once('.') {
         Some((whole, frac)) => (whole, Some(frac)),
         None => (text, None),
     };
     let len = digits.len();
     if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
-        if fraction.is_none() && !tm.has_full_date() && len >= 6 {
+        if fraction.is_none() && !date_known && !tm.has_full_date() && len >= 6 {
             let (year, rest) = digits.split_at(len - 4);
             let (month, day) = rest.split_at(2);
             tm.year = Some(parse_int(year)?);
@@ -1235,14 +1558,11 @@ fn julian_to_date(jd: i32) -> Result<Date, DecodeError> {
 // Keyword tables
 // ---------------------------------------------------------------------------
 
-/// Map a reserved spelling to the value it stands for.
+/// Map a reserved spelling to the whole value it stands for. The clock-relative
+/// spellings are [`relative_word`]'s, not these.
 fn special_word(word: &str) -> Option<Special> {
     Some(match word {
         "infinity" => Special::Infinity,
-        "now" => Special::Now,
-        "today" => Special::Today,
-        "tomorrow" => Special::Tomorrow,
-        "yesterday" => Special::Yesterday,
         "epoch" => Special::Epoch,
         _ => return None,
     })
