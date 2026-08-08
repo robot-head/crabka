@@ -506,7 +506,19 @@ async fn with_ordinality_and_a_column_definition_list_cannot_share_an_item() {
             )
     );
 
-    // `ROWS FROM` moves the list onto the call, where the two do combine.
+    // `ROWS FROM` moves the list onto the call, where the two do combine --
+    // including with a *single* call, which is the case that distinguishes the
+    // two spellings. Both parse to one call carrying `column_defs`, so a check
+    // that looks only at the calls refuses the very shape the hint above
+    // recommends. Certification caught that; a two-call `ROWS FROM` does not.
+    let one = result(
+        &mut s,
+        "SELECT * FROM ROWS FROM (json_to_record('{\"a\":1}') AS (a int)) WITH ORDINALITY",
+    )
+    .await;
+    assert!(field_names(&one) == vec!["a", "ordinality"]);
+    assert!(rows_text(&one) == vec![row(&[Some("1"), Some("1")])]);
+
     let r = result(
         &mut s,
         "SELECT * FROM ROWS FROM (json_to_record('{\"a\":1}') AS (a int), generate_series(1, 2)) \

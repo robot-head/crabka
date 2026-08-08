@@ -14243,12 +14243,14 @@ fn build_table_expr(
         TableExpr::Function {
             functions,
             with_ordinality,
+            rows_from,
             alias,
             column_aliases,
             ..
         } => crate::srf::from_item(
             functions,
             *with_ordinality,
+            *rows_from,
             alias.as_deref(),
             column_aliases,
             ctx,
@@ -15923,6 +15925,7 @@ fn build_table_expr_schema_with_ctes(
         TableExpr::Function {
             functions,
             with_ordinality,
+            rows_from,
             alias,
             column_aliases,
             ..
@@ -15944,6 +15947,7 @@ fn build_table_expr_schema_with_ctes(
             crate::srf::from_item_schema(
                 functions,
                 *with_ordinality,
+                *rows_from,
                 alias.as_deref(),
                 column_aliases,
             )
@@ -30039,11 +30043,12 @@ mod tests {
             crate::srf::from_item(
                 &unknown,
                 false,
+                false,
                 None,
                 &None,
                 &crate::clock::EvalCtx::test_default(),
             ),
-            crate::srf::from_item_schema(&unknown, false, None, &None),
+            crate::srf::from_item_schema(&unknown, false, false, None, &None),
         ] {
             assert!(matches!(relation, Err(ExecError::UndefinedFunction(_))));
         }
@@ -30056,7 +30061,7 @@ mod tests {
             },
         );
         assert!(matches!(
-            crate::srf::from_item_schema(&scalar, false, None, &None),
+            crate::srf::from_item_schema(&scalar, false, false, None, &None),
             Err(ExecError::UndefinedFunction(_))
         ));
     }

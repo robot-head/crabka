@@ -1084,12 +1084,13 @@ fn event_dropped_object_rows(ctx: &EvalCtx) -> Result<Vec<Vec<Datum>>, ExecError
 pub(crate) fn from_item(
     functions: &[TableFuncCall],
     with_ordinality: bool,
+    rows_from: bool,
     alias: Option<&str>,
     column_aliases: &Option<Vec<String>>,
     ctx: &EvalCtx,
 ) -> Result<Relation, ExecError> {
     if with_ordinality {
-        reject_ordinality_with_column_defs(functions)?;
+        reject_ordinality_with_column_defs(functions, rows_from)?;
     }
     let plans = plan_all(functions)?;
     let mut produced = Vec::new();
@@ -1110,11 +1111,12 @@ pub(crate) fn from_item(
 pub(crate) fn from_item_schema(
     functions: &[TableFuncCall],
     with_ordinality: bool,
+    rows_from: bool,
     alias: Option<&str>,
     column_aliases: &Option<Vec<String>>,
 ) -> Result<Relation, ExecError> {
     if with_ordinality {
-        reject_ordinality_with_column_defs(functions)?;
+        reject_ordinality_with_column_defs(functions, rows_from)?;
     }
     let plans = plan_all(functions)?;
     qualify(&plans, Vec::new(), with_ordinality, alias, column_aliases)
@@ -1135,8 +1137,16 @@ fn first_duplicate(defs: &[TableFuncColumnDef]) -> Option<&str> {
 /// hint pointing at the one spelling that does accept both — `ROWS FROM(f(…) AS
 /// (…)) WITH ORDINALITY`, where the list belongs to the call rather than to the
 /// item.
-fn reject_ordinality_with_column_defs(functions: &[TableFuncCall]) -> Result<(), ExecError> {
-    if matches!(functions, [call] if call.column_defs.is_some()) {
+///
+/// `rows_from` is what tells the two apart, and it has to be passed in: both
+/// spellings parse to a single call carrying `column_defs`, so the calls alone
+/// cannot distinguish the legal form from the illegal one. Without it this
+/// refused the very shape its own hint recommends.
+fn reject_ordinality_with_column_defs(
+    functions: &[TableFuncCall],
+    rows_from: bool,
+) -> Result<(), ExecError> {
+    if !rows_from && matches!(functions, [call] if call.column_defs.is_some()) {
         return Err(ExecError::Remote(
             crabka_pgwire::error::PgError::error(
                 "42601",
@@ -2481,8 +2491,8 @@ mod tests {
                 args: args.clone(),
                 column_defs: None,
             }];
-            let schema = from_item_schema(&item, false, None, &None).expect("schema");
-            let executed = from_item(&item, false, None, &None, &ctx()).expect("rows");
+            let schema = from_item_schema(&item, false, false, None, &None).expect("schema");
+            let executed = from_item(&item, false, false, None, &None, &ctx()).expect("rows");
             assert!(schema.scope == executed.scope, "describing {name}");
         }
     }
