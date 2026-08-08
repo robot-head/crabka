@@ -202,6 +202,17 @@ impl GucSlot {
         }
     }
 
+    /// Replace this parameter's session default, which is where `RESET` and
+    /// `DISCARD` return to, along with its current value. Any staged assignment
+    /// is discarded: the default is established before the session's first
+    /// statement, so there is nothing legitimate to stage over.
+    fn set_session_default(&mut self, value: GucValue) {
+        self.source = value.clone();
+        self.committed = value;
+        self.txn_current = None;
+        self.txn_session = None;
+    }
+
     fn commit(&mut self) {
         if let Some(value) = self.txn_session.take() {
             self.committed = value;
@@ -1050,7 +1061,11 @@ static GUC_DEFINITIONS: &[GucDefinition] = &[
         Ok(GucValue::Text(value.to_string()))
     }),
     guc("client_encoding", "string", "UTF8", parse_client_encoding),
-    guc("datestyle", "string", "ISO, MDY", parse_date_style).aliases(&["DateStyle"]),
+    // The canonical spelling is the one `pg_settings.name` reports, which for
+    // these three is the mixed-case one `guc.c` declares — a lookup is
+    // case-insensitive either way, but `WHERE name = 'DateStyle'` only matches
+    // the canonical spelling.
+    guc("DateStyle", "string", "ISO, MDY", parse_date_style).aliases(&["datestyle"]),
     guc(
         "default_text_search_config",
         "string",
@@ -1064,7 +1079,7 @@ static GUC_DEFINITIONS: &[GucDefinition] = &[
         parse_extra_float_digits,
     )
     .ranged(None, -15.0, 3.0),
-    guc("intervalstyle", "string", "postgres", parse_interval_style).aliases(&["IntervalStyle"]),
+    guc("IntervalStyle", "string", "postgres", parse_interval_style).aliases(&["intervalstyle"]),
     guc("search_path", "string", "\"$user\", public", |value, _| {
         // Nothing is validated. `SET search_path = '"unbalanced'` succeeds on
         // PostgreSQL 18.4, and a schema that does not exist is silently
@@ -1382,34 +1397,24 @@ pub(crate) struct GucSettingRow {
 }
 
 impl Default for GucState {
+    /// Every parameter at its compiled-in boot value. A session's actual
+    /// defaults are laid over this by [`GucState::set_session_default`] as the
+    /// startup packet is applied.
     fn default() -> Self {
-        Self::with_source_values(BTreeMap::new()).expect("compiled GUC defaults are valid")
+        Self {
+            slots: GUC_DEFINITIONS
+                .iter()
+                .map(|definition| {
+                    let value = parse_guc_value(definition, definition.boot_default, None)
+                        .expect("a compiled-in boot value parses");
+                    (definition.name.into(), GucSlot::new(value))
+                })
+                .collect(),
+        }
     }
 }
 
 impl GucState {
-    fn with_source_values(source_values: BTreeMap<String, String>) -> Result<Self, ExecError> {
-        for name in source_values.keys() {
-            if guc_definition(name).is_none() {
-                return Err(ExecError::UnrecognizedParameter(name.clone()));
-            }
-        }
-        let mut slots = BTreeMap::new();
-        for definition in GUC_DEFINITIONS {
-            let source = source_values
-                .iter()
-                .find(|(name, _)| {
-                    guc_definition(name).is_some_and(|found| std::ptr::eq(found, definition))
-                })
-                .map_or(definition.boot_default, |(_, value)| value.as_str());
-            slots.insert(
-                definition.name.into(),
-                GucSlot::new(parse_guc_value(definition, source, None)?),
-            );
-        }
-        Ok(Self { slots })
-    }
-
     pub(crate) fn effective(&self, name: &str) -> Result<String, ExecError> {
         let key = normalize_guc_name(name);
         self.slots
@@ -1435,6 +1440,36 @@ impl GucState {
     }
 
     pub(crate) fn set(&mut self, name: &str, value: &str, local: bool) -> Result<(), ExecError> {
+        let (key, value) = self.prepare_assignment(name, value)?;
+        self.slot_for_assignment(key).set(value, local);
+        Ok(())
+    }
+
+    /// Adopt a value as the parameter's *session default* rather than as an
+    /// assignment on top of it, which is what a value supplied in the startup
+    /// packet does.
+    ///
+    /// `PostgreSQL` applies a client-supplied setting with `PGC_S_CLIENT`,
+    /// which ranks at or below `PGC_S_OVERRIDE` and therefore rewrites
+    /// `reset_val` as well as the current value. `RESET`, `SET … TO DEFAULT`,
+    /// `RESET ALL` and `DISCARD ALL` all return to it, never to the compiled-in
+    /// boot value — so a session started with `PGDATESTYLE='Postgres, MDY'`
+    /// still prints `Postgres` dates after `RESET DateStyle`.
+    ///
+    /// The assignment is not transactional: it happens before the first
+    /// statement, so there is no open transaction for a `ROLLBACK` to undo it
+    /// from, and any staged value would be a caller bug.
+    pub(crate) fn set_session_default(&mut self, name: &str, value: &str) -> Result<(), ExecError> {
+        let (key, value) = self.prepare_assignment(name, value)?;
+        self.slot_for_assignment(key).set_session_default(value);
+        Ok(())
+    }
+
+    /// Resolve a parameter name, refuse an assignment its context forbids, and
+    /// parse the value against the parameter's current effective value — which
+    /// a partial assignment such as `DateStyle = 'German'` inherits the rest of
+    /// its components from.
+    fn prepare_assignment(&self, name: &str, value: &str) -> Result<(String, GucValue), ExecError> {
         let key = normalize_guc_name(name);
         // PostgreSQL accepts any two-part `extension.parameter` name as a
         // customized option, creating a placeholder string parameter on first
@@ -1443,11 +1478,7 @@ impl GucState {
             if !is_custom_guc_name(&key) {
                 return Err(ExecError::UnrecognizedParameter(name.to_string()));
             }
-            self.slots
-                .entry(key)
-                .or_insert_with(|| GucSlot::new(GucValue::Text(String::new())))
-                .set(GucValue::Text(value.to_string()), local);
-            return Ok(());
+            return Ok((key, GucValue::Text(value.to_string())));
         };
         if let Some(refusal) = definition.context.refusal(definition.name) {
             return Err(refusal);
@@ -1458,13 +1489,15 @@ impl GucState {
             .ok_or_else(|| ExecError::UnrecognizedParameter(name.to_string()))?
             .effective()
             .clone();
-        let value = parse_guc_value(definition, value, Some(&current))?;
-        let slot = self
-            .slots
-            .get_mut(&key)
-            .ok_or_else(|| ExecError::UnrecognizedParameter(name.to_string()))?;
-        slot.set(value, local);
-        Ok(())
+        Ok((key, parse_guc_value(definition, value, Some(&current))?))
+    }
+
+    /// The slot [`Self::prepare_assignment`] resolved to, creating the
+    /// placeholder a first-time customized option needs.
+    fn slot_for_assignment(&mut self, key: String) -> &mut GucSlot {
+        self.slots
+            .entry(key)
+            .or_insert_with(|| GucSlot::new(GucValue::Text(String::new())))
     }
 
     /// Restore one parameter's session default. `PostgreSQL` checks the
@@ -1812,7 +1845,15 @@ fn parse_date_style(value: &str, current: Option<&GucValue>) -> Result<GucValue,
             "iso" => output = Some(DateOutputStyle::Iso),
             "sql" => output = Some(DateOutputStyle::Sql),
             "postgres" | "postgresql" => output = Some(DateOutputStyle::Postgres),
-            "german" => output = Some(DateOutputStyle::German),
+            "german" => {
+                output = Some(DateOutputStyle::German);
+                // German dates are traditionally day-first, so naming the style
+                // picks the order up as well — but only if the same setting has
+                // not already named one. `'MDY, German'` stays MDY, while
+                // `'German, MDY'` is overridden right back to MDY by the token
+                // that follows.
+                order = order.or(Some(DateOrder::Dmy));
+            }
             "mdy" | "us" | "noneuro" | "noneuropean" => order = Some(DateOrder::Mdy),
             "dmy" | "euro" | "european" => order = Some(DateOrder::Dmy),
             "ymd" => order = Some(DateOrder::Ymd),
@@ -13106,16 +13147,19 @@ impl Session for SqlSession {
                     )
                 })?;
                 self.guc
-                    .set(name, value, false)
+                    .set_session_default(name, value)
                     .map_err(ExecError::into_pg)?;
             }
-            self.guc.commit();
+            // `transaction_isolation` reports `default_transaction_isolation`
+            // outside a block, and the startup packet is one of the places that
+            // default can arrive from.
+            self.sync_transaction_isolation();
             return Ok(());
         }
         self.guc
-            .set(name, value, false)
+            .set_session_default(name, value)
             .map_err(ExecError::into_pg)?;
-        self.guc.commit();
+        self.sync_transaction_isolation();
         Ok(())
     }
 
@@ -13765,7 +13809,6 @@ fn row_result_bytes(row: &[Option<crabka_pgwire::engine::Cell>]) -> Result<usize
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::BTreeMap,
         io::Write as _,
         sync::{
             Arc,
@@ -15631,6 +15674,129 @@ mod tests {
         assert!(rows[1][2].is_none());
     }
 
+    /// Storing a value runs the target type's *input* function, so an ambiguous
+    /// all-numeric date literal is read under the session's `DateStyle` field
+    /// order — the same reading the literal gets when it is written as a typed
+    /// constant. `INSERT`, `UPDATE`, `COPY` and the written cast have to agree.
+    /// Every expectation is PostgreSQL 18.4's.
+    #[tokio::test]
+    async fn every_store_path_reads_the_session_date_order() {
+        use assert2::assert;
+        /// `(DateStyle, the ambiguous literal that spells 1997-02-10 under it)`.
+        const ORDERS: &[(&str, &str)] = &[
+            ("ISO, YMD", "97/02/10"),
+            ("ISO, DMY", "10/02/97"),
+            ("ISO, MDY", "02/10/97"),
+        ];
+        for (style, date) in ORDERS {
+            let engine = SqlEngine::new();
+            let mut session = engine.connect();
+            for setup in [
+                format!("SET DateStyle TO '{style}'"),
+                "CREATE TABLE w (t timestamp, d date)".to_string(),
+                // The written cast is the control: it already honoured the order.
+                format!("INSERT INTO w VALUES (timestamp '{date} 17:32:01', date '{date}')"),
+                format!("INSERT INTO w VALUES ('{date} 17:32:01', '{date}')"),
+                "INSERT INTO w VALUES (NULL, NULL)".to_string(),
+                format!("UPDATE w SET t = '{date} 17:32:01', d = '{date}' WHERE t IS NULL"),
+            ] {
+                session
+                    .simple_query(&setup)
+                    .await
+                    .unwrap_or_else(|error| panic!("{style}: {setup}: {error:?}"));
+            }
+            session
+                .copy_in(
+                    "COPY w (t, d) FROM STDIN",
+                    vec![bytes::Bytes::from(format!("{date} 17:32:01\t{date}\n"))],
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{style}: COPY: {error:?}"));
+
+            let stored = rows_or_sqlstate(
+                &mut session,
+                "SELECT DISTINCT t::text || ' / ' || d::text FROM w",
+            )
+            .await
+            .unwrap_or_else(|code| panic!("{style}: SELECT: {code}"));
+            assert!(
+                stored == vec![vec!["1997-02-10 17:32:01 / 1997-02-10".to_string()]],
+                "{style}"
+            );
+        }
+    }
+
+    /// The order is not merely consulted, it is decisive: `31/01/97` is a date
+    /// under `DMY` and out of range under `MDY`, and a store has to say so
+    /// (22008) rather than quietly reading the fields the other way round.
+    #[tokio::test]
+    async fn a_store_refuses_a_literal_the_session_date_order_makes_impossible() {
+        use assert2::assert;
+        for (style, expected) in [("ISO, DMY", "00000"), ("ISO, MDY", "22008")] {
+            let engine = SqlEngine::new();
+            let mut session = engine.connect();
+            session
+                .simple_query(&format!(
+                    "SET DateStyle TO '{style}'; CREATE TABLE z (d date)"
+                ))
+                .await
+                .expect("setup");
+            assert!(
+                sqlstate(&mut session, "INSERT INTO z VALUES ('31/01/97')").await == expected,
+                "INSERT under {style}"
+            );
+            let copied = session
+                .copy_in(
+                    "COPY z (d) FROM STDIN",
+                    vec![bytes::Bytes::from_static(b"31/01/97\n")],
+                )
+                .await
+                .err()
+                .map_or_else(|| "00000".to_string(), |error| error.code);
+            assert!(copied == expected, "COPY under {style}");
+        }
+    }
+
+    /// A `COPY` field runs the column type's input function under *assignment*
+    /// rules, so an over-long `varchar(n)` is 22001 — PostgreSQL truncates only
+    /// for an explicit cast. Nothing here is a date: the routing this shares
+    /// with the `DateStyle` fix is every column type's store path.
+    #[tokio::test]
+    async fn copy_from_stdin_applies_assignment_rules_to_bounded_strings() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query("CREATE TABLE b (v varchar(3), c char(3))")
+            .await
+            .expect("create");
+        for (field, expected) in [
+            ("abcd\tabc", "22001"),
+            ("abc\tabcd", "22001"),
+            // Trailing blanks are discarded rather than refused, which is the
+            // one over-long value assignment accepts.
+            ("abc  \tabc  ", "00000"),
+            ("abc\tabc", "00000"),
+        ] {
+            let code = session
+                .copy_in(
+                    "COPY b (v, c) FROM STDIN",
+                    vec![bytes::Bytes::from(format!("{field}\n"))],
+                )
+                .await
+                .err()
+                .map_or_else(|| "00000".to_string(), |error| error.code);
+            assert!(code == expected, "{field:?}");
+        }
+        let stored = rows_or_sqlstate(&mut session, "SELECT v, c FROM b ORDER BY v")
+            .await
+            .expect("select");
+        assert!(
+            stored == vec![vec!["abc".to_string(), "abc".to_string()]; 2],
+            "{stored:?}"
+        );
+    }
+
     #[tokio::test]
     async fn copy_from_file_reuses_the_text_import_path() {
         let engine = SqlEngine::new();
@@ -16894,9 +17060,9 @@ mod tests {
         gucs.commit();
         assert_eq!(gucs.effective("application_name").unwrap(), "session-two");
 
-        let mut source = BTreeMap::new();
-        source.insert("application_name".to_string(), "from-source".to_string());
-        let mut gucs = GucState::with_source_values(source).unwrap();
+        let mut gucs = GucState::default();
+        gucs.set_session_default("application_name", "from-source")
+            .unwrap();
         gucs.set("application_name", "changed", false).unwrap();
         gucs.commit();
         gucs.reset("application_name").unwrap();
@@ -16921,14 +17087,32 @@ mod tests {
         assert!(gucs.set("statement_timeout", "-1", false).is_err());
     }
 
+    /// Every expectation is PostgreSQL 18.4's, read off a live server. The
+    /// `German` rows are the interesting ones: naming that style also picks the
+    /// day-first order up, unless the very same setting already named an order.
     #[test]
     fn datestyle_partial_assignment_inherits_effective_components() {
-        let mut gucs = GucState::default();
-        gucs.set("DateStyle", "SQL, DMY", false).unwrap();
-        gucs.set("DateStyle", "MDY", false).unwrap();
-        assert_eq!(gucs.effective("DateStyle").unwrap(), "SQL, MDY");
-        gucs.set("DateStyle", "German", false).unwrap();
-        assert_eq!(gucs.effective("DateStyle").unwrap(), "German, MDY");
+        use assert2::assert;
+        let assignments: &[(&[&str], &str)] = &[
+            (&["SQL, DMY", "MDY"], "SQL, MDY"),
+            (&["MDY", "German"], "German, DMY"),
+            (&["MDY", "German, MDY"], "German, MDY"),
+            (&["MDY", "MDY, German"], "German, MDY"),
+            (&["German", "SQL"], "SQL, DMY"),
+            (&["German", "ISO, MDY"], "ISO, MDY"),
+            (&["YMD", "Postgres"], "Postgres, YMD"),
+        ];
+        for (sequence, expected) in assignments {
+            let mut gucs = GucState::default();
+            for assignment in *sequence {
+                gucs.set("DateStyle", assignment, false)
+                    .unwrap_or_else(|_| panic!("PostgreSQL accepts {assignment}"));
+            }
+            assert!(
+                gucs.effective("DateStyle").unwrap() == *expected,
+                "{sequence:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -16977,6 +17161,165 @@ mod tests {
             single_text(&session.simple_query("SHOW IntervalStyle").await.unwrap()),
             "postgres_verbose"
         );
+    }
+
+    /// A startup packet's parameters, and the `-c` assignments inside its
+    /// `options`, are the session's *defaults* — not assignments layered on top
+    /// of the compiled-in ones. Every way back to a default has to land on them:
+    /// `RESET`, `SET … TO DEFAULT`, `RESET ALL`, `DISCARD ALL`, and a rolled-back
+    /// `SET`. Verified against PostgreSQL 18.4 driven with `PGDATESTYLE`/`PGTZ`/
+    /// `PGOPTIONS`, which is exactly how `pg_regress` starts every session.
+    ///
+    /// The parameters span the registry's vartypes deliberately: the rule is a
+    /// property of the GUC machinery, not of the date parameters that exposed it.
+    #[tokio::test]
+    async fn startup_packet_gucs_become_the_session_default() {
+        /// `(parameter, startup value, an unrelated value to assign over it)`.
+        const PARAMETERS: &[(&str, &str, &str)] = &[
+            ("DateStyle", "Postgres, MDY", "ISO, YMD"),
+            ("TimeZone", "America/Los_Angeles", "UTC"),
+            ("IntervalStyle", "postgres_verbose", "sql_standard"),
+            ("application_name", "startup-name", "assigned-name"),
+            ("search_path", "startup_schema", "assigned_schema"),
+            ("work_mem", "16MB", "8MB"),
+            ("extra_float_digits", "3", "0"),
+            ("enable_seqscan", "off", "on"),
+            ("lc_time", "startup_locale", "assigned_locale"),
+        ];
+
+        let engine = SqlEngine::new();
+        for (parameter, startup, assigned) in PARAMETERS {
+            let mut session = engine.connect();
+            session
+                .startup_parameter(parameter, startup)
+                .await
+                .unwrap_or_else(|error| panic!("{parameter} startup parameter: {error:?}"));
+            assert!(
+                shown_setting(&mut session, parameter).await == *startup,
+                "{parameter} at startup"
+            );
+
+            for restore in ["RESET", "SET"] {
+                let restore = if restore == "RESET" {
+                    format!("RESET {parameter}")
+                } else {
+                    format!("SET {parameter} TO DEFAULT")
+                };
+                session
+                    .simple_query(&format!("SET {parameter} TO '{assigned}'"))
+                    .await
+                    .unwrap_or_else(|error| panic!("{parameter} = {assigned}: {error:?}"));
+                assert!(
+                    shown_setting(&mut session, parameter).await == *assigned,
+                    "{parameter} assigned"
+                );
+                session.simple_query(&restore).await.unwrap();
+                assert!(
+                    shown_setting(&mut session, parameter).await == *startup,
+                    "{parameter} {restore}"
+                );
+            }
+
+            for wholesale in ["RESET ALL", "DISCARD ALL"] {
+                session
+                    .simple_query(&format!("SET {parameter} TO '{assigned}'"))
+                    .await
+                    .unwrap();
+                session.simple_query(wholesale).await.unwrap();
+                assert!(
+                    shown_setting(&mut session, parameter).await == *startup,
+                    "{parameter} {wholesale}"
+                );
+            }
+
+            session.simple_query("BEGIN").await.unwrap();
+            session
+                .simple_query(&format!("SET {parameter} TO '{assigned}'"))
+                .await
+                .unwrap();
+            session.simple_query("ROLLBACK").await.unwrap();
+            assert!(
+                shown_setting(&mut session, parameter).await == *startup,
+                "{parameter} rollback"
+            );
+
+            // `pg_settings` separates the two: `boot_val` stays the compiled-in
+            // value while `reset_val` follows the startup packet, so the two
+            // disagree for every parameter here. `setting`/`reset_val` are the
+            // base-unit spellings (`work_mem` is `16384`, not the `16MB` `SHOW`
+            // renders), which is why they are compared with each other rather
+            // than with the startup string.
+            let settings = rows_or_sqlstate(
+                &mut session,
+                &format!(
+                    "SELECT setting, boot_val, reset_val FROM pg_catalog.pg_settings \
+                     WHERE name = '{parameter}'"
+                ),
+            )
+            .await
+            .unwrap_or_else(|code| panic!("pg_settings for {parameter}: {code}"));
+            let [row] = settings.as_slice() else {
+                panic!("expected one pg_settings row for {parameter}: {settings:?}");
+            };
+            assert!(row[1] == guc_default(parameter), "{parameter} boot_val");
+            assert!(
+                row[2] == row[0],
+                "{parameter} reset_val is the current value"
+            );
+            assert!(
+                row[2] != row[1],
+                "{parameter} reset_val is not the boot value"
+            );
+        }
+    }
+
+    /// The same rule for the `-c` assignments carried in `options`, including a
+    /// customized `extension.parameter` option, which has no registry entry and
+    /// so takes a different path through the assignment code.
+    #[tokio::test]
+    async fn startup_options_become_the_session_default() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .startup_parameter(
+                "options",
+                "-c datestyle=Postgres,MDY -c work_mem=16MB --myext.flavour=salty \
+                 -c 'default_transaction_isolation=repeatable read'",
+            )
+            .await
+            .unwrap();
+        session
+            .simple_query(
+                "SET DateStyle TO 'ISO, YMD'; SET work_mem TO '8MB'; \
+                 SET myext.flavour TO 'sour'; RESET ALL",
+            )
+            .await
+            .unwrap();
+        for (parameter, expected) in [
+            ("DateStyle", "Postgres, MDY"),
+            ("work_mem", "16MB"),
+            ("myext.flavour", "salty"),
+            // A derived parameter follows: `transaction_isolation` reports
+            // `default_transaction_isolation` outside a transaction block, so
+            // it has to pick the startup packet's value up as well.
+            ("default_transaction_isolation", "repeatable read"),
+            ("transaction_isolation", "repeatable read"),
+        ] {
+            assert!(
+                shown_setting(&mut session, parameter).await == expected,
+                "{parameter}"
+            );
+        }
+    }
+
+    /// `SHOW <parameter>`'s single cell.
+    async fn shown_setting(session: &mut SqlSession, parameter: &str) -> String {
+        single_text(
+            &session
+                .simple_query(&format!("SHOW {parameter}"))
+                .await
+                .unwrap(),
+        )
     }
 
     #[test]
@@ -17244,12 +17587,12 @@ mod tests {
     async fn source_values_drive_default_reset_all_discard_and_pg_settings() {
         let engine = SqlEngine::new();
         let mut session = engine.connect();
-        let mut source = BTreeMap::new();
-        source.insert(
-            "application_name".to_string(),
-            "configured-source".to_string(),
-        );
-        session.guc = GucState::with_source_values(source).unwrap();
+        // The production way a session default is established: the startup
+        // packet, which every libpq client sends `application_name` in.
+        session
+            .startup_parameter("application_name", "configured-source")
+            .await
+            .unwrap();
 
         session
             .simple_query("SET application_name = 'changed'; SET application_name = DEFAULT")

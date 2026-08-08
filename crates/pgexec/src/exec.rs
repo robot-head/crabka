@@ -2539,13 +2539,22 @@ fn build_copy_row(
         let target = table.columns[*slot].ty;
         row[*slot] = match value {
             Some(value) if let Some(base) = jsonpath_assignment_base(target) => {
-                let value =
-                    crate::eval::cast_value(&Datum::Text(value.clone()), base, &ctx.time_zone)?;
+                let value = crate::eval::cast_value_in(
+                    &Datum::Text(value.clone()),
+                    base,
+                    ctx.output_style(),
+                )?;
                 coerce(value, target, ctx)?
             }
-            Some(value) => {
-                crabka_pgtypes::cast::cast(&Datum::Text(value.clone()), target, &ctx.time_zone)?
-            }
+            // A COPY field runs the column type's input function under
+            // *assignment* rules, so an over-long `varchar(n)` is 22001 rather
+            // than the silent truncation an explicit cast would do — and the
+            // date arms read the session's `DateStyle` field order.
+            Some(value) => crabka_pgtypes::cast::cast_assign_in(
+                &Datum::Text(value.clone()),
+                target,
+                ctx.output_style(),
+            )?,
             None => coerce(Datum::Null, target, ctx)?,
         };
     }
@@ -9911,15 +9920,19 @@ fn resolve_unknown_literal(
     };
     let value = Datum::Text(text.to_owned());
     if let Some(jsonpath) = jsonpath_assignment_base(base) {
-        return crate::eval::cast_value(&value, jsonpath, &ctx.time_zone);
+        return crate::eval::cast_value_in(&value, jsonpath, ctx.output_style());
     }
     match base {
         // `bytea_in` is the escape/hex decoder rather than a cast arm.
         ColumnType::Bytea => Ok(Datum::Bytea(crate::session::decode_bytea_text(text)?)),
-        _ => Ok(crabka_pgtypes::cast::cast_assign(
+        // The session's styles, not the canonical ones: PostgreSQL runs the
+        // target type's input function here, and `date_in`/`timestamp_in` read
+        // `DateStyle`'s field order. A stored `'97/02/10'` has to mean what the
+        // same literal means when it is written as a cast.
+        _ => Ok(crabka_pgtypes::cast::cast_assign_in(
             &value,
             base,
-            &ctx.time_zone,
+            ctx.output_style(),
         )?),
     }
 }
@@ -10013,7 +10026,11 @@ pub(crate) fn coerce(
             Datum::Int4(_) | Datum::Int8(_) | Datum::Float8(_) | Datum::Numeric(_)
         )
     {
-        return Ok(crabka_pgtypes::cast::cast(&value, target, &ctx.time_zone)?);
+        return Ok(crabka_pgtypes::cast::cast_in(
+            &value,
+            target,
+            ctx.output_style(),
+        )?);
     }
     Ok(match (value, target) {
         (Datum::Null, _) => Datum::Null,
@@ -10032,7 +10049,7 @@ pub(crate) fn coerce(
             crabka_pgtypes::string::apply_char_typmod(&s, limit, Coercion::Assignment)?,
         ),
         (value, target @ (ColumnType::Varchar(_) | ColumnType::Char(_))) => {
-            crabka_pgtypes::cast::cast_assign(&value, target, &ctx.time_zone)?
+            crabka_pgtypes::cast::cast_assign_in(&value, target, ctx.output_style())?
         }
         (Datum::Text(s), ColumnType::Uuid) => {
             Datum::Text(crabka_pgtypes::uuid::UuidBytes::parse(&s)?.to_canonical_text())
@@ -10090,7 +10107,7 @@ pub(crate) fn coerce(
         // an over-long value, where the explicit cast the catch-all would use
         // pads or truncates silently.
         (value @ Datum::BitString(_), ty @ (ColumnType::Bit(_) | ColumnType::VarBit(_))) => {
-            crabka_pgtypes::cast::cast_assign(&value, ty, &ctx.time_zone)?
+            crabka_pgtypes::cast::cast_assign_in(&value, ty, ctx.output_style())?
         }
         // `json → jsonb` and `jsonb → json` are assignment-level casts in
         // `pg_cast`, so storing one in a column of the other is allowed and runs
@@ -10100,9 +10117,9 @@ pub(crate) fn coerce(
             ty @ (ColumnType::Jsonb | ColumnType::Json),
         )
         | (value @ (Datum::Text(_) | Datum::Array(_)), ty @ ColumnType::Array(_)) => {
-            // `cast_assign`, because this is a store: an over-long element of a
-            // `varchar(n)[]` column is 22001, not a silent truncation.
-            crabka_pgtypes::cast::cast_assign(&value, ty, &ctx.time_zone)?
+            // `cast_assign_in`, because this is a store: an over-long element
+            // of a `varchar(n)[]` column is 22001, not a silent truncation.
+            crabka_pgtypes::cast::cast_assign_in(&value, ty, ctx.output_style())?
         }
         (v, target) => {
             // Assignment-context implicit casts — PostgreSQL's pg_cast
@@ -10113,7 +10130,11 @@ pub(crate) fn coerce(
             if let Some(from) = v.column_type()
                 && crabka_pgtypes::cast::assignment_cast_allowed(from, target)
             {
-                return Ok(crabka_pgtypes::cast::cast(&v, target, &ctx.time_zone)?);
+                return Ok(crabka_pgtypes::cast::cast_in(
+                    &v,
+                    target,
+                    ctx.output_style(),
+                )?);
             }
             return Err(ExecError::TypeMismatch(format!(
                 "column is of type {} but expression is of type {}",
@@ -23766,7 +23787,11 @@ fn alter_table_action_ops(
                             if value.is_null() {
                                 Ok(Datum::Null)
                             } else {
-                                crabka_pgtypes::cast::cast(&value, *ty, &ddl_ctx.time_zone)
+                                // `ALTER COLUMN … TYPE` without `USING` is the
+                                // implicit `column::newtype`, which reads the
+                                // session's `DateStyle` when the old column is
+                                // a string and the new one a date or time.
+                                crabka_pgtypes::cast::cast_in(&value, *ty, ddl_ctx.output_style())
                                     .map_err(ExecError::from)
                             }
                         }

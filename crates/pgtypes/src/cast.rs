@@ -337,12 +337,32 @@ pub fn cast_assign(
     to: ColumnType,
     tz: &jiff::tz::TimeZone,
 ) -> Result<Datum, TypeError> {
+    cast_assign_in(value, to, crate::encoding::OutputStyle::with_zone(tz))
+}
+
+/// [`cast_assign`] in the session's styles, which is what storing a value
+/// actually needs: `PostgreSQL` reaches an assignment cast through the target
+/// type's *input function*, and that reads `DateStyle` exactly as a written
+/// cast does. `INSERT INTO t VALUES ('97/02/10')` and `SELECT date '97/02/10'`
+/// therefore agree about which field is the day under `DateStyle = 'ISO, YMD'`.
+///
+/// Prefer this over [`cast_assign`] wherever the session is at hand; the
+/// zone-only spelling is for callers rendering a canonical value.
+///
+/// # Errors
+///
+/// As [`cast_assign`].
+pub fn cast_assign_in(
+    value: &Datum,
+    to: ColumnType,
+    style: crate::encoding::OutputStyle<'_>,
+) -> Result<Datum, TypeError> {
     // Cast to the *unbounded* type first so `cast_in` applies no modifier of its
     // own, then apply the modifier under assignment rules. Splitting it this way
     // keeps one implementation of every cast arm.
     match to {
         ColumnType::Varchar(Some(_)) | ColumnType::Char(Some(_)) => {
-            let unbounded = cast(value, unbounded_string(to), tz)?;
+            let unbounded = cast_in(value, unbounded_string(to), style)?;
             bounded_string(&unbounded, to)
         }
         // `bit(n)` rejects a length mismatch and `bit varying(n)` an over-long
@@ -350,14 +370,14 @@ pub fn cast_assign(
         // difference between `B'10'::bit(11)` and storing `B'10'` in one.
         ColumnType::Bit(Some(len)) | ColumnType::VarBit(Some(len)) => {
             let varying = matches!(to, ColumnType::VarBit(_));
-            let unbounded = cast(
+            let unbounded = cast_in(
                 value,
                 if varying {
                     ColumnType::VarBit(None)
                 } else {
                     ColumnType::Bit(None)
                 },
-                tz,
+                style,
             )?;
             let Datum::BitString(bits) = &unbounded else {
                 return Ok(unbounded);
@@ -379,7 +399,8 @@ pub fn cast_assign(
         {
             let unbounded = crate::ElemType::from_column_type(unbounded_string(elem.column_type()))
                 .expect("an unbounded string is an element type");
-            let Datum::Array(mut array) = cast(value, ColumnType::Array(unbounded), tz)? else {
+            let Datum::Array(mut array) = cast_in(value, ColumnType::Array(unbounded), style)?
+            else {
                 return Ok(Datum::Null);
             };
             for element in &mut array.elems {
@@ -388,7 +409,7 @@ pub fn cast_assign(
             array.elem = elem;
             Ok(Datum::Array(array))
         }
-        _ => cast(value, to, tz),
+        _ => cast_in(value, to, style),
     }
 }
 
@@ -616,7 +637,10 @@ pub fn cast_in(
                 .into_iter()
                 .map(|e| match e {
                     None => Ok(Datum::Null),
-                    Some(text) => cast(&Datum::Text(text), elem.column_type(), tz),
+                    // The element input function reads the session's styles
+                    // too: `'{97/02/10}'::date[]` is `array_in` calling
+                    // `date_in`, which consults `DateStyle`'s field order.
+                    Some(text) => cast_in(&Datum::Text(text), elem.column_type(), style),
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(Datum::Array(crate::datum::ArrayValue::with_dims(
@@ -659,7 +683,7 @@ pub fn cast_in(
             let elems = a
                 .elems
                 .iter()
-                .map(|e| cast(e, elem.column_type(), tz))
+                .map(|e| cast_in(e, elem.column_type(), style))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(Datum::Array(crate::datum::ArrayValue::with_dims(
                 elem,
@@ -671,7 +695,7 @@ pub fn cast_in(
             let elems = a
                 .elems
                 .iter()
-                .map(|e| cast(e, elem.column_type(), tz))
+                .map(|e| cast_in(e, elem.column_type(), style))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(Datum::Array(crate::datum::ArrayValue::with_dims(
                 elem,
@@ -1524,6 +1548,90 @@ mod tests {
 
     fn utc() -> jiff::tz::TimeZone {
         jiff::tz::TimeZone::UTC
+    }
+
+    /// The session styles a `DateStyle` of `'ISO, <order>'` produces.
+    fn ordered(
+        tz: &jiff::tz::TimeZone,
+        order: crate::datetime::DateOrder,
+    ) -> crate::encoding::OutputStyle<'_> {
+        crate::encoding::OutputStyle {
+            date_order: order,
+            ..crate::encoding::OutputStyle::with_zone(tz)
+        }
+    }
+
+    /// The field order reaches every arm that runs a type's input function,
+    /// including the ones that run it *inside* a container: `array_in` and
+    /// `record_in` call the element/attribute input function, and PostgreSQL's
+    /// read those GUCs exactly as a bare `date_in` does. Checked against
+    /// PostgreSQL 18.4.
+    #[test]
+    fn the_date_order_reaches_element_and_attribute_input_functions() {
+        use assert2::assert;
+
+        use crate::datetime::DateOrder;
+        let tz = utc();
+        let date_array = ColumnType::Array(crate::ElemType::Date);
+        let expected = cast_in(
+            &Datum::Text("1997-02-10".into()),
+            ColumnType::Date,
+            ordered(&tz, DateOrder::Ymd),
+        )
+        .expect("unambiguous date");
+        for (order, literal) in [
+            (DateOrder::Ymd, "97/02/10"),
+            (DateOrder::Dmy, "10/02/97"),
+            (DateOrder::Mdy, "02/10/97"),
+        ] {
+            let style = ordered(&tz, order);
+            let parsed = cast_in(&Datum::Text(literal.into()), ColumnType::Date, style)
+                .unwrap_or_else(|error| panic!("{order:?} {literal}: {error:?}"));
+            assert!(parsed == expected, "{order:?} bare");
+
+            let array = cast_in(&Datum::Text(format!("{{{literal}}}")), date_array, style)
+                .unwrap_or_else(|error| panic!("{order:?} {{{literal}}}: {error:?}"));
+            let Datum::Array(array) = array else {
+                panic!("{order:?}: expected an array");
+            };
+            assert!(
+                array.elems == vec![expected.clone()],
+                "{order:?} array element"
+            );
+
+            // An assignment reads it too — the store path is not a different
+            // parser from the one a written cast uses.
+            let assigned = cast_assign_in(&Datum::Text(literal.into()), ColumnType::Date, style)
+                .unwrap_or_else(|error| panic!("{order:?} assign {literal}: {error:?}"));
+            assert!(assigned == expected, "{order:?} assignment");
+        }
+        // The order is decisive, not advisory: `31/01/97` is a date under DMY
+        // and out of range under MDY, through the same three arms.
+        for build in [ColumnType::Date, date_array] {
+            let literal = |text: &str| {
+                if matches!(build, ColumnType::Array(_)) {
+                    format!("{{{text}}}")
+                } else {
+                    text.to_string()
+                }
+            };
+            assert!(
+                cast_in(
+                    &Datum::Text(literal("31/01/97")),
+                    build,
+                    ordered(&tz, DateOrder::Dmy)
+                )
+                .is_ok()
+            );
+            assert!(
+                cast_in(
+                    &Datum::Text(literal("31/01/97")),
+                    build,
+                    ordered(&tz, DateOrder::Mdy)
+                )
+                .is_err()
+            );
+        }
     }
 
     // ---- the static matrix ----

@@ -60,15 +60,33 @@ pub(crate) fn eval(
 
 /// Executor-level cast, adding the `jsonpath` input function to the pure type
 /// layer's Datum-preserving cast table.
+///
+/// Every style but the zone is left at its default, so a `text → date`/
+/// `timestamp` arm reads an ambiguous all-numeric literal as `MDY` whatever the
+/// session says. Prefer [`cast_value_in`] wherever the context is at hand.
 pub(crate) fn cast_value(
     value: &Datum,
     target: ColumnType,
     time_zone: &jiff::tz::TimeZone,
 ) -> Result<Datum, ExecError> {
+    cast_value_in(
+        value,
+        target,
+        crabka_pgtypes::encoding::OutputStyle::with_zone(time_zone),
+    )
+}
+
+/// [`cast_value`] in the session's styles, so an ambiguous all-numeric date
+/// literal is read under the session's `DateStyle` field order.
+pub(crate) fn cast_value_in(
+    value: &Datum,
+    target: ColumnType,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) -> Result<Datum, ExecError> {
     match target.storage_type() {
         ColumnType::JsonPath => crate::jsonpath::cast_datum(value),
         ColumnType::Array(ElemType::JsonPath) => crate::jsonpath::cast_array_datum(value),
-        _ => crabka_pgtypes::cast::cast(value, target, time_zone).map_err(ExecError::from),
+        _ => crabka_pgtypes::cast::cast_in(value, target, style).map_err(ExecError::from),
     }
 }
 
@@ -446,7 +464,10 @@ fn eval_depth_inner(
                             elem.name()
                         ))
                     })?;
-                    crabka_pgtypes::cast::cast(&a, target, &ctx.time_zone)?
+                    // `array_in` runs the element type's input function, so
+                    // the session's `DateStyle` order decides how an ambiguous
+                    // all-numeric element is read.
+                    crabka_pgtypes::cast::cast_in(&a, target, ctx.output_style())?
                 }
                 _ => a,
             };
