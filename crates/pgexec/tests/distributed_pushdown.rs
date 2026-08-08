@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 
+use assert2::check;
 use crabka_pgcatalog::{Column, RelationName, Table};
 use crabka_pgexec::{
     ColumnPredicate, JoinExecutionStrategy, JoinRangeRequest, JoinRangeResult,
@@ -8,7 +9,7 @@ use crabka_pgexec::{
     ScannedRow, SqlEngine, TopKColumn, TopKSpec,
     plan_dist::{
         CheckpointMetadata, JoinInputs, JoinStrategy, PlannerConfig, SequenceCounters, Stats,
-        plan_join, plan_join_for_tables, plan_scan, strict_predicate_for_filter,
+        StoredRowStats, plan_join, plan_join_for_tables, plan_scan, strict_predicate_for_filter,
     },
     scanner::{
         LocalRangeScanner, apply_executable_scan_pushdown, apply_scan_pushdown,
@@ -1326,6 +1327,250 @@ async fn correlated_exists_inside_or_builds_one_lazy_lookup() {
     assert_eq!(
         or_scans.last().expect("OR inner scan").projection,
         ProjectionPushdown::Columns(vec![0])
+    );
+}
+
+/// Read a relation's id the way the planner keys statistics on it.
+fn table_id(engine: &SqlEngine, relname: &str) -> u64 {
+    let table = crabka_pgcatalog::get_table(engine.catalog_kv(), &RelationName::public(relname))
+        .expect("relation exists");
+    u64::from(table.id)
+}
+
+async fn run(engine: &SqlEngine, sql: &str) {
+    engine
+        .connect()
+        .simple_query(sql)
+        .await
+        .unwrap_or_else(|error| panic!("{sql}: {error:?}"));
+}
+
+#[tokio::test]
+async fn table_statistics_track_the_rows_a_table_holds_not_the_rowids_it_burned() {
+    let engine = SqlEngine::new();
+    run(&engine, "CREATE TABLE t (id int4, k int4)").await;
+    let oid = table_id(&engine, "t");
+    // A threshold of 100 rows, so the rowid counter never proves the table small
+    // on its own and every estimate below is a measurement.
+    let stats = StoredRowStats::new(engine.kv_handle(), 100 * 256);
+    let rows = |bytes: Option<u64>| bytes.map(|bytes| bytes / 256);
+
+    // Empty. The durable rowid counter already reads 1_025 here, because an
+    // insert reserves a block of 1_024 rowids ahead of handing any out.
+    check!(rows(stats.estimated_bytes(oid)) == Some(0));
+
+    run(
+        &engine,
+        "INSERT INTO t SELECT g, 41 - g FROM generate_series(1, 40) AS g; \
+         CREATE INDEX t_k ON t (k)",
+    )
+    .await;
+    check!(rows(stats.estimated_bytes(oid)) == Some(40));
+
+    // CLUSTER rewrites all 40 rows at fresh rowids and permanently vacates the
+    // block they came from. The dead versions are still stored until the sweep
+    // reclaims them, so the estimate doubles first — the safe direction.
+    run(&engine, "CLUSTER t USING t_k").await;
+    check!(rows(stats.estimated_bytes(oid)) == Some(80));
+    engine.vacuum().await.expect("vacuum");
+    check!(rows(stats.estimated_bytes(oid)) == Some(40));
+
+    // The rowid counter reads 2_064 allocations at this point and will never
+    // read less; a second CLUSTER takes it to 4_064. Deleting behaves the same
+    // way round: high until swept, exact after.
+    run(&engine, "DELETE FROM t WHERE id > 4").await;
+    check!(rows(stats.estimated_bytes(oid)) == Some(40));
+    engine.vacuum().await.expect("vacuum");
+    check!(rows(stats.estimated_bytes(oid)) == Some(4));
+}
+
+fn relation(engine: &SqlEngine, relname: &str) -> Table {
+    crabka_pgcatalog::get_table(engine.catalog_kv(), &RelationName::public(relname))
+        .expect("relation exists")
+}
+
+/// Rows the broadcast threshold in `config` allows.
+fn threshold_rows(rows: u64) -> PlannerConfig {
+    PlannerConfig {
+        broadcast_threshold_bytes: rows * 256,
+    }
+}
+
+#[tokio::test]
+async fn a_small_table_is_broadcast_instead_of_gathered_once_its_rows_are_counted() {
+    let engine = SqlEngine::new();
+    run(
+        &engine,
+        "CREATE TABLE small_t (id int4); \
+         CREATE TABLE big_t (id int4); \
+         INSERT INTO small_t SELECT g FROM generate_series(1, 40) AS g; \
+         INSERT INTO big_t SELECT g FROM generate_series(1, 4000) AS g",
+    )
+    .await;
+    let (small, big) = (relation(&engine, "small_t"), relation(&engine, "big_t"));
+
+    // 40 rows is 10 KiB of allowance against a 128 KiB threshold. The rowid
+    // counter says 1_064 rows and 266 KiB, because inserting reserves a block of
+    // 1_024 rowids ahead of hand-out — no delete and no CLUSTER required.
+    check!(
+        plan_join_for_tables(
+            engine.join_stats().as_ref(),
+            threshold_rows(512),
+            &small,
+            &big,
+            &[],
+            &[],
+        ) == JoinStrategy::Broadcast {
+            small_table_id: u64::from(small.id)
+        }
+    );
+}
+
+#[tokio::test]
+async fn clustering_a_table_does_not_change_how_it_is_joined() {
+    let engine = SqlEngine::new();
+    run(
+        &engine,
+        "CREATE TABLE t (id int4, k int4); \
+         CREATE TABLE other (id int4); \
+         INSERT INTO t SELECT g, 2001 - g FROM generate_series(1, 2000) AS g; \
+         INSERT INTO other SELECT g FROM generate_series(1, 100000) AS g; \
+         CREATE INDEX t_k ON t (k)",
+    )
+    .await;
+    let (t, other) = (relation(&engine, "t"), relation(&engine, "other"));
+    let strategy = || {
+        plan_join_for_tables(
+            engine.join_stats().as_ref(),
+            threshold_rows(3_100),
+            &t,
+            &other,
+            &[],
+            &[],
+        )
+    };
+    let broadcast_t = JoinStrategy::Broadcast {
+        small_table_id: u64::from(t.id),
+    };
+    check!(strategy() == broadcast_t);
+
+    // CLUSTER burns 2_000 fresh rowids to rewrite 2_000 rows, so the rowid
+    // counter reads 4_000 allocations — past the threshold — for a table holding
+    // exactly the rows it held a moment ago, and it will never read less. What
+    // the table stores comes back to 2_000 as soon as the dead versions are
+    // swept, and this join is planned the same way it was before.
+    run(&engine, "CLUSTER t USING t_k").await;
+    engine.vacuum().await.expect("vacuum");
+    check!(strategy() == broadcast_t);
+}
+
+#[test]
+fn stored_row_counts_bound_estimates_that_the_rowid_counter_cannot() {
+    use crabka_pgexec::plan_dist::StoredRowStats;
+    use crabka_pgkv::{Kv as _, MemKv, key};
+
+    // A sharded table's rowid is a packed clock reading, so its sequence key
+    // holds a number near the top of the domain however few rows it has.
+    let clock_rowid = 7_400_000_000_000_000_000_u64;
+    let cases: [(&str, u64, Vec<u64>, Option<u64>); 5] = [
+        ("no rows and no counter", 0, vec![], Some(0)),
+        (
+            "a counter that outran the rows",
+            1_065,
+            vec![1, 2, 3],
+            Some(3 * 256),
+        ),
+        (
+            "rowids that are clock readings",
+            clock_rowid + 1,
+            vec![clock_rowid - 2, clock_rowid - 1, clock_rowid],
+            Some(3 * 256),
+        ),
+        // The counter still bounds a table whose stored keys outnumber it,
+        // which is what an unvacuumed version chain looks like.
+        (
+            "more rows stored than allocated",
+            3,
+            vec![1, 2, 3, 4, 5],
+            Some(2 * 256),
+        ),
+        // Past the budget the count abstains and the counter's answer stands:
+        // 40 allocated is 39 rows, and a table this far over the threshold is
+        // not a broadcast candidate under either number.
+        (
+            "more rows than the budget reads",
+            40,
+            (1..=40).collect(),
+            Some(39 * 256),
+        ),
+    ];
+
+    for (case, sequence, rowids, expected) in cases {
+        let kv = MemKv::new();
+        if sequence > 0 {
+            kv.put(key::seq_key(7), sequence.to_be_bytes().to_vec())
+                .expect("seed sequence");
+        }
+        for rowid in rowids {
+            let mut version_key = key::row_key(7, rowid);
+            version_key.extend_from_slice(&1_u64.to_be_bytes());
+            kv.put(version_key, vec![0]).expect("seed row version");
+        }
+        // Room for eight rows, so the last case runs past the budget.
+        let stats = StoredRowStats::new(Arc::new(kv), 8 * 256);
+
+        check!(stats.estimated_bytes(7) == expected, "{case}");
+    }
+}
+
+#[tokio::test]
+async fn a_one_row_sharded_table_is_small_enough_to_broadcast() {
+    let scanner = Arc::new(RecordingScanner::default());
+    let mut engine = SqlEngine::new();
+    engine.set_range_scanner(scanner.clone());
+    run(
+        &engine,
+        "CREATE TABLE left_t (id int4, value text) SHARDED; \
+         CREATE TABLE right_t (id int4, value text) SHARDED; \
+         INSERT INTO left_t VALUES (1, 'l'); \
+         INSERT INTO right_t VALUES (1, 'r'); \
+         SELECT left_t.value, right_t.value FROM left_t JOIN right_t ON left_t.id = right_t.id",
+    )
+    .await;
+
+    // A sharded table's hidden rowid is a leased timestamp rather than a
+    // position in a counter, so reading the counter as a row count values a
+    // one-row table at about 1.9 exabytes: no configurable threshold calls that
+    // small, and this join could never be planned as a broadcast.
+    let strategy = scanner.joins().first().expect("one join dispatch").strategy;
+    check!(
+        strategy == JoinExecutionStrategy::BroadcastLeft
+            || strategy == JoinExecutionStrategy::BroadcastRight
+    );
+}
+
+#[tokio::test]
+async fn a_sharded_table_above_the_threshold_is_still_gathered() {
+    let scanner = Arc::new(RecordingScanner::default());
+    let mut engine = SqlEngine::new();
+    engine.set_range_scanner(scanner.clone());
+    // Four rows' worth of allowance, so eight rows must not be broadcast.
+    engine.set_join_strategy_config(PlannerConfig {
+        broadcast_threshold_bytes: 4 * 256,
+    });
+    run(
+        &engine,
+        "CREATE TABLE left_t (id int4, value text) SHARDED; \
+         CREATE TABLE right_t (id int4, value text) SHARDED; \
+         INSERT INTO left_t VALUES (1,'l'),(2,'l'),(3,'l'),(4,'l'),(5,'l'),(6,'l'),(7,'l'),(8,'l'); \
+         INSERT INTO right_t VALUES (1,'r'),(2,'r'),(3,'r'),(4,'r'),(5,'r'),(6,'r'),(7,'r'),(8,'r'); \
+         SELECT left_t.value, right_t.value FROM left_t JOIN right_t ON left_t.id = right_t.id",
+    )
+    .await;
+
+    check!(
+        scanner.joins().first().expect("one join dispatch").strategy
+            == JoinExecutionStrategy::Gather
     );
 }
 

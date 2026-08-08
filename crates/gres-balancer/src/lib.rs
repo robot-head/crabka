@@ -45,6 +45,7 @@ mod tests {
             checkpoint_bytes: Some(store_bytes / 2),
             commit_rate: Some(commit_rate),
             scan_bytes: Some(0),
+            median_rowid: Some(500),
             is_sharded: true,
             co_location_group: None,
             co_location_bucket: None,
@@ -120,7 +121,6 @@ mod tests {
         GoalContext {
             size_ceiling: bytes(1_000),
             merge_floor: bytes(200),
-            split_stride_rows: 100,
             load_skew_hysteresis: percent(25),
             max_ranges_per_compute: Some(3),
             max_operations: 32,
@@ -155,6 +155,7 @@ mod tests {
                 tenant_name: "blue".to_string(),
                 range_id: 1,
                 row_count: None,
+                median_rowid: Some(500),
                 store_bytes: Some(2_500),
                 write_rate: Some(0),
                 read_rate: Some(0),
@@ -230,6 +231,7 @@ mod tests {
                 tenant_name: "blue".to_string(),
                 range_id: 1,
                 row_count: None,
+                median_rowid: None,
                 store_bytes: None,
                 write_rate: None,
                 read_rate: None,
@@ -249,6 +251,7 @@ mod tests {
         assert!(output.plan.operations.is_empty());
         assert!(output.state_after[0].ranges[0].store_bytes.is_none());
         assert!(output.state_after[0].ranges[0].commit_rate.is_none());
+        assert!(output.state_after[0].ranges[0].median_rowid.is_none());
     }
 
     #[test]
@@ -262,6 +265,7 @@ mod tests {
                     tenant_name: "blue".to_string(),
                     range_id: 1,
                     row_count: None,
+                    median_rowid: Some(500),
                     store_bytes: Some(2_500),
                     write_rate: Some(0),
                     read_rate: Some(0),
@@ -1064,7 +1068,20 @@ mod tests {
         RangeMetrics {
             start_key,
             end_key,
+            median_rowid: None,
             ..range(1, "c1", 2_500, 0)
+        }
+    }
+
+    /// An oversized range whose owner reported `median_rowid`.
+    fn oversized_observing(
+        start_key: RangeBoundary,
+        end_key: Option<RangeBoundary>,
+        median_rowid: u64,
+    ) -> RangeMetrics {
+        RangeMetrics {
+            median_rowid: Some(median_rowid),
+            ..oversized(start_key, end_key)
         }
     }
 
@@ -1084,27 +1101,61 @@ mod tests {
     }
 
     #[test]
-    fn split_points_are_bucket_starts_on_hash_sharded_ranges_and_rowids_elsewhere() {
+    fn split_points_are_bucket_starts_on_hash_sharded_ranges_and_observed_rowids_elsewhere() {
         let cases = [
             (
-                "row sharded range halves its rowid interval",
+                "row sharded range cuts at the rowid its owner observed",
+                table(),
+                oversized_observing(
+                    RangeBoundary::new(10, 0),
+                    Some(RangeBoundary::new(10, 1_000)),
+                    900,
+                ),
+                Some(RangeBoundary::new(10, 900)),
+            ),
+            (
+                "row sharded range unbounded in its table cuts at the observed rowid",
+                table(),
+                oversized_observing(RangeBoundary::new(10, 0), None, 5_000_000_000),
+                Some(RangeBoundary::new(10, 5_000_000_000)),
+            ),
+            (
+                "row sharded range whose owner observed nothing is not planned",
                 table(),
                 oversized(
                     RangeBoundary::new(10, 0),
                     Some(RangeBoundary::new(10, 1_000)),
                 ),
-                Some(RangeBoundary::new(10, 500)),
+                None,
             ),
             (
-                "row sharded range unbounded in its table steps one stride",
+                "observed rowid outside the range is not a legal boundary",
                 table(),
-                oversized(RangeBoundary::new(10, 0), None),
-                Some(RangeBoundary::new(10, 100)),
+                oversized_observing(
+                    RangeBoundary::new(10, 0),
+                    Some(RangeBoundary::new(10, 1_000)),
+                    4_000,
+                ),
+                None,
+            ),
+            (
+                "observed rowid at the range start would leave an empty successor",
+                table(),
+                oversized_observing(
+                    RangeBoundary::new(10, 10),
+                    Some(RangeBoundary::new(10, 1_000)),
+                    10,
+                ),
+                None,
             ),
             (
                 "row sharded range of one rowid has no interior point",
                 table(),
-                oversized(RangeBoundary::new(10, 10), Some(RangeBoundary::new(10, 11))),
+                oversized_observing(
+                    RangeBoundary::new(10, 10),
+                    Some(RangeBoundary::new(10, 11)),
+                    10,
+                ),
                 None,
             ),
             (
@@ -1167,9 +1218,10 @@ mod tests {
             (
                 "row sharded range whose boundaries carry a bucket is not planned",
                 table(),
-                oversized(
+                oversized_observing(
                     RangeBoundary::hash(10, 3, 0),
                     Some(RangeBoundary::hash(10, 4, 0)),
+                    500,
                 ),
                 None,
             ),
@@ -1183,6 +1235,100 @@ mod tests {
                 "{case}"
             );
         }
+    }
+
+    /// Byte weight one modelled row contributes to its range.
+    const SIM_ROW_BYTES: u64 = 100;
+
+    /// The metrics a set of range owners would report for `layout`, given where
+    /// the table's live rowids actually are.
+    fn observed_tenant(live: &[u64], layout: &[(u32, u64, Option<u64>)]) -> TenantMetrics {
+        let ranges = layout
+            .iter()
+            .map(|&(range_id, start, end)| {
+                let owned = owned_rowids(live, start, end);
+                RangeMetrics {
+                    start_key: RangeBoundary::new(10, start),
+                    end_key: end.map(|end| RangeBoundary::new(10, end)),
+                    store_bytes: Some(
+                        u64::try_from(owned.len()).expect("row count") * SIM_ROW_BYTES,
+                    ),
+                    median_rowid: owned.get(owned.len() / 2).copied(),
+                    ..range(range_id, "c1", 0, 0)
+                }
+            })
+            .collect();
+        TenantMetrics {
+            ranges,
+            ..tenant(Vec::new())
+        }
+    }
+
+    fn owned_rowids(live: &[u64], start: u64, end: Option<u64>) -> Vec<u64> {
+        live.iter()
+            .copied()
+            .filter(|rowid| *rowid >= start && end.is_none_or(|end| *rowid < end))
+            .collect()
+    }
+
+    #[test]
+    fn splitting_a_clustered_range_converges_without_leaving_empty_ranges() {
+        // What one CLUSTER leaves behind: every live row rewritten into a fresh
+        // block at the top, and the 4_096 rowids below it permanently vacated.
+        // The range's own interval says the rows start at 0, and they do not.
+        let live: Vec<u64> = (4_096..4_160).collect();
+        let ctx = GoalContext {
+            // Isolate splitting: nothing here should be merged back together.
+            merge_floor: bytes(0),
+            ..context()
+        };
+        let mut layout = vec![(1_u32, 0_u64, None)];
+        let mut next_range_id = 2_u32;
+        let mut epochs = 0_u32;
+
+        loop {
+            let operations = SizeGoal.propose(&[observed_tenant(&live, &layout)], &ctx);
+            if operations.is_empty() {
+                break;
+            }
+            // Each epoch at least halves the rows of every oversized range, so
+            // the loop terminates; a boundary that misses the rows would not.
+            assert!(epochs < 16, "split planning did not converge");
+            epochs += 1;
+            for operation in operations {
+                let BalanceOperation::Split {
+                    source_range_id,
+                    split_at,
+                    ..
+                } = operation
+                else {
+                    unreachable!("the size goal proposed something other than a split")
+                };
+                let position = layout
+                    .iter()
+                    .position(|(range_id, _, _)| *range_id == source_range_id)
+                    .expect("split names a range in the layout");
+                let (_, start, end) = layout[position];
+                let boundary = split_at.rowid;
+                // The whole point: a cut that leaves one successor with no rows
+                // costs an epoch and a range and reduces nothing.
+                check!(!owned_rowids(&live, start, Some(boundary)).is_empty());
+                check!(!owned_rowids(&live, boundary, end).is_empty());
+                layout[position] = (source_range_id, start, Some(boundary));
+                layout.push((next_range_id, boundary, end));
+                next_range_id += 1;
+            }
+            layout.sort_unstable_by_key(|(_, start, _)| *start);
+        }
+
+        let sizes: Vec<usize> = layout
+            .iter()
+            .map(|&(_, start, end)| owned_rowids(&live, start, end).len())
+            .collect();
+        // 64 rows at 100 bytes under a 1_000-byte ceiling: eight ranges of
+        // eight, reached by three halvings.
+        check!(epochs == 3);
+        check!(sizes == vec![8; 8]);
     }
 
     fn hash_placement(bucket_count: u32) -> HashPlacement {

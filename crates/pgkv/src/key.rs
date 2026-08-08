@@ -160,6 +160,19 @@ pub fn table_prefix(table_id: u32) -> Vec<u8> {
     k
 }
 
+/// Exclusive upper bound of a table's primary index: the prefix of the index
+/// that would follow it, which no primary-index key can reach.
+#[must_use]
+pub fn table_prefix_end(table_id: u32) -> Vec<u8> {
+    // Checked at compile time, so the bound needs no runtime fallibility.
+    const AFTER_PRIMARY: u32 = INDEX_PRIMARY + 1;
+
+    let mut k = Vec::with_capacity(8);
+    put_u32(&mut k, table_id);
+    put_u32(&mut k, AFTER_PRIMARY);
+    k
+}
+
 /// Full key for one row: table prefix followed by the order-preserving rowid.
 #[must_use]
 pub fn row_key(table_id: u32, rowid: u64) -> Vec<u8> {

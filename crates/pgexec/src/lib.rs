@@ -947,7 +947,10 @@ impl SqlEngine {
             clock: Arc::new(crate::clock::SystemClock),
             foreign_scanner: None,
             range_scanner: Arc::new(scanner::LocalRangeScanner),
-            join_stats: Arc::new(plan_dist::DurableSequenceStats::new(Arc::clone(&kv))),
+            join_stats: Arc::new(plan_dist::StoredRowStats::new(
+                Arc::clone(&kv),
+                policy.join_broadcast_threshold.bytes_u64(),
+            )),
             join_strategy_config: plan_dist::PlannerConfig {
                 broadcast_threshold_bytes: policy.join_broadcast_threshold.bytes_u64(),
             },
@@ -1570,7 +1573,10 @@ impl SqlEngine {
             clock: Arc::new(crate::clock::SystemClock),
             foreign_scanner: None,
             range_scanner: Arc::new(scanner::LocalRangeScanner),
-            join_stats: Arc::new(plan_dist::DurableSequenceStats::new(Arc::clone(&sm_kv))),
+            join_stats: Arc::new(plan_dist::StoredRowStats::new(
+                Arc::clone(&sm_kv),
+                policy.join_broadcast_threshold.bytes_u64(),
+            )),
             join_strategy_config: plan_dist::PlannerConfig {
                 broadcast_threshold_bytes: policy.join_broadcast_threshold.bytes_u64(),
             },

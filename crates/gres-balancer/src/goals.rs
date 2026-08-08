@@ -37,8 +37,7 @@ pub struct GoalContext {
     /// Merge adjacent ranges whose combined size stays below this floor.
     #[serde(with = "crabka_units::serde_units::human::byte_size")]
     pub merge_floor: ByteSize,
-    pub split_stride_rows: u64,
-    /// Ignore load skew while it stays within this margin.
+    /// Leave load skew alone while it stays within this margin.
     #[serde(with = "crabka_units::serde_units::human::ratio")]
     pub load_skew_hysteresis: Ratio,
     pub max_ranges_per_compute: Option<usize>,
@@ -65,7 +64,6 @@ impl Default for GoalContext {
         Self {
             size_ceiling: gibibytes(1),
             merge_floor: mebibytes(64),
-            split_stride_rows: 1_000_000,
             load_skew_hysteresis: percent(25),
             max_ranges_per_compute: None,
             max_operations: 32,
@@ -351,11 +349,7 @@ fn split_oversized_ranges(tenant: &TenantMetrics, ctx: &GoalContext) -> Vec<Bala
         })
         .filter(|range| !ctx.is_in_cooldown(range.range_id, OperationKind::Split))
         .filter_map(|range| {
-            let split_at = split_boundary(
-                range,
-                hash_bucket_count(tenant, range.table_id),
-                ctx.split_stride_rows,
-            )?;
+            let split_at = split_boundary(range, hash_bucket_count(tenant, range.table_id))?;
             Some(BalanceOperation::Split {
                 tenant_name: tenant.tenant_name.clone(),
                 source_range_id: range.range_id,
@@ -408,23 +402,18 @@ fn merge_tiny_adjacent_ranges(tenant: &TenantMetrics, ctx: &GoalContext) -> Vec<
 /// Return the boundary to cut a range at, or `None` when the range has no legal
 /// split point.
 ///
-/// The planner cuts a hash-sharded table on the first row of a bucket the table
-/// has, and nowhere else. Hash equality routing probes a bucket at rowid 0 and
-/// answers for every row of that bucket. A boundary inside a bucket would leave
-/// the other rows of that bucket on a range the router never consults.
-///
-/// `RangeMap::plan_hash_split_at_key`, the registry function
-/// `ensure_boundaries_match_hash_placements`, and `gres split` all enforce the
-/// same rule. A mid-bucket point planned here would only produce an operation
-/// that execution rejects.
-fn split_boundary(
-    range: &RangeMetrics,
-    hash_bucket_count: Option<u32>,
-    stride: u64,
-) -> Option<RangeBoundary> {
+/// A hash-sharded table is cut on the first row of a bucket it has, and nowhere
+/// else. Hash equality routing probes a bucket at rowid 0 and answers for every
+/// row of that bucket, so a boundary inside a bucket would leave the rest of its
+/// rows on a range the router never consults. The same rule is enforced by
+/// `RangeMap::plan_hash_split_at_key`, by the registry
+/// (`ensure_boundaries_match_hash_placements`), and by `gres split`; planning a
+/// mid-bucket point here would only ever produce an operation rejected at
+/// execution.
+fn split_boundary(range: &RangeMetrics, hash_bucket_count: Option<u32>) -> Option<RangeBoundary> {
     let candidate = match hash_bucket_count {
         Some(bucket_count) => bucket_start_boundary(range, bucket_count)?,
-        None => rowid_boundary(range, stride),
+        None => rowid_boundary(range)?,
     };
 
     // `RangeMap::plan_split_at_key`: a split point lies strictly inside the
@@ -476,28 +465,31 @@ fn bucket_limit(range: &RangeMetrics, table_id: u64, bucket_count: u32) -> Optio
     }
 }
 
-/// Halve the rowids the range owns of `range.table_id`, or step one stride when
-/// the range is unbounded within that table.
-fn rowid_boundary(range: &RangeMetrics, stride: u64) -> RangeBoundary {
-    let table_id = range.table_id;
-    let start_rowid = if range.start_key.table_id == table_id {
-        range.start_key.rowid
-    } else {
-        0
-    };
-    let bounded = range
-        .end_key
-        .filter(|end| end.table_id == table_id)
-        .map(|end| end.rowid);
-
-    let Some(end_rowid) = bounded else {
-        return RangeBoundary::new(table_id, start_rowid.saturating_add(stride.max(1)));
-    };
-
-    RangeBoundary::new(
-        table_id,
-        start_rowid.saturating_add(end_rowid.saturating_sub(start_rowid) / 2),
-    )
+/// Cut a non-hash range at a rowid its owner observed, and decline when it has
+/// not observed one.
+///
+/// Halving the range's *rowid interval* instead would assume rows are spread
+/// evenly through it, which is true of no table that has ever been deleted from.
+/// `CLUSTER` is the sharpest case: it rewrites every live row at a fresh rowid
+/// and permanently vacates the block it came from, so a clustered range holds
+/// all of its rows above the midpoint of its own interval. The midpoint boundary
+/// then produces one empty successor and one that still owns every row and every
+/// byte — so the size goal proposes the identical split again on the next epoch,
+/// against a range one rowid further along, and the loop adds an empty range per
+/// epoch without ever bringing one under the ceiling.
+///
+/// The unbounded case was worse still: it stepped a fixed stride from the range
+/// start, so reaching the live block of a table clustered at rowid 5e9 took five
+/// thousand splits, and on a timestamp-sharded table — whose rowids are packed
+/// clock readings, not counter positions — a million-rowid stride is a quarter
+/// of a millisecond and the walk never arrives.
+///
+/// Abstaining is what the rest of this crate already does with a metric it does
+/// not have (see [`crate::model::TenantMetrics::with_stats_snapshot`]), and an
+/// oversized range that no one can cut is a range that stays oversized — which
+/// is at least stable, and visible.
+fn rowid_boundary(range: &RangeMetrics) -> Option<RangeBoundary> {
+    Some(RangeBoundary::new(range.table_id, range.median_rowid?))
 }
 
 /// `RangeSpec::contains_key` over the registry's boundary type.

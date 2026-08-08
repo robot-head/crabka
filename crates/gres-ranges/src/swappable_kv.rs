@@ -67,6 +67,16 @@ impl Kv for SwappableKv {
         self.inner.load().scan_range(start, end)
     }
 
+    fn for_each_key(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+        visit: &mut dyn FnMut(&[u8]),
+    ) -> Result<usize, KvError> {
+        self.inner.load().for_each_key(start, end, limit, visit)
+    }
+
     fn write_batch(&self, ops: &[WriteOp]) -> Result<(), KvError> {
         self.inner.load().write_batch(ops)
     }
