@@ -964,7 +964,7 @@ pub(crate) enum SubscriptArg {
 }
 
 impl SubscriptArg {
-    fn is_slice(&self) -> bool {
+    pub(crate) fn is_slice(&self) -> bool {
         matches!(self, SubscriptArg::Slice { .. })
     }
 }
@@ -1094,8 +1094,11 @@ fn collect_slice(
     }
 }
 
-/// One subscript value as an integer. `None` is a NULL subscript.
-fn subscript_int(value: &Datum) -> Result<Option<i64>, ExecError> {
+/// One subscript value as an integer; `None` is a NULL subscript.
+///
+/// Shared with the geometric subscripting in `eval`, whose bounds `PostgreSQL`
+/// coerces to `integer` exactly as it does an array's.
+pub(crate) fn subscript_int(value: &Datum) -> Result<Option<i64>, ExecError> {
     Ok(match value {
         Datum::Null => None,
         Datum::Int2(n) => Some(i64::from(*n)),

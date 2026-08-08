@@ -1200,6 +1200,13 @@ fn unary_text(op: UnaryOp, expr: &Expr, ctx: Ctx<'_>) -> String {
         UnaryOp::IsNotUnknown => ctx.paren(format!("{} IS NOT UNKNOWN", expr_text(expr, ctx))),
         UnaryOp::BitNot => ctx.paren(format!("~ {}", expr_text(expr, ctx))),
         UnaryOp::TsNot => ctx.paren(format!("!! {}", expr_text(expr, ctx))),
+        // The geometric prefix operators. `get_rule_expr` prints every prefix
+        // operator the same way, so these parenthesize like `@` and `~` do.
+        UnaryOp::NPoints => ctx.paren(format!("# {}", expr_text(expr, ctx))),
+        UnaryOp::Length => ctx.paren(format!("@-@ {}", expr_text(expr, ctx))),
+        UnaryOp::Center => ctx.paren(format!("@@ {}", expr_text(expr, ctx))),
+        UnaryOp::IsHorizontal => ctx.paren(format!("?- {}", expr_text(expr, ctx))),
+        UnaryOp::IsVertical => ctx.paren(format!("?| {}", expr_text(expr, ctx))),
         // Alone among the postfix predicates, `IS DOCUMENT` is an `XmlExpr` in
         // PostgreSQL rather than a `BooleanTest`, and `get_rule_expr` adds no
         // parentheses around it — `SELECT data IS DOCUMENT AS d`, where the
@@ -1402,57 +1409,14 @@ pub(crate) fn const_text(value: &Datum, ty: ColumnType) -> String {
     }
 }
 
+/// The SQL spelling a binary operator deparses to.
+///
+/// This is `eval::op_spelling`, which the 42883 messages already spell every
+/// operator with. Sharing it is what keeps a view over `~=`, `<->` or any of
+/// the geometric operators round-tripping: the table there is exhaustive over
+/// `BinaryOp`, so a new operator cannot reach `pg_get_viewdef` unspelled.
 fn binary_op_text(op: BinaryOp) -> &'static str {
-    match op {
-        BinaryOp::Add => "+",
-        BinaryOp::Sub => "-",
-        BinaryOp::Mul => "*",
-        BinaryOp::Div => "/",
-        BinaryOp::Mod => "%",
-        BinaryOp::Pow => "^",
-        BinaryOp::Concat => "||",
-        BinaryOp::Eq => "=",
-        BinaryOp::Ne => "<>",
-        BinaryOp::Lt => "<",
-        BinaryOp::Le => "<=",
-        BinaryOp::Gt => ">",
-        BinaryOp::Ge => ">=",
-        BinaryOp::And => "AND",
-        BinaryOp::Or => "OR",
-        BinaryOp::Match => "~",
-        BinaryOp::MatchCi => "~*",
-        BinaryOp::NotMatch => "!~",
-        BinaryOp::NotMatchCi => "!~*",
-        BinaryOp::IsDistinctFrom => "IS DISTINCT FROM",
-        BinaryOp::IsNotDistinctFrom => "IS NOT DISTINCT FROM",
-        _ => binary_op_text_rest(op),
-    }
-}
-
-fn binary_op_text_rest(op: BinaryOp) -> &'static str {
-    match op {
-        BinaryOp::JsonGet => "->",
-        BinaryOp::JsonGetText => "->>",
-        BinaryOp::JsonGetPath => "#>",
-        BinaryOp::JsonGetPathText => "#>>",
-        BinaryOp::Contains => "@>",
-        BinaryOp::ContainedBy => "<@",
-        BinaryOp::KeyExists => "?",
-        BinaryOp::KeyExistsAny => "?|",
-        BinaryOp::KeyExistsAll => "?&",
-        BinaryOp::Overlaps => "&&",
-        BinaryOp::DoesNotExtendRight => "&<",
-        BinaryOp::DoesNotExtendLeft => "&>",
-        BinaryOp::Adjacent => "-|-",
-        BinaryOp::BitAnd => "&",
-        BinaryOp::BitOr => "|",
-        BinaryOp::BitXor => "#",
-        BinaryOp::Shl => "<<",
-        BinaryOp::Shr => ">>",
-        BinaryOp::ContainedByOrEq => "<<=",
-        BinaryOp::ContainsOrEq => ">>=",
-        _ => "?",
-    }
+    crate::eval::op_spelling(op)
 }
 
 #[cfg(test)]

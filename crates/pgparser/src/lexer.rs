@@ -606,15 +606,15 @@ fn skip_block_comment(bytes: &[u8], i: usize) -> (usize, bool) {
 
 /// Match the longest operator/punctuation lexeme that starts at `bytes[i]`.
 ///
-/// Returns the lexeme with its byte length.
-///
-/// MAXIMAL MUNCH is the whole contract of this function. Every spelling whose
-/// first byte also begins a shorter spelling is listed longest-first: `->>`
-/// before `->` before `-`, `#>>` before `#>` before `#`, `?|`/`?&` before `?`,
-/// `!~*` before `!~`, `||/` before `||` before `|/` before `|`, `<<=` before
-/// `<<`, `>>=` before `>>`, `<@`/`<=`/`<>`/`<<` before `<`, `::` before `:`. A
-/// slip re-reads `a->>'k'` as `a -> >'k'`, whose tail still lexes, so the lexer
-/// tests pin each neighbouring shorter spelling explicitly.
+/// MAXIMAL MUNCH is the whole contract of this function: every spelling whose
+/// first byte also begins a shorter spelling is listed longest-first — `->>`
+/// before `->` before `-`, `#>>` before `#>` before `##` before `#`, `?-|`
+/// before `?-` and `?||` before `?|`, then `?#`/`?&` before `?`, `@-@` before
+/// `@>`/`@?`/`@@`/`@`, `!~*` before `!~`, `||/` before `||` before `|/` before
+/// `|`, `<<=` before `<<`, `>>=` before `>>`, `<@`/`<=`/`<>`/`<^`/`<<` before
+/// `<`, `>^` before `>`, `::` before `:`. A slip re-reads `a->>'k'` as
+/// `a -> >'k'`, whose tail still lexes, so the lexer tests pin each
+/// neighbouring shorter spelling explicitly.
 ///
 /// The comment arms in [`lex`] claim `--` and `/*` before this function runs,
 /// so a `-` or `/` that reaches here is always the operator. The one place that
@@ -630,11 +630,20 @@ fn punctuation(bytes: &[u8], i: usize) -> Option<(Token, usize)> {
         b'-' if next_is(b'>') => (Token::JsonGet, 2),
         b'#' if next_two_are(b'>', b'>') => (Token::JsonGetPathText, 3),
         b'#' if next_is(b'>') => (Token::JsonGetPath, 2),
+        b'#' if next_is(b'#') => (Token::ClosestPoint, 2),
+        // `@-@` leads the `@` family. Its second byte is unique among them, so
+        // ordering is not load-bearing here — but the geometric spellings are
+        // the ones a reader is least likely to expect, so they go first.
+        b'@' if next_two_are(b'-', b'@') => (Token::Length, 3),
         b'@' if next_is(b'>') => (Token::Contains, 2),
         b'@' if next_is(b'?') => (Token::JsonPathExists, 2),
         b'@' if next_is(b'@') => (Token::JsonPathMatch, 2),
         b'<' if next_is(b'@') => (Token::ContainedBy, 2),
+        b'?' if next_two_are(b'-', b'|') => (Token::Perpendicular, 3),
+        b'?' if next_two_are(b'|', b'|') => (Token::Parallel, 3),
         b'?' if next_is(b'|') => (Token::KeyExistsAny, 2),
+        b'?' if next_is(b'-') => (Token::Horizontal, 2),
+        b'?' if next_is(b'#') => (Token::Intersects, 2),
         b'?' if next_is(b'&') => (Token::KeyExistsAll, 2),
         b'?' => (Token::KeyExists, 1),
         b'&' if next_is(b'&') => (Token::Overlaps, 2),
@@ -653,6 +662,11 @@ fn punctuation(bytes: &[u8], i: usize) -> Option<(Token, usize)> {
         b'<' if next_is(b'=') => (Token::Le, 2),
         b'>' if next_is(b'=') => (Token::Ge, 2),
         b'<' if next_is(b'>') => (Token::Ne, 2),
+        // The geometric `<^`/`>^`. Nothing extends them, and their `^` second
+        // byte is unique in both families, so they cannot disturb `<@ <= <>
+        // <<| <<= << <-> <` or `>= >>= >> >`.
+        b'<' if next_is(b'^') => (Token::BelowEq, 2),
+        b'>' if next_is(b'^') => (Token::AboveEq, 2),
         b'<' if next_two_are(b'<', b'|') => (Token::StrictlyBelow, 3),
         b'<' if next_two_are(b'<', b'=') => (Token::ContainedByOrEq, 3),
         b'<' if next_is(b'<') => (Token::Shl, 2),
@@ -1438,6 +1452,112 @@ mod tests {
                     Token::LBracket,
                     Token::IntLit("1".into()),
                     Token::RBracket,
+                    Token::Eof,
+                ]
+        );
+    }
+
+    #[test]
+    fn geometric_operator_spellings_lex_with_maximal_munch() {
+        use assert2::assert;
+
+        // Written WITHOUT surrounding spaces, and each new spelling paired with
+        // every SHORTER spelling it shares a first byte with. A munch-order slip
+        // re-reads `a?-|b` as `a ?- |b` — whose tail still lexes — so only the
+        // exact token vector catches it.
+        let cases: &[(&str, &[Token])] = &[
+            // `#`: `#>>` before `#>` before `##` before `#`.
+            (
+                "a#>>'{k}'",
+                &[Token::JsonGetPathText, Token::StringLit("{k}".into())],
+            ),
+            (
+                "a#>'{k}'",
+                &[Token::JsonGetPath, Token::StringLit("{k}".into())],
+            ),
+            ("a##b", &[Token::ClosestPoint, Token::Ident("b".into())]),
+            ("a#b", &[Token::Hash, Token::Ident("b".into())]),
+            // `?`: `?-|` before `?-`, `?||` before `?|`, then `?#`, `?&`, `?`.
+            ("a?-|b", &[Token::Perpendicular, Token::Ident("b".into())]),
+            ("a?-b", &[Token::Horizontal, Token::Ident("b".into())]),
+            ("a?||b", &[Token::Parallel, Token::Ident("b".into())]),
+            ("a?|b", &[Token::KeyExistsAny, Token::Ident("b".into())]),
+            ("a?#b", &[Token::Intersects, Token::Ident("b".into())]),
+            ("a?&b", &[Token::KeyExistsAll, Token::Ident("b".into())]),
+            ("a?'k'", &[Token::KeyExists, Token::StringLit("k".into())]),
+            // `@`: `@-@` before `@>`, `@?`, `@@`, `@`.
+            ("a@>b", &[Token::Contains, Token::Ident("b".into())]),
+            ("a@?b", &[Token::JsonPathExists, Token::Ident("b".into())]),
+            ("a@@b", &[Token::JsonPathMatch, Token::Ident("b".into())]),
+            ("a@b", &[Token::At, Token::Ident("b".into())]),
+            // `<`: `<^` must leave the rest of the family alone.
+            ("a<^b", &[Token::BelowEq, Token::Ident("b".into())]),
+            ("a<@b", &[Token::ContainedBy, Token::Ident("b".into())]),
+            ("a<=b", &[Token::Le, Token::Ident("b".into())]),
+            ("a<>b", &[Token::Ne, Token::Ident("b".into())]),
+            ("a<<|b", &[Token::StrictlyBelow, Token::Ident("b".into())]),
+            ("a<<=b", &[Token::ContainedByOrEq, Token::Ident("b".into())]),
+            ("a<<b", &[Token::Shl, Token::Ident("b".into())]),
+            ("a<->b", &[Token::Phrase, Token::Ident("b".into())]),
+            ("a<b", &[Token::Lt, Token::Ident("b".into())]),
+            // `>`: same for `>^`.
+            ("a>^b", &[Token::AboveEq, Token::Ident("b".into())]),
+            ("a>=b", &[Token::Ge, Token::Ident("b".into())]),
+            ("a>>=b", &[Token::ContainsOrEq, Token::Ident("b".into())]),
+            ("a>>b", &[Token::Shr, Token::Ident("b".into())]),
+            ("a>b", &[Token::Gt, Token::Ident("b".into())]),
+        ];
+        for (sql, tail) in cases {
+            let mut expected = vec![Token::Ident("a".into())];
+            expected.extend_from_slice(tail);
+            expected.push(Token::Eof);
+            assert!(toks(sql) == expected, "lexing {sql:?}");
+        }
+    }
+
+    #[test]
+    fn the_prefix_only_length_spelling_is_one_token() {
+        use assert2::assert;
+
+        // `@-@` is the one geometric spelling with no infix reading, and the
+        // only one whose bytes used to lex as three separate operators — as
+        // `@ - @`, which parsed as a nested absolute value.
+        assert!(toks("@-@p") == vec![Token::Length, Token::Ident("p".into()), Token::Eof,]);
+        // The shorter `@` spellings it could have stolen from are untouched, and
+        // an `@` followed by an ordinary minus still lexes as two operators.
+        assert!(
+            toks("@-p")
+                == vec![
+                    Token::At,
+                    Token::Minus,
+                    Token::Ident("p".into()),
+                    Token::Eof,
+                ]
+        );
+    }
+
+    #[test]
+    fn the_plpgsql_label_and_directive_bytes_still_lex_as_before() {
+        use assert2::assert;
+
+        // PL/pgSQL spells `<<label>>` with the shift tokens and its compiler
+        // directives with a bare `#`; `<^`/`>^`/`##` must not have disturbed
+        // either. (The parse-level guarantee is pinned in the parser tests.)
+        assert!(
+            toks("<<lbl>>")
+                == vec![
+                    Token::Shl,
+                    Token::Ident("lbl".into()),
+                    Token::Shr,
+                    Token::Eof,
+                ]
+        );
+        assert!(
+            toks("#variable_conflict use_column")
+                == vec![
+                    Token::Hash,
+                    Token::Ident("variable_conflict".into()),
+                    Token::Ident("use_column".into()),
                     Token::Eof,
                 ]
         );

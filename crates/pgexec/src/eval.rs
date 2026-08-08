@@ -406,6 +406,7 @@ fn eval_depth_inner(
             match subscript_kind(&b, base, scope)? {
                 SubscriptKind::Json => Err(cannot_subscript(ColumnType::Json)),
                 SubscriptKind::Jsonb => json_fn::jsonb_subscript(&b, &i),
+                SubscriptKind::Geometric => geometric_subscript(&b, &i),
                 SubscriptKind::Array => array_fn::array_subscript(&b, &i),
             }
         }
@@ -760,9 +761,16 @@ pub(crate) fn apply_unary(op: UnaryOp, v: &Datum, _ctx: &EvalCtx) -> Result<Datu
             | Datum::PgLsn(_) => Err(undefined_prefix_operator(op, v)),
             _ => Ok(ops::sub(&Datum::Int4(0), v)?),
         },
-        UnaryOp::Plus | UnaryOp::BitNot | UnaryOp::Abs | UnaryOp::Sqrt | UnaryOp::Cbrt => {
-            apply_prefix_op(op, v)
-        }
+        UnaryOp::Plus
+        | UnaryOp::BitNot
+        | UnaryOp::Abs
+        | UnaryOp::Sqrt
+        | UnaryOp::Cbrt
+        | UnaryOp::NPoints
+        | UnaryOp::Length
+        | UnaryOp::Center
+        | UnaryOp::IsHorizontal
+        | UnaryOp::IsVertical => apply_prefix_op(op, v),
         // `IS [NOT] DOCUMENT` is the one postfix test that is NOT total: a
         // NULL `xml` yields NULL, because unlike the boolean tests it asks a
         // question about a value rather than about its definedness.
@@ -901,6 +909,11 @@ fn apply_prefix_op(op: UnaryOp, v: &Datum) -> Result<Datum, ExecError> {
                 Ok(Datum::Float8(x.cbrt()))
             }
         }
+        UnaryOp::NPoints
+        | UnaryOp::Length
+        | UnaryOp::Center
+        | UnaryOp::IsHorizontal
+        | UnaryOp::IsVertical => apply_geometric_prefix(op, v),
         UnaryOp::Not
         | UnaryOp::Neg
         | UnaryOp::IsTrue
@@ -913,6 +926,49 @@ fn apply_prefix_op(op: UnaryOp, v: &Datum) -> Result<Datum, ExecError> {
         | UnaryOp::IsNotDocument
         | UnaryOp::TsNot => Err(undefined_prefix_operator(op, v)),
     }
+}
+
+/// The five geometric prefix operators: `#` (the number of points in a path or
+/// polygon), `@-@` (the length of an lseg or path), `@@` (the centre of a box,
+/// circle, lseg or polygon — but NOT a path, which has none), and `?-` / `?|`
+/// (is this line or lseg horizontal / vertical?).
+///
+/// Every one is 42883 on any other operand, including on `integer`: PostgreSQL
+/// lexes `@-@ 5` as one operator and finds no `@-@ integer`.
+fn apply_geometric_prefix(op: UnaryOp, v: &Datum) -> Result<Datum, ExecError> {
+    match (op, v) {
+        (UnaryOp::NPoints, Datum::Path(path)) => Ok(Datum::Int4(path.npoints())),
+        (UnaryOp::NPoints, Datum::Polygon(polygon)) => Ok(Datum::Int4(polygon.npoints())),
+        (UnaryOp::Length, Datum::Lseg(lseg)) => Ok(Datum::Float8(lseg.length())),
+        (UnaryOp::Length, Datum::Path(path)) => Ok(Datum::Float8(path.length())),
+        (UnaryOp::Center, Datum::Box(value)) => Ok(Datum::Point(value.center())),
+        (UnaryOp::Center, Datum::Circle(circle)) => Ok(Datum::Point(circle.to_point())),
+        (UnaryOp::Center, Datum::Lseg(lseg)) => Ok(Datum::Point(lseg.center())),
+        (UnaryOp::Center, Datum::Polygon(polygon)) => Ok(Datum::Point(polygon.center())),
+        (UnaryOp::IsHorizontal, Datum::Line(line)) => Ok(Datum::Bool(line.is_horizontal())),
+        (UnaryOp::IsHorizontal, Datum::Lseg(lseg)) => Ok(Datum::Bool(lseg.is_horizontal())),
+        (UnaryOp::IsVertical, Datum::Line(line)) => Ok(Datum::Bool(line.is_vertical())),
+        (UnaryOp::IsVertical, Datum::Lseg(lseg)) => Ok(Datum::Bool(lseg.is_vertical())),
+        _ => Err(undefined_prefix_operator(op, v)),
+    }
+}
+
+/// The static result type of a geometric prefix operator over its operand, or
+/// `None` when PostgreSQL declares no such operator. `@@` over a `path` is the
+/// one that surprises: `path` has a length and a point count but no centre.
+fn geometric_prefix_result_type(op: UnaryOp, ty: ColumnType) -> Option<ColumnType> {
+    Some(match (op, ty) {
+        (UnaryOp::NPoints, ColumnType::Path | ColumnType::Polygon) => ColumnType::Int4,
+        (UnaryOp::Length, ColumnType::Lseg | ColumnType::Path) => ColumnType::Float8,
+        (
+            UnaryOp::Center,
+            ColumnType::Box | ColumnType::Circle | ColumnType::Lseg | ColumnType::Polygon,
+        ) => ColumnType::Point,
+        (UnaryOp::IsHorizontal | UnaryOp::IsVertical, ColumnType::Line | ColumnType::Lseg) => {
+            ColumnType::Bool
+        }
+        _ => return None,
+    })
 }
 
 /// Promote a numeric-tower Datum to `f64`, for the operators `PostgreSQL`
@@ -946,16 +1002,26 @@ fn prefix_spelling(op: UnaryOp) -> &'static str {
         UnaryOp::Neg => "-",
         UnaryOp::Plus => "+",
         UnaryOp::TsNot => "!!",
+        UnaryOp::NPoints => "#",
+        UnaryOp::Length => "@-@",
+        UnaryOp::Center => "@@",
+        UnaryOp::IsHorizontal => "?-",
+        UnaryOp::IsVertical => "?|",
         _ => "NOT",
     }
 }
 
 /// 42883 for a prefix operator applied to a type it is not defined for.
 fn undefined_prefix_operator(op: UnaryOp, v: &Datum) -> ExecError {
+    undefined_prefix_operator_named(op, v.column_type().map_or("unknown", ColumnType::name))
+}
+
+/// [`undefined_prefix_operator`] with the operand type already spelled, for the
+/// plan-time rejections that have a `ColumnType` rather than a value.
+fn undefined_prefix_operator_named(op: UnaryOp, ty: &str) -> ExecError {
     ExecError::UndefinedFunction(format!(
-        "operator does not exist: {} {}",
-        prefix_spelling(op),
-        v.column_type().map_or("unknown", ColumnType::name)
+        "operator does not exist: {} {ty}",
+        prefix_spelling(op)
     ))
 }
 
@@ -1407,37 +1473,12 @@ fn coerce_untyped_literal_operands(
                 _ => None,
             };
         }
-        // A geometric counterpart resolves the literal to its own type, which is
-        // how `p.f1 << '(0,0)'` and `p.f1 ~= '(5.1,34.5)'` pick an operator.
-        let geometric_type = match other {
-            Datum::Point(_) => Some(ColumnType::Point),
-            Datum::Box(_) => Some(ColumnType::Box),
-            Datum::Circle(_) => Some(ColumnType::Circle),
-            Datum::Lseg(_) => Some(ColumnType::Lseg),
-            Datum::Line(_) => Some(ColumnType::Line),
-            _ => None,
-        };
-        if let Some(geometric_type) = geometric_type {
-            return match op {
-                BinaryOp::Shl
-                | BinaryOp::Shr
-                | BinaryOp::DoesNotExtendRight
-                | BinaryOp::DoesNotExtendLeft
-                | BinaryOp::StrictlyBelow
-                | BinaryOp::StrictlyAbove
-                | BinaryOp::Overlaps
-                | BinaryOp::Contains
-                | BinaryOp::ContainedBy
-                | BinaryOp::Same
-                | BinaryOp::Phrase
-                | BinaryOp::Eq
-                | BinaryOp::Ne
-                | BinaryOp::Lt
-                | BinaryOp::Le
-                | BinaryOp::Gt
-                | BinaryOp::Ge => Some(geometric_type),
-                _ => None,
-            };
+        // A geometric counterpart resolves the literal to whichever type the
+        // operator's one surviving candidate wants — its own for
+        // `p.f1 << '(0,0)'`, but a `point` for `b.f1 + '(1,2)'`, whose only
+        // candidate is `box + point`.
+        if let Some(geometric_type) = other.column_type().filter(|ty| is_geometric_type(*ty)) {
+            return geometric_literal_type(op, geometric_type);
         }
         // A scalar counterpart resolves the literal to its own type, which is how
         // psql's `c.oid = '20001'` finds an `oid` comparison and `1 + '1'` stays
@@ -1571,8 +1612,17 @@ pub(crate) fn apply_binary(
     {
         return Ok(result);
     }
-    if let Some(result) = apply_geometric_position(op, l, r) {
-        return Ok(result);
+    // Every geometric operator is resolved by the EXACT (operator, left type,
+    // right type) triple PostgreSQL declares, so this claims nothing but a
+    // geometric operand pair and the families below keep their spellings.
+    //
+    // The operand test is written out here rather than left to the callee: this
+    // is a PER-ROW path, and hoisting it keeps a row of integers to two inlined
+    // discriminant comparisons with no call at all.
+    if (is_geometric_datum(l) || is_geometric_datum(r))
+        && let Some(result) = apply_geometric_operator(op, l, r)
+    {
+        return result;
     }
     // `<<`, `>>`, `&&`, `&`, `|`, `+` and `-` are shared with the bitwise,
     // range and arithmetic families; a network operand is what selects the
@@ -1753,15 +1803,30 @@ pub(crate) fn apply_binary(
             }
         }
         // `<->` is the tsquery phrase operator and the geometric distance
-        // operator; the operand types pick the overload.
+        // operator; the operand types pick the overload, and the geometric one
+        // was already claimed by `apply_geometric_operator` above.
         BinaryOp::Phrase => match (l, r) {
-            (Datum::Circle(left), Datum::Circle(right)) => Ok(Datum::Float8(left.distance(*right))),
             (Datum::TsQuery(left), Datum::TsQuery(right)) => Ok(Datum::TsQuery(
                 crabka_pgtypes::TsQuery::Phrase(Box::new(left.clone()), Box::new(right.clone()), 1),
             )),
             (Datum::Null, _) | (_, Datum::Null) => Ok(Datum::Null),
             _ => Err(undefined_operator_for(op, l, r)),
         },
+        // The seven operators PostgreSQL declares for geometry ALONE. Anything
+        // reaching here had no geometric operand, so there is no overload left.
+        BinaryOp::ClosestPoint
+        | BinaryOp::Intersects
+        | BinaryOp::Horizontal
+        | BinaryOp::Perpendicular
+        | BinaryOp::Parallel
+        | BinaryOp::BelowEq
+        | BinaryOp::AboveEq => {
+            if l.is_null() || r.is_null() {
+                Ok(Datum::Null)
+            } else {
+                Err(undefined_operator_for(op, l, r))
+            }
+        }
         BinaryOp::Match | BinaryOp::MatchCi | BinaryOp::NotMatch | BinaryOp::NotMatchCi => {
             apply_regex_match(op, l, r)
         }
@@ -1777,20 +1842,28 @@ pub(crate) fn apply_binary(
                 let distinct = !equal;
                 return Ok(Datum::Bool(distinct ^ (op == BinaryOp::IsNotDistinctFrom)));
             }
+            // Both forms are resolved through the type's `=`, so a geometric
+            // operand with no equality operator is named that way — which
+            // `require_runtime_equality` does for every construct that expands
+            // into an equality.
             require_runtime_equality(l, r)?;
             let distinct = rowexpr::is_distinct(l, r)?;
             Ok(Datum::Bool(distinct ^ (op == BinaryOp::IsNotDistinctFrom)))
         }
-        BinaryOp::Eq | BinaryOp::Ne => {
-            if let Some(equal) = runtime_equality_short_circuit(l, r) {
-                return Ok(Datum::Bool(equal ^ (op == BinaryOp::Ne)));
+        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
+            if (is_geometric_datum(l) || is_geometric_datum(r))
+                && let Some(result) = apply_geometric_comparison(op, l, r)
+            {
+                return result;
             }
-            require_runtime_equality(l, r)?;
-            let ord = ops::compare(l, r)?;
-            Ok(cmp_result(op, ord))
-        }
-        BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
-            require_runtime_comparison(l, r)?;
+            if matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
+                if let Some(equal) = runtime_equality_short_circuit(l, r) {
+                    return Ok(Datum::Bool(equal ^ (op == BinaryOp::Ne)));
+                }
+                require_runtime_equality(l, r)?;
+            } else {
+                require_runtime_comparison(l, r)?;
+            }
             let ord = ops::compare(l, r)?;
             Ok(cmp_result(op, ord))
         }
@@ -2480,18 +2553,158 @@ fn json_op_of(op: BinaryOp) -> Option<JsonOp> {
     })
 }
 
-/// Whether a type reduces to a bounding box for the positional operators.
-fn is_boxable(ty: ColumnType) -> bool {
+/// One of `PostgreSQL`'s seven geometric types, as an operator-resolution key.
+///
+/// `pg_operator` declares the geometric operators pair by pair — `box <-> lseg`
+/// exists and `box <-> circle` does not — so resolving one means naming both
+/// operand types exactly, not asking whether each is "geometric enough".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GeoType {
+    Point,
+    Box,
+    Circle,
+    Line,
+    Lseg,
+    Path,
+    Polygon,
+}
+
+impl GeoType {
+    fn of_column(ty: ColumnType) -> Option<Self> {
+        Some(match ty {
+            ColumnType::Point => Self::Point,
+            ColumnType::Box => Self::Box,
+            ColumnType::Circle => Self::Circle,
+            ColumnType::Line => Self::Line,
+            ColumnType::Lseg => Self::Lseg,
+            ColumnType::Path => Self::Path,
+            ColumnType::Polygon => Self::Polygon,
+            _ => return None,
+        })
+    }
+
+    fn of_datum(value: &Datum) -> Option<Self> {
+        Some(match value {
+            Datum::Point(_) => Self::Point,
+            Datum::Box(_) => Self::Box,
+            Datum::Circle(_) => Self::Circle,
+            Datum::Line(_) => Self::Line,
+            Datum::Lseg(_) => Self::Lseg,
+            Datum::Path(_) => Self::Path,
+            Datum::Polygon(_) => Self::Polygon,
+            _ => return None,
+        })
+    }
+}
+
+/// Is this one of the seven geometric types?
+fn is_geometric_type(ty: ColumnType) -> bool {
+    GeoType::of_column(ty).is_some()
+}
+
+/// Is this value one of the seven geometric types? A single discriminant test,
+/// and the guard [`apply_binary`] inlines at its own call site so a row with no
+/// geometric operand never enters (or even calls into) the geometric dispatch.
+#[inline]
+fn is_geometric_datum(value: &Datum) -> bool {
     matches!(
-        ty,
-        ColumnType::Point | ColumnType::Box | ColumnType::Circle | ColumnType::Lseg
+        value,
+        Datum::Point(_)
+            | Datum::Box(_)
+            | Datum::Circle(_)
+            | Datum::Line(_)
+            | Datum::Lseg(_)
+            | Datum::Path(_)
+            | Datum::Polygon(_)
     )
+}
+
+/// The operators `PostgreSQL` gives a geometric overload. `=`, `<>` and the
+/// four orderings are deliberately absent: they are declared type by type over
+/// a *different* table and answered by [`apply_geometric_comparison`].
+fn is_geometric_operator(op: BinaryOp) -> bool {
+    matches!(
+        op,
+        BinaryOp::BitXor
+            | BinaryOp::ClosestPoint
+            | BinaryOp::Overlaps
+            | BinaryOp::DoesNotExtendRight
+            | BinaryOp::DoesNotExtendLeft
+            | BinaryOp::DoesNotExtendAbove
+            | BinaryOp::DoesNotExtendBelow
+            | BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::Div
+            | BinaryOp::Phrase
+            | BinaryOp::Shl
+            | BinaryOp::Shr
+            | BinaryOp::StrictlyBelow
+            | BinaryOp::StrictlyAbove
+            | BinaryOp::Contains
+            | BinaryOp::ContainedBy
+            | BinaryOp::BelowEq
+            | BinaryOp::AboveEq
+            | BinaryOp::Intersects
+            | BinaryOp::Horizontal
+            | BinaryOp::KeyExistsAny
+            | BinaryOp::Perpendicular
+            | BinaryOp::Parallel
+            | BinaryOp::Same
+    )
+}
+
+/// The type an `unknown` literal adopts beside a geometric operand, or `None`
+/// when nothing resolves it. `PostgreSQL` runs full operator resolution here;
+/// this reproduces the cases where exactly one candidate survives, so
+/// `p.f1 << '(0,0)'` picks `point << point` and `b.f1 + '(1,2)'` picks
+/// `box + point` rather than a second box.
+fn geometric_literal_type(op: BinaryOp, sibling: ColumnType) -> Option<ColumnType> {
+    let geo = GeoType::of_column(sibling)?;
+    Some(match op {
+        // `path + path` is `path_add`, an exact match beside a path; every
+        // other geometric arithmetic operator's only partner is a point.
+        BinaryOp::Add if geo == GeoType::Path => ColumnType::Path,
+        BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div => ColumnType::Point,
+        // The same-type operators, where the sibling's own type is the only
+        // candidate — plus the comparisons, which are same-type throughout.
+        BinaryOp::Shl
+        | BinaryOp::Shr
+        | BinaryOp::StrictlyBelow
+        | BinaryOp::StrictlyAbove
+        | BinaryOp::DoesNotExtendRight
+        | BinaryOp::DoesNotExtendLeft
+        | BinaryOp::DoesNotExtendAbove
+        | BinaryOp::DoesNotExtendBelow
+        | BinaryOp::Overlaps
+        | BinaryOp::Same
+        | BinaryOp::BitXor
+        | BinaryOp::Intersects
+        | BinaryOp::Horizontal
+        | BinaryOp::KeyExistsAny
+        | BinaryOp::Perpendicular
+        | BinaryOp::Parallel
+        | BinaryOp::BelowEq
+        | BinaryOp::AboveEq
+        | BinaryOp::Contains
+        | BinaryOp::ContainedBy
+        | BinaryOp::Phrase
+        | BinaryOp::Eq
+        | BinaryOp::Ne
+        | BinaryOp::Lt
+        | BinaryOp::Le
+        | BinaryOp::Gt
+        | BinaryOp::Ge => sibling,
+        // `##` has two candidates beside every operand it takes, and
+        // PostgreSQL calls that ambiguous rather than picking one.
+        _ => return None,
+    })
 }
 
 /// The result type when a geometric operator has one bare `unknown` literal.
 /// PostgreSQL resolves the literal from its sibling, so `p.f1 << '(0,0)'` picks
-/// the `point` operator; the literal's *value* is converted to the sibling's
-/// type later, by `coerce_untyped_literal_operands`.
+/// the `point` operator; the literal's *value* is converted to the same type
+/// later, by `coerce_untyped_literal_operands`.
 fn geometric_literal_operator(
     op: BinaryOp,
     left: &Expr,
@@ -2507,68 +2720,573 @@ fn geometric_literal_operator(
     } else {
         infer_type(left, scope)?
     };
-    if !is_boxable(sibling) {
+    let Some(literal) = geometric_literal_type(op, sibling) else {
         return Ok(None);
+    };
+    let (lt, rt) = if unknown_left {
+        (literal, sibling)
+    } else {
+        (sibling, literal)
+    };
+    Ok(geometric_operator_result_type(op, lt, rt))
+}
+
+/// The static result type of a geometric operator over the two operand types,
+/// or `None` when `pg_operator` declares no such pair. This is the plan-time
+/// twin of [`apply_geometric_operator`]; a test cross-checks that the two agree
+/// on every one of the 7×7 pairs for every operator.
+fn geometric_operator_result_type(
+    op: BinaryOp,
+    lt: ColumnType,
+    rt: ColumnType,
+) -> Option<ColumnType> {
+    let (left, right) = (GeoType::of_column(lt)?, GeoType::of_column(rt)?);
+    geometric_pair_result(op, left, right)
+}
+
+/// `Some(result)` — or `Some(Err)` for an undeclared pair — when at least one
+/// operand of a geometric-capable operator is geometric, so the operator can
+/// only be the geometric one. `None` leaves the operator's other overloads
+/// (bitwise, network, range, jsonb, …) to the caller.
+fn geometric_operand_result(
+    op: BinaryOp,
+    lt: ColumnType,
+    rt: ColumnType,
+) -> Option<Result<ColumnType, ExecError>> {
+    if !is_geometric_operator(op) || !(is_geometric_type(lt) || is_geometric_type(rt)) {
+        return None;
     }
-    Ok(match op {
-        BinaryOp::Shl
-        | BinaryOp::Shr
+    Some(
+        geometric_operator_result_type(op, lt, rt)
+            .ok_or_else(|| undefined_operator(op_spelling(op), lt, rt)),
+    )
+}
+
+/// The declared (operator, left, right) matrix, as `pg_operator` records it.
+fn geometric_pair_result(op: BinaryOp, left: GeoType, right: GeoType) -> Option<ColumnType> {
+    use GeoType::{Box, Circle, Line, Lseg, Path, Point, Polygon};
+    let pair = (left, right);
+    match op {
+        // `#` — `box_intersect`, `line_interpt` and `lseg_interpt`.
+        BinaryOp::BitXor => match pair {
+            (Box, Box) => Some(ColumnType::Box),
+            (Line, Line) | (Lseg, Lseg) => Some(ColumnType::Point),
+            _ => None,
+        },
+        // `##` — the point of the RIGHT operand closest to the left one.
+        BinaryOp::ClosestPoint => matches!(
+            pair,
+            (Line, Lseg)
+                | (Lseg, Box)
+                | (Lseg, Lseg)
+                | (Point, Box)
+                | (Point, Line)
+                | (Point, Lseg)
+        )
+        .then_some(ColumnType::Point),
+        // `&&`, `&<`, `&>`, `&<|` and `|&>` — the five tests `point` has no
+        // spelling of.
+        BinaryOp::Overlaps
         | BinaryOp::DoesNotExtendRight
         | BinaryOp::DoesNotExtendLeft
+        | BinaryOp::DoesNotExtendAbove
+        | BinaryOp::DoesNotExtendBelow => {
+            matches!(pair, (Box, Box) | (Circle, Circle) | (Polygon, Polygon))
+                .then_some(ColumnType::Bool)
+        }
+        // `<<`, `>>`, `<<|`, `|>>` and `~=` — the same four families plus
+        // `point`.
+        BinaryOp::Shl
+        | BinaryOp::Shr
         | BinaryOp::StrictlyBelow
         | BinaryOp::StrictlyAbove
-        | BinaryOp::Overlaps
-        | BinaryOp::Contains
-        | BinaryOp::ContainedBy
-        | BinaryOp::Same => Some(ColumnType::Bool),
-        BinaryOp::Phrase => Some(ColumnType::Float8),
+        | BinaryOp::Same => matches!(
+            pair,
+            (Box, Box) | (Circle, Circle) | (Point, Point) | (Polygon, Polygon)
+        )
+        .then_some(ColumnType::Bool),
+        // `<^` / `>^` — `box_below_eq` and `point_below`, which despite the
+        // shared spelling are not the same relation.
+        BinaryOp::BelowEq | BinaryOp::AboveEq => {
+            matches!(pair, (Box, Box) | (Point, Point)).then_some(ColumnType::Bool)
+        }
+        BinaryOp::Contains => matches!(
+            pair,
+            (Box, Box)
+                | (Box, Point)
+                | (Circle, Circle)
+                | (Circle, Point)
+                | (Path, Point)
+                | (Polygon, Point)
+                | (Polygon, Polygon)
+        )
+        .then_some(ColumnType::Bool),
+        // `<@` has four pairs `@>` has no commutator for — `lseg <@ box`,
+        // `lseg <@ line`, `point <@ line` and `point <@ lseg`.
+        BinaryOp::ContainedBy => matches!(
+            pair,
+            (Box, Box)
+                | (Circle, Circle)
+                | (Lseg, Box)
+                | (Lseg, Line)
+                | (Point, Box)
+                | (Point, Circle)
+                | (Point, Line)
+                | (Point, Lseg)
+                | (Point, Path)
+                | (Point, Polygon)
+                | (Polygon, Polygon)
+        )
+        .then_some(ColumnType::Bool),
+        BinaryOp::Intersects => matches!(
+            pair,
+            (Box, Box)
+                | (Line, Box)
+                | (Line, Line)
+                | (Lseg, Box)
+                | (Lseg, Line)
+                | (Lseg, Lseg)
+                | (Path, Path)
+        )
+        .then_some(ColumnType::Bool),
+        // `?-` and `?|` between two points ask whether they share a horizontal
+        // or a vertical; the same spellings are the prefix tests on a line.
+        BinaryOp::Horizontal | BinaryOp::KeyExistsAny => {
+            matches!(pair, (Point, Point)).then_some(ColumnType::Bool)
+        }
+        BinaryOp::Perpendicular | BinaryOp::Parallel => {
+            matches!(pair, (Line, Line) | (Lseg, Lseg)).then_some(ColumnType::Bool)
+        }
+        BinaryOp::Phrase => geometric_distance_pair(left, right).then_some(ColumnType::Float8),
+        BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div => {
+            geometric_arithmetic_result(op, left, right)
+        }
         _ => None,
+    }
+}
+
+/// The 24 pairs `<->` is declared over. Every other pair — `box <-> circle`
+/// and `point <-> path`'s missing siblings among them — is 42883, NOT the
+/// bounding-box distance that would otherwise answer them.
+fn geometric_distance_pair(left: GeoType, right: GeoType) -> bool {
+    use GeoType::{Box, Circle, Line, Lseg, Path, Point, Polygon};
+    matches!(
+        (left, right),
+        (Box, Box)
+            | (Box, Lseg)
+            | (Box, Point)
+            | (Circle, Circle)
+            | (Circle, Point)
+            | (Circle, Polygon)
+            | (Line, Line)
+            | (Line, Lseg)
+            | (Line, Point)
+            | (Lseg, Box)
+            | (Lseg, Line)
+            | (Lseg, Lseg)
+            | (Lseg, Point)
+            | (Path, Path)
+            | (Path, Point)
+            | (Point, Box)
+            | (Point, Circle)
+            | (Point, Line)
+            | (Point, Lseg)
+            | (Point, Path)
+            | (Point, Point)
+            | (Point, Polygon)
+            | (Polygon, Circle)
+            | (Polygon, Point)
+            | (Polygon, Polygon)
+    )
+}
+
+/// `+`, `-`, `*` and `/`. Every one translates (or rotates and scales) a shape
+/// by a POINT and keeps the shape's type; `path + path` alone concatenates.
+fn geometric_arithmetic_result(op: BinaryOp, left: GeoType, right: GeoType) -> Option<ColumnType> {
+    if op == BinaryOp::Add && (left, right) == (GeoType::Path, GeoType::Path) {
+        return Some(ColumnType::Path);
+    }
+    if right != GeoType::Point {
+        return None;
+    }
+    Some(match left {
+        GeoType::Box => ColumnType::Box,
+        GeoType::Circle => ColumnType::Circle,
+        GeoType::Path => ColumnType::Path,
+        GeoType::Point => ColumnType::Point,
+        // `lseg`, `line` and `polygon` have no arithmetic operator at all.
+        GeoType::Lseg | GeoType::Line | GeoType::Polygon => return None,
     })
 }
 
-/// The bounding box a geometric operand compares as. `point`, `box`, `lseg`
-/// and `circle` all reduce to a box for the positional operators, which is how
-/// PostgreSQL's `box`-based comparisons are defined.
+/// The bounding box a geometric operand compares as for the eight DIRECTIONAL
+/// positional tests, which is the one place `PostgreSQL` genuinely reduces to
+/// one: `box_left`, `circle_left` and `poly_left` are each written as a
+/// comparison of the operands' extents. A point bounds to itself.
 fn bounding_box(value: &Datum) -> Option<crabka_pgtypes::geometry::Box2> {
     use crabka_pgtypes::geometry::Box2;
     match value {
         Datum::Point(point) => Some(Box2::of_point(*point)),
         Datum::Box(value) => Some(*value),
         Datum::Circle(circle) => Some(Box2::of_circle(*circle)),
-        Datum::Lseg(lseg) => Some(Box2::normalized(lseg.start, lseg.end)),
+        Datum::Polygon(polygon) => Some(polygon.bounding_box()),
         _ => None,
     }
 }
 
-/// The geometric positional operators, which every boxable type shares:
-/// `<<`, `>>`, `&<`, `&>`, `<<|`, `|>>`, `&&`, `@>`, `<@`, `~=` and `<->`.
-/// Returns `None` when the operands are not both geometric, leaving the
-/// operator's other overloads to the caller.
-fn apply_geometric_position(op: BinaryOp, left: &Datum, right: &Datum) -> Option<Datum> {
-    // A circle pair measures centre-to-centre minus the radii, not bounding
-    // boxes, so `circle_distance` is checked before the box reduction.
-    if let (BinaryOp::Phrase, Datum::Circle(a), Datum::Circle(b)) = (op, left, right) {
-        return Some(Datum::Float8(a.distance(*b)));
+/// Every geometric operator except the comparisons, resolved EXACTLY by the
+/// (operator, left type, right type) triple `pg_operator` declares.
+///
+/// Returns `None` when neither operand is geometric, leaving the operator's
+/// bitwise / network / range / jsonb / text-search overloads to the caller —
+/// this runs early in [`apply_binary`], so it must claim nothing that is not
+/// geometric. A geometric operand with an undeclared partner is 42883 rather
+/// than a bounding-box approximation, and a NULL operand is SQL NULL.
+fn apply_geometric_operator(
+    op: BinaryOp,
+    left: &Datum,
+    right: &Datum,
+) -> Option<Result<Datum, ExecError>> {
+    if !is_geometric_operator(op) || !(is_geometric_datum(left) || is_geometric_datum(right)) {
+        return None;
+    }
+    // Every geometric operator is strict.
+    if left.is_null() || right.is_null() {
+        return Some(Ok(Datum::Null));
+    }
+    Some(
+        geometric_predicate(op, left, right)
+            .map(|held| Ok(Datum::Bool(held)))
+            .or_else(|| geometric_distance(op, left, right))
+            .or_else(|| geometric_construction(op, left, right).map(Ok))
+            .or_else(|| geometric_arithmetic(op, left, right))
+            .unwrap_or_else(|| Err(undefined_operator_for(op, left, right))),
+    )
+}
+
+/// The boolean-valued geometric operators.
+fn geometric_predicate(op: BinaryOp, left: &Datum, right: &Datum) -> Option<bool> {
+    geometric_positional(op, left, right)
+        .or_else(|| geometric_containment(op, left, right))
+        .or_else(|| geometric_relation(op, left, right))
+}
+
+/// `~=`, `&&`, `<^`, `>^` and the eight directional tests.
+fn geometric_positional(op: BinaryOp, left: &Datum, right: &Datum) -> Option<bool> {
+    match (op, left, right) {
+        // `~=` is structural for all four families it is declared over —
+        // `box_same` compares corners, not the areas `box_eq` compares.
+        (BinaryOp::Same, Datum::Box(a), Datum::Box(b)) => Some(a.same(*b)),
+        (BinaryOp::Same, Datum::Circle(a), Datum::Circle(b)) => Some(a.same(*b)),
+        (BinaryOp::Same, Datum::Point(a), Datum::Point(b)) => Some(a.eq_point(*b)),
+        (BinaryOp::Same, Datum::Polygon(a), Datum::Polygon(b)) => Some(a.same(b)),
+        // `&&` is a true overlap test, not a bounding-box one: `circle_overlap`
+        // measures centre distance against the radii.
+        (BinaryOp::Overlaps, Datum::Box(a), Datum::Box(b)) => Some(a.overlaps(*b)),
+        (BinaryOp::Overlaps, Datum::Circle(a), Datum::Circle(b)) => Some(a.overlaps(*b)),
+        (BinaryOp::Overlaps, Datum::Polygon(a), Datum::Polygon(b)) => Some(a.overlaps(b)),
+        // `<^` / `>^` are `box_below_eq` for boxes and the STRICT `point_below`
+        // for points, which is why they cannot share the box reduction.
+        (BinaryOp::BelowEq, Datum::Box(a), Datum::Box(b)) => Some(a.below_or_equal(*b)),
+        (BinaryOp::BelowEq, Datum::Point(a), Datum::Point(b)) => Some(a.is_below(*b)),
+        (BinaryOp::AboveEq, Datum::Box(a), Datum::Box(b)) => Some(a.above_or_equal(*b)),
+        (BinaryOp::AboveEq, Datum::Point(a), Datum::Point(b)) => Some(a.is_above(*b)),
+        _ => geometric_directional(op, left, right),
+    }
+}
+
+/// `<<`, `>>`, `<<|`, `|>>`, `&<`, `&>`, `&<|` and `|&>`.
+///
+/// `point` has only the four STRICT spellings; the four "does not extend"
+/// tests are declared for `box`, `circle` and `polygon` alone.
+fn geometric_directional(op: BinaryOp, left: &Datum, right: &Datum) -> Option<bool> {
+    let strict = matches!(
+        op,
+        BinaryOp::Shl | BinaryOp::Shr | BinaryOp::StrictlyBelow | BinaryOp::StrictlyAbove
+    );
+    let declared = match (left, right) {
+        (Datum::Box(_), Datum::Box(_))
+        | (Datum::Circle(_), Datum::Circle(_))
+        | (Datum::Polygon(_), Datum::Polygon(_)) => true,
+        (Datum::Point(_), Datum::Point(_)) => strict,
+        _ => false,
+    };
+    if !declared {
+        return None;
     }
     let (a, b) = (bounding_box(left)?, bounding_box(right)?);
-    let held = match op {
+    Some(match op {
         BinaryOp::Shl => a.strictly_left_of(b),
         BinaryOp::Shr => a.strictly_right_of(b),
+        BinaryOp::StrictlyBelow => a.strictly_below(b),
+        BinaryOp::StrictlyAbove => a.strictly_above(b),
         BinaryOp::DoesNotExtendRight => a.does_not_extend_right(b),
         BinaryOp::DoesNotExtendLeft => a.does_not_extend_left(b),
-        BinaryOp::StrictlyBelow => a.strictly_below(b),
         BinaryOp::DoesNotExtendAbove => a.does_not_extend_above(b),
         BinaryOp::DoesNotExtendBelow => a.does_not_extend_below(b),
-        BinaryOp::StrictlyAbove => a.strictly_above(b),
-        BinaryOp::Overlaps => a.overlaps(b),
-        BinaryOp::Contains => a.contains(b),
-        BinaryOp::ContainedBy => b.contains(a),
-        BinaryOp::Same => a.same(b),
-        // `<->` yields a distance rather than a predicate.
-        BinaryOp::Phrase => return Some(Datum::Float8(a.distance(b))),
+        _ => return None,
+    })
+}
+
+/// `@>` and `<@`. The two are NOT mirror images: `PostgreSQL` declares
+/// `lseg <@ box`, `lseg <@ line`, `point <@ line` and `point <@ lseg` with no
+/// commutator, so `box @> lseg` is 42883.
+fn geometric_containment(op: BinaryOp, left: &Datum, right: &Datum) -> Option<bool> {
+    let contained_by = match op {
+        BinaryOp::Contains => false,
+        BinaryOp::ContainedBy => true,
         _ => return None,
     };
-    Some(Datum::Bool(held))
+    let (outer, inner) = if contained_by {
+        (right, left)
+    } else {
+        (left, right)
+    };
+    Some(match (outer, inner) {
+        (Datum::Box(a), Datum::Box(b)) => a.contains(*b),
+        (Datum::Box(a), Datum::Point(p)) => a.contains_point(*p),
+        (Datum::Circle(a), Datum::Circle(b)) => a.contains(*b),
+        (Datum::Circle(a), Datum::Point(p)) => a.contains_point(*p),
+        (Datum::Path(a), Datum::Point(p)) => a.contains_point(*p),
+        (Datum::Polygon(a), Datum::Point(p)) => a.contains_point(*p),
+        (Datum::Polygon(a), Datum::Polygon(b)) => a.contains_polygon(b),
+        (Datum::Box(a), Datum::Lseg(s)) if contained_by => a.contains_lseg(*s),
+        (Datum::Line(a), Datum::Lseg(s)) if contained_by => a.contains_lseg(*s),
+        (Datum::Line(a), Datum::Point(p)) if contained_by => a.contains_point(*p),
+        (Datum::Lseg(a), Datum::Point(p)) if contained_by => a.contains_point(*p),
+        _ => return None,
+    })
+}
+
+/// `?#`, `?-`, `?|`, `?-|` and `?||`.
+fn geometric_relation(op: BinaryOp, left: &Datum, right: &Datum) -> Option<bool> {
+    match (op, left, right) {
+        (BinaryOp::Intersects, Datum::Box(a), Datum::Box(b)) => Some(a.overlaps(*b)),
+        (BinaryOp::Intersects, Datum::Line(a), Datum::Box(b)) => Some(a.intersects_box(*b)),
+        (BinaryOp::Intersects, Datum::Line(a), Datum::Line(b)) => Some(a.intersects(*b)),
+        (BinaryOp::Intersects, Datum::Lseg(s), Datum::Box(b)) => Some(b.intersects_lseg(*s)),
+        (BinaryOp::Intersects, Datum::Lseg(s), Datum::Line(a)) => Some(s.intersects_line(*a)),
+        (BinaryOp::Intersects, Datum::Lseg(a), Datum::Lseg(b)) => Some(a.intersects(*b)),
+        (BinaryOp::Intersects, Datum::Path(a), Datum::Path(b)) => Some(a.intersects(b)),
+        (BinaryOp::Horizontal, Datum::Point(a), Datum::Point(b)) => Some(a.is_horizontal_with(*b)),
+        (BinaryOp::KeyExistsAny, Datum::Point(a), Datum::Point(b)) => Some(a.is_vertical_with(*b)),
+        (BinaryOp::Perpendicular, Datum::Line(a), Datum::Line(b)) => {
+            Some(a.is_perpendicular_to(*b))
+        }
+        (BinaryOp::Perpendicular, Datum::Lseg(a), Datum::Lseg(b)) => {
+            Some(a.is_perpendicular_to(*b))
+        }
+        (BinaryOp::Parallel, Datum::Line(a), Datum::Line(b)) => Some(a.is_parallel_to(*b)),
+        (BinaryOp::Parallel, Datum::Lseg(a), Datum::Lseg(b)) => Some(a.is_parallel_to(*b)),
+        _ => None,
+    }
+}
+
+/// `<->` over the 24 pairs `pg_operator` declares. `path <-> path` and
+/// `polygon <-> polygon` are the two that can be NULL (an empty operand).
+fn geometric_distance(
+    op: BinaryOp,
+    left: &Datum,
+    right: &Datum,
+) -> Option<Result<Datum, ExecError>> {
+    if op != BinaryOp::Phrase {
+        return None;
+    }
+    let float = |value: f64| Some(Ok(Datum::Float8(value)));
+    let nullable = |value: Option<f64>| Some(Ok(value.map_or(Datum::Null, Datum::Float8)));
+    match (left, right) {
+        (Datum::Box(a), Datum::Box(b)) => float(a.distance(*b)),
+        (Datum::Box(a), Datum::Lseg(s)) | (Datum::Lseg(s), Datum::Box(a)) => {
+            float(a.distance_to_lseg(*s))
+        }
+        (Datum::Box(a), Datum::Point(p)) | (Datum::Point(p), Datum::Box(a)) => {
+            float(a.distance_to_point(*p))
+        }
+        (Datum::Circle(a), Datum::Circle(b)) => float(a.distance(*b)),
+        (Datum::Circle(a), Datum::Point(p)) | (Datum::Point(p), Datum::Circle(a)) => {
+            float(a.distance_to_point(*p))
+        }
+        (Datum::Circle(a), Datum::Polygon(g)) | (Datum::Polygon(g), Datum::Circle(a)) => {
+            float(a.distance_to_polygon(g))
+        }
+        (Datum::Line(a), Datum::Line(b)) => float(a.distance(*b)),
+        (Datum::Line(a), Datum::Lseg(s)) | (Datum::Lseg(s), Datum::Line(a)) => {
+            float(a.distance_to_lseg(*s))
+        }
+        (Datum::Line(a), Datum::Point(p)) | (Datum::Point(p), Datum::Line(a)) => {
+            float(a.distance_to_point(*p))
+        }
+        (Datum::Lseg(a), Datum::Lseg(b)) => float(a.distance(*b)),
+        (Datum::Lseg(s), Datum::Point(p)) | (Datum::Point(p), Datum::Lseg(s)) => {
+            float(s.distance_to_point(*p))
+        }
+        (Datum::Path(a), Datum::Path(b)) => nullable(a.distance(b)),
+        (Datum::Path(a), Datum::Point(p)) | (Datum::Point(p), Datum::Path(a)) => {
+            float(a.distance_to_point(*p))
+        }
+        (Datum::Point(a), Datum::Point(b)) => float(a.distance(*b)),
+        (Datum::Point(p), Datum::Polygon(g)) | (Datum::Polygon(g), Datum::Point(p)) => {
+            float(g.distance_to_point(*p))
+        }
+        (Datum::Polygon(a), Datum::Polygon(b)) => nullable(a.distance(b)),
+        _ => None,
+    }
+}
+
+/// `#` (the intersection of two boxes, lines or segments) and `##` (the point
+/// on the RIGHT operand closest to the left one). Both are NULL wherever the
+/// construction is undefined — disjoint boxes, parallel lines.
+fn geometric_construction(op: BinaryOp, left: &Datum, right: &Datum) -> Option<Datum> {
+    let point = match (op, left, right) {
+        (BinaryOp::BitXor, Datum::Box(a), Datum::Box(b)) => {
+            return Some(a.intersection(*b).map_or(Datum::Null, Datum::Box));
+        }
+        (BinaryOp::BitXor, Datum::Line(a), Datum::Line(b)) => a.intersection_point(*b),
+        (BinaryOp::BitXor, Datum::Lseg(a), Datum::Lseg(b)) => a.intersection_point(*b),
+        (BinaryOp::ClosestPoint, Datum::Line(a), Datum::Lseg(s)) => a.closest_point_to_lseg(*s),
+        (BinaryOp::ClosestPoint, Datum::Lseg(s), Datum::Box(b)) => b.closest_point_to_lseg(*s),
+        (BinaryOp::ClosestPoint, Datum::Lseg(a), Datum::Lseg(b)) => a.closest_point_to_lseg(*b),
+        (BinaryOp::ClosestPoint, Datum::Point(p), Datum::Box(b)) => b.closest_point_to(*p),
+        (BinaryOp::ClosestPoint, Datum::Point(p), Datum::Line(a)) => a.closest_point_to(*p),
+        (BinaryOp::ClosestPoint, Datum::Point(p), Datum::Lseg(s)) => s.closest_point_to(*p),
+        _ => return None,
+    };
+    Some(point.map_or(Datum::Null, Datum::Point))
+}
+
+/// `+`, `-`, `*` and `/`. `geometry.rs` already reports 22003 (overflow /
+/// underflow) and 22012 (division by zero) as a `TypeError`.
+fn geometric_arithmetic(
+    op: BinaryOp,
+    left: &Datum,
+    right: &Datum,
+) -> Option<Result<Datum, ExecError>> {
+    if !matches!(
+        op,
+        BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div
+    ) {
+        return None;
+    }
+    // `path + path` is `path_add`: plain concatenation, and NULL when either
+    // operand is a closed path.
+    if let (BinaryOp::Add, Datum::Path(a), Datum::Path(b)) = (op, left, right) {
+        return Some(Ok(a.concat(b).map_or(Datum::Null, Datum::Path)));
+    }
+    let Datum::Point(point) = right else {
+        return None;
+    };
+    let point = *point;
+    let value = match left {
+        Datum::Box(a) => match op {
+            BinaryOp::Add => a.add_point(point),
+            BinaryOp::Sub => a.sub_point(point),
+            BinaryOp::Mul => a.mul_point(point),
+            _ => a.div_point(point),
+        }
+        .map(Datum::Box),
+        Datum::Circle(a) => match op {
+            BinaryOp::Add => a.add_point(point),
+            BinaryOp::Sub => a.sub_point(point),
+            BinaryOp::Mul => a.mul_point(point),
+            _ => a.div_point(point),
+        }
+        .map(Datum::Circle),
+        Datum::Path(a) => match op {
+            BinaryOp::Add => a.add_point(point),
+            BinaryOp::Sub => a.sub_point(point),
+            BinaryOp::Mul => a.mul_point(point),
+            _ => a.div_point(point),
+        }
+        .map(Datum::Path),
+        Datum::Point(a) => match op {
+            BinaryOp::Add => a.add_point(point),
+            BinaryOp::Sub => a.sub_point(point),
+            BinaryOp::Mul => a.mul_point(point),
+            _ => a.div_point(point),
+        }
+        .map(Datum::Point),
+        _ => return None,
+    };
+    Some(value.map_err(ExecError::Type))
+}
+
+/// `=`, `<>` and the four orderings over a geometric operand.
+///
+/// `PostgreSQL` declares these one type at a time and inconsistently: `point`
+/// has `<>` but no `=`, `box` has `=` but no `<>`, `polygon` has neither, and
+/// `line` has `=` alone. Where the operator exists, what it MEANS also varies —
+/// `box = box` compares areas while `lseg = lseg` compares endpoints. Returns
+/// `None` when neither operand is geometric.
+fn apply_geometric_comparison(
+    op: BinaryOp,
+    left: &Datum,
+    right: &Datum,
+) -> Option<Result<Datum, ExecError>> {
+    if !is_geometric_datum(left) && !is_geometric_datum(right) {
+        return None;
+    }
+    if left.is_null() || right.is_null() {
+        return Some(Ok(Datum::Null));
+    }
+    if let Some(error) = geometric_comparison_rejection(op, left, right) {
+        return Some(Err(error));
+    }
+    Some(match (op, left, right) {
+        // `lseg_eq` / `lseg_ne` compare ENDPOINTS, where `lseg_lt` and friends
+        // compare length — so equality cannot go through `ops::compare`.
+        (BinaryOp::Eq, Datum::Lseg(a), Datum::Lseg(b)) => Ok(Datum::Bool(a.eq_lseg(*b))),
+        (BinaryOp::Ne, Datum::Lseg(a), Datum::Lseg(b)) => Ok(Datum::Bool(a.ne_lseg(*b))),
+        // `point` and `polygon` order nothing; `<>` is all `point` has.
+        (BinaryOp::Ne, Datum::Point(a), Datum::Point(b)) => Ok(Datum::Bool(a.ne_point(*b))),
+        // `circle_ne` is not the negation of `circle_eq` for a NaN area, so it
+        // is answered by its own function rather than by inverting `=`.
+        (BinaryOp::Ne, Datum::Circle(a), Datum::Circle(b)) => Ok(Datum::Bool(a.ne_circle(*b))),
+        _ => ops::compare(left, right)
+            .map(|ord| cmp_result(op, ord))
+            .map_err(ExecError::from),
+    })
+}
+
+/// The 42883 for a geometric comparison `pg_operator` does not declare, or
+/// `None` when the pair is one it does. `IS [NOT] DISTINCT FROM` resolves
+/// through the type's `=`, so its caller passes [`BinaryOp::Eq`].
+fn geometric_comparison_rejection(op: BinaryOp, left: &Datum, right: &Datum) -> Option<ExecError> {
+    // A NULL carries no type, so it resolves the operator from its sibling and
+    // there is nothing to refuse: `box IS DISTINCT FROM NULL` is `t`.
+    if left.is_null() || right.is_null() {
+        return None;
+    }
+    if !is_geometric_datum(left) && !is_geometric_datum(right) {
+        return None;
+    }
+    let declared = GeoType::of_datum(left)
+        .zip(GeoType::of_datum(right))
+        .is_some_and(|(a, b)| a == b && geometric_comparison_declared(op, a));
+    (!declared).then(|| undefined_operator_for(op, left, right))
+}
+
+/// The btree surface `pg_operator` gives each geometric type, verified against
+/// PostgreSQL 18.4:
+///
+/// | type | `=` | `<>` | `<` `<=` `>` `>=` |
+/// |---|---|---|---|
+/// | `point` | no | yes | no |
+/// | `box` | yes | no | yes |
+/// | `circle` | yes | yes | yes |
+/// | `line` | yes | no | no |
+/// | `lseg` | yes | yes | yes |
+/// | `path` | yes | no | yes |
+/// | `polygon` | no | no | no |
+fn geometric_comparison_declared(op: BinaryOp, ty: GeoType) -> bool {
+    use GeoType::{Box, Circle, Line, Lseg, Path, Point};
+    match op {
+        BinaryOp::Eq => matches!(ty, Box | Circle | Line | Lseg | Path),
+        BinaryOp::Ne => matches!(ty, Circle | Lseg | Point),
+        BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
+            matches!(ty, Box | Circle | Lseg | Path)
+        }
+        _ => false,
+    }
 }
 
 /// A binary operator's SQL spelling, for error messages.
@@ -2599,6 +3317,13 @@ pub(crate) fn op_spelling(op: BinaryOp) -> &'static str {
         BinaryOp::DoesNotExtendRight => "&<",
         BinaryOp::DoesNotExtendLeft => "&>",
         BinaryOp::Adjacent => "-|-",
+        BinaryOp::ClosestPoint => "##",
+        BinaryOp::Intersects => "?#",
+        BinaryOp::Horizontal => "?-",
+        BinaryOp::Perpendicular => "?-|",
+        BinaryOp::Parallel => "?||",
+        BinaryOp::BelowEq => "<^",
+        BinaryOp::AboveEq => ">^",
         BinaryOp::Phrase => "<->",
         BinaryOp::Match => "~",
         BinaryOp::MatchCi => "~*",
@@ -2749,6 +3474,15 @@ pub(crate) fn is_uncomparable_scalar(ty: ColumnType) -> bool {
 }
 
 pub(crate) fn require_runtime_equality(left: &Datum, right: &Datum) -> Result<(), ExecError> {
+    // `point` and `polygon` have no `=` operator at all, and every construct
+    // that expands into one — `IN (…)`, a simple `CASE`, a row comparison,
+    // `IS DISTINCT FROM` — names the missing OPERATOR, not a missing opclass.
+    // The operand test is inlined here because this is a per-row path.
+    if (is_geometric_datum(left) || is_geometric_datum(right))
+        && let Some(error) = geometric_comparison_rejection(BinaryOp::Eq, left, right)
+    {
+        return Err(error);
+    }
     let needs_operator = match (left, right) {
         (Datum::JsonPath(_), Datum::JsonPath(_)) => true,
         (Datum::Array(left), Datum::Array(right))
@@ -2783,16 +3517,22 @@ pub(crate) fn runtime_equality_short_circuit(left: &Datum, right: &Datum) -> Opt
 }
 
 pub(crate) fn require_runtime_comparison(left: &Datum, right: &Datum) -> Result<(), ExecError> {
-    // `line` has `=` but no btree opclass, so ordering it is
-    // `operator does not exist` exactly as in PostgreSQL.
-    if matches!((left, right), (Datum::Line(_), Datum::Line(_))) {
-        return Err(ExecError::UndefinedFunction(
-            "operator does not exist: line < line".into(),
-        ));
-    }
-    // `xid` and `cid` are `line`'s situation exactly: equality but no btree
-    // opclass, so an ordering comparison is `operator does not exist`.
+    // The types with equality (or, for `point` and `polygon`, not even that)
+    // but no ordering operator at all. `line` has `=`; `point` has only `<>`;
+    // `polygon` has neither. `xid` and `cid` are the same situation outside the
+    // geometric family — transaction ids compare modularly, which has no total
+    // order. The four geometric types PostgreSQL DOES order (`box`, `circle`,
+    // `lseg` and `path`) fall through, as does every other pair.
+    //
+    // The spelling is `<` because this is the ordering gate: the callers that
+    // reach it are `ORDER BY`, `min`/`max`, array and row comparison, all of
+    // which PostgreSQL resolves through the type's `<`. A written `>` or `<=`
+    // over these types is named exactly by [`apply_geometric_comparison`],
+    // which runs first.
     let unordered = match (left, right) {
+        (Datum::Line(_), Datum::Line(_)) => Some("line"),
+        (Datum::Point(_), Datum::Point(_)) => Some("point"),
+        (Datum::Polygon(_), Datum::Polygon(_)) => Some("polygon"),
         (Datum::Xid(_), Datum::Xid(_)) => Some("xid"),
         (Datum::Cid(_), Datum::Cid(_)) => Some("cid"),
         _ => None,
@@ -3085,6 +3825,18 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
                 Ok(operand)
             }
             UnaryOp::Sqrt | UnaryOp::Cbrt => Ok(ColumnType::Float8),
+            // The geometric prefix operators are declared operand type by
+            // operand type, so PostgreSQL rejects `@-@ 5` at parse analysis —
+            // which is here — rather than on the first row.
+            UnaryOp::NPoints
+            | UnaryOp::Length
+            | UnaryOp::Center
+            | UnaryOp::IsHorizontal
+            | UnaryOp::IsVertical => {
+                let operand = infer_type(expr, scope)?;
+                geometric_prefix_result_type(*op, operand)
+                    .ok_or_else(|| undefined_prefix_operator_named(*op, operand.name()))
+            }
             // `IS DOCUMENT` is boolean-valued over an `xml` operand, and
             // PostgreSQL rejects any other operand type right here.
             UnaryOp::IsDocument | UnaryOp::IsNotDocument => {
@@ -3264,6 +4016,12 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
             if bt == ColumnType::Jsonb {
                 return Ok(ColumnType::Jsonb);
             }
+            // `point[i]` and `line[i]` are `float8`; `box[i]` and `lseg[i]` are
+            // `point`. `circle`, `path` and `polygon` have no handler and fall
+            // through to the 42804 below.
+            if let Some(elem) = geometric_subscript_element(bt) {
+                return Ok(elem);
+            }
             bt.array_element()
                 .map(ElemType::column_type)
                 .ok_or_else(|| cannot_subscript(bt))
@@ -3274,6 +4032,12 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
             let bt = infer_type(base, scope)?;
             if bt == ColumnType::Jsonb {
                 return Ok(ColumnType::Jsonb);
+            }
+            // A fixed-length geometric type has one dimension and cannot be
+            // sliced, so every chain over one reports the element type; the
+            // slice itself is refused when the reference evaluates.
+            if let Some(elem) = geometric_subscript_element(bt) {
+                return Ok(elem);
             }
             let elem = bt.array_element().ok_or_else(|| cannot_subscript(bt))?;
             if subscripts
@@ -3329,6 +4093,12 @@ fn infer_binary_type(
                 return Err(ambiguous_operator(op_spelling(op)));
             }
             let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
+            // A geometric operand selects `box + point`, `path + path` and
+            // their siblings; every undeclared pair (`polygon + point`,
+            // `lseg + point`, `point + box`) is 42883 right here.
+            if let Some(resolved) = geometric_operand_result(op, lt, rt) {
+                return resolved;
+            }
             if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul) {
                 match (lt, rt) {
                     (ColumnType::Range(a), ColumnType::Range(b)) if a == b => return Ok(lt),
@@ -3374,12 +4144,10 @@ fn infer_binary_type(
         BinaryOp::Phrase => {
             let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
             if lt == ColumnType::TsQuery && rt == ColumnType::TsQuery {
-                Ok(ColumnType::TsQuery)
-            } else if is_boxable(lt) && is_boxable(rt) {
-                Ok(ColumnType::Float8)
-            } else {
-                Err(undefined_operator("<->", lt, rt))
+                return Ok(ColumnType::TsQuery);
             }
+            geometric_operand_result(op, lt, rt)
+                .unwrap_or_else(|| Err(undefined_operator("<->", lt, rt)))
         }
         // `@@` is shared by jsonpath and full-text search. A text-search
         // operand selects the latter overload; a bare query literal adopts
@@ -3453,8 +4221,8 @@ fn infer_binary_type(
                 return Err(ambiguous_operator(op_spelling(op)));
             }
             let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
-            if is_boxable(lt) && is_boxable(rt) && !matches!(op, BinaryOp::Adjacent) {
-                return Ok(ColumnType::Bool);
+            if let Some(resolved) = geometric_operand_result(op, lt, rt) {
+                return resolved;
             }
             if range_family_compatible(lt, rt)
                 || matches!(lt, ColumnType::Range(_) | ColumnType::Multirange(_))
@@ -3472,8 +4240,10 @@ fn infer_binary_type(
                 return Err(ambiguous_operator(op_spelling(op)));
             }
             let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
-            if matches!(op, BinaryOp::Shl | BinaryOp::Shr) && is_boxable(lt) && is_boxable(rt) {
-                return Ok(ColumnType::Bool);
+            // `<<`, `>>` and `#` all double as geometric operators, and a
+            // geometric operand is what selects that meaning.
+            if let Some(resolved) = geometric_operand_result(op, lt, rt) {
+                return resolved;
             }
             if matches!(op, BinaryOp::Shl | BinaryOp::Shr)
                 && (range_family_compatible(lt, rt)
@@ -3530,6 +4300,42 @@ fn infer_binary_type(
                 return Err(undefined_operator("%", lt, rt));
             }
             Ok(numeric_result_type(lt, rt))
+        }
+        // The geometry-only operators, plus the five whose other overload is
+        // the range family. `##` alone is not a predicate — it yields the
+        // closest point — so none of these can fall through to the `boolean`
+        // default below without being resolved first.
+        BinaryOp::ClosestPoint
+        | BinaryOp::Intersects
+        | BinaryOp::Horizontal
+        | BinaryOp::Perpendicular
+        | BinaryOp::Parallel
+        | BinaryOp::BelowEq
+        | BinaryOp::AboveEq
+        | BinaryOp::Same
+        | BinaryOp::StrictlyBelow
+        | BinaryOp::StrictlyAbove
+        | BinaryOp::DoesNotExtendAbove
+        | BinaryOp::DoesNotExtendBelow => {
+            let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
+            match geometric_operand_result(op, lt, rt) {
+                Some(resolved) => resolved,
+                // `~=`, `<<|`, `|>>`, `&<|` and `|&>` are also range operators,
+                // which the value layer answers; `##` and the other five are
+                // geometry's alone and are 42883 without a geometric operand.
+                None if matches!(
+                    op,
+                    BinaryOp::Same
+                        | BinaryOp::StrictlyBelow
+                        | BinaryOp::StrictlyAbove
+                        | BinaryOp::DoesNotExtendAbove
+                        | BinaryOp::DoesNotExtendBelow
+                ) =>
+                {
+                    Ok(ColumnType::Bool)
+                }
+                None => Err(undefined_operator(op_spelling(op), lt, rt)),
+            }
         }
         _ => Ok(ColumnType::Bool),
     }
@@ -3773,25 +4579,10 @@ fn json_or_array_operator_result_type(
             return Some(ColumnType::Bool);
         }
     }
-    // The geometric positional operators take two boxable operands and yield a
-    // predicate; `<->` yields the distance between them.
-    if is_boxable(lt) && is_boxable(rt) {
-        match op {
-            BinaryOp::Shl
-            | BinaryOp::Shr
-            | BinaryOp::DoesNotExtendRight
-            | BinaryOp::DoesNotExtendLeft
-            | BinaryOp::StrictlyBelow
-            | BinaryOp::StrictlyAbove
-            | BinaryOp::DoesNotExtendAbove
-            | BinaryOp::DoesNotExtendBelow
-            | BinaryOp::Overlaps
-            | BinaryOp::Contains
-            | BinaryOp::ContainedBy
-            | BinaryOp::Same => return Some(ColumnType::Bool),
-            BinaryOp::Phrase => return Some(ColumnType::Float8),
-            _ => {}
-        }
+    // The geometric operators resolve by the exact operand pair; an undeclared
+    // one is `None` here and the caller reports 42883.
+    if let Some(resolved) = geometric_operator_result_type(op, lt, rt) {
+        return Some(resolved);
     }
     match (op, lt, rt) {
         (
@@ -3914,6 +4705,7 @@ fn eval_array_ref(
     match subscript_kind(&evaluated, base, scope)? {
         SubscriptKind::Json => Err(cannot_subscript(ColumnType::Json)),
         SubscriptKind::Jsonb => eval_jsonb_subscript_chain(&evaluated, subscripts, &args),
+        SubscriptKind::Geometric => geometric_array_ref(&evaluated, &args),
         SubscriptKind::Array => array_fn::array_ref(&evaluated, &args),
     }
 }
@@ -3928,20 +4720,93 @@ enum SubscriptKind {
     /// `json`, which has NO subscript handler at all — the reference is an
     /// error rather than a different rule.
     Json,
+    /// `point`, `box`, `lseg` and `line`: a fixed-length, **0-based** reference
+    /// into the value's own fields, which cannot be sliced.
+    Geometric,
 }
 
 /// The rule a base value (or, when the value carries no type of its own, the
 /// base expression's static type) selects.
+///
+/// `circle`, `path` and `polygon` are the three geometric types with no
+/// subscript handler at all, so they are rejected here rather than falling
+/// through to `array_fn`'s "assume it is an array" default — which would have
+/// produced the same 42804 message, but only for a non-NULL value.
 fn subscript_kind(value: &Datum, base: &Expr, scope: &Scope) -> Result<SubscriptKind, ExecError> {
-    Ok(match value {
-        Datum::Jsonb(_) => SubscriptKind::Jsonb,
-        Datum::Json(_) => SubscriptKind::Json,
-        _ => match infer_type(base, scope)? {
-            ColumnType::Jsonb => SubscriptKind::Jsonb,
-            ColumnType::Json => SubscriptKind::Json,
-            _ => SubscriptKind::Array,
-        },
+    let ty = match value {
+        Datum::Jsonb(_) => return Ok(SubscriptKind::Jsonb),
+        Datum::Json(_) => return Ok(SubscriptKind::Json),
+        Datum::Point(_) => ColumnType::Point,
+        Datum::Box(_) => ColumnType::Box,
+        Datum::Lseg(_) => ColumnType::Lseg,
+        Datum::Line(_) => ColumnType::Line,
+        Datum::Circle(_) => ColumnType::Circle,
+        Datum::Path(_) => ColumnType::Path,
+        Datum::Polygon(_) => ColumnType::Polygon,
+        _ => infer_type(base, scope)?,
+    };
+    Ok(match ty {
+        ColumnType::Jsonb => SubscriptKind::Jsonb,
+        ColumnType::Json => SubscriptKind::Json,
+        ColumnType::Point | ColumnType::Box | ColumnType::Lseg | ColumnType::Line => {
+            SubscriptKind::Geometric
+        }
+        ColumnType::Circle | ColumnType::Path | ColumnType::Polygon => {
+            return Err(cannot_subscript(ty));
+        }
+        _ => SubscriptKind::Array,
     })
+}
+
+/// The element type `base[i]` yields for the four subscriptable geometric
+/// types, or `None` for every other type.
+fn geometric_subscript_element(ty: ColumnType) -> Option<ColumnType> {
+    match ty {
+        ColumnType::Point | ColumnType::Line => Some(ColumnType::Float8),
+        ColumnType::Box | ColumnType::Lseg => Some(ColumnType::Point),
+        _ => None,
+    }
+}
+
+/// `point[i]`, `box[i]`, `lseg[i]` and `line[i]` — `PostgreSQL`'s fixed-length
+/// subscripting, which is **0-based** where the array rule is 1-based. Every
+/// out-of-range index is SQL NULL, a negative one included.
+fn geometric_subscript(base: &Datum, index: &Datum) -> Result<Datum, ExecError> {
+    let Some(index) = array_fn::subscript_int(index)? else {
+        return Ok(Datum::Null);
+    };
+    Ok(match (base, index) {
+        (Datum::Point(point), 0) => Datum::Float8(point.x),
+        (Datum::Point(point), 1) => Datum::Float8(point.y),
+        // `box_subscript` reads the HIGH corner first, which is also the order
+        // `box_out` prints them in.
+        (Datum::Box(value), 0) => Datum::Point(value.high),
+        (Datum::Box(value), 1) => Datum::Point(value.low),
+        (Datum::Lseg(lseg), 0) => Datum::Point(lseg.start),
+        (Datum::Lseg(lseg), 1) => Datum::Point(lseg.end),
+        (Datum::Line(line), 0) => Datum::Float8(line.a),
+        (Datum::Line(line), 1) => Datum::Float8(line.b),
+        (Datum::Line(line), 2) => Datum::Float8(line.c),
+        _ => Datum::Null,
+    })
+}
+
+/// [`geometric_subscript`] over a whole subscript chain. A fixed-length type
+/// has exactly one dimension, so a longer chain is SQL NULL (`box[0][1]` is a
+/// two-dimensional reference, not `(box[0])[1]`), and a slice is 0A000.
+fn geometric_array_ref(
+    base: &Datum,
+    subscripts: &[array_fn::SubscriptArg],
+) -> Result<Datum, ExecError> {
+    if subscripts.iter().any(array_fn::SubscriptArg::is_slice) {
+        return Err(ExecError::Unsupported(
+            "slices of fixed-length arrays not implemented".into(),
+        ));
+    }
+    let [array_fn::SubscriptArg::Index(index)] = subscripts else {
+        return Ok(Datum::Null);
+    };
+    geometric_subscript(base, index)
 }
 
 /// PostgreSQL's 42804 for a base type with no subscripting operator. `json` is
@@ -6146,5 +7011,190 @@ mod tests {
                 &[]
             ) == Datum::Bool(true)
         );
+    }
+
+    /// The plan-time table and the value-time dispatch answer the SAME set of
+    /// (operator, left type, right type) triples.
+    ///
+    /// [`geometric_operator_result_type`] is what decides at plan time whether
+    /// `box <-> circle` exists, and [`apply_geometric_operator`] is what decides
+    /// it per row. A pair one of them accepts and the other does not is a
+    /// divergence a corpus would see as a query that describes and then fails,
+    /// or the other way round — so this walks all 26 geometric operators over
+    /// every one of the 7×7 pairs and requires the two to agree 1274 times.
+    #[test]
+    fn plan_time_and_value_time_agree_on_every_geometric_pair() {
+        use assert2::assert;
+
+        let ctx = crate::clock::EvalCtx::test_default();
+        for op in GEOMETRIC_BINARY_OPERATORS {
+            for (lt, left) in geometric_samples() {
+                for (rt, right) in geometric_samples() {
+                    let planned = geometric_operator_result_type(op, lt, rt);
+                    let evaluated = apply_geometric_operator(op, &left, &right)
+                        .expect("a geometric operand pair is always claimed");
+                    assert!(
+                        planned.is_some() == evaluated.is_ok(),
+                        "{} {} {}: plan {:?}, value {:?}",
+                        lt.name(),
+                        op_spelling(op),
+                        rt.name(),
+                        planned,
+                        evaluated
+                    );
+                    // A declared pair's value really has the type the plan
+                    // promised, so a RowDescription built from the plan
+                    // describes the rows the executor then sends.
+                    if let (Some(ty), Ok(value)) = (planned, &evaluated)
+                        && !value.is_null()
+                    {
+                        assert!(
+                            value.column_type() == Some(ty),
+                            "{} {} {} produced {value:?}, not {}",
+                            lt.name(),
+                            op_spelling(op),
+                            rt.name(),
+                            ty.name()
+                        );
+                    }
+                    // The full `apply_binary` path agrees with the dispatch it
+                    // delegates to, so nothing downstream re-claims a pair.
+                    let whole = apply_binary(op, &left, &right, &ctx);
+                    assert!(whole.is_ok() == evaluated.is_ok());
+                }
+            }
+        }
+    }
+
+    /// Every geometric operator is strict: one NULL operand is one NULL result,
+    /// whichever side it is on and whether or not the pair is declared.
+    #[test]
+    fn a_null_operand_makes_every_geometric_operator_null() {
+        use assert2::assert;
+
+        for op in GEOMETRIC_BINARY_OPERATORS {
+            for (ty, value) in geometric_samples() {
+                for pair in [(value.clone(), Datum::Null), (Datum::Null, value.clone())] {
+                    let result = apply_geometric_operator(op, &pair.0, &pair.1);
+                    assert!(
+                        result.map(Result::ok) == Some(Some(Datum::Null)),
+                        "{} {}",
+                        op_spelling(op),
+                        ty.name()
+                    );
+                }
+            }
+        }
+    }
+
+    /// The geometric dispatch runs SECOND in `apply_binary`'s prelude, ahead of
+    /// the network, bit-string, money and system-identifier families. It must
+    /// therefore claim nothing that has no geometric operand — including two
+    /// NULLs, which carry no type at all.
+    #[test]
+    fn the_geometric_dispatch_claims_nothing_without_a_geometric_operand() {
+        use assert2::assert;
+
+        let others = [
+            Datum::Null,
+            Datum::Int4(5),
+            Datum::Int8(5),
+            Datum::Float8(1.5),
+            Datum::Text("x".into()),
+            Datum::Bool(true),
+        ];
+        for op in GEOMETRIC_BINARY_OPERATORS {
+            for left in &others {
+                for right in &others {
+                    assert!(
+                        apply_geometric_operator(op, left, right).is_none(),
+                        "{op:?} claimed {left:?} and {right:?}"
+                    );
+                    assert!(apply_geometric_comparison(op, left, right).is_none());
+                }
+            }
+        }
+    }
+
+    /// Every `BinaryOp` PostgreSQL gives a geometric overload.
+    const GEOMETRIC_BINARY_OPERATORS: [BinaryOp; 26] = [
+        BinaryOp::BitXor,
+        BinaryOp::ClosestPoint,
+        BinaryOp::Overlaps,
+        BinaryOp::DoesNotExtendRight,
+        BinaryOp::DoesNotExtendLeft,
+        BinaryOp::DoesNotExtendAbove,
+        BinaryOp::DoesNotExtendBelow,
+        BinaryOp::Add,
+        BinaryOp::Sub,
+        BinaryOp::Mul,
+        BinaryOp::Div,
+        BinaryOp::Phrase,
+        BinaryOp::Shl,
+        BinaryOp::Shr,
+        BinaryOp::StrictlyBelow,
+        BinaryOp::StrictlyAbove,
+        BinaryOp::Contains,
+        BinaryOp::ContainedBy,
+        BinaryOp::BelowEq,
+        BinaryOp::AboveEq,
+        BinaryOp::Intersects,
+        BinaryOp::Horizontal,
+        BinaryOp::KeyExistsAny,
+        BinaryOp::Perpendicular,
+        BinaryOp::Parallel,
+        BinaryOp::Same,
+    ];
+
+    /// One well-formed value of each geometric type. The coordinates are chosen
+    /// so no pair overflows, divides by zero or leaves an operand empty — the
+    /// point of the sweep is which pairs RESOLVE, not what they answer.
+    fn geometric_samples() -> [(ColumnType, Datum); 7] {
+        use crabka_pgtypes::{
+            Path, Point, Polygon,
+            geometry::{Box2, Circle, Line, Lseg},
+        };
+
+        let point = Point { x: 1.0, y: 2.0 };
+        let other = Point { x: 3.0, y: 4.0 };
+        [
+            (ColumnType::Point, Datum::Point(point)),
+            (ColumnType::Box, Datum::Box(Box2::normalized(point, other))),
+            (
+                ColumnType::Circle,
+                Datum::Circle(Circle {
+                    center: point,
+                    radius: 1.0,
+                }),
+            ),
+            (
+                ColumnType::Line,
+                Datum::Line(Line {
+                    a: 1.0,
+                    b: -1.0,
+                    c: 0.0,
+                }),
+            ),
+            (
+                ColumnType::Lseg,
+                Datum::Lseg(Lseg {
+                    start: point,
+                    end: other,
+                }),
+            ),
+            (
+                ColumnType::Path,
+                Datum::Path(Path {
+                    closed: false,
+                    points: vec![point, other],
+                }),
+            ),
+            (
+                ColumnType::Polygon,
+                Datum::Polygon(Polygon {
+                    points: vec![point, other, Point { x: 5.0, y: 1.0 }],
+                }),
+            ),
+        ]
     }
 }

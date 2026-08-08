@@ -3698,9 +3698,13 @@ pub enum MatchKind {
 }
 
 /// A one-operand operator: the prefix forms (`NOT`, unary `-`, `~`, `@`, `|/`,
-/// `||/`) and SQL's six postfix boolean tests. The tests belong here because
-/// that is exactly what they are: one boolean operand in, one never-NULL
-/// boolean out.
+/// `||/`, and the geometric `#`, `@-@`, `@@`, `?-`, `?|`) and SQL's six postfix
+/// boolean tests. The tests belong here because that is exactly what they are —
+/// one boolean operand in, one never-NULL boolean out.
+///
+/// Four of the geometric spellings are shared with an infix operator (`#`,
+/// `@@`, `?-`, `?|`); the parser picks the reading from the position, and the
+/// executor picks the implementation from the operand type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOp {
     Not,
@@ -3739,6 +3743,24 @@ pub enum UnaryOp {
     Cbrt,
     /// Prefix `!!`: tsquery boolean negation.
     TsNot,
+    /// Prefix `#` — the number of points in a path or polygon. Spelled like the
+    /// infix XOR/geometric-intersection operator; only the position tells them
+    /// apart.
+    NPoints,
+    /// Prefix `@-@` — the length of an lseg or path. `PostgreSQL` has no infix
+    /// `@-@`, so this spelling is unambiguous once the lexer munches it whole:
+    /// `@-@ x` is a length, never `@(-(@x))`.
+    Length,
+    /// Prefix `@@` — the centre of a box, circle, lseg or polygon. Spelled like
+    /// the infix jsonpath-match operator.
+    Center,
+    /// Prefix `?-` — is this line or lseg horizontal? Spelled like the infix
+    /// "these two points share a `y`" operator.
+    IsHorizontal,
+    /// Prefix `?|` — is this line or lseg vertical? Spelled like the infix
+    /// jsonb "any key exists" and geometric "these two points share an `x`"
+    /// operators.
+    IsVertical,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3765,7 +3787,10 @@ pub enum BinaryOp {
     ContainedBy,
     /// jsonb `?`: the string exists as a top-level key (or array element).
     KeyExists,
-    /// jsonb `?|`: any of the given strings exist as top-level keys.
+    /// jsonb `?|` — any of the given strings exist as top-level keys. Also the
+    /// geometric `point ?| point` (do the two points share an `x`?): one
+    /// spelling, one `BinaryOp`, and the operand types choose the meaning at
+    /// evaluation time.
     KeyExistsAny,
     /// jsonb `?&`: all of the given strings exist as top-level keys.
     KeyExistsAll,
@@ -3787,9 +3812,28 @@ pub enum BinaryOp {
     DoesNotExtendRight,
     /// Range does not extend left of the other range (`&>`).
     DoesNotExtendLeft,
+    /// Geometric `##` — the point on the right-hand operand closest to the
+    /// left-hand one.
+    ClosestPoint,
+    /// Geometric `?#` — do the two operands intersect?
+    Intersects,
+    /// Geometric `point ?- point` — do the two points share a `y`? The same
+    /// spelling is the prefix [`UnaryOp::IsHorizontal`].
+    Horizontal,
+    /// Geometric `?-|` — are the two lines (or lsegs) perpendicular?
+    Perpendicular,
+    /// Geometric `?||` — are the two lines (or lsegs) parallel?
+    Parallel,
+    /// Geometric `<^` — `point` strictly below, `box` below or level with.
+    BelowEq,
+    /// Geometric `>^` — `point` strictly above, `box` above or level with.
+    AboveEq,
     /// Ranges are adjacent (`-|-`).
     Adjacent,
-    /// `tsquery <-> tsquery` — adjacent phrase composition.
+    /// `tsquery <-> tsquery` — adjacent phrase composition. Also the geometric
+    /// distance operator (`point <-> box` and its two dozen siblings), which
+    /// `PostgreSQL` spells the same way; the operand types disambiguate at
+    /// evaluation time, not at parse time.
     Phrase,
     /// `~`: the left string matches the POSIX regular expression on the right.
     Match,
@@ -3803,7 +3847,9 @@ pub enum BinaryOp {
     BitAnd,
     /// `|`: bitwise OR on two integers of the same width.
     BitOr,
-    /// `#`: bitwise XOR on two integers of the same width.
+    /// `#` — bitwise XOR on two integers of the same width. Also the geometric
+    /// intersection point (`box # box`, `line # line`, `lseg # lseg`); the
+    /// operand types disambiguate at evaluation time.
     BitXor,
     /// `<<`: bitwise left shift.
     Shl,

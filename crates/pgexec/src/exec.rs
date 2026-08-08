@@ -16130,6 +16130,10 @@ fn format_default_value(value: &Datum, ty: ColumnType) -> String {
         Datum::Json(_)
         | Datum::Xml(_)
         | Datum::Jsonb(_)
+        // `polygon` is a varlena whose output function is zone-independent, so
+        // its default reads back the way `pg_get_expr` prints it:
+        // `'((0,0),(1,1))'::polygon`.
+        | Datum::Polygon(_)
         | Datum::Array(_)
         | Datum::OidVector(_)
         | Datum::Range(_)
@@ -16342,6 +16346,7 @@ fn attribute_storage(ty: ColumnType) -> &'static str {
         | C::Bit(_)
         | C::VarBit(_)
         | C::Path
+        | C::Polygon
         | C::Array(_)
         | C::Record(_)
         | C::Range(_)
@@ -17531,6 +17536,50 @@ fn scalar_type_rows() -> &'static [BuiltinTypeRow] {
             oid: crabka_pgtypes::oids::PATH as i32,
             name: "path",
             len: -1,
+            category: "G",
+            elem: 0,
+            array: 0,
+        },
+        // The other five geometric types, category 'G' like `point`/`path`.
+        // `typelem`/`typarray` stay 0 for the same reason theirs do: crabka
+        // builds no array of a geometric type, and `type_sanity` treats a
+        // `typarray` pointing at a row that does not exist as a catalog error.
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::LSEG as i32,
+            name: "lseg",
+            len: 32,
+            category: "G",
+            elem: 0,
+            array: 0,
+        },
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::BOX as i32,
+            name: "box",
+            len: 32,
+            category: "G",
+            elem: 0,
+            array: 0,
+        },
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::POLYGON as i32,
+            name: "polygon",
+            len: -1,
+            category: "G",
+            elem: 0,
+            array: 0,
+        },
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::LINE as i32,
+            name: "line",
+            len: 24,
+            category: "G",
+            elem: 0,
+            array: 0,
+        },
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::CIRCLE as i32,
+            name: "circle",
+            len: 24,
             category: "G",
             elem: 0,
             array: 0,
@@ -19346,8 +19395,18 @@ pub(crate) fn column_type_from_oid(oid: u32) -> Result<ColumnType, ExecError> {
         crabka_pgtypes::oids::BPCHAR => ColumnType::Char(None),
         crabka_pgtypes::oids::FLOAT4 => ColumnType::Float4,
         crabka_pgtypes::oids::FLOAT8 => ColumnType::Float8,
+        // All seven geometric types. Before the geometric operators landed,
+        // only `point` and `path` could reach here, because nothing produced a
+        // `box`/`lseg`/`line`/`circle`/`polygon` as a query field type except a
+        // bare column reference. `b # b`, `@@ c`, `lseg(b)` and friends now do,
+        // so a view over any of them needs its oid to round-trip.
         crabka_pgtypes::oids::POINT => ColumnType::Point,
         crabka_pgtypes::oids::PATH => ColumnType::Path,
+        crabka_pgtypes::oids::BOX => ColumnType::Box,
+        crabka_pgtypes::oids::LSEG => ColumnType::Lseg,
+        crabka_pgtypes::oids::LINE => ColumnType::Line,
+        crabka_pgtypes::oids::CIRCLE => ColumnType::Circle,
+        crabka_pgtypes::oids::POLYGON => ColumnType::Polygon,
         crabka_pgtypes::oids::NUMERIC => ColumnType::Numeric(None),
         crabka_pgtypes::oids::DATE => ColumnType::Date,
         crabka_pgtypes::oids::TIME => ColumnType::Time,

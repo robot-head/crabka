@@ -114,6 +114,10 @@ fn column_hash(value: &Datum, seed: u64) -> Result<Option<u64>, ExecError> {
         Datum::Float8(_) => return Err(unsupported("double precision")),
         Datum::Point(_) => return Err(unsupported("point")),
         Datum::Path(_) => return Err(unsupported("path")),
+        // `polygon` joins the other six: PostgreSQL gives no geometric type a
+        // hash operator class, because none of them has an equality operator a
+        // hash could be consistent with.
+        Datum::Polygon(_) => return Err(unsupported("polygon")),
         Datum::Lseg(_) => return Err(unsupported("lseg")),
         Datum::Line(_) => return Err(unsupported("line")),
         Datum::Circle(_) => return Err(unsupported("circle")),
@@ -686,6 +690,62 @@ mod tests {
         for (values, expected_remainder) in vectors {
             let row_hash = partition_hash(&values).expect("supported key types");
             assert!(row_hash % 8 == expected_remainder);
+        }
+    }
+
+    /// `PostgreSQL` gives none of the seven geometric types a hash operator
+    /// class — none of them has an equality operator a hash could be consistent
+    /// with — so none can be a hash partition key.
+    #[test]
+    fn no_geometric_type_is_a_hash_partition_key() {
+        let point = crabka_pgtypes::Point { x: 1.0, y: 2.0 };
+        let vectors: [(Datum, &str); 7] = [
+            (Datum::Point(point), "point"),
+            (
+                Datum::Box(crabka_pgtypes::geometry::Box2 {
+                    high: point,
+                    low: point,
+                }),
+                "box",
+            ),
+            (
+                Datum::Circle(crabka_pgtypes::geometry::Circle {
+                    center: point,
+                    radius: 1.0,
+                }),
+                "circle",
+            ),
+            (
+                Datum::Line(crabka_pgtypes::geometry::Line {
+                    a: 1.0,
+                    b: -1.0,
+                    c: 0.0,
+                }),
+                "line",
+            ),
+            (
+                Datum::Lseg(crabka_pgtypes::geometry::Lseg {
+                    start: point,
+                    end: point,
+                }),
+                "lseg",
+            ),
+            (
+                Datum::Path(crabka_pgtypes::Path {
+                    closed: false,
+                    points: vec![point],
+                }),
+                "path",
+            ),
+            (
+                Datum::Polygon(crabka_pgtypes::Polygon {
+                    points: vec![point],
+                }),
+                "polygon",
+            ),
+        ];
+        for (value, type_name) in vectors {
+            assert!(partition_hash(&[value]) == Err(unsupported(type_name)));
         }
     }
 

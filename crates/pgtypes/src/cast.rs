@@ -31,9 +31,13 @@
 
 use crate::{ColumnType, Datum, TypeError, string::Coercion};
 
-/// Is an explicit cast from `from` to `to` defined among the slice's types? The
-/// planner calls this so an undefined cast surfaces as 42846 before execution,
-/// and so it knows the result column type for `RowDescription`.
+/// `polygon(circle)` is spelled `select pg_catalog.polygon(12, $1)` in
+/// `pg_proc`, so the `circle → polygon` cast always produces twelve vertices.
+const CIRCLE_CAST_VERTICES: i32 = 12;
+
+/// Is an explicit cast from `from` to `to` defined among the slice's types? Used
+/// at plan time so an undefined cast surfaces as 42846 before execution, and so
+/// the result column type is known for `RowDescription`.
 pub fn cast_allowed(from: ColumnType, to: ColumnType) -> bool {
     use ColumnType::{Bool, Date, Int4, Text, Time, Timestamp, Timestamptz};
     // SP32: the numeric family — int2/int4/int8/float4/float8/numeric — all
@@ -79,6 +83,12 @@ pub fn cast_allowed(from: ColumnType, to: ColumnType) -> bool {
             cast_allowed(a.column_type(), b.column_type())
         }
         (ColumnType::OidVector, ColumnType::Array(crate::ElemType::Regtype)) => true,
+        // The fourteen geometric conversions `pg_cast` declares, and no others:
+        // there is no `point → polygon`, no `lseg → box`, and nothing at all
+        // touching `line`. Each runs a named conversion function, so the pairs
+        // are listed one by one rather than being derived from "both sides are
+        // geometric".
+        _ if geometric_cast(from, to) => true,
         // The system identifier family. `pg_cast` gives `oid` conversions with
         // the integer types and with every `reg*` type, and gives `xid8 → xid`
         // (explicit); it gives the other four nothing at all, so they reach any
@@ -192,11 +202,44 @@ pub fn cast_allowed(from: ColumnType, to: ColumnType) -> bool {
     }
 }
 
-/// Is an *implicit-or-assignment* cast from `from` to `to` defined, that is, one
-/// of the pairs PostgreSQL 18's `pg_cast` marks `castcontext` `'i'` or `'a'`,
-/// restricted to crabka's types? This is a strict SUBSET of [`cast_allowed`].
-/// Assignment (INSERT / UPDATE SET into a column) converts through these pairs
-/// automatically, and everything else still needs an explicit `CAST`.
+/// The geometric ↔ geometric pairs `pg_cast` declares, each backed by a
+/// conversion function of the target type's name (`polygon(box)`, `point(lseg)`,
+/// …). Four are assignment-level ([`geometric_assignment_cast`]) and the rest
+/// explicit; both contexts share this membership test.
+///
+/// `line` appears in none of them: PostgreSQL gives the infinite line no
+/// conversion to or from any other geometric type. Neither does `point → lseg`,
+/// `point → polygon`, `lseg → box` or `path → box` — the missing directions are
+/// as load-bearing as the present ones, since each absence is a 42846.
+fn geometric_cast(from: ColumnType, to: ColumnType) -> bool {
+    use ColumnType::{Box, Circle, Lseg, Path, Point, Polygon};
+    matches!(
+        (from, to),
+        (Point, Box)
+            | (Lseg, Point)
+            | (Path, Polygon)
+            | (Box, Point | Lseg | Polygon | Circle)
+            | (Polygon, Point | Path | Box | Circle)
+            | (Circle, Point | Box | Polygon)
+    )
+}
+
+/// The four geometric casts `pg_cast` marks `castcontext = 'a'`. The other ten
+/// are `'e'`, so `INSERT`ing a `circle` into a `polygon` column still needs the
+/// cast written out even though `circle::polygon` exists.
+fn geometric_assignment_cast(from: ColumnType, to: ColumnType) -> bool {
+    use ColumnType::{Box, Path, Point, Polygon};
+    matches!(
+        (from, to),
+        (Point, Box) | (Path, Polygon) | (Box, Polygon) | (Polygon, Path)
+    )
+}
+
+/// Is an *implicit-or-assignment* cast from `from` to `to` defined — the pairs
+/// PostgreSQL 18's `pg_cast` marks `castcontext` `'i'` or `'a'`, restricted to
+/// crabka's types? A strict SUBSET of [`cast_allowed`]: assignment (INSERT /
+/// UPDATE SET into a column) converts through these pairs automatically, while
+/// everything else keeps requiring an explicit `CAST`.
 ///
 /// The allowed pairs and their `pg_cast` contexts:
 ///   * identity `T → T` (no cast needed);
@@ -262,7 +305,7 @@ pub fn assignment_cast_allowed(from: ColumnType, to: ColumnType) -> bool {
             ColumnType::Bit(_) | ColumnType::VarBit(_),
             ColumnType::Bit(_) | ColumnType::VarBit(_),
         ) => true,
-        _ => false,
+        _ => geometric_assignment_cast(from, to),
     }
 }
 
@@ -408,6 +451,31 @@ pub fn cast_in(
         (Datum::Line(line), ColumnType::Line) => Ok(Datum::Line(*line)),
         (Datum::Circle(circle), ColumnType::Circle) => Ok(Datum::Circle(*circle)),
         (Datum::Box(value), ColumnType::Box) => Ok(Datum::Box(*value)),
+        (Datum::Polygon(polygon), ColumnType::Polygon) => Ok(Datum::Polygon(polygon.clone())),
+        // The geometric conversions, each running the `pg_cast` function of the
+        // target type's name. `polygon(path)` is the only one that can fail: an
+        // open path has no polygon, which upstream reports as 22023 rather than
+        // the NULL its neighbours return.
+        (Datum::Point(point), ColumnType::Box) => {
+            Ok(Datum::Box(crate::geometry::Box2::of_point(*point)))
+        }
+        (Datum::Lseg(lseg), ColumnType::Point) => Ok(Datum::Point(lseg.center())),
+        (Datum::Path(path), ColumnType::Polygon) => path.to_polygon().map(Datum::Polygon),
+        (Datum::Box(value), ColumnType::Point) => Ok(Datum::Point(value.center())),
+        (Datum::Box(value), ColumnType::Lseg) => Ok(Datum::Lseg(value.diagonal())),
+        (Datum::Box(value), ColumnType::Polygon) => Ok(Datum::Polygon(value.to_polygon())),
+        (Datum::Box(value), ColumnType::Circle) => Ok(Datum::Circle(value.to_circle())),
+        (Datum::Polygon(polygon), ColumnType::Point) => Ok(Datum::Point(polygon.to_point())),
+        (Datum::Polygon(polygon), ColumnType::Path) => Ok(Datum::Path(polygon.to_path())),
+        (Datum::Polygon(polygon), ColumnType::Box) => Ok(Datum::Box(polygon.to_box())),
+        (Datum::Polygon(polygon), ColumnType::Circle) => Ok(Datum::Circle(polygon.to_circle())),
+        (Datum::Circle(circle), ColumnType::Point) => Ok(Datum::Point(circle.to_point())),
+        (Datum::Circle(circle), ColumnType::Box) => Ok(Datum::Box(circle.to_box())),
+        // `polygon(circle)` is a SQL function reading `polygon(12, $1)`, so the
+        // cast produces a twelve-vertex polygon whatever the radius.
+        (Datum::Circle(circle), ColumnType::Polygon) => {
+            circle.to_polygon(CIRCLE_CAST_VERTICES).map(Datum::Polygon)
+        }
         // The network family. `inet → cidr` is `inet_to_cidr`, which zeroes
         // every bit to the right of the netmask; `cidr → inet` only re-labels.
         (Datum::Inet(value), ColumnType::Inet) => Ok(Datum::Inet(value.as_inet())),
@@ -684,6 +752,9 @@ pub fn cast_in(
             crate::geometry::Circle::parse(s).map(Datum::Circle)
         }
         (Datum::Text(s), ColumnType::Box) => crate::geometry::Box2::parse(s).map(Datum::Box),
+        (Datum::Text(s), ColumnType::Polygon) => {
+            crate::geometry::Polygon::parse(s).map(Datum::Polygon)
+        }
         // `regclass` → the oid family drops the name and keeps the oid, which is
         // what `regclass::oid`/`::int` yields in PostgreSQL.
         (Datum::Regclass(r), reg) if reg.is_reg() => Ok(Datum::Regclass(r.clone())),
@@ -2946,5 +3017,292 @@ mod tests {
             cast(&Datum::Bool(true), ColumnType::Float8, &tz),
             Err(TypeError::CannotCast { .. })
         ));
+    }
+
+    // ---- the geometric family ----
+
+    /// The seven geometric types, in `pg_type.oid` order.
+    const GEOMETRIC: [ColumnType; 7] = [
+        ColumnType::Point,
+        ColumnType::Lseg,
+        ColumnType::Path,
+        ColumnType::Box,
+        ColumnType::Polygon,
+        ColumnType::Line,
+        ColumnType::Circle,
+    ];
+
+    /// Every geometric row of `pg_cast` on PostgreSQL 18.4:
+    ///
+    /// ```sql
+    /// SELECT castsource::regtype, casttarget::regtype, castcontext
+    ///   FROM pg_cast
+    ///  WHERE castsource::regtype::text
+    ///        IN ('point','box','circle','line','lseg','path','polygon')
+    ///     OR casttarget::regtype::text IN (…);
+    /// ```
+    ///
+    /// Fourteen rows and no more. `line` appears in none of them.
+    const GEOMETRIC_PG_CAST: [(ColumnType, ColumnType, bool); 14] = [
+        (ColumnType::Point, ColumnType::Box, true),
+        (ColumnType::Lseg, ColumnType::Point, false),
+        (ColumnType::Path, ColumnType::Polygon, true),
+        (ColumnType::Box, ColumnType::Point, false),
+        (ColumnType::Box, ColumnType::Lseg, false),
+        (ColumnType::Box, ColumnType::Polygon, true),
+        (ColumnType::Box, ColumnType::Circle, false),
+        (ColumnType::Polygon, ColumnType::Point, false),
+        (ColumnType::Polygon, ColumnType::Path, true),
+        (ColumnType::Polygon, ColumnType::Box, false),
+        (ColumnType::Polygon, ColumnType::Circle, false),
+        (ColumnType::Circle, ColumnType::Point, false),
+        (ColumnType::Circle, ColumnType::Box, false),
+        (ColumnType::Circle, ColumnType::Polygon, false),
+    ];
+
+    /// The static matrix must contain exactly `pg_cast`'s geometric rows: every
+    /// declared pair allowed, every one of the other 35 ordered pairs refused.
+    /// The absences carry as much weight as the presences — `point → polygon`
+    /// and anything touching `line` are 42846 in PostgreSQL.
+    #[test]
+    fn geometric_cast_matrix_is_exactly_the_declared_pg_cast_rows() {
+        use assert2::assert;
+        for from in GEOMETRIC {
+            for to in GEOMETRIC {
+                let declared = GEOMETRIC_PG_CAST
+                    .iter()
+                    .any(|(source, target, _)| *source == from && *target == to);
+                // Identity is always allowed and needs no `pg_cast` row.
+                let expected = declared || from == to;
+                assert!(
+                    cast_allowed(from, to) == expected,
+                    "explicit {from:?} -> {to:?}"
+                );
+            }
+        }
+    }
+
+    /// Only the four rows PostgreSQL marks `castcontext = 'a'` convert without
+    /// a written-out cast; the other ten are `'e'`. Storing a `circle` in a
+    /// `polygon` column therefore still needs `::polygon`.
+    #[test]
+    fn geometric_assignment_matrix_is_exactly_the_assignment_context_rows() {
+        use assert2::assert;
+        for from in GEOMETRIC {
+            for to in GEOMETRIC {
+                let expected = from == to
+                    || GEOMETRIC_PG_CAST
+                        .iter()
+                        .any(|(source, target, assignment)| {
+                            *source == from && *target == to && *assignment
+                        });
+                assert!(
+                    assignment_cast_allowed(from, to) == expected,
+                    "assignment {from:?} -> {to:?}"
+                );
+                // The subset invariant the whole matrix rests on.
+                assert!(
+                    !assignment_cast_allowed(from, to) || cast_allowed(from, to),
+                    "assignment outruns explicit for {from:?} -> {to:?}"
+                );
+            }
+        }
+    }
+
+    /// Every expectation is `SELECT <source> '<literal>'::<target>::text` on
+    /// PostgreSQL 18.4 at the default `extra_float_digits`.
+    #[test]
+    fn geometric_conversions_match_the_pg_cast_functions() {
+        use assert2::assert;
+        let tz = utc();
+        let cases: &[(ColumnType, &str, ColumnType, &str)] = &[
+            // `box(point)` — the degenerate box at the point.
+            (ColumnType::Point, "(1,2)", ColumnType::Box, "(1,2),(1,2)"),
+            // `point(lseg)` — the midpoint.
+            (
+                ColumnType::Lseg,
+                "[(1,2),(3,4)]",
+                ColumnType::Point,
+                "(2,3)",
+            ),
+            // `polygon(path)` — the same vertices, for a CLOSED path.
+            (
+                ColumnType::Path,
+                "((0,0),(1,0),(1,1))",
+                ColumnType::Polygon,
+                "((0,0),(1,0),(1,1))",
+            ),
+            (ColumnType::Box, "(1,2),(3,4)", ColumnType::Point, "(2,3)"),
+            // `lseg(box)` — the positive-slope diagonal, high corner first.
+            (
+                ColumnType::Box,
+                "(1,2),(3,4)",
+                ColumnType::Lseg,
+                "[(3,4),(1,2)]",
+            ),
+            // `polygon(box)` — the four corners anticlockwise from the low one.
+            (
+                ColumnType::Box,
+                "(1,2),(3,4)",
+                ColumnType::Polygon,
+                "((1,2),(1,4),(3,4),(3,2))",
+            ),
+            // `circle(box)` circumscribes; `box(circle)` inscribes, so the two
+            // are not inverses.
+            (
+                ColumnType::Box,
+                "(1,2),(3,4)",
+                ColumnType::Circle,
+                "<(2,3),1.4142135623730951>",
+            ),
+            (
+                ColumnType::Circle,
+                "<(1,2),3>",
+                ColumnType::Box,
+                "(3.1213203435596424,4.121320343559642),(-1.1213203435596424,-0.12132034355964239)",
+            ),
+            (ColumnType::Circle, "<(1,2),3>", ColumnType::Point, "(1,2)"),
+            // `point(polygon)` is the mean of the VERTICES, not the centre of
+            // the bounding box — the two differ for this triangle.
+            (
+                ColumnType::Polygon,
+                "((0,0),(2,0),(2,2))",
+                ColumnType::Point,
+                "(1.3333333333333333,0.6666666666666666)",
+            ),
+            (
+                ColumnType::Polygon,
+                "((0,0),(2,0),(2,2))",
+                ColumnType::Path,
+                "((0,0),(2,0),(2,2))",
+            ),
+            (
+                ColumnType::Polygon,
+                "((0,0),(2,0),(2,2))",
+                ColumnType::Box,
+                "(2,2),(0,0)",
+            ),
+            (
+                ColumnType::Polygon,
+                "((0,0),(2,0),(2,2))",
+                ColumnType::Circle,
+                "<(1.3333333333333333,0.6666666666666666),1.308077670527261>",
+            ),
+        ];
+        for (source, literal, target, expected) in cases {
+            let value = cast(&Datum::Text((*literal).into()), *source, &tz)
+                .unwrap_or_else(|_| panic!("{literal} is a {source:?}"));
+            let converted =
+                cast(&value, *target, &tz).unwrap_or_else(|_| panic!("{source:?} -> {target:?}"));
+            assert!(
+                converted.column_type() == Some(*target),
+                "{source:?} -> {target:?}"
+            );
+            let text = cast(&converted, ColumnType::Text, &tz).expect("render");
+            assert!(
+                text == Datum::Text((*expected).to_string()),
+                "{source:?} '{literal}'::{target:?}"
+            );
+        }
+    }
+
+    /// `polygon(circle)` is `select pg_catalog.polygon(12, $1)` in `pg_proc`, so
+    /// the cast yields twelve vertices whatever the radius. The rendering is
+    /// `SELECT circle '<(0,0),2>'::polygon::text` on PostgreSQL 18.4.
+    #[test]
+    fn circle_to_polygon_produces_twelve_vertices() {
+        use assert2::assert;
+        let tz = utc();
+        let circle = cast(&Datum::Text("<(0,0),2>".into()), ColumnType::Circle, &tz).expect("c");
+        let Datum::Polygon(polygon) = cast(&circle, ColumnType::Polygon, &tz).expect("poly") else {
+            panic!("circle::polygon is a polygon");
+        };
+        assert!(polygon.npoints() == 12);
+        let text = cast(&Datum::Polygon(polygon), ColumnType::Text, &tz).expect("render");
+        assert!(
+            text == Datum::Text(
+                "((-2,0),(-1.7320508075688774,0.9999999999999999),\
+                 (-1.0000000000000002,1.7320508075688772),(-1.2246467991473532e-16,2),\
+                 (0.9999999999999996,1.7320508075688774),(1.732050807568877,1.0000000000000007),\
+                 (2,2.4492935982947064e-16),(1.7320508075688776,-0.9999999999999994),\
+                 (1.0000000000000009,-1.7320508075688767),(3.6739403974420594e-16,-2),\
+                 (-0.9999999999999987,-1.732050807568878),\
+                 (-1.7320508075688767,-1.0000000000000009))"
+                    .to_string()
+            )
+        );
+        // A zero-radius circle has no polygon: `circle_poly` reports 0A000, not
+        // a twelve-fold repetition of the centre.
+        let degenerate =
+            cast(&Datum::Text("<(0,0),0>".into()), ColumnType::Circle, &tz).expect("c");
+        let error = cast(&degenerate, ColumnType::Polygon, &tz).expect_err("radius zero");
+        assert!(error.sqlstate() == "0A000");
+        assert!(
+            error
+                .to_string()
+                .contains("cannot convert circle with radius zero to polygon")
+        );
+    }
+
+    /// `path_poly` is the one geometric conversion that can fail: an open path
+    /// has no polygon. Upstream reports 22023 rather than the NULL its
+    /// neighbouring conversions return.
+    #[test]
+    fn open_path_to_polygon_is_22023() {
+        use assert2::assert;
+        let tz = utc();
+        let open = cast(&Datum::Text("[(0,0),(1,1)]".into()), ColumnType::Path, &tz).expect("path");
+        let error = cast(&open, ColumnType::Polygon, &tz).expect_err("open path");
+        assert!(error.sqlstate() == "22023");
+        assert!(
+            error
+                .to_string()
+                .contains("open path cannot be converted to polygon")
+        );
+    }
+
+    /// `polygon` reaches the string family through its input and output
+    /// functions, like every other geometric type, and a bad literal is 22P02.
+    #[test]
+    fn polygon_converts_with_the_string_family_only_through_its_io_functions() {
+        use assert2::assert;
+        let tz = utc();
+        assert!(cast_allowed(ColumnType::Text, ColumnType::Polygon));
+        assert!(cast_allowed(ColumnType::Polygon, ColumnType::Text));
+        // An I/O-conversion cast is explicit-only (PostgreSQL 8.3 onward).
+        assert!(!assignment_cast_allowed(
+            ColumnType::Text,
+            ColumnType::Polygon
+        ));
+        assert!(!assignment_cast_allowed(
+            ColumnType::Polygon,
+            ColumnType::Text
+        ));
+        let value = cast(
+            &Datum::Text("(0,0),(1,0),(1,1)".into()),
+            ColumnType::Polygon,
+            &tz,
+        )
+        .expect("poly_in");
+        // Identity keeps the value.
+        assert!(cast(&value, ColumnType::Polygon, &tz).expect("identity") == value);
+        assert!(
+            cast(&value, ColumnType::Text, &tz).expect("poly_out")
+                == Datum::Text("((0,0),(1,0),(1,1))".into())
+        );
+        // `varchar`/`char` go through the same output function, then the typmod.
+        assert!(
+            cast(&value, ColumnType::Varchar(Some(5)), &tz).expect("varchar")
+                == Datum::Text("((0,0".into())
+        );
+        let bad = cast(&Datum::Text("((0,0),(1".into()), ColumnType::Polygon, &tz)
+            .expect_err("malformed");
+        assert!(bad.sqlstate() == "22P02");
+        // Nothing outside the geometric and string families.
+        assert!(!cast_allowed(ColumnType::Polygon, ColumnType::Int4));
+        assert!(!cast_allowed(ColumnType::Int4, ColumnType::Polygon));
+        assert!(!cast_allowed(ColumnType::Polygon, ColumnType::Jsonb));
+        let refused = cast(&value, ColumnType::Int4, &tz).expect_err("no polygon -> int4");
+        assert!(refused.sqlstate() == "42846");
     }
 }

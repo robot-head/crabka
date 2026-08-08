@@ -44,7 +44,6 @@ pub enum Token {
     JsonGetPath,
     /// The jsonb `#>>` operator (element at a text path, as text).
     JsonGetPathText,
-    /// The jsonb/array `@>` containment operator.
     /// The geometric `~=` (same as), `<<|` (strictly below) and `|>>`
     /// (strictly above) operators.
     Same,
@@ -53,12 +52,34 @@ pub enum Token {
     /// `&<|` (does not extend above) and `|&>` (does not extend below).
     DoesNotExtendAbove,
     DoesNotExtendBelow,
+    /// `##` — the point on the second geometric operand closest to the first.
+    ClosestPoint,
+    /// `?#` — do the two geometric operands intersect?
+    Intersects,
+    /// `?-` — horizontality. Infix it asks whether two points share a `y`;
+    /// prefix it asks whether one line/lseg is horizontal.
+    Horizontal,
+    /// `?-|` — are the two lines/lsegs perpendicular?
+    Perpendicular,
+    /// `?||` — are the two lines/lsegs parallel?
+    Parallel,
+    /// `<^` — is the first operand below (or, for boxes, below or level with)
+    /// the second?
+    BelowEq,
+    /// `>^` — is the first operand above (or, for boxes, above or level with)
+    /// the second?
+    AboveEq,
+    /// `@-@` — prefix length of an lseg or path. Prefix-only: `PostgreSQL` has
+    /// no infix `@-@`.
+    Length,
+    /// The jsonb/array `@>` containment operator.
     Contains,
     /// The jsonb/array `<@` "contained by" operator.
     ContainedBy,
     /// The jsonb `?` key-existence operator.
     KeyExists,
-    /// The jsonb `?|` "any key exists" operator.
+    /// The jsonb `?|` "any key exists" operator. Also the geometric verticality
+    /// operator: infix on two points, prefix on a line or lseg.
     KeyExistsAny,
     /// The jsonb `?&` "all keys exist" operator.
     KeyExistsAll,
@@ -68,7 +89,8 @@ pub enum Token {
     DoesNotExtendRight,
     DoesNotExtendLeft,
     Adjacent,
-    /// `<->` — adjacent-lexeme phrase query composition.
+    /// `<->` — adjacent-lexeme phrase query composition, and the geometric
+    /// distance operator.
     Phrase,
     /// `!!`: prefix tsquery negation.
     TsNot,
@@ -88,10 +110,9 @@ pub enum Token {
     Amp,
     /// `|`: bitwise OR on integers.
     Pipe,
-    /// `#`: bitwise XOR on integers.
-    ///
-    /// This is NOT exponentiation. `PostgreSQL` spells XOR `#` and
-    /// exponentiation `^`.
+    /// `#` — bitwise XOR on integers (NOT exponentiation; `PostgreSQL` spells
+    /// XOR `#` and exponentiation `^`). Also the geometric intersection-point
+    /// operator when infix, and the path/polygon point count when prefix.
     Hash,
     /// `<<`: bitwise left shift.
     Shl,
@@ -109,7 +130,8 @@ pub enum Token {
     At,
     /// `@?`: tests if the jsonpath on the right finds any item in the jsonb on the left.
     JsonPathExists,
-    /// `@@`: the jsonpath predicate on the right, checked against the jsonb on the left.
+    /// `@@` — the jsonpath predicate on the right, checked against the jsonb on
+    /// the left. Also the geometric prefix "centre of" operator.
     JsonPathMatch,
     /// `|/`: prefix square root (`float8`).
     SquareRoot,

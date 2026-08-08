@@ -120,6 +120,23 @@ pub fn encode_text_in(d: &Datum, style: OutputStyle<'_>) -> Vec<u8> {
             out.push(if path.closed { ')' } else { ']' });
             out.into_bytes()
         }
+        // `poly_out` is `path_encode(PATH_CLOSED, …)`: always parenthesised,
+        // never bracketed, because a polygon has no open spelling.
+        Datum::Polygon(polygon) => {
+            let mut out = String::from("(");
+            for (index, point) in polygon.points.iter().enumerate() {
+                if index != 0 {
+                    out.push(',');
+                }
+                out.push('(');
+                out.push_str(&encode_float8_text(point.x, style.extra_float_digits));
+                out.push(',');
+                out.push_str(&encode_float8_text(point.y, style.extra_float_digits));
+                out.push(')');
+            }
+            out.push(')');
+            out.into_bytes()
+        }
         // SP32: PostgreSQL `numeric_out` (plain decimal, dscale fractional digits).
         Datum::Numeric(d) => crate::numeric::to_text(d).into_bytes(),
         // SP37: text encodings. `Timestamptz` renders in the supplied session zone.
@@ -459,6 +476,23 @@ pub fn encode_binary(d: &Datum) -> Vec<u8> {
                     .to_be_bytes(),
             );
             for point in &path.points {
+                out.extend_from_slice(&point.x.to_be_bytes());
+                out.extend_from_slice(&point.y.to_be_bytes());
+            }
+            out
+        }
+        // `poly_send`: the point count then the points, and **not** the bounding
+        // box. Upstream's `poly_recv` recomputes the box rather than trusting a
+        // transmitted one, so it is deliberately left out of the wire form.
+        // There is no closed flag either — a polygon is always closed.
+        Datum::Polygon(polygon) => {
+            let mut out = Vec::with_capacity(4 + polygon.points.len() * 16);
+            out.extend_from_slice(
+                &i32::try_from(polygon.points.len())
+                    .expect("polygon has more than i32::MAX points")
+                    .to_be_bytes(),
+            );
+            for point in &polygon.points {
                 out.extend_from_slice(&point.x.to_be_bytes());
                 out.extend_from_slice(&point.y.to_be_bytes());
             }
@@ -837,6 +871,91 @@ mod tests {
         // elem oid is jsonb (3802) and the element carries its version byte.
         assert!(encoded[8..12] == 3802u32.to_be_bytes());
         assert!(encoded[24] == JSONB_BINARY_VERSION);
+    }
+
+    fn polygon(text: &str) -> Datum {
+        Datum::Polygon(crate::geometry::Polygon::parse(text).expect(text))
+    }
+
+    /// Every expectation is `SELECT polygon '…'::text` on PostgreSQL 18.4.
+    /// `poly_out` is `path_encode(PATH_CLOSED, …)`, so the result is always
+    /// parenthesised and always closed however the input was spelled — there is
+    /// no open polygon and no bracketed form.
+    #[test]
+    fn polygon_text_matches_poly_out() {
+        use assert2::assert;
+        let tz = utc();
+        let cases: &[(&str, &str)] = &[
+            ("((1,2),(3,4))", "((1,2),(3,4))"),
+            // Three input spellings `poly_in` accepts, one output spelling.
+            ("(0,0),(1,0),(1,1),(0,1)", "((0,0),(1,0),(1,1),(0,1))"),
+            ("0,0,1,0,1,1", "((0,0),(1,0),(1,1))"),
+            ("((0,0),(1,0),(1,1))", "((0,0),(1,0),(1,1))"),
+            // A single vertex is a polygon.
+            ("((1,2))", "((1,2))"),
+            // Coordinates render through `float8out`, specials included, and a
+            // negative zero keeps its sign.
+            ("((1.0000000000000002,2))", "((1.0000000000000002,2))"),
+            (
+                "(NaN,Infinity),(-Infinity,-0)",
+                "((NaN,Infinity),(-Infinity,-0))",
+            ),
+        ];
+        for (input, expected) in cases {
+            assert!(
+                encode_text(&polygon(input), &tz) == expected.as_bytes(),
+                "poly_out({input})"
+            );
+        }
+    }
+
+    /// Geometric coordinates go through `float8out` and therefore honour
+    /// `extra_float_digits`, which `geometry.sql` runs at -3. Both spellings are
+    /// `SELECT polygon '…'::text` on PostgreSQL 18.4 at the two settings.
+    #[test]
+    fn polygon_text_honours_extra_float_digits() {
+        use assert2::assert;
+        let tz = utc();
+        let value = polygon("((1.0000000000000002,0.3333333333333333),(1e100,1e-100))");
+        let style = |extra_float_digits| OutputStyle {
+            extra_float_digits,
+            ..OutputStyle::with_zone(&tz)
+        };
+        assert!(
+            encode_text_in(&value, style(1))
+                == b"((1.0000000000000002,0.3333333333333333),(1e+100,1e-100))"
+        );
+        assert!(encode_text_in(&value, style(-3)) == b"((1,0.333333333333),(1e+100,1e-100))");
+    }
+
+    /// `poly_send` writes `int32 npts` then the points, and **nothing else**:
+    /// `poly_recv` recomputes the bounding box rather than reading a transmitted
+    /// one, so the box is deliberately absent from the wire form. There is no
+    /// closed flag either, which is the whole difference from `path_send`.
+    ///
+    /// The bytes are `COPY (SELECT polygon '((0,0),(2,0),(2,2))') TO STDOUT
+    /// (FORMAT binary)` on PostgreSQL 18.4, whose field length is 0x34 = 52 =
+    /// 4 + 3 × 16.
+    #[test]
+    fn polygon_binary_is_the_point_count_then_the_points() {
+        use assert2::assert;
+        let encoded = encode_binary(&polygon("((0,0),(2,0),(2,2))"));
+        let expected: Vec<u8> = [
+            &3i32.to_be_bytes()[..],
+            &0.0f64.to_be_bytes()[..],
+            &0.0f64.to_be_bytes()[..],
+            &2.0f64.to_be_bytes()[..],
+            &0.0f64.to_be_bytes()[..],
+            &2.0f64.to_be_bytes()[..],
+            &2.0f64.to_be_bytes()[..],
+        ]
+        .concat();
+        assert!(encoded == expected);
+        assert!(encoded.len() == 52);
+        // `path_send` prefixes a closed flag, so the same vertices are one byte
+        // longer as a path — the two wire forms must not be confused.
+        let path = Datum::Path(crate::Path::parse("((0,0),(2,0),(2,2))").expect("path"));
+        assert!(encode_binary(&path).len() == 53);
     }
 
     #[test]

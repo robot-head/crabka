@@ -101,6 +101,12 @@ mod tag {
     pub const TID: u8 = 41;
     /// `PostgreSQL` `pg_lsn` (`[42][u64 big-endian]`). Append-only.
     pub const PG_LSN: u8 = 42;
+    /// `PostgreSQL` `polygon` (`[44][u32 vertex count][f64 x][f64 y]…`). Like
+    /// [`PATH`] but with no closed flag: a polygon is always closed. The
+    /// bounding box is not stored — it is a function of the vertices, and
+    /// recomputing it on read is what keeps the two from disagreeing.
+    /// Append-only — no version bump.
+    pub const POLYGON: u8 = 44;
 }
 
 /// Encodes one row in the current storage format.
@@ -193,6 +199,16 @@ fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
                 let count = u32::try_from(path.points.len()).expect("path exceeds 2^32 points");
                 out.extend_from_slice(&count.to_be_bytes());
                 for point in &path.points {
+                    out.extend_from_slice(&point.x.to_be_bytes());
+                    out.extend_from_slice(&point.y.to_be_bytes());
+                }
+            }
+            Datum::Polygon(polygon) => {
+                out.push(tag::POLYGON);
+                let count =
+                    u32::try_from(polygon.points.len()).expect("polygon exceeds 2^32 points");
+                out.extend_from_slice(&count.to_be_bytes());
+                for point in &polygon.points {
                     out.extend_from_slice(&point.x.to_be_bytes());
                     out.extend_from_slice(&point.y.to_be_bytes());
                 }
@@ -560,6 +576,17 @@ fn decode_field(cur: &mut &[u8]) -> Result<Datum, KvError> {
                 points.push(crabka_pgtypes::Point { x, y });
             }
             Datum::Path(crabka_pgtypes::Path { closed, points })
+        }
+        tag::POLYGON => {
+            let count = usize::try_from(u32::from_be_bytes(take_n(cur, 4)?.try_into().expect("4")))
+                .expect("u32 fits usize");
+            let mut points = Vec::with_capacity(count);
+            for _ in 0..count {
+                let x = f64::from_be_bytes(take_n(cur, 8)?.try_into().expect("8"));
+                let y = f64::from_be_bytes(take_n(cur, 8)?.try_into().expect("8"));
+                points.push(crabka_pgtypes::Point { x, y });
+            }
+            Datum::Polygon(crabka_pgtypes::Polygon { points })
         }
         tag::BOX => {
             let mut values = [0.0_f64; 4];
@@ -1068,5 +1095,89 @@ mod tests {
             }),
         ];
         assert_eq!(decode_row(&encode_row(&row)).expect("decode"), row);
+    }
+
+    fn geometric(ty: crabka_pgtypes::ColumnType, text: &str) -> Datum {
+        crabka_pgtypes::cast::cast(&Datum::Text(text.into()), ty, &jiff::tz::TimeZone::UTC)
+            .unwrap_or_else(|_| panic!("{text} is a {ty:?}"))
+    }
+
+    /// All seven geometric types in one row, with the non-geometric kinds
+    /// interleaved: appending the `polygon` tag must not disturb any tag already
+    /// in the registry, and a geometry-only corpus would not notice if it did.
+    #[test]
+    fn geometric_row_round_trip_keeps_every_other_tag_working() {
+        use assert2::assert;
+        use crabka_pgtypes::{ArrayValue, ColumnType, ElemType};
+
+        let row = vec![
+            // The controls: unchanged tags on either side of the new one.
+            Datum::Int4(-7),
+            Datum::Text("héllo".into()),
+            Datum::Jsonb(crabka_pgtypes::jsonb::parse(r#"{"b":1,"a":2}"#).expect("jsonb")),
+            Datum::Array(ArrayValue::new(
+                ElemType::Int4,
+                vec![Datum::Int4(1), Datum::Null, Datum::Int4(3)],
+            )),
+            Datum::Null,
+            geometric(ColumnType::Point, "(1,2)"),
+            geometric(ColumnType::Lseg, "[(1,2),(3,4)]"),
+            geometric(ColumnType::Line, "{1,-1,0}"),
+            geometric(ColumnType::Box, "(1,2),(3,4)"),
+            geometric(ColumnType::Circle, "<(1,2),3>"),
+            // Open and closed paths differ only in the flag the tag carries.
+            geometric(ColumnType::Path, "[(0,0),(1,1)]"),
+            geometric(ColumnType::Path, "((0,0),(1,0),(1,1))"),
+            // A polygon with the same vertices as the closed path above: the two
+            // must decode back as different variants, which is the whole reason
+            // `polygon` needs its own tag rather than reusing `PATH`.
+            geometric(ColumnType::Polygon, "((0,0),(1,0),(1,1))"),
+            geometric(ColumnType::Polygon, "((1,2))"),
+            // Wild coordinates: `-0` and the IEEE specials survive the bit-level
+            // round trip. (`Point`'s `PartialEq` treats NaN as equal to NaN, so
+            // this compares as written.)
+            geometric(ColumnType::Polygon, "(NaN,Infinity),(-Infinity,-0)"),
+            Datum::Bytea(vec![0xDE, 0xAD]),
+            Datum::Float8(-0.0),
+        ];
+        let bytes = encode_row(&row);
+        assert!(decode_row(&bytes).expect("decode") == row);
+        // The closed path and the polygon over the same vertices encode to
+        // different bytes, so neither can decode as the other.
+        let path = geometric(ColumnType::Path, "((0,0),(1,0),(1,1))");
+        let polygon = geometric(ColumnType::Polygon, "((0,0),(1,0),(1,1))");
+        assert!(
+            encode_row(std::slice::from_ref(&path)) != encode_row(std::slice::from_ref(&polygon))
+        );
+        assert!(
+            decode_row(&encode_row(std::slice::from_ref(&polygon))).expect("decode")
+                == vec![polygon]
+        );
+    }
+
+    /// The `polygon` field is `[44][u32 count]` then the vertices — no closed
+    /// flag and no bounding box, so a two-vertex polygon is exactly 37 bytes
+    /// after the row's version byte.
+    #[test]
+    fn polygon_field_layout_is_the_tag_then_the_count_then_the_points() {
+        use assert2::assert;
+        use crabka_pgtypes::ColumnType;
+
+        let encoded = encode_row(std::slice::from_ref(&geometric(
+            ColumnType::Polygon,
+            "((1,2),(3,4))",
+        )));
+        let expected: Vec<u8> = [
+            &[ROW_VERSION, tag::POLYGON][..],
+            &2u32.to_be_bytes()[..],
+            &1.0f64.to_be_bytes()[..],
+            &2.0f64.to_be_bytes()[..],
+            &3.0f64.to_be_bytes()[..],
+            &4.0f64.to_be_bytes()[..],
+        ]
+        .concat();
+        assert!(encoded == expected);
+        // A truncated vertex list is corruption, not a silent short polygon.
+        assert!(decode_row(&encoded[..encoded.len() - 1]).is_err());
     }
 }

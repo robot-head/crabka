@@ -70,6 +70,7 @@ pub mod fk;
 pub mod foreign;
 mod format_fn;
 mod func;
+mod geometry_fn;
 mod grouping;
 mod gtm;
 pub mod hlc;

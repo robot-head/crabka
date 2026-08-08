@@ -264,6 +264,8 @@ mod type_tag {
     pub const REGCOLLATION: u8 = 56;
     /// `xml`. Append-only — no version bump.
     pub const XML: u8 = 57;
+    /// `PostgreSQL` `polygon`. Append-only — no version bump.
+    pub const POLYGON: u8 = 58;
 }
 
 #[derive(Debug)]
@@ -303,6 +305,7 @@ pub(crate) fn write_type(out: &mut Vec<u8>, ty: ColumnType) {
         ColumnType::Float8 => out.push(type_tag::FLOAT8),
         ColumnType::Point => out.push(type_tag::POINT),
         ColumnType::Path => out.push(type_tag::PATH),
+        ColumnType::Polygon => out.push(type_tag::POLYGON),
         ColumnType::Lseg => out.push(type_tag::LSEG),
         ColumnType::Line => out.push(type_tag::LINE),
         ColumnType::Circle => out.push(type_tag::CIRCLE),
@@ -431,6 +434,7 @@ fn read_type_with(
         type_tag::FLOAT8 => ColumnType::Float8,
         type_tag::POINT => ColumnType::Point,
         type_tag::PATH => ColumnType::Path,
+        type_tag::POLYGON => ColumnType::Polygon,
         type_tag::LSEG => ColumnType::Lseg,
         type_tag::LINE => ColumnType::Line,
         type_tag::CIRCLE => ColumnType::Circle,
@@ -755,6 +759,7 @@ fn write_default_value(out: &mut Vec<u8>, default: &Datum) {
         Datum::Date(_)
         | Datum::Point(_)
         | Datum::Path(_)
+        | Datum::Polygon(_)
         | Datum::Lseg(_)
         | Datum::Line(_)
         | Datum::Circle(_)
@@ -2627,6 +2632,16 @@ mod tests {
             ColumnType::Regclass,
             ColumnType::Jsonb,
             ColumnType::JsonPath,
+            // All seven geometric types. `polygon` and `path` are the pair worth
+            // watching: they hold the same shape of value, so a missing read arm
+            // would let one decode as the other rather than as a failure.
+            ColumnType::Point,
+            ColumnType::Lseg,
+            ColumnType::Path,
+            ColumnType::Box,
+            ColumnType::Polygon,
+            ColumnType::Line,
+            ColumnType::Circle,
             ColumnType::Record(None),
             ColumnType::builtin_range(crabka_pgtypes::oids::INT4RANGE).expect("built-in range"),
         ];
@@ -2650,8 +2665,13 @@ mod tests {
         }
     }
 
-    /// No two `ColumnType` tags may collide. A collision makes one type decode
-    /// as the other, and no single-type round trip can detect that.
+    /// No two `ColumnType` tags may collide — a collision makes one type decode
+    /// as the other, which no single-type round trip can detect.
+    ///
+    /// The tag space is **append-only**: it is persisted, so a new type must
+    /// take a byte no existing type uses and no existing byte may change
+    /// meaning. Listing every distinctly-tagged type here is what turns a reused
+    /// byte into a test failure instead of silently mis-decoded catalog rows.
     #[test]
     fn column_type_tags_are_distinct() {
         let types = [
@@ -2660,8 +2680,11 @@ mod tests {
             ColumnType::Int4,
             ColumnType::Int8,
             ColumnType::Text,
+            ColumnType::Varchar(None),
+            ColumnType::Char(None),
             ColumnType::Float4,
             ColumnType::Float8,
+            ColumnType::Numeric(None),
             ColumnType::Date,
             ColumnType::Time,
             ColumnType::Timetz,
@@ -2671,7 +2694,44 @@ mod tests {
             ColumnType::Bytea,
             ColumnType::Uuid,
             ColumnType::Regclass,
+            ColumnType::Regtype,
+            ColumnType::Regprocedure,
+            ColumnType::Regnamespace,
+            ColumnType::Regproc,
+            ColumnType::Regoper,
+            ColumnType::Regoperator,
+            ColumnType::Regconfig,
+            ColumnType::Regdictionary,
+            ColumnType::Regrole,
+            ColumnType::Regcollation,
+            ColumnType::OidVector,
+            ColumnType::Int2Vector,
+            ColumnType::TsVector,
+            ColumnType::TsQuery,
+            ColumnType::Point,
+            ColumnType::Lseg,
+            ColumnType::Path,
+            ColumnType::Box,
+            ColumnType::Polygon,
+            ColumnType::Line,
+            ColumnType::Circle,
+            ColumnType::Inet,
+            ColumnType::Cidr,
+            ColumnType::MacAddr,
+            ColumnType::MacAddr8,
+            ColumnType::Bit(None),
+            ColumnType::VarBit(None),
+            ColumnType::Money,
+            ColumnType::Oid,
+            ColumnType::Xid,
+            ColumnType::Xid8,
+            ColumnType::Cid,
+            ColumnType::Tid,
+            ColumnType::PgLsn,
+            ColumnType::Json,
+            ColumnType::Xml,
             ColumnType::Jsonb,
+            ColumnType::JsonPath,
         ];
 
         let mut tags = std::collections::BTreeMap::new();
@@ -2683,6 +2743,29 @@ mod tests {
                 panic!("tag {tag} is shared by {previous:?} and {ty:?}");
             }
         }
+    }
+
+    /// A `polygon` column must survive a whole-schema serialize/deserialize, not
+    /// just `write_type`/`read_type` in isolation — and the columns around it
+    /// must come through untouched, since a new tag that shifted the cursor
+    /// would corrupt its neighbours rather than itself.
+    #[test]
+    fn polygon_column_round_trips_through_a_whole_schema() {
+        use assert2::assert;
+        let columns = vec![
+            Column::new("id", ColumnType::Int4),
+            Column::new("label", ColumnType::Text),
+            Column::new("region", ColumnType::Polygon),
+            Column::new("route", ColumnType::Path),
+            Column::new("doc", ColumnType::Jsonb),
+            Column::new(
+                "tags",
+                ColumnType::Array(crabka_pgtypes::ElemType::Varchar(Some(3))),
+            ),
+        ];
+        let bytes = serialize_schema(9, &columns, TableOptions::default(), "postgres", None, &[]);
+        let (_, decoded, _, _, _, _) = deserialize_schema(&bytes).expect("schema reads back");
+        assert!(decoded == columns);
     }
 
     #[test]

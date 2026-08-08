@@ -33,7 +33,7 @@ pub use datum::{
     RangeValue, RecordValue, RegclassValue, canonicalize_for_key, canonicalize_row_for_key, oids,
 };
 pub use error::TypeError;
-pub use geometry::{Path, Point};
+pub use geometry::{Path, Point, Polygon};
 pub use jsonb::JsonbValue;
 pub use money::Money;
 pub use network::{Inet, InetFamily, MacAddr, MacAddr8};

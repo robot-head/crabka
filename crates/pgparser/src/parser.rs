@@ -979,6 +979,18 @@ impl Parser {
             Token::StrictlyAbove => (BinaryOp::StrictlyAbove, 7, 8),
             Token::DoesNotExtendRight => (BinaryOp::DoesNotExtendRight, 7, 8),
             Token::DoesNotExtendLeft => (BinaryOp::DoesNotExtendLeft, 7, 8),
+            // The geometric spellings that exist only as operators, all at
+            // PostgreSQL's single "any other operator" level like the rest of
+            // this family. `#`, `?|` and `<->` are geometric too, but they
+            // already have a row below: one token, one BinaryOp, and the
+            // operand types pick the implementation at evaluation time.
+            Token::ClosestPoint => (BinaryOp::ClosestPoint, 7, 8),
+            Token::Intersects => (BinaryOp::Intersects, 7, 8),
+            Token::Horizontal => (BinaryOp::Horizontal, 7, 8),
+            Token::Perpendicular => (BinaryOp::Perpendicular, 7, 8),
+            Token::Parallel => (BinaryOp::Parallel, 7, 8),
+            Token::BelowEq => (BinaryOp::BelowEq, 7, 8),
+            Token::AboveEq => (BinaryOp::AboveEq, 7, 8),
             Token::Adjacent => (BinaryOp::Adjacent, 7, 8),
             Token::Phrase => (BinaryOp::Phrase, 7, 8),
             Token::Tilde => (BinaryOp::Match, 7, 8),
@@ -1060,15 +1072,13 @@ impl Parser {
 
     fn explicit_prefix_operator(&mut self) -> Result<Expr, ParseError> {
         let (token, position) = self.explicit_operator_token()?;
+        // `-` and `+` are prefix operators only in this wrapped spelling's
+        // table; bare, they carry unary minus's much tighter operand power.
         let op = match token {
             Token::Minus => UnaryOp::Neg,
             Token::Plus => UnaryOp::Plus,
-            Token::Tilde => UnaryOp::BitNot,
-            Token::At => UnaryOp::Abs,
-            Token::SquareRoot => UnaryOp::Sqrt,
-            Token::CubeRoot => UnaryOp::Cbrt,
-            Token::TsNot => UnaryOp::TsNot,
-            _ => return Err(ParseError::new("expected prefix operator", position)),
+            other => prefix_operator(&other)
+                .ok_or_else(|| ParseError::new("expected prefix operator", position))?,
         };
         Ok(Expr::Unary {
             op,
@@ -1218,36 +1228,38 @@ impl Parser {
     /// Can `tok` begin an expression? Exactly the set [`Parser::prefix`] accepts,
     /// used as the one-token lookahead that tells an infix operator keyword from
     /// the same word used as a no-`AS` column label.
+    ///
+    /// The generic prefix operators are asked of [`prefix_operator`] rather than
+    /// listed again, so the two sets cannot drift apart. That matters most for
+    /// the geometric spellings, four of which (`#`, `@@`, `?-`, `?|`) are infix
+    /// operators too: it is this function that decides the `and` in
+    /// `SELECT x and #p` is the conjunction and not a column label.
     fn starts_expr(tok: &Token) -> bool {
-        matches!(
-            tok,
-            Token::Ident(_)
-                | Token::IntLit(_)
-                | Token::FloatLit(_)
-                | Token::StringLit(_)
-                | Token::Param(_)
-                | Token::LParen
-                | Token::Minus
-                | Token::Plus
-                | Token::Tilde
-                | Token::At
-                | Token::SquareRoot
-                | Token::CubeRoot
-                | Token::TsNot
-                | Token::Keyword(
-                    Keyword::Not
-                        | Keyword::Exists
-                        | Keyword::Array
-                        | Keyword::True
-                        | Keyword::False
-                        | Keyword::Null
-                        | Keyword::Case
-                        | Keyword::Cast
-                        | Keyword::CurrentUser
-                        | Keyword::Left
-                        | Keyword::Right
-                )
-        )
+        prefix_operator(tok).is_some()
+            || matches!(
+                tok,
+                Token::Ident(_)
+                    | Token::IntLit(_)
+                    | Token::FloatLit(_)
+                    | Token::StringLit(_)
+                    | Token::Param(_)
+                    | Token::LParen
+                    | Token::Minus
+                    | Token::Plus
+                    | Token::Keyword(
+                        Keyword::Not
+                            | Keyword::Exists
+                            | Keyword::Array
+                            | Keyword::True
+                            | Keyword::False
+                            | Keyword::Null
+                            | Keyword::Case
+                            | Keyword::Cast
+                            | Keyword::CurrentUser
+                            | Keyword::Left
+                            | Keyword::Right
+                    )
+            )
     }
 
     /// Does an `IS` at the cursor continue into a predicate? The words that may
@@ -1270,6 +1282,20 @@ impl Parser {
     fn prefix(&mut self) -> Result<Expr, ParseError> {
         if self.explicit_operator_starts() {
             return self.explicit_prefix_operator();
+        }
+        // The generic PREFIX operators. Unlike unary minus these bind LOOSELY —
+        // PostgreSQL gives them the "any other operator" level, so their operand
+        // is parsed at 8 and `~ 5 + 1` is `~(5 + 1)` = -7 while `~ 5 & 3` is
+        // `(~5) & 3` = 2. `~` here is bitwise NOT; the same token in infix
+        // position is the regex-match operator, and the same goes for the
+        // geometric `#`, `@@`, `?-` and `?|`. `@-@` is the one spelling with no
+        // infix reading at all.
+        if let Some(op) = prefix_operator(self.peek()) {
+            self.bump();
+            return Ok(Expr::Unary {
+                op,
+                expr: Box::new(self.expr(8)?),
+            });
         }
         match self.peek().clone() {
             Token::Keyword(Keyword::Not) => {
@@ -1299,30 +1325,6 @@ impl Parser {
                 Ok(Expr::Unary {
                     op: UnaryOp::Plus,
                     expr: Box::new(self.expr(15)?),
-                })
-            }
-            // The generic PREFIX operators. Unlike unary minus these bind
-            // LOOSELY — PostgreSQL gives them the "any other operator" level, so
-            // their operand is parsed at 8 and `~ 5 + 1` is `~(5 + 1)` = -7 while
-            // `~ 5 & 3` is `(~5) & 3` = 2. `~` here is bitwise NOT; the same
-            // token in infix position is the regex-match operator.
-            Token::Tilde | Token::At | Token::SquareRoot | Token::CubeRoot => {
-                let op = match self.bump() {
-                    Token::Tilde => UnaryOp::BitNot,
-                    Token::At => UnaryOp::Abs,
-                    Token::SquareRoot => UnaryOp::Sqrt,
-                    _ => UnaryOp::Cbrt,
-                };
-                Ok(Expr::Unary {
-                    op,
-                    expr: Box::new(self.expr(8)?),
-                })
-            }
-            Token::TsNot => {
-                self.bump();
-                Ok(Expr::Unary {
-                    op: UnaryOp::TsNot,
-                    expr: Box::new(self.expr(8)?),
                 })
             }
             Token::LParen => {
@@ -13247,6 +13249,35 @@ fn check_row_arity(left: &Expr, right: &Expr, position: usize) -> Result<(), Par
     Ok(())
 }
 
+/// The [`UnaryOp`] a token spells in PREFIX position, or `None` when the token
+/// has no prefix reading.
+///
+/// This is `PostgreSQL`'s "any other operator" family, whose members all take an
+/// operand at binding power 8 — unary `-` and `+` are NOT here, because bare
+/// they bind far tighter (15) and only the `OPERATOR(-)` spelling demotes them.
+/// Five of these tokens are infix operators as well, so the caller's position is
+/// the whole of what picks the reading.
+///
+/// One table, three callers: [`Parser::prefix`], the `OPERATOR(…)` wrapping in
+/// [`Parser::explicit_prefix_operator`], and [`Parser::starts_expr`] — whose
+/// doc-comment promise to admit "exactly the set `prefix` accepts" is kept by
+/// construction rather than by a second list that could drift.
+fn prefix_operator(token: &Token) -> Option<UnaryOp> {
+    Some(match token {
+        Token::Tilde => UnaryOp::BitNot,
+        Token::At => UnaryOp::Abs,
+        Token::SquareRoot => UnaryOp::Sqrt,
+        Token::CubeRoot => UnaryOp::Cbrt,
+        Token::TsNot => UnaryOp::TsNot,
+        Token::Hash => UnaryOp::NPoints,
+        Token::Length => UnaryOp::Length,
+        Token::JsonPathMatch => UnaryOp::Center,
+        Token::Horizontal => UnaryOp::IsHorizontal,
+        Token::KeyExistsAny => UnaryOp::IsVertical,
+        _ => return None,
+    })
+}
+
 /// How an operator token is spelled, for error messages that quote the operator
 /// the query wrote. `None` for a token that is not an operator at all.
 fn operator_spelling(token: &Token) -> Option<&'static str> {
@@ -13286,6 +13317,20 @@ fn operator_spelling(token: &Token) -> Option<&'static str> {
         Token::Shr => ">>",
         Token::ContainedByOrEq => "<<=",
         Token::ContainsOrEq => ">>=",
+        // The geometric family. `#`, `?|`, `<->` and `@@` are listed here (or
+        // above) because a geometric operator class names them, and an index
+        // definition that spells one must round-trip through this table.
+        Token::ClosestPoint => "##",
+        Token::Intersects => "?#",
+        Token::Horizontal => "?-",
+        Token::Perpendicular => "?-|",
+        Token::Parallel => "?||",
+        Token::BelowEq => "<^",
+        Token::AboveEq => ">^",
+        Token::Length => "@-@",
+        Token::KeyExistsAny => "?|",
+        Token::Phrase => "<->",
+        Token::JsonPathMatch => "@@",
         _ => return None,
     })
 }
@@ -15846,6 +15891,339 @@ mod tests {
             match expr(src) {
                 Expr::Binary { op, .. } => assert_eq!(op, want, "operator in `{src}`"),
                 other => panic!("`{src}` should parse to a Binary expr, got {other:?}"),
+            }
+        }
+    }
+
+    /// `a <op> b` with both operands bare column references — the whole shape,
+    /// so a test compares one struct instead of a chain of field assertions.
+    fn geometric_binary(op: BinaryOp) -> Expr {
+        Expr::Binary {
+            op,
+            left: Box::new(Expr::Column {
+                table: None,
+                name: "a".into(),
+            }),
+            right: Box::new(Expr::Column {
+                table: None,
+                name: "b".into(),
+            }),
+        }
+    }
+
+    /// `<op> p` with a bare column operand.
+    fn geometric_unary(op: UnaryOp) -> Expr {
+        Expr::Unary {
+            op,
+            expr: Box::new(Expr::Column {
+                table: None,
+                name: "p".into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn every_geometric_infix_spelling_builds_its_binary_op() {
+        use assert2::assert;
+
+        use crate::ast::BinaryOp::*;
+
+        // Seven spellings are geometric-only and get their own BinaryOp; three
+        // are shared with a non-geometric operator and deliberately do NOT —
+        // gres resolves those by operand type at evaluation time, exactly as it
+        // already does for `-` (numeric minus / jsonb delete-key).
+        let cases: &[(&str, BinaryOp)] = &[
+            ("a ## b", ClosestPoint),
+            ("a ?# b", Intersects),
+            ("a ?- b", Horizontal),
+            ("a ?-| b", Perpendicular),
+            ("a ?|| b", Parallel),
+            ("a <^ b", BelowEq),
+            ("a >^ b", AboveEq),
+            // Shared spellings: geometric intersection point, point-is-vertical,
+            // and geometric distance.
+            ("a # b", BitXor),
+            ("a ?| b", KeyExistsAny),
+            ("a <-> b", Phrase),
+        ];
+        for (sql, op) in cases {
+            assert!(expr(sql) == geometric_binary(*op), "parsing {sql:?}");
+        }
+    }
+
+    #[test]
+    fn every_geometric_prefix_spelling_builds_its_unary_op() {
+        use assert2::assert;
+
+        use crate::ast::UnaryOp::*;
+
+        // `PostgreSQL`'s five geometric prefix operators. Four of the five are
+        // also infix operators, so only the position separates the readings.
+        let cases: &[(&str, UnaryOp)] = &[
+            ("# p", NPoints),
+            ("@-@ p", Length),
+            ("@@ p", Center),
+            ("?- p", IsHorizontal),
+            ("?| p", IsVertical),
+        ];
+        for (sql, op) in cases {
+            assert!(expr(sql) == geometric_unary(*op), "parsing {sql:?}");
+        }
+        // The spelling need not be separated from its operand.
+        for (spaced, tight) in [
+            ("# p", "#p"),
+            ("@-@ p", "@-@p"),
+            ("@@ p", "@@p"),
+            ("?- p", "?-p"),
+            ("?| p", "?|p"),
+        ] {
+            assert!(expr(spaced) == expr(tight), "parsing {tight:?}");
+        }
+    }
+
+    #[test]
+    fn a_geometric_prefix_operator_takes_the_generic_operator_operand_power() {
+        use assert2::assert;
+
+        // Operand power 8, like every other generic prefix operator: `+` (9/10)
+        // is absorbed into the operand, and `#` (7/8) is not.
+        assert!(
+            expr("# a + b")
+                == Expr::Unary {
+                    op: UnaryOp::NPoints,
+                    expr: Box::new(geometric_binary(BinaryOp::Add)),
+                }
+        );
+        assert!(
+            expr("# a # b")
+                == Expr::Binary {
+                    op: BinaryOp::BitXor,
+                    left: Box::new(Expr::Unary {
+                        op: UnaryOp::NPoints,
+                        expr: Box::new(Expr::Column {
+                            table: None,
+                            name: "a".into(),
+                        }),
+                    }),
+                    right: Box::new(Expr::Column {
+                        table: None,
+                        name: "b".into(),
+                    }),
+                }
+        );
+    }
+
+    #[test]
+    fn explicit_operator_wrapping_reaches_the_geometric_spellings() {
+        use assert2::assert;
+
+        for (sql, op) in [
+            ("OPERATOR(#) p", UnaryOp::NPoints),
+            ("OPERATOR(@-@) p", UnaryOp::Length),
+            ("OPERATOR(@@) p", UnaryOp::Center),
+            ("OPERATOR(?-) p", UnaryOp::IsHorizontal),
+            ("OPERATOR(?|) p", UnaryOp::IsVertical),
+            ("OPERATOR(pg_catalog.@@) p", UnaryOp::Center),
+        ] {
+            assert!(expr(sql) == geometric_unary(op), "parsing {sql:?}");
+        }
+        for (sql, op) in [
+            ("a OPERATOR(##) b", BinaryOp::ClosestPoint),
+            ("a OPERATOR(?#) b", BinaryOp::Intersects),
+            ("a OPERATOR(?-|) b", BinaryOp::Perpendicular),
+            ("a OPERATOR(?||) b", BinaryOp::Parallel),
+            ("a OPERATOR(<^) b", BinaryOp::BelowEq),
+            ("a OPERATOR(>^) b", BinaryOp::AboveEq),
+        ] {
+            assert!(expr(sql) == geometric_binary(op), "parsing {sql:?}");
+        }
+        // `@-@` has no infix reading, so the wrapped infix form is refused —
+        // and `?-|` has no prefix reading.
+        assert!(parse_expr_for_test("a OPERATOR(@-@) b").is_err());
+        assert!(parse_expr_for_test("OPERATOR(?-|) p").is_err());
+    }
+
+    #[test]
+    fn at_minus_at_is_one_operator_and_not_a_nested_absolute_value() {
+        use assert2::assert;
+
+        // Before `@-@` was munched whole, `@-@ 5` parsed as `@(-(@ 5))` and gres
+        // evaluated it to 5; `PostgreSQL` reports 42883 because `@-@ integer`
+        // does not exist. It must now be one prefix operator over one operand,
+        // leaving the type error to the executor.
+        assert!(
+            expr("@-@ 5")
+                == Expr::Unary {
+                    op: UnaryOp::Length,
+                    expr: Box::new(Expr::IntLiteral("5".into())),
+                }
+        );
+        // The bytes that really do spell a nested absolute value still do.
+        assert!(
+            expr("@ - @ 5")
+                == Expr::Unary {
+                    op: UnaryOp::Abs,
+                    expr: Box::new(Expr::Unary {
+                        op: UnaryOp::Neg,
+                        expr: Box::new(Expr::Unary {
+                            op: UnaryOp::Abs,
+                            expr: Box::new(Expr::IntLiteral("5".into())),
+                        }),
+                    }),
+                }
+        );
+    }
+
+    #[test]
+    fn the_jsonb_operator_family_is_unchanged_in_infix_position() {
+        use assert2::assert;
+
+        use crate::ast::BinaryOp::*;
+
+        // Every jsonb spelling that shares a first byte with a new geometric
+        // one. `?`, `?|`, `?&`, `@>`, `<@`, `@?`, `@@`, `#>`, `#>>` must all
+        // still reach their own BinaryOp when written between two operands.
+        let cases: &[(&str, BinaryOp)] = &[
+            ("a ? b", KeyExists),
+            ("a ?| b", KeyExistsAny),
+            ("a ?& b", KeyExistsAll),
+            ("a @> b", Contains),
+            ("a <@ b", ContainedBy),
+            ("a @? b", JsonPathExists),
+            ("a @@ b", JsonPathMatch),
+            ("a #> b", JsonGetPath),
+            ("a #>> b", JsonGetPathText),
+            ("a -> b", JsonGet),
+            ("a ->> b", JsonGetText),
+        ];
+        for (sql, op) in cases {
+            assert!(expr(sql) == geometric_binary(*op), "parsing {sql:?}");
+        }
+        // And the string-keyed spellings a real jsonb query writes.
+        assert!(
+            expr("a ? 'k'")
+                == Expr::Binary {
+                    op: KeyExists,
+                    left: Box::new(Expr::Column {
+                        table: None,
+                        name: "a".into(),
+                    }),
+                    right: Box::new(Expr::StringLiteral("k".into())),
+                }
+        );
+    }
+
+    #[test]
+    fn plpgsql_compiler_directives_still_parse() {
+        use assert2::assert;
+
+        use crate::ast::PlPgSqlVariableConflict;
+
+        // The PL/pgSQL parser reads `#variable_conflict` / `#print_strict_params`
+        // off a bare `Token::Hash` at the very start of a body. `#` is now also a
+        // prefix operator and the lead byte of `##`, so each directive shape has
+        // to be pinned: one directive, two in a row, and one on the first line.
+        let cases: &[(&str, PlPgSqlVariableConflict)] = &[
+            (
+                "#variable_conflict use_variable\nBEGIN NULL; END",
+                PlPgSqlVariableConflict::UseVariable,
+            ),
+            (
+                "#variable_conflict use_column\nBEGIN NULL; END",
+                PlPgSqlVariableConflict::UseColumn,
+            ),
+            (
+                "#variable_conflict error\nBEGIN NULL; END",
+                PlPgSqlVariableConflict::Error,
+            ),
+            (
+                "#print_strict_params on\nBEGIN NULL; END",
+                PlPgSqlVariableConflict::Error,
+            ),
+            (
+                "#variable_conflict use_column\n#print_strict_params on\nBEGIN NULL; END",
+                PlPgSqlVariableConflict::UseColumn,
+            ),
+            (
+                "#print_strict_params off\n#variable_conflict use_variable\nBEGIN NULL; END",
+                PlPgSqlVariableConflict::UseVariable,
+            ),
+        ];
+        for (body, want) in cases {
+            let block = crate::plpgsql::parse_plpgsql(body).expect("parse PL/pgSQL");
+            assert!(block.variable_conflict == *want, "parsing {body:?}");
+        }
+        // An unknown directive is still named in the error, rather than being
+        // swallowed as a prefix operator applied to an identifier.
+        let e = crate::plpgsql::parse_plpgsql("#nosuch on\nBEGIN NULL; END")
+            .expect_err("unknown directive");
+        assert!(e.message.contains("unrecognized PL/pgSQL directive"));
+    }
+
+    #[test]
+    fn plpgsql_block_labels_still_parse() {
+        use assert2::assert;
+
+        // `<<label>>` is spelled with `Token::Shl`/`Token::Shr`; adding `<^` and
+        // `>^` must not have split either.
+        let block = crate::plpgsql::parse_plpgsql("<<outer>>\nBEGIN NULL; END")
+            .expect("parse labelled block");
+        assert!(block.label == Some("outer".into()));
+
+        let block = crate::plpgsql::parse_plpgsql(
+            "#variable_conflict use_variable\n<<outer>>\nBEGIN\n<<inner>>\nLOOP EXIT inner; END LOOP;\nEND",
+        )
+        .expect("parse directive then label");
+        assert!(block.label == Some("outer".into()));
+        assert!(block.variable_conflict == crate::ast::PlPgSqlVariableConflict::UseVariable);
+    }
+
+    #[test]
+    fn the_and_or_column_label_decision_survives_the_new_prefix_operators() {
+        use assert2::assert;
+
+        // `starts_expr` is what tells an infix `AND`/`OR` from the same word
+        // used as a no-AS column label, and it just gained five tokens. A bare
+        // trailing `and` is still a label; a following operand still makes it
+        // the conjunction — including when that operand starts with one of the
+        // new prefix spellings, which is what PostgreSQL does too.
+        let labels: &[(&str, &str)] = &[
+            ("SELECT 1 AS and", "and"),
+            ("SELECT 1 and", "and"),
+            ("SELECT 1 AS or", "or"),
+            ("SELECT 1 or", "or"),
+        ];
+        for (sql, alias) in labels {
+            let Statement::Query(query) = one(sql) else {
+                panic!("not a query: {sql}")
+            };
+            let crate::ast::SetExpr::Query(crate::ast::QueryBody::Select(select)) = query.body
+            else {
+                panic!("not a plain SELECT: {sql}")
+            };
+            assert!(
+                select.projection
+                    == vec![SelectItem::Expr {
+                        expr: Expr::IntLiteral("1".into()),
+                        alias: Some((*alias).into()),
+                    }],
+                "parsing {sql:?}"
+            );
+        }
+
+        let operators: &[(&str, BinaryOp)] = &[
+            ("x and y", BinaryOp::And),
+            ("x or y", BinaryOp::Or),
+            ("x and #y", BinaryOp::And),
+            ("x or @-@ y", BinaryOp::Or),
+            ("x and ?| y", BinaryOp::And),
+            ("x or @@ y", BinaryOp::Or),
+            ("x and ?- y", BinaryOp::And),
+        ];
+        for (sql, op) in operators {
+            match expr(sql) {
+                Expr::Binary { op: got, .. } => assert!(got == *op, "parsing {sql:?}"),
+                other => panic!("`{sql}` should be a Binary expr, got {other:?}"),
             }
         }
     }

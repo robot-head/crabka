@@ -578,33 +578,16 @@ fn expr_list_with(exprs: &[Expr], qualify: bool) -> String {
         .join(", ")
 }
 
-const fn binary_op_text(op: BinaryOp) -> &'static str {
-    match op {
-        BinaryOp::Eq => "=",
-        BinaryOp::Ne => "<>",
-        BinaryOp::Lt => "<",
-        BinaryOp::Le => "<=",
-        BinaryOp::Gt => ">",
-        BinaryOp::Ge => ">=",
-        BinaryOp::And => "AND",
-        BinaryOp::Or => "OR",
-        BinaryOp::Add => "+",
-        BinaryOp::Sub => "-",
-        BinaryOp::Mul => "*",
-        BinaryOp::Div => "/",
-        BinaryOp::Mod => "%",
-        BinaryOp::Concat => "||",
-        // The network family's operator spellings, several of which it shares
-        // with the bitwise, range and array families.
-        BinaryOp::Shl => "<<",
-        BinaryOp::Shr => ">>",
-        BinaryOp::ContainedByOrEq => "<<=",
-        BinaryOp::ContainsOrEq => ">>=",
-        BinaryOp::Overlaps => "&&",
-        BinaryOp::BitAnd => "&",
-        BinaryOp::BitOr => "|",
-        _ => "?",
-    }
+/// How EXPLAIN spells a binary operator.
+///
+/// Delegates to [`crate::eval::op_spelling`] rather than keeping a second table.
+/// This was a partial copy ending in `_ => "?"`, so every operator it had not
+/// been taught — the whole jsonb family, and every geometric operator — printed
+/// as a literal `?` in a `Filter:` line. A catch-all in a deparser cannot fail
+/// loudly, so the only durable fix is to have ONE exhaustive table that the
+/// compiler forces someone to extend when a `BinaryOp` variant is added.
+fn binary_op_text(op: BinaryOp) -> &'static str {
+    crate::eval::op_spelling(op)
 }
 
 /// Render the plan for the wire, one output line per element.

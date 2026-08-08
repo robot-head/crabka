@@ -95,6 +95,11 @@ pub mod oids {
     pub const POINT: u32 = 600;
     /// PostgreSQL geometric path.
     pub const PATH: u32 = 602;
+    /// PostgreSQL `polygon` — a closed vertex list. Its array type (`_polygon`,
+    /// 1027) is deliberately not named here: like the other six geometric
+    /// types, `polygon` has no [`ElemType`] and so no array form crabka can
+    /// encode.
+    pub const POLYGON: u32 = 604;
     /// PostgreSQL `lseg` — a line segment between two points.
     pub const LSEG: u32 = 601;
     /// PostgreSQL `line` — an infinite line as `Ax + By + C = 0`.
@@ -363,6 +368,7 @@ impl ElemType {
             // name, so callers report 0A000 rather than mis-encoding.
             ColumnType::Point
             | ColumnType::Path
+            | ColumnType::Polygon
             | ColumnType::Lseg
             | ColumnType::Line
             | ColumnType::Circle
@@ -704,6 +710,8 @@ pub enum ColumnType {
     Point,
     /// PostgreSQL `path` (OID 602): an open or closed point sequence.
     Path,
+    /// PostgreSQL `polygon` (OID 604): a closed, non-directional vertex list.
+    Polygon,
     /// PostgreSQL `lseg` (OID 601): a line segment between two endpoints.
     Lseg,
     /// PostgreSQL `line` (OID 628): the infinite line `Ax + By + C = 0`.
@@ -939,6 +947,7 @@ impl ColumnType {
             "float8" | "float" | "double precision" => Some(ColumnType::Float8),
             "point" => Some(ColumnType::Point),
             "path" => Some(ColumnType::Path),
+            "polygon" => Some(ColumnType::Polygon),
             "lseg" => Some(ColumnType::Lseg),
             "line" => Some(ColumnType::Line),
             "circle" => Some(ColumnType::Circle),
@@ -1055,6 +1064,7 @@ impl ColumnType {
             ColumnType::Float8 => oids::FLOAT8,
             ColumnType::Point => oids::POINT,
             ColumnType::Path => oids::PATH,
+            ColumnType::Polygon => oids::POLYGON,
             ColumnType::Lseg => oids::LSEG,
             ColumnType::Line => oids::LINE,
             ColumnType::Circle => oids::CIRCLE,
@@ -1123,6 +1133,7 @@ impl ColumnType {
             ColumnType::Float8 => "double precision",
             ColumnType::Point => "point",
             ColumnType::Path => "path",
+            ColumnType::Polygon => "polygon",
             ColumnType::Lseg => "lseg",
             ColumnType::Line => "line",
             ColumnType::Circle => "circle",
@@ -1188,7 +1199,9 @@ impl ColumnType {
             ColumnType::Float4 => 4,
             ColumnType::Float8 => 8,
             ColumnType::Point => 16,
-            ColumnType::Path => -1,
+            // `path` and `polygon` are the two varlena geometric types: both
+            // carry an unbounded vertex list, so `pg_type.typlen` is -1.
+            ColumnType::Path | ColumnType::Polygon => -1,
             ColumnType::Lseg => 32,
             ColumnType::Line => 24,
             ColumnType::Circle => 24,
@@ -1331,6 +1344,8 @@ pub enum Datum {
     Point(crate::geometry::Point),
     /// PostgreSQL geometric path.
     Path(crate::geometry::Path),
+    /// PostgreSQL's `polygon`, a closed vertex list.
+    Polygon(crate::geometry::Polygon),
     /// PostgreSQL's `lseg`, a line segment between two endpoints.
     Lseg(crate::geometry::Lseg),
     /// PostgreSQL's `line`, an infinite line's three coefficients.
@@ -1773,6 +1788,9 @@ impl PartialEq for Datum {
             (Datum::Float8(a), Datum::Float8(b)) => a == b || (a.is_nan() && b.is_nan()),
             (Datum::Point(a), Datum::Point(b)) => a == b,
             (Datum::Path(a), Datum::Path(b)) => a == b,
+            // Vertex-order-sensitive, unlike SQL's `~=` (`poly_same`), which
+            // also ignores rotation and direction and so cannot back a hash.
+            (Datum::Polygon(a), Datum::Polygon(b)) => a == b,
             (Datum::Lseg(a), Datum::Lseg(b)) => a == b,
             (Datum::Line(a), Datum::Line(b)) => a == b,
             (Datum::Circle(a), Datum::Circle(b)) => a == b,
@@ -1879,6 +1897,7 @@ impl std::hash::Hash for Datum {
             }
             Datum::Point(point) => point.hash(state),
             Datum::Path(path) => path.hash(state),
+            Datum::Polygon(polygon) => polygon.hash(state),
             Datum::Lseg(lseg) => lseg.hash(state),
             Datum::Line(line) => line.hash(state),
             Datum::Circle(circle) => circle.hash(state),
@@ -1937,6 +1956,7 @@ impl Datum {
             Datum::Float8(_) => Some(ColumnType::Float8),
             Datum::Point(_) => Some(ColumnType::Point),
             Datum::Path(_) => Some(ColumnType::Path),
+            Datum::Polygon(_) => Some(ColumnType::Polygon),
             Datum::Lseg(_) => Some(ColumnType::Lseg),
             Datum::Line(_) => Some(ColumnType::Line),
             Datum::Circle(_) => Some(ColumnType::Circle),
@@ -3010,5 +3030,80 @@ mod tests {
             BigDecimal::from_str("2.0").expect("2.0"),
         ));
         assert_ne!(a, c);
+    }
+
+    fn polygon(text: &str) -> Datum {
+        Datum::Polygon(crate::geometry::Polygon::parse(text).expect(text))
+    }
+
+    /// Every column is `SELECT typname, oid, typlen FROM pg_type` on PostgreSQL
+    /// 18.4, for all seven geometric types at once: `polygon`'s row is the point
+    /// of the test, and its six neighbours are here so a change that shifts one
+    /// of the shared arms cannot hide behind a polygon-only corpus.
+    #[test]
+    fn geometric_column_types_report_the_postgres_oid_name_and_typlen() {
+        use assert2::assert;
+        let expected: &[(ColumnType, u32, &str, i16)] = &[
+            (ColumnType::Point, 600, "point", 16),
+            (ColumnType::Lseg, 601, "lseg", 32),
+            (ColumnType::Path, 602, "path", -1),
+            (ColumnType::Box, 603, "box", 32),
+            (ColumnType::Polygon, 604, "polygon", -1),
+            (ColumnType::Line, 628, "line", 24),
+            (ColumnType::Circle, 718, "circle", 24),
+        ];
+        for (ty, oid, name, typlen) in expected {
+            assert!(ty.oid() == *oid, "{name} oid");
+            assert!(ty.name() == *name, "{name} name");
+            assert!(ty.type_size() == *typlen, "{name} typlen");
+            // No geometric type carries a length modifier.
+            assert!(ty.typmod() == -1, "{name} typmod");
+            assert!(
+                ColumnType::from_sql_name(name) == Some(*ty),
+                "{name} by name"
+            );
+            // `pg_type.typcategory` is `G` for all seven, none of which is a
+            // string or a number as far as the cast matrix is concerned.
+            assert!(!ty.is_string(), "{name} is not a string type");
+            assert!(!ty.is_numeric(), "{name} is not numeric");
+            assert!(!ty.is_reg(), "{name} is not a reg type");
+            // None of the seven has an `ElemType`, so crabka names no array type
+            // over them — `polygon[]` (1027) included.
+            assert!(
+                ColumnType::array_of(*ty) == None,
+                "{name} has no array type"
+            );
+            assert!(ty.array_element() == None, "{name} is not an array");
+            assert!(ty.storage_type() == *ty, "{name} stores as itself");
+            assert!(ty.composite() == None, "{name} is not a composite");
+        }
+    }
+
+    #[test]
+    fn polygon_datum_reports_its_column_type_and_compares_by_vertex_order() {
+        use assert2::assert;
+        assert!(polygon("((0,0),(2,0),(2,2))").column_type() == Some(ColumnType::Polygon));
+        // `Datum` equality is the exact, vertex-order-sensitive relation — NOT
+        // SQL's `~=` (`poly_same`), which also ignores rotation and direction.
+        assert!(polygon("((0,0),(2,0),(2,2))") == polygon("((0,0),(2,0),(2,2))"));
+        assert!(polygon("((0,0),(2,0),(2,2))") != polygon("((2,0),(2,2),(0,0))"));
+        assert!(polygon("((0,0),(2,0),(2,2))") != polygon("((0,0),(2,0))"));
+        // A polygon is never equal to a value of another variant, including the
+        // closed path over the same vertices.
+        assert!(polygon("((0,0),(2,0),(2,2))") != Datum::Text("((0,0),(2,0),(2,2))".into()));
+        assert!(
+            polygon("((0,0),(2,0),(2,2))")
+                != Datum::Path(crate::Path::parse("((0,0),(2,0),(2,2))").expect("path"))
+        );
+        assert!(
+            hash_of(&polygon("((0,0),(2,0),(2,2))")) == hash_of(&polygon("((0,0),(2,0),(2,2))"))
+        );
+        assert!(
+            hash_of(&polygon("((0,0),(2,0),(2,2))")) != hash_of(&polygon("((2,0),(2,2),(0,0))"))
+        );
+        // `-0` and `NaN` are canonicalized by `Point`'s own `Hash`, so the
+        // Hash/Eq contract holds without a `canonicalize_for_key` arm.
+        assert!(polygon("((-0,0),(1,1))") == polygon("((0,0),(1,1))"));
+        assert!(hash_of(&polygon("((-0,0),(1,1))")) == hash_of(&polygon("((0,0),(1,1))")));
     }
 }

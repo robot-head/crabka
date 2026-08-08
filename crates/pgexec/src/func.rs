@@ -109,22 +109,6 @@ enum ScalarFunc {
     /// Regression helper exposing PostgreSQL's `IsBinaryCoercible`.
     BinaryCoercible,
     PgNumaAvailable,
-    /// `point(float8, float8)` — the two-coordinate constructor.
-    PointConstructor,
-    /// `lseg(point, point)` — the two-endpoint constructor.
-    LsegConstructor,
-    /// `line(point, point)` — the line through two distinct points.
-    LineConstructor,
-    /// `center(circle)`, `radius(circle)`, `diameter(circle)`, `area(circle)`.
-    CircleCenter,
-    CircleRadius,
-    CircleDiameter,
-    CircleArea,
-    /// `width(box)` and `height(box)`.
-    BoxWidth,
-    BoxHeight,
-    /// `box(point, point)` — the box bounding two corners.
-    BoxConstructor,
     RangeConstructor(RangeRef),
     MultirangeConstructor(MultirangeRef),
     GenericMultirangeConstructor,
@@ -247,16 +231,6 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "pg_input_is_valid" => ScalarFunc::PgInputIsValid,
         "binary_coercible" => ScalarFunc::BinaryCoercible,
         "pg_numa_available" => ScalarFunc::PgNumaAvailable,
-        "point" => ScalarFunc::PointConstructor,
-        "lseg" => ScalarFunc::LsegConstructor,
-        "line" => ScalarFunc::LineConstructor,
-        "center" => ScalarFunc::CircleCenter,
-        "radius" => ScalarFunc::CircleRadius,
-        "diameter" => ScalarFunc::CircleDiameter,
-        "area" => ScalarFunc::CircleArea,
-        "width" => ScalarFunc::BoxWidth,
-        "height" => ScalarFunc::BoxHeight,
-        "box" => ScalarFunc::BoxConstructor,
         "isempty" => ScalarFunc::IsEmpty,
         "lower_inc" => ScalarFunc::LowerInc,
         "lower_inf" => ScalarFunc::LowerInf,
@@ -310,6 +284,7 @@ pub(crate) fn is_scalar(name: &str) -> bool {
         || crate::bit_fn::is_bit_func(name)
         || crate::money_fn::is_money_func(name)
         || crate::sysid_fn::is_sysid_func(name)
+        || crate::geometry_fn::is_geometry_func(name)
 }
 
 /// The call a bare, unparenthesised `name` denotes, when `PostgreSQL` reserves
@@ -409,13 +384,27 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
     if crate::regexp_fn::is_regexp_func(&fc.name) {
         return crate::regexp_fn::regexp_func_result_type(fc, scope);
     }
+    // Last of the family modules, so every name the older families already own
+    // keeps its meaning; the geometric surface adds only names of its own.
+    if crate::geometry_fn::is_geometry_func(&fc.name) {
+        return crate::geometry_fn::geometry_func_result_type(fc, scope);
+    }
     let f = scalar_func(&fc.name).ok_or_else(|| undefined_function(&fc.name))?;
     let args = checked_args(fc)?;
     let n = args.len();
     match f {
         ScalarFunc::Length => {
             require_arity(fc, n == 1)?;
-            match crate::eval::infer_type(&args[0], scope)? {
+            let ty = crate::eval::infer_type(&args[0], scope)?;
+            // `length(lseg)` and `length(path)` are the geometric overloads and
+            // return `float8`. Only the `length` spelling has them —
+            // `char_length`/`character_length` are `text`-only in PostgreSQL.
+            if fc.name == "length"
+                && let Some(result) = crate::geometry_fn::geometric_length_type(ty)
+            {
+                return Ok(result);
+            }
+            match ty {
                 ColumnType::TsVector => {}
                 ColumnType::Bytea if fc.name == "length" => {}
                 // `length(bit)` is `bitlength` — the bit count, not a
@@ -783,34 +772,6 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
             require_arity(fc, n == 0)?;
             Ok(ColumnType::Bool)
         }
-        ScalarFunc::PointConstructor => {
-            require_arity(fc, n == 2)?;
-            Ok(ColumnType::Point)
-        }
-        ScalarFunc::LsegConstructor => {
-            require_arity(fc, n == 2)?;
-            Ok(ColumnType::Lseg)
-        }
-        ScalarFunc::LineConstructor => {
-            require_arity(fc, n == 2)?;
-            Ok(ColumnType::Line)
-        }
-        ScalarFunc::CircleCenter => {
-            require_arity(fc, n == 1)?;
-            Ok(ColumnType::Point)
-        }
-        ScalarFunc::BoxConstructor => {
-            require_arity(fc, n == 2)?;
-            Ok(ColumnType::Box)
-        }
-        ScalarFunc::CircleRadius
-        | ScalarFunc::CircleDiameter
-        | ScalarFunc::CircleArea
-        | ScalarFunc::BoxWidth
-        | ScalarFunc::BoxHeight => {
-            require_arity(fc, n == 1)?;
-            Ok(ColumnType::Float8)
-        }
         ScalarFunc::RangeConstructor(range) => {
             require_arity(fc, (1..=3).contains(&n))?;
             Ok(ColumnType::Range(range))
@@ -947,6 +908,9 @@ pub(crate) fn eval_scalar(
     }
     if crate::regexp_fn::is_regexp_func(&fc.name) {
         return crate::regexp_fn::eval_regexp(fc, ctx, eval_child);
+    }
+    if crate::geometry_fn::is_geometry_func(&fc.name) {
+        return crate::geometry_fn::eval_geometry(fc, ctx, eval_child);
     }
     let f = scalar_func(&fc.name).ok_or_else(|| undefined_function(&fc.name))?;
     let args = checked_args(fc)?;
@@ -1218,6 +1182,13 @@ fn eval_eager(
             require_arity(fc, vals.len() == 1)?;
             if let Datum::BitString(bits) = &vals[0] {
                 return Ok(Datum::Int4(crate::bit_fn::length(bits)));
+            }
+            // The two geometric overloads are `float8`; the rest count units of
+            // the argument's own storage.
+            if fc.name == "length"
+                && let Some(length) = crate::geometry_fn::length_of(&vals[0])
+            {
+                return Ok(Datum::Float8(length));
             }
             let n = match &vals[0] {
                 Datum::TsVector(vector) => vector.len(),
@@ -1752,78 +1723,6 @@ fn eval_eager(
             require_arity(fc, vals.is_empty())?;
             Ok(Datum::Bool(false))
         }
-        ScalarFunc::PointConstructor => {
-            require_arity(fc, vals.len() == 2)?;
-            Ok(Datum::Point(crabka_pgtypes::Point {
-                x: as_f64(&vals[0])?,
-                y: as_f64(&vals[1])?,
-            }))
-        }
-        ScalarFunc::LsegConstructor => {
-            require_arity(fc, vals.len() == 2)?;
-            let endpoint = |value: &Datum| match value {
-                Datum::Point(point) => Ok(*point),
-                _ => Err(undefined_function("lseg")),
-            };
-            Ok(Datum::Lseg(crabka_pgtypes::geometry::Lseg {
-                start: endpoint(&vals[0])?,
-                end: endpoint(&vals[1])?,
-            }))
-        }
-        ScalarFunc::BoxConstructor => {
-            require_arity(fc, vals.len() == 2)?;
-            let corner = |value: &Datum| match value {
-                Datum::Point(point) => Ok(*point),
-                _ => Err(undefined_function("box")),
-            };
-            Ok(Datum::Box(crabka_pgtypes::geometry::Box2::normalized(
-                corner(&vals[0])?,
-                corner(&vals[1])?,
-            )))
-        }
-        side @ (ScalarFunc::BoxWidth | ScalarFunc::BoxHeight) => {
-            require_arity(fc, vals.len() == 1)?;
-            let Datum::Box(value) = &vals[0] else {
-                return Err(undefined_function(&fc.name));
-            };
-            Ok(Datum::Float8(match side {
-                ScalarFunc::BoxWidth => value.width(),
-                _ => value.height(),
-            }))
-        }
-        accessor @ (ScalarFunc::CircleCenter
-        | ScalarFunc::CircleRadius
-        | ScalarFunc::CircleDiameter
-        | ScalarFunc::CircleArea) => {
-            require_arity(fc, vals.len() == 1)?;
-            if let Datum::Box(value) = &vals[0] {
-                return Ok(match accessor {
-                    ScalarFunc::CircleCenter => Datum::Point(value.center()),
-                    ScalarFunc::CircleArea => Datum::Float8(value.area()),
-                    _ => return Err(undefined_function(&fc.name)),
-                });
-            }
-            let Datum::Circle(circle) = &vals[0] else {
-                return Err(undefined_function(&fc.name));
-            };
-            Ok(match accessor {
-                ScalarFunc::CircleCenter => Datum::Point(circle.center),
-                ScalarFunc::CircleRadius => Datum::Float8(circle.radius),
-                ScalarFunc::CircleDiameter => Datum::Float8(circle.radius * 2.0),
-                _ => Datum::Float8(circle.area()),
-            })
-        }
-        ScalarFunc::LineConstructor => {
-            require_arity(fc, vals.len() == 2)?;
-            let endpoint = |value: &Datum| match value {
-                Datum::Point(point) => Ok(*point),
-                _ => Err(undefined_function("line")),
-            };
-            Ok(Datum::Line(crabka_pgtypes::geometry::Line::from_points(
-                endpoint(&vals[0])?,
-                endpoint(&vals[1])?,
-            )?))
-        }
         ScalarFunc::PgTableIsVisible => {
             require_arity(fc, vals.len() == 1)?;
             let oid = int_arg(&vals[0])?;
@@ -2233,6 +2132,13 @@ enum TypmodKind {
     /// `bit varying` has a space in its name and the modifier goes at the END:
     /// `bit varying(5)`, never `bit(5) varying`.
     Bits,
+    /// `printTypmod`'s fallback for a type with no `typmodout`: the stored word
+    /// is printed verbatim. The geometric types are the case — none of them
+    /// accepts a modifier (`point(4)` as a declaration is `42601 type modifier
+    /// is not allowed for type "point"`), so this is only ever reached by
+    /// calling `format_type` with a typmod the type could not have carried,
+    /// where `PostgreSQL` still prints `point(4)` rather than dropping it.
+    Verbatim,
 }
 
 fn type_modifier(kind: TypmodKind, typmod: i64) -> String {
@@ -2243,7 +2149,7 @@ fn type_modifier(kind: TypmodKind, typmod: i64) -> String {
             let packed = typmod - 4;
             format!("({},{})", (packed >> 16) & 0xffff, packed & 0xffff)
         }
-        TypmodKind::Seconds | TypmodKind::Bits => format!("({typmod})"),
+        TypmodKind::Seconds | TypmodKind::Bits | TypmodKind::Verbatim => format!("({typmod})"),
     }
 }
 
@@ -2251,8 +2157,19 @@ fn type_modifier(kind: TypmodKind, typmod: i64) -> String {
 /// The name carries a `[]` suffix for an array type, and the modifier goes in
 /// before that suffix (`character varying(6)[]`).
 fn builtin_format_type(oid: u32) -> Option<(&'static str, TypmodKind)> {
-    use TypmodKind::{Bits, Length, None as NoMod, PrecisionScale, Seconds};
+    use TypmodKind::{Bits, Length, None as NoMod, PrecisionScale, Seconds, Verbatim};
     Some(match oid {
+        // The seven geometric types. None accepts a modifier, so `Verbatim` is
+        // only reached through a direct `format_type(600, 4)` call; the reason
+        // they are here at all is that psql's `\d` renders every column through
+        // `format_type`, and without these arms it printed `-` for the type.
+        crabka_pgtypes::oids::POINT => ("point", Verbatim),
+        crabka_pgtypes::oids::LSEG => ("lseg", Verbatim),
+        crabka_pgtypes::oids::PATH => ("path", Verbatim),
+        crabka_pgtypes::oids::BOX => ("box", Verbatim),
+        crabka_pgtypes::oids::POLYGON => ("polygon", Verbatim),
+        crabka_pgtypes::oids::LINE => ("line", Verbatim),
+        crabka_pgtypes::oids::CIRCLE => ("circle", Verbatim),
         790 => ("money", NoMod),
         791 => ("money[]", NoMod),
         1560 => ("bit", Bits),
@@ -3585,5 +3502,144 @@ mod tests {
         assert_eq!(ty("sqrt(4.0::float8)"), ColumnType::Float8);
         assert_eq!(ty("power(qn, 2)"), ColumnType::Numeric(None)); // numeric base
         assert_eq!(ty("power(2, 3)"), ColumnType::Float8); // all-int
+    }
+
+    /// A table whose columns are named after the geometric functions. Every one
+    /// of these is an ordinary identifier in `PostgreSQL` — none of the seven
+    /// type names is even a keyword there — so a column keeps the name whatever
+    /// `is_scalar` says about it.
+    fn geometric_name_table() -> Table {
+        Table {
+            id: 1,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
+            name: RelationName::public("t"),
+            columns: vec![
+                Column::new("area", ColumnType::Int4),
+                Column::new("center", ColumnType::Text),
+                Column::new("path", ColumnType::Text),
+                Column::new("slope", ColumnType::Int4),
+                Column::new("npoints", ColumnType::Int4),
+                Column::new("radius", ColumnType::Int4),
+                Column::new("width", ColumnType::Int4),
+                Column::new("height", ColumnType::Int4),
+                Column::new("length", ColumnType::Int4),
+            ],
+            sharded: false,
+            row_security: false,
+            force_row_security: false,
+            sharding: None,
+            foreign: None,
+            checks: Vec::new(),
+        }
+    }
+
+    /// Adding the geometric family to `is_scalar` must not take any of its
+    /// names away from a column that happens to use one. A bare `area` is a
+    /// column reference, not a niladic call.
+    #[test]
+    fn a_column_named_after_a_geometric_function_is_still_a_column() {
+        let t = geometric_name_table();
+        let scope = scope_of(Some(&t));
+        let ty =
+            |sql: &str| crate::eval::infer_type(&pexpr(sql).expect("parse"), &scope).expect("type");
+        for (sql, expected) in [
+            ("area", ColumnType::Int4),
+            ("center", ColumnType::Text),
+            ("path", ColumnType::Text),
+            ("slope", ColumnType::Int4),
+            ("npoints", ColumnType::Int4),
+            ("radius", ColumnType::Int4),
+            ("width", ColumnType::Int4),
+            ("height", ColumnType::Int4),
+            ("length", ColumnType::Int4),
+            ("area + 1", ColumnType::Int4),
+            ("t.area", ColumnType::Int4),
+            ("upper(center)", ColumnType::Text),
+        ] {
+            assert!(ty(sql) == expected, "{sql}");
+        }
+        // And the values come through, not a function's result.
+        let ctx = crate::clock::EvalCtx::test_default();
+        let row = vec![
+            Datum::Int4(7),
+            Datum::Text("c".into()),
+            Datum::Text("p".into()),
+            Datum::Int4(1),
+            Datum::Int4(2),
+            Datum::Int4(3),
+            Datum::Int4(4),
+            Datum::Int4(5),
+            Datum::Int4(6),
+        ];
+        let value = crate::eval::eval(&pexpr("area + 1").expect("parse"), &scope, &row, &ctx)
+            .expect("eval");
+        assert!(value == Datum::Int4(8));
+    }
+
+    /// `length` keeps every non-geometric overload it already had; only `lseg`
+    /// and `path` arguments take the `float8` reading, and only under the
+    /// `length` spelling.
+    #[test]
+    fn length_keeps_its_non_geometric_overloads() {
+        let t = table();
+        let ty = |sql: &str| {
+            crate::eval::infer_type(&pexpr(sql).expect("parse"), &scope_of(Some(&t))).expect("type")
+        };
+        for sql in [
+            "length('abc')",
+            "length(s)",
+            "char_length(s)",
+            "character_length('abc')",
+            "length(B'1011')",
+            "length('abc'::bytea)",
+            "length('a b'::tsvector)",
+        ] {
+            assert!(ty(sql) == ColumnType::Int4, "{sql}");
+        }
+        assert!(ev("length('abc')") == Datum::Int4(3));
+        assert!(ev("length(B'1011')") == Datum::Int4(4));
+        assert!(ev("length('abc'::bytea)") == Datum::Int4(3));
+        // The two geometric overloads, which return float8 rather than int4.
+        assert!(ty("length(lseg '[(0,0),(3,4)]')") == ColumnType::Float8);
+        assert!(ty("length(path '((0,0),(3,0),(3,4))')") == ColumnType::Float8);
+        assert!(ev("length(lseg '[(0,0),(3,4)]')") == Datum::Float8(5.0));
+        assert!(ev("length(path '((0,0),(3,0),(3,4))')") == Datum::Float8(12.0));
+        // `char_length`/`character_length` have no geometric overload.
+        assert!(err_code("char_length(lseg '[(0,0),(3,4)]')", Some(&t)) == "42883");
+    }
+
+    /// The geometric family answers through the ordinary scalar dispatch, so
+    /// its result types reach `RowDescription` and its errors are 42883.
+    #[test]
+    fn the_geometric_family_resolves_through_the_scalar_dispatch() {
+        let t = table();
+        let ty = |sql: &str| {
+            crate::eval::infer_type(&pexpr(sql).expect("parse"), &scope_of(Some(&t))).expect("type")
+        };
+        for (sql, expected) in [
+            ("area(box '(0,0),(2,3)')", ColumnType::Float8),
+            ("area(circle '<(0,0),2>')", ColumnType::Float8),
+            ("area(path '((0,0),(2,0),(2,2),(0,2))')", ColumnType::Float8),
+            ("center(box '(0,0),(2,4)')", ColumnType::Point),
+            ("point(1, 2)", ColumnType::Point),
+            ("box(point '(1,2)', point '(3,4)')", ColumnType::Box),
+            ("lseg(box '(0,0),(2,3)')", ColumnType::Lseg),
+            ("line(point '(0,0)', point '(1,1)')", ColumnType::Line),
+            ("polygon(box '(0,0),(1,1)')", ColumnType::Polygon),
+            ("path(polygon '((0,0),(1,1))')", ColumnType::Path),
+            ("circle(box '(0,0),(2,2)')", ColumnType::Circle),
+            ("npoints(polygon '((0,0),(1,1))')", ColumnType::Int4),
+            ("isclosed(path '((0,0),(1,1))')", ColumnType::Bool),
+            ("poly_center(polygon '((0,0),(1,1))')", ColumnType::Point),
+        ] {
+            assert!(ty(sql) == expected, "{sql}");
+        }
+        assert!(ev("area(box '(0,0),(2,3)')") == Datum::Float8(6.0));
+        assert!(ev("width(box '(0,0),(2,3)')") == Datum::Float8(2.0));
+        // An argument type with no overload is 42883, both at plan time and at
+        // value time.
+        assert!(err_code("area(lseg '[(0,0),(1,1)]')", Some(&t)) == "42883");
+        assert!(ec_eval("area(lseg '[(0,0),(1,1)]')") == "42883");
+        assert!(err_code("area(n)", Some(&t)) == "42883");
     }
 }

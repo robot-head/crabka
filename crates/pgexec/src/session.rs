@@ -10405,6 +10405,14 @@ impl ParamBinder<'_> {
                     // infers the parameter as `xml` rather than leaving it
                     // unknown.
                     UnaryOp::IsDocument | UnaryOp::IsNotDocument => Some(ColumnType::Xml),
+                    // Every geometric prefix operator is declared over two or
+                    // more operand types (`@-@` over lseg and path, `@@` over
+                    // four), so a bare parameter beside one resolves nothing.
+                    UnaryOp::NPoints
+                    | UnaryOp::Length
+                    | UnaryOp::Center
+                    | UnaryOp::IsHorizontal
+                    | UnaryOp::IsVertical => None,
                 };
                 self.bind_expr_with_scope_and_ctes(expr, child_expected, scope, ctes)?;
             }
@@ -10582,6 +10590,18 @@ fn binary_param_type(
         | BinaryOp::StrictlyAbove
         | BinaryOp::DoesNotExtendAbove
         | BinaryOp::DoesNotExtendBelow => None,
+        // `?#`, `?-`, `?-|`, `?||`, `<^` and `>^` are all same-type geometric
+        // tests, so a parameter beside one adopts its sibling's type.
+        BinaryOp::Intersects
+        | BinaryOp::Horizontal
+        | BinaryOp::Perpendicular
+        | BinaryOp::Parallel
+        | BinaryOp::BelowEq
+        | BinaryOp::AboveEq => infer_param_context_type(other, scope),
+        // `##` has two candidates beside every operand it takes (`lseg ## box`
+        // and `lseg ## lseg`, `point ## line` and `point ## lseg`, …), so
+        // nothing here decides which the parameter is.
+        BinaryOp::ClosestPoint => None,
         // Comparisons and arithmetic take same-family operands, so a
         // parameter adopts its sibling's type — matching PostgreSQL's
         // operator resolution for `int8 + $1` and friends.
@@ -11324,6 +11344,28 @@ fn decode_binary_value(
                 closed: closed == 1,
                 points,
             }))
+        }
+        // `poly_recv`: the point count then the points. There is no closed flag
+        // (a polygon always is) and no bounding box — upstream recomputes it
+        // rather than trusting a transmitted one.
+        ColumnType::Polygon => {
+            if value.len() < 4 {
+                return Err(malformed_binary_parameter());
+            }
+            let count =
+                usize::try_from(i32::from_be_bytes(value[..4].try_into().expect("4 bytes")))
+                    .map_err(|_| malformed_binary_parameter())?;
+            if value.len() != 4 + count.saturating_mul(16) {
+                return Err(malformed_binary_parameter());
+            }
+            let points = value[4..]
+                .chunks_exact(16)
+                .map(|bytes| crabka_pgtypes::Point {
+                    x: f64::from_be_bytes(bytes[..8].try_into().expect("8 bytes")),
+                    y: f64::from_be_bytes(bytes[8..].try_into().expect("8 bytes")),
+                })
+                .collect();
+            Ok(Datum::Polygon(crabka_pgtypes::Polygon { points }))
         }
         ColumnType::Numeric(_) => crabka_pgtypes::numeric::from_binary(value)
             .map(Datum::Numeric)

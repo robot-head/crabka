@@ -692,10 +692,35 @@ pub fn compare(a: &Datum, b: &Datum) -> Result<Option<Ordering>, TypeError> {
             Some(ordering) => ordering,
             None => return Ok(None),
         },
+        // `box` orders by AREA through the same epsilon macros, so two boxes of
+        // equal area are `=` however differently they are placed — `~=`
+        // (`box_same`) is the structural relation. PostgreSQL declares no
+        // `box <> box`; refusing that spelling is operator resolution's job, not
+        // this function's, which only answers what the ordering is.
+        (Datum::Box(x), Datum::Box(y)) => match x.compare(*y) {
+            Some(ordering) => ordering,
+            None => return Ok(None),
+        },
+        // `lseg` orders by LENGTH, so the endpoints are ignored entirely and `=`
+        // (`lseg_eq`) is a separate, structural relation the executor answers
+        // itself. NaN coordinates make every upstream comparison false, which is
+        // the `None` here.
+        (Datum::Lseg(x), Datum::Lseg(y)) => match x.compare(*y) {
+            Some(ordering) => ordering,
+            None => return Ok(None),
+        },
+        // `path` orders by the NUMBER OF POINTS and nothing else (`path_n_lt`
+        // and friends). Plain integer comparison, so unlike box and circle it is
+        // total and can never be NULL. `path` has no `<>` either.
+        (Datum::Path(x), Datum::Path(y)) => x.compare(y),
         // `line` supports only equality; the ordering operators are rejected
         // before they reach here, so `Equal`/`Greater` is enough to answer `=`.
+        // `line_eq` is PROPORTIONAL, not field-by-field — `{1,-1,0}` equals
+        // `{2,-2,0}` — so this must go through `eq_line` rather than the
+        // derive-shaped `PartialEq`, which is the structural relation backing
+        // `Hash`.
         (Datum::Line(x), Datum::Line(y)) => {
-            if x == y {
+            if x.eq_line(*y) {
                 Ordering::Equal
             } else {
                 Ordering::Greater
@@ -2078,5 +2103,136 @@ mod tests {
                 "{right:?} vs {left:?}"
             );
         }
+    }
+
+    // ---- the geometric btree orderings ----
+
+    /// The four geometric types with an ordering each compare a different
+    /// *magnitude*, not their structure: `box` and `circle` by area, `lseg` by
+    /// length, `path` by point count. Every row is the truth of the
+    /// corresponding `<`/`=`/`>` on PostgreSQL 18.4.
+    #[test]
+    fn geometric_ordering_compares_the_magnitude_postgres_compares() {
+        use assert2::assert;
+
+        use crate::ColumnType;
+        let tz = jiff::tz::TimeZone::UTC;
+        let value = |ty: ColumnType, text: &str| {
+            crate::cast::cast(&Datum::Text(text.into()), ty, &tz)
+                .unwrap_or_else(|_| panic!("{text}"))
+        };
+        let cases: &[(ColumnType, &str, &str, Ordering)] = &[
+            // `box` orders by AREA, so two boxes of equal area are Equal however
+            // differently they are placed — the structural relation is `~=`.
+            (
+                ColumnType::Box,
+                "(0,0),(2,2)",
+                "(0,0),(3,3)",
+                Ordering::Less,
+            ),
+            (
+                ColumnType::Box,
+                "(0,0),(2,2)",
+                "(5,5),(7,7)",
+                Ordering::Equal,
+            ),
+            (
+                ColumnType::Box,
+                "(0,0),(2,2)",
+                "(0,0),(1,1)",
+                Ordering::Greater,
+            ),
+            // `lseg` orders by LENGTH, so two segments of equal length are Equal
+            // even with different endpoints — `lseg_eq` is the structural one.
+            (
+                ColumnType::Lseg,
+                "[(0,0),(3,0)]",
+                "[(0,0),(0,2)]",
+                Ordering::Greater,
+            ),
+            (
+                ColumnType::Lseg,
+                "[(0,0),(3,0)]",
+                "[(1,1),(1,4)]",
+                Ordering::Equal,
+            ),
+            (
+                ColumnType::Lseg,
+                "[(0,0),(3,0)]",
+                "[(0,0),(4,0)]",
+                Ordering::Less,
+            ),
+            // `path` orders by POINT COUNT and nothing else — the vertices, the
+            // shape and the open/closed flag are all ignored.
+            (
+                ColumnType::Path,
+                "((0,0),(1,0),(1,1))",
+                "((0,0),(1,1))",
+                Ordering::Greater,
+            ),
+            (
+                ColumnType::Path,
+                "[(0,0),(1,1)]",
+                "((5,5),(9,9))",
+                Ordering::Equal,
+            ),
+            (
+                ColumnType::Path,
+                "((0,0),(1,1))",
+                "((0,0),(1,0),(1,1))",
+                Ordering::Less,
+            ),
+            // `circle` orders by area too.
+            (
+                ColumnType::Circle,
+                "<(0,0),1>",
+                "<(9,9),1>",
+                Ordering::Equal,
+            ),
+            (ColumnType::Circle, "<(0,0),1>", "<(0,0),2>", Ordering::Less),
+        ];
+        for (ty, left, right, expected) in cases {
+            let (a, b) = (value(*ty, left), value(*ty, right));
+            assert!(
+                compare(&a, &b).expect("geometric cmp") == Some(*expected),
+                "{ty:?} {left} vs {right}"
+            );
+            assert!(
+                compare(&b, &a).expect("geometric cmp") == Some(expected.reverse()),
+                "{ty:?} {right} vs {left}"
+            );
+        }
+    }
+
+    /// `polygon` and `point` have no btree opclass at all: `polygon < polygon`
+    /// and `point = point` are both "operator does not exist" upstream, so
+    /// `compare` must refuse rather than invent an order. The message names the
+    /// types, which is what the executor turns into its own error.
+    #[test]
+    fn polygon_and_point_have_no_comparison() {
+        use assert2::assert;
+
+        use crate::ColumnType;
+        let tz = jiff::tz::TimeZone::UTC;
+        let value = |ty: ColumnType, text: &str| {
+            crate::cast::cast(&Datum::Text(text.into()), ty, &tz)
+                .unwrap_or_else(|_| panic!("{text}"))
+        };
+        for (ty, left, right) in [
+            (ColumnType::Polygon, "((0,0),(1,0),(1,1))", "((0,0),(1,1))"),
+            // Even two identical polygons: PostgreSQL has no `polygon =`.
+            (
+                ColumnType::Polygon,
+                "((0,0),(1,0),(1,1))",
+                "((0,0),(1,0),(1,1))",
+            ),
+            (ColumnType::Point, "(1,2)", "(1,2)"),
+        ] {
+            let error = compare(&value(ty, left), &value(ty, right)).expect_err("no ordering");
+            assert!(error.sqlstate() == "42804", "{ty:?} {left} vs {right}");
+            assert!(error.to_string().contains(ty.name()), "{ty:?} names itself");
+        }
+        // A NULL still short-circuits to NULL before the type is consulted.
+        assert!(compare(&Datum::Null, &value(ColumnType::Polygon, "((0,0),(1,1))")) == Ok(None));
     }
 }
