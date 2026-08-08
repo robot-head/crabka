@@ -403,10 +403,10 @@
       "sha256": "1c1196f7daa99ae1ed5f8dfebc4bca8ae8c8b3991b5d8a5f5c611f77897cb07d"
     },
     "groupingsets": {
-      "changed_lines": 1907,
+      "changed_lines": 1903,
       "expected": "groupingsets.out",
       "hunks": 58,
-      "sha256": "ea23249eae4938756a40a87470360c7a21a3b4ab64d1de5776f523475f821e7f"
+      "sha256": "54e387d3fcb6d7bf67b654d4c30e6abac7e19e9864d02d13d413720a36d81970"
     },
     "guc": {
       "changed_lines": 230,
@@ -517,10 +517,10 @@
       "sha256": "524893a2ab82087b12cdc36144984bdb4319c82d0cc20ba93079f57e7c621cb9"
     },
     "join": {
-      "changed_lines": 18050,
+      "changed_lines": 8017,
       "expected": "join.out",
       "hunks": 249,
-      "sha256": "96005f2f1b261ce1e7271a1588128c63020773cf27b765274b6fb4e03bedfdc8"
+      "sha256": "04c102ccee6e916090bf56cd87895fc249e9c55b75e7abc37a79e9788408f979"
     },
     "join_hash": {
       "changed_lines": 845,
