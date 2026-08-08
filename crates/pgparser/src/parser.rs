@@ -3813,8 +3813,23 @@ impl Parser {
             if self.eat_ident_eq("tablespace") {
                 return Ok(AlterTableAction::SetTablespace(self.expect_ident()?));
             }
+            // `SET WITHOUT OIDS` shares this prefix and must stay an unsupported
+            // subcommand, so `WITHOUT` is only consumed once `CLUSTER` is in
+            // sight.
+            if self.peek_ident_eq("without")
+                && matches!(self.peek2(), Token::Ident(word) if word.eq_ignore_ascii_case("cluster"))
+            {
+                self.bump();
+                self.bump();
+                return Ok(AlterTableAction::SetWithoutCluster);
+            }
             let label = self.consume_unsupported_subcommand("SET");
             return Ok(AlterTableAction::Unsupported(label));
+        }
+        if self.peek_ident_eq("cluster") && *self.peek2() == Token::Keyword(Keyword::On) {
+            self.bump();
+            self.bump();
+            return Ok(AlterTableAction::ClusterOn(self.expect_ident()?));
         }
         if self.eat_ident_eq("reset") {
             self.expect(&Token::LParen)?;
@@ -5473,20 +5488,37 @@ impl Parser {
         ))
     }
 
-    /// P5: `CLUSTER [ ( <option>, … ) ] [VERBOSE] [ <table> [ USING <index> ] ]`.
+    /// P5: `CLUSTER [ ( <option>, … ) ] [VERBOSE] [ <table> [ USING <index> ] ]`,
+    /// plus the pre-8.3 `CLUSTER <index> ON <table>` spelling `PostgreSQL` still
+    /// accepts (and its own regression suite still writes).
+    ///
+    /// The two forms are told apart only by what follows the first name, so the
+    /// name is parsed once and reinterpreted as the index when `ON` follows.
     fn cluster_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
         self.bump(); // cluster
         self.eat_utility_option_list()?;
         self.eat_ident_eq("verbose");
-        if matches!(self.peek(), Token::Ident(_)) {
-            self.expect_ident()?;
-            if self.eat_keyword(Keyword::Using) {
-                self.expect_ident()?;
-            }
+        if !matches!(self.peek(), Token::Ident(_)) {
+            return Ok(crate::ast::Statement::Cluster(None));
         }
-        Ok(crate::ast::Statement::Utility(
-            crate::ast::UtilityStatement::Cluster,
-        ))
+        let first = self.relation_ref()?;
+        let target = if self.eat_keyword(Keyword::On) {
+            crate::ast::ClusterTarget {
+                table: self.relation_ref()?,
+                index: Some(first.name),
+            }
+        } else if self.eat_keyword(Keyword::Using) {
+            crate::ast::ClusterTarget {
+                table: first,
+                index: Some(self.expect_ident()?),
+            }
+        } else {
+            crate::ast::ClusterTarget {
+                table: first,
+                index: None,
+            }
+        };
+        Ok(crate::ast::Statement::Cluster(Some(target)))
     }
 
     /// P5: `REINDEX [ ( <option>, … ) ] { INDEX | TABLE | SCHEMA | DATABASE |
@@ -20894,6 +20926,58 @@ mod json_array_conflict_notify_tests {
                 .map(|column| column.name.as_str())
                 .collect::<Vec<_>>()
                 == vec!["notify", "unlisten"]
+        );
+    }
+
+    /// Every spelling of `CLUSTER` names the same two things. The pre-8.3
+    /// `CLUSTER <index> ON <table>` form writes them in the opposite order, and
+    /// the option list and `VERBOSE` sit between the keyword and the name.
+    #[test]
+    fn cluster_spellings_all_resolve_to_a_table_and_an_index() {
+        // (SQL, schema of the relation, its name, the index named)
+        let cases: &[(&str, Option<&str>, &str, Option<&str>)] = &[
+            ("CLUSTER t USING i", None, "t", Some("i")),
+            ("CLUSTER i ON t", None, "t", Some("i")),
+            ("CLUSTER t", None, "t", None),
+            ("CLUSTER VERBOSE t USING i", None, "t", Some("i")),
+            ("CLUSTER (VERBOSE) t USING i", None, "t", Some("i")),
+            ("CLUSTER VERBOSE i ON t", None, "t", Some("i")),
+            // A qualified relation, in both orders.
+            ("CLUSTER s.t USING i", Some("s"), "t", Some("i")),
+            ("CLUSTER i ON s.t", Some("s"), "t", Some("i")),
+        ];
+        for (sql, schema, name, index) in cases {
+            let Statement::Cluster(Some(target)) = one(sql) else {
+                panic!("expected a targeted CLUSTER: {sql}");
+            };
+            assert!(target.table.schema.as_deref() == *schema, "{sql}");
+            assert!(target.table.name == *name, "{sql}");
+            assert!(target.index.as_deref() == *index, "{sql}");
+        }
+        for sql in ["CLUSTER", "CLUSTER VERBOSE", "CLUSTER (VERBOSE)"] {
+            assert!(one(sql) == Statement::Cluster(None), "{sql}");
+        }
+    }
+
+    /// `ALTER TABLE` grew two clustering subcommands. `SET WITHOUT OIDS` shares
+    /// a prefix with one of them and has to stay an unsupported subcommand.
+    #[test]
+    fn alter_table_recognizes_the_clustering_subcommands() {
+        use crate::ast::AlterTableAction;
+
+        fn action(sql: &str) -> AlterTableAction {
+            let Statement::AlterTable { mut actions, .. } = one(sql) else {
+                panic!("expected ALTER TABLE: {sql}");
+            };
+            assert!(actions.len() == 1, "{sql}");
+            actions.pop().expect("one action")
+        }
+
+        assert!(action("ALTER TABLE t CLUSTER ON i") == AlterTableAction::ClusterOn("i".into()));
+        assert!(action("ALTER TABLE t SET WITHOUT CLUSTER") == AlterTableAction::SetWithoutCluster);
+        assert!(
+            action("ALTER TABLE t SET WITHOUT OIDS")
+                == AlterTableAction::Unsupported("SET WITHOUT OIDS".into())
         );
     }
 }

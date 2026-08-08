@@ -53,7 +53,7 @@ const TABLE_OPTION_KNOWN: u8 =
 const SHARDING_VERSION: u8 = 1;
 const SHARDING_NONE: u8 = 0;
 const SHARDING_HASH: u8 = 1;
-const INDEX_VERSION: u8 = 5;
+const INDEX_VERSION: u8 = 6;
 const SEQUENCE_VERSION: u8 = 1;
 const INDEX_PLACEMENT_LOCAL: u8 = 0;
 const INDEX_PLACEMENT_GLOBAL: u8 = 1;
@@ -1319,6 +1319,7 @@ pub fn serialize_index(index: &Index) -> Vec<u8> {
         IndexMethod::Spgist => INDEX_METHOD_SPGIST,
     });
     out.push(u8::from(index.without_overlaps));
+    out.push(u8::from(index.clustered));
     out.push(match &index.constraint {
         None => INDEX_CONSTRAINT_NONE,
         Some(IndexConstraint::PrimaryKey) => INDEX_CONSTRAINT_PRIMARY_KEY,
@@ -1362,7 +1363,7 @@ pub fn serialize_index(index: &Index) -> Vec<u8> {
 pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
     let mut cur = bytes;
     let version = take_u8(&mut cur)?;
-    if !(2..=INDEX_VERSION).contains(&version) {
+    if version != INDEX_VERSION {
         return Err(KvError::CorruptRow(format!(
             "unknown index version {version}"
         )));
@@ -1389,40 +1390,41 @@ pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
             )));
         }
     };
-    let method = if version >= 3 {
-        match take_u8(&mut cur)? {
-            INDEX_METHOD_BTREE => IndexMethod::Btree,
-            INDEX_METHOD_GIN => IndexMethod::Gin,
-            INDEX_METHOD_HASH => IndexMethod::Hash,
-            INDEX_METHOD_GIST => IndexMethod::Gist,
-            INDEX_METHOD_SPGIST => IndexMethod::Spgist,
-            tag => {
-                return Err(KvError::CorruptRow(format!(
-                    "unknown index method tag {tag}"
-                )));
-            }
+    let method = match take_u8(&mut cur)? {
+        INDEX_METHOD_BTREE => IndexMethod::Btree,
+        INDEX_METHOD_GIN => IndexMethod::Gin,
+        INDEX_METHOD_HASH => IndexMethod::Hash,
+        INDEX_METHOD_GIST => IndexMethod::Gist,
+        INDEX_METHOD_SPGIST => IndexMethod::Spgist,
+        tag => {
+            return Err(KvError::CorruptRow(format!(
+                "unknown index method tag {tag}"
+            )));
         }
-    } else {
-        IndexMethod::Btree
     };
-    let without_overlaps = if version >= 5 {
-        match take_u8(&mut cur)? {
-            0 => false,
-            1 => true,
-            flag => {
-                return Err(KvError::CorruptRow(format!(
-                    "unknown index WITHOUT OVERLAPS flag {flag}"
-                )));
-            }
+    let without_overlaps = match take_u8(&mut cur)? {
+        0 => false,
+        1 => true,
+        flag => {
+            return Err(KvError::CorruptRow(format!(
+                "unknown index WITHOUT OVERLAPS flag {flag}"
+            )));
         }
-    } else {
-        false
+    };
+    let clustered = match take_u8(&mut cur)? {
+        0 => false,
+        1 => true,
+        flag => {
+            return Err(KvError::CorruptRow(format!(
+                "unknown index clustered flag {flag}"
+            )));
+        }
     };
     let constraint = match take_u8(&mut cur)? {
         INDEX_CONSTRAINT_NONE => None,
         INDEX_CONSTRAINT_PRIMARY_KEY => Some(IndexConstraint::PrimaryKey),
         INDEX_CONSTRAINT_UNIQUE => Some(IndexConstraint::Unique),
-        INDEX_CONSTRAINT_EXCLUSION if version >= 4 => {
+        INDEX_CONSTRAINT_EXCLUSION => {
             let count = usize::try_from(u32::from_be_bytes(
                 take_n(&mut cur, 4)?.try_into().expect("4"),
             ))
@@ -1478,6 +1480,7 @@ pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
         method,
         constraint,
         without_overlaps,
+        clustered,
     })
 }
 
@@ -3041,6 +3044,7 @@ mod tests {
                 method,
                 constraint: None,
                 without_overlaps: false,
+                clustered: false,
             };
             assert_eq!(
                 deserialize_index(&serialize_index(&index)).expect("index decode"),
@@ -3062,6 +3066,7 @@ mod tests {
                 ExclusionOperator::Overlaps,
             ])),
             without_overlaps: false,
+            clustered: false,
         };
         assert_eq!(
             deserialize_index(&serialize_index(&exclusion)).expect("exclusion index decode"),
@@ -3083,11 +3088,41 @@ mod tests {
             method: IndexMethod::Gist,
             constraint: Some(IndexConstraint::PrimaryKey),
             without_overlaps: true,
+            clustered: false,
         };
         assert_eq!(
             deserialize_index(&serialize_index(&temporal)).expect("temporal index decode"),
             temporal
         );
+    }
+
+    /// `indisclustered` is durable state: it decides which index a later bare
+    /// `CLUSTER <table>` reorders by, so it has to survive the wire format in
+    /// both settings and not be confused with the flag beside it.
+    #[test]
+    fn the_clustered_flag_round_trips_independently_of_without_overlaps() {
+        use assert2::assert;
+
+        for clustered in [false, true] {
+            for without_overlaps in [false, true] {
+                let index = Index {
+                    id: 11,
+                    name: "orders_placed_idx".into(),
+                    table: RelationName::public("orders"),
+                    table_id: 3,
+                    columns: vec!["placed".into()],
+                    unique: false,
+                    placement: IndexPlacement::Local,
+                    method: IndexMethod::Btree,
+                    constraint: None,
+                    without_overlaps,
+                    clustered,
+                };
+                let decoded =
+                    deserialize_index(&serialize_index(&index)).expect("clustered index decode");
+                assert!(decoded == index, "{clustered} {without_overlaps}");
+            }
+        }
     }
 
     fn foreign_key_fixture() -> ForeignKey {

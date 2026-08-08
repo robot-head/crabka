@@ -6700,6 +6700,37 @@ fn route_statement(
         });
     }
 
+    // `CLUSTER` rewrites a relation's rows at new hidden rowids. It names its
+    // relation with neither `FROM` nor `INTO` nor `UPDATE`, so the token router
+    // below cannot find the table and would classify it `Local` — sending it to
+    // the coordinator's own store, where a relation owned by another range has
+    // no rows at all. That reads as a successful CLUSTER that moved nothing.
+    // Refuse it rather than route it wrongly; a single-range tenant is the one
+    // case where the coordinator really does own everything.
+    if normalized.starts_with("cluster") && range_map.ranges().len() > 1 {
+        return Err(PgError::error(
+            "0A000",
+            "CLUSTER is not supported on a multi-range tenant: the statement does not name its \
+             relation in a form the gateway can route",
+        ));
+    }
+
+    let kind = if starts_with_any(&normalized, &["insert", "update", "delete"]) {
+        StatementKind::Dml
+    } else if normalized.starts_with("select") {
+        StatementKind::Query
+    } else {
+        StatementKind::Local
+    };
+    if kind == StatementKind::Local {
+        return Ok(StatementRoute {
+            kind,
+            range_id: RangeId::COORDINATOR,
+            table_id: None,
+            scatter_ranges: None,
+        });
+    }
+
     let table_refs = table_refs_in_statement(&normalized);
     reject_unsupported_cross_range_statement(range_map, catalog, &table_refs)?;
     let table_ref = table_refs.first();
@@ -10156,6 +10187,36 @@ mod tests {
                 "unexpected route for {statement}: {route:?}"
             );
         }
+    }
+
+    /// `CLUSTER` names its relation with none of the keywords the token router
+    /// looks for, so it would fall into the `Local` bucket and run against the
+    /// coordinator's own store — reordering nothing, silently, for a relation
+    /// another range owns. It is refused instead.
+    #[tokio::test]
+    async fn cluster_is_refused_rather_than_routed_to_the_coordinator() {
+        let config = MultiRangeTenantConfig::from_boundaries(
+            TenantName::parse("cluster-routing").expect("tenant"),
+            "0,100",
+        )
+        .expect("config");
+        let (gateway, _handles) = MultiRangeTenant::start(config).expect("start");
+        let session = gateway.connect_with_pid(78);
+
+        for statement in [
+            "CLUSTER",
+            "CLUSTER t7 USING t7_pkey",
+            "cluster t7_pkey on t7",
+            "  CLUSTER VERBOSE t7",
+        ] {
+            let error = session
+                .route_statement(statement)
+                .expect_err("CLUSTER must not route");
+            assert!(error.code == "0A000", "{statement}: {error:?}");
+        }
+        // The bucket it would otherwise have joined still works.
+        let route = session.route_statement("LISTEN c").expect("route");
+        assert!(route.kind == StatementKind::Local);
     }
 
     #[tokio::test]

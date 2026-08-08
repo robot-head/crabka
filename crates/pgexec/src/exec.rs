@@ -1132,6 +1132,7 @@ pub(crate) fn execute_ddl(
                     placement,
                     method: index_method,
                     constraint: None,
+                    clustered: false,
                     without_overlaps: false,
                 };
                 ops.extend(local_index_backfill_ops(
@@ -5175,6 +5176,10 @@ async fn execute_write_body(
             Ok((spec.outcome(tag, returned_rows, ctx)?, ops))
         }
         Statement::Merge { .. } => Box::pin(execute_merge(write_ctx, ctes, stmt, writes)).await,
+        Statement::Cluster(target) => {
+            execute_cluster(write_ctx, target.as_ref(), writes, &mut ops).await?;
+            Ok((WriteOutcome::command("CLUSTER".into()), ops))
+        }
         Statement::Truncate {
             targets,
             restart_identity,
@@ -6710,6 +6715,460 @@ fn writable_local_indexes(
     Ok(local_indexes)
 }
 
+/// One relation `CLUSTER` will reorder, paired with the index whose order it
+/// takes. A partitioned parent expands into one unit per leaf.
+struct ClusterUnit {
+    table: Table,
+    index: crabka_pgcatalog::Index,
+}
+
+/// `there is no previously clustered index for table "…"` (42704) — what
+/// `PostgreSQL` raises for `CLUSTER <table>` with no `USING` and no recorded
+/// index.
+fn no_clustered_index(name: &crabka_pgcatalog::RelationName) -> ExecError {
+    ExecError::UndefinedObject(format!(
+        "there is no previously clustered index for table \"{}\"",
+        name.name
+    ))
+}
+
+/// `CLUSTER [ <table> [ USING <index> ] ]`.
+///
+/// `PostgreSQL` rewrites the heap so that a sequential scan returns the rows in
+/// the index's order. Gres stores a row at `/<table_id>/1/<rowid>` and every
+/// scan hands rows back in rowid order — that is [`crate::scanner::RangeScanner`]'s
+/// documented contract, not an accident of the map — so the same effect is a
+/// *renumbering*: read the live rows, sort them by the index key, and rewrite
+/// them over a fresh ascending block of rowids.
+///
+/// The renumbering stays inside the rowid contract because the new block comes
+/// from [`crate::seq::SequenceManager::alloc`], whose invariant is that the
+/// persisted counter is at or above every rowid ever handed out. The rows move
+/// strictly *upward* into rowids that were never used; the vacated ones are
+/// abandoned, never recycled. Nothing is minted by hand.
+///
+/// The rewrite is an ordinary MVCC delete-and-reinsert under each row's
+/// exclusive lock, not a physical move: the old version is tombstoned with this
+/// transaction's `xmax` and the new one written with its `xmin`, so a snapshot
+/// that cannot see this transaction still reads the table exactly as it was,
+/// and `ROLLBACK` leaves the heap untouched. That is also why the secondary
+/// indexes need no special handling — the entries for the old rowids stay valid
+/// for as long as the old versions are visible to somebody, and the ordinary
+/// chain prune reclaims them afterwards.
+///
+/// Sharded relations are refused, as `TRUNCATE` refuses them: their hidden
+/// rowids are timestamps drawn from a lease rather than a per-table counter, so
+/// there is no ascending block to move rows into.
+async fn execute_cluster(
+    write_ctx: &WriteContext<'_>,
+    target: Option<&crabka_pgparser::ast::ClusterTarget>,
+    writes: &mut StatementWrites,
+    ops: &mut Vec<crabka_pgkv::WriteOp>,
+) -> Result<(), ExecError> {
+    let units = match target {
+        Some(target) => cluster_units_for_target(write_ctx, target)?,
+        None => cluster_units_for_role(write_ctx)?,
+    };
+    for unit in &units {
+        cluster_one_relation(write_ctx, unit, writes, ops).await?;
+    }
+    Ok(())
+}
+
+/// The catalog writes `CLUSTER <table> USING <index>` makes: the relation's
+/// `pg_index.indisclustered` moves to the named index.
+///
+/// Raised separately from the reordering because a catalog record carries no
+/// MVCC header — it has to go through the session's catalog seam, which records
+/// the before-images `ROLLBACK` undoes it with, rather than riding the row
+/// batch, whose undo is the aborted xid on each tuple.
+///
+/// Empty for `CLUSTER <table>` (which reuses the recorded index rather than
+/// choosing one) and for a partitioned parent, whose indexes `PostgreSQL` never
+/// marks.
+pub(crate) fn cluster_mark_ops(
+    catalog_kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
+    target: &crabka_pgparser::ast::ClusterTarget,
+) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
+    let Some(index_name) = target.index.as_deref() else {
+        return Ok(Vec::new());
+    };
+    let name = crate::relname::resolve_relation(
+        catalog_kv,
+        resolution,
+        &target.table,
+        crate::relname::SchemaDisposition::Utility,
+    )?;
+    if crate::partition::is_partitioned(catalog_kv, &name)? {
+        return Ok(Vec::new());
+    }
+    let table = crabka_pgcatalog::get_table(catalog_kv, &name)?;
+    let index = cluster_index_named(catalog_kv, &table, index_name)?;
+    record_clustered_index_ops(catalog_kv, &table, Some(&index.name))
+}
+
+/// Mark `index` as `table`'s clustered index, clearing the flag from every other
+/// index on the relation. `None` clears all of them (`SET WITHOUT CLUSTER`).
+///
+/// Only the records whose flag actually moves are rewritten, so the batch is
+/// empty — and the statement writes nothing — when the mark is already where it
+/// is being asked to go.
+fn record_clustered_index_ops(
+    catalog_kv: &dyn Kv,
+    table: &Table,
+    index: Option<&str>,
+) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
+    let mut ops = Vec::new();
+    for mut candidate in crabka_pgcatalog::list_table_indexes(catalog_kv, &table.name)? {
+        let wanted = index.is_some_and(|name| name == candidate.name);
+        if candidate.clustered == wanted {
+            continue;
+        }
+        candidate.clustered = wanted;
+        ops.extend(crabka_pgcatalog::put_index_ops(&candidate));
+    }
+    Ok(ops)
+}
+
+/// Resolve, authorize and expand the relation one `CLUSTER <table> …` names.
+fn cluster_units_for_target(
+    write_ctx: &WriteContext<'_>,
+    target: &crabka_pgparser::ast::ClusterTarget,
+) -> Result<Vec<ClusterUnit>, ExecError> {
+    let catalog_kv = write_ctx.catalog_kv;
+    let name = crate::relname::resolve_relation(
+        catalog_kv,
+        write_ctx.eval_ctx.resolution(),
+        &target.table,
+        crate::relname::SchemaDisposition::Utility,
+    )?;
+    let table = crabka_pgcatalog::get_table(catalog_kv, &name)?;
+    require_cluster_privilege(write_ctx, &table)?;
+    if crate::partition::is_partitioned(catalog_kv, &name)? {
+        // A partitioned parent holds no rows: `PostgreSQL` reorders each leaf by
+        // the leaf's own copy of the index and leaves every partitioned index
+        // unmarked, which is why `CLUSTER <partitioned parent>` with no `USING`
+        // still reports that there is no previously clustered index.
+        let Some(index_name) = target.index.as_deref() else {
+            return Err(no_clustered_index(&name));
+        };
+        let parent_index = cluster_index_named(catalog_kv, &table, index_name)?;
+        let mut units = Vec::new();
+        for leaf in crate::partition::leaves_of(catalog_kv, &name)? {
+            let leaf_table = crabka_pgcatalog::get_table(catalog_kv, &leaf)?;
+            // The leaf's copy is matched by key, not by name: a partition's
+            // index carries its own generated name.
+            let Some(index) = crabka_pgcatalog::list_table_indexes(catalog_kv, &leaf)?
+                .into_iter()
+                .find(|index| index.columns == parent_index.columns)
+            else {
+                continue;
+            };
+            units.push(ClusterUnit {
+                table: leaf_table,
+                index,
+            });
+        }
+        return Ok(units);
+    }
+    let index = match target.index.as_deref() {
+        Some(index_name) => cluster_index_named(catalog_kv, &table, index_name)?,
+        None => crabka_pgcatalog::list_table_indexes(catalog_kv, &name)?
+            .into_iter()
+            .find(|index| index.clustered)
+            .ok_or_else(|| no_clustered_index(&name))?,
+    };
+    Ok(vec![ClusterUnit { table, index }])
+}
+
+/// Every relation the bare `CLUSTER` reorders: the ones that already record a
+/// clustered index and that the current role may cluster.
+///
+/// `PostgreSQL` warns about, and then skips, a relation the role cannot
+/// cluster; Gres has no `NoticeResponse` path from here, so the skip happens
+/// silently. The regression suite runs this statement under
+/// `client_min_messages = ERROR` for exactly that reason.
+fn cluster_units_for_role(write_ctx: &WriteContext<'_>) -> Result<Vec<ClusterUnit>, ExecError> {
+    let catalog_kv = write_ctx.catalog_kv;
+    let mut units = Vec::new();
+    for index in marked_clustered_indexes(catalog_kv)? {
+        let table = crabka_pgcatalog::get_table(catalog_kv, &index.table)?;
+        if require_cluster_privilege(write_ctx, &table).is_err() {
+            continue;
+        }
+        units.push(ClusterUnit { table, index });
+    }
+    Ok(units)
+}
+
+/// Every index carrying `pg_index.indisclustered`, in catalog order.
+///
+/// The session reads this to know which relations a bare `CLUSTER` will reach,
+/// so it can lock them before the executor starts moving their rows — the
+/// executor's own view of the set has to agree with the one that was locked,
+/// which is why both come from here.
+pub(crate) fn marked_clustered_indexes(
+    catalog_kv: &dyn Kv,
+) -> Result<Vec<crabka_pgcatalog::Index>, ExecError> {
+    Ok(crabka_pgcatalog::list_indexes(catalog_kv)?
+        .into_iter()
+        .filter(|index| index.clustered)
+        .collect())
+}
+
+/// `PostgreSQL` authorizes `CLUSTER` with the relation's `MAINTAIN` privilege,
+/// which only the owner (and the superuser) holds here, and reports the refusal
+/// as `permission denied for table <name>` rather than `must be owner of`.
+fn require_cluster_privilege(write_ctx: &WriteContext<'_>, table: &Table) -> Result<(), ExecError> {
+    let role = write_ctx.fctx.effective_role();
+    if crabka_pgcatalog::role_has_privs_of(write_ctx.catalog_kv, role, &table.owner)?
+        || crate::rls::role_is_superuser(write_ctx.catalog_kv, role)?
+    {
+        return Ok(());
+    }
+    Err(ExecError::PermissionDenied {
+        kind: "table",
+        relation: table.name.name.clone(),
+    })
+}
+
+/// Look up the index a `CLUSTER … USING <name>` (or `CLUSTER <name> ON …`)
+/// asked for, and refuse the ones whose order cannot drive a heap rewrite.
+fn cluster_index_named(
+    catalog_kv: &dyn Kv,
+    table: &Table,
+    index_name: &str,
+) -> Result<crabka_pgcatalog::Index, ExecError> {
+    let index = crabka_pgcatalog::list_table_indexes(catalog_kv, &table.name)?
+        .into_iter()
+        .find(|index| index.name == index_name)
+        .ok_or_else(|| {
+            ExecError::UndefinedObject(format!(
+                "index \"{index_name}\" for table \"{}\" does not exist",
+                table.name.name
+            ))
+        })?;
+    if index.method != crabka_pgcatalog::IndexMethod::Btree {
+        return Err(ExecError::Unsupported(format!(
+            "cannot cluster on index \"{index_name}\" because access method does not support \
+             clustering"
+        )));
+    }
+    Ok(index)
+}
+
+/// Reorder one relation's live rows into `unit.index`'s order.
+async fn cluster_one_relation(
+    write_ctx: &WriteContext<'_>,
+    unit: &ClusterUnit,
+    writes: &mut StatementWrites,
+    ops: &mut Vec<crabka_pgkv::WriteOp>,
+) -> Result<(), ExecError> {
+    let table = &unit.table;
+    if table_uses_global_visibility(table) {
+        return Err(ExecError::Unsupported(
+            "CLUSTER on sharded tables is not supported: a hidden rowid there is a leased \
+             timestamp, not a position in a per-table sequence"
+                .into(),
+        ));
+    }
+    reject_cluster_with_pending_checks(write_ctx, table)?;
+    let scanned = scan_live(
+        write_ctx.kv,
+        write_ctx.global,
+        write_ctx.global_snapshot,
+        write_ctx.snapshot,
+        Some(write_ctx.xid),
+        table,
+    )?;
+    // Reclustering an already-clustered relation is the common case — the bare
+    // `CLUSTER` reruns every marked relation — and it moves nothing. Decide that
+    // from the snapshot rows, before taking a single row lock: the alternative
+    // is to lock and re-read the whole table to discover there is no work, which
+    // measured three times the cost of the rewrite it was avoiding.
+    if cluster_scan_is_ordered(table, &unit.index, &scanned, write_ctx.eval_ctx)? {
+        return Ok(());
+    }
+    // Lock in ascending rowid order — the order every other statement takes
+    // this table's row locks in — then re-read each row under its lock, exactly
+    // as `DELETE` does, so a concurrent writer is serialized against rather
+    // than read around.
+    let mut locked = Vec::with_capacity(scanned.len());
+    for (rowid, _, _) in &scanned {
+        write_ctx
+            .lockmgr
+            .acquire_as(
+                table.id,
+                *rowid,
+                crate::lockmgr::LockMode::Exclusive,
+                write_ctx.lock_owner,
+                write_ctx.lock_wait_cap,
+            )
+            .await
+            .map_err(lock_acquire_error)?;
+        let Some((cur_key_xid, cur_xmin, cur_row)) =
+            eval_plan_qual(&write_ctx.mutation(), table, *rowid)?
+        else {
+            continue; // already deleted by a concurrent committed transaction
+        };
+        let key = cluster_sort_key(table, &unit.index, &cur_row, write_ctx.eval_ctx)?;
+        locked.push((key, *rowid, cur_key_xid, cur_xmin, cur_row));
+    }
+    // Stable, so rows sharing an index key keep the order they already have —
+    // the only deterministic tie-break available, and the one that makes
+    // reclustering idempotent.
+    locked.sort_by(|a, b| compare_cluster_key(&a.0, &b.0));
+    if locked.windows(2).all(|pair| pair[0].1 < pair[1].1) {
+        // The pre-check said the same thing about the snapshot rows, but under
+        // READ COMMITTED the versions re-read under the locks can be newer.
+        // Confirming it here is what keeps `CLUSTER` from burning a block of
+        // rowids to rewrite a heap into the order it is already in.
+        return Ok(());
+    }
+    let local_indexes = writable_local_indexes(write_ctx.catalog_kv, table)?;
+    let (start, seq_op) = write_ctx.seq.alloc(
+        write_ctx.kv,
+        table.id,
+        u64::try_from(locked.len()).map_err(|_| {
+            ExecError::Unsupported("CLUSTER row count exceeds the rowid domain".into())
+        })?,
+    )?;
+    ops.extend(seq_op);
+    // `(start..)` walks the reserved block, the way the INSERT path walks the
+    // block it reserved: the rows land at consecutive ascending rowids in the
+    // order they were just sorted into, which is what makes the next scan read
+    // them back in index order.
+    for (new_rowid, (_, rowid, cur_key_xid, cur_xmin, cur_row)) in (start..).zip(locked.iter()) {
+        apply_locked_row_delete(
+            write_ctx,
+            table,
+            &local_indexes,
+            &LockedRowDelete {
+                rowid: *rowid,
+                cur_key_xid: *cur_key_xid,
+                cur_xmin: *cur_xmin,
+                cur_row,
+            },
+            writes,
+            ops,
+        )?;
+        ops.push(crabka_pgkv::WriteOp::Put {
+            key: crabka_pgmvcc::version::version_key_xid(table.id, new_rowid, write_ctx.xid),
+            value: encode_table_tuple(
+                table,
+                write_ctx.xid,
+                crabka_pgmvcc::xid::INVALID_XID,
+                cur_row,
+            ),
+        });
+        ops.extend(local_index_entry_ops(
+            table,
+            &local_indexes,
+            new_rowid,
+            cur_row,
+        )?);
+    }
+    Ok(())
+}
+
+/// Refuse to reorder a relation the open transaction still owes a deferred
+/// referential check on, as `PostgreSQL` does (55006).
+///
+/// A deferred check identifies its row by rowid and re-derives the key from
+/// whatever version that rowid holds at `COMMIT`. Reordering moves the row to a
+/// different rowid and tombstones the old one, so the check would read no
+/// version at all, conclude the row is gone, and pass — committing the
+/// violation it existed to catch. `PostgreSQL` reaches the same conclusion from
+/// its own direction and reports it as pending trigger events, which is what a
+/// deferred check is there.
+fn reject_cluster_with_pending_checks(
+    write_ctx: &WriteContext<'_>,
+    table: &Table,
+) -> Result<(), ExecError> {
+    let owed = write_ctx
+        .deferred_fk
+        .is_some_and(|slot| slot.lock().expect("deferred fk").touches_table(table.id));
+    if owed {
+        return Err(ExecError::ObjectInUse(format!(
+            "cannot CLUSTER \"{}\" because it has pending trigger events",
+            table.name.name
+        )));
+    }
+    Ok(())
+}
+
+/// Whether `scanned` — which arrives in rowid order, so in the order an
+/// unqualified scan reads the heap — is already in `index`'s order.
+fn cluster_scan_is_ordered(
+    table: &Table,
+    index: &crabka_pgcatalog::Index,
+    scanned: &[(u64, u64, Vec<Datum>)],
+    ctx: &crate::clock::EvalCtx,
+) -> Result<bool, ExecError> {
+    let mut previous: Option<Vec<Datum>> = None;
+    for (_, _, row) in scanned {
+        let key = cluster_sort_key(table, index, row, ctx)?;
+        if let Some(previous) = &previous
+            && compare_cluster_key(previous, &key) == std::cmp::Ordering::Greater
+        {
+            return Ok(false);
+        }
+        previous = Some(key);
+    }
+    Ok(true)
+}
+
+/// The values one row sorts by under `index`.
+///
+/// An expression key is evaluated against the row the way a generated column's
+/// expression is; a plain key is the stored column value.
+fn cluster_sort_key(
+    table: &Table,
+    index: &crabka_pgcatalog::Index,
+    row: &[Datum],
+    ctx: &crate::clock::EvalCtx,
+) -> Result<Vec<Datum>, ExecError> {
+    let mut key = Vec::with_capacity(index.columns.len());
+    for column in &index.columns {
+        if let Some(source) = crabka_pgcatalog::index_key_expression(column) {
+            let expr = crabka_pgparser::parser::parse_expression(source)?;
+            let scope = Scope::single(table, &table.name.name);
+            key.push(crate::eval::eval(&expr, &scope, row, ctx)?);
+            continue;
+        }
+        let ordinal = table
+            .column_index(column)
+            .ok_or_else(|| ExecError::UndefinedColumn(column.clone()))?;
+        key.push(row[ordinal].clone());
+    }
+    Ok(key)
+}
+
+/// Compare two index keys the way a btree orders them: ascending, NULLs last.
+///
+/// Gres's catalog records an index's key columns as names without a per-column
+/// `ASC`/`DESC` or `NULLS` clause, so there is exactly one order an index can
+/// have and it is `PostgreSQL`'s default one.
+fn compare_cluster_key(a: &[Datum], b: &[Datum]) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    for (x, y) in a.iter().zip(b.iter()) {
+        let ord = match (x.is_null(), y.is_null()) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Greater,
+            (false, true) => Ordering::Less,
+            (false, false) => crabka_pgtypes::ops::compare(x, y)
+                .ok()
+                .flatten()
+                .unwrap_or(Ordering::Equal),
+        };
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+    Ordering::Equal
+}
+
 /// The relation whose unique-index gate a DML statement must hold SHARED for
 /// its duration (until COMMIT/ROLLBACK in an explicit transaction). Unique-index
 /// DDL takes that relation's gate EXCLUSIVELY while it backfills. Same-key DML
@@ -6729,6 +7188,10 @@ pub(crate) fn write_requires_unique_local_serialization(
         | Statement::Update { table, .. }
         | Statement::Delete { table, .. }
         | Statement::Merge { table, .. } => table,
+        // `CLUSTER` moves rows to new rowids and re-emits every local index
+        // entry for them, which is exactly what a concurrent unique-index
+        // backfill must not run alongside.
+        Statement::Cluster(Some(target)) => &target.table,
         _ => return Ok(UniqueLocalSerialization::None),
     };
     let table_name = resolve_relation(
@@ -17656,13 +18119,13 @@ fn builtin_type_category(base: crabka_pgtypes::ColumnType) -> &'static str {
 /// PostgreSQL 18.4 headers for the base catalogs crabka exposes. Their names
 /// and oids are catalog identity, so keep the pinned values rather than minting
 /// synthetic index ids as user-created indexes do.
-struct BuiltinCatalogOidIndex {
+pub(crate) struct BuiltinCatalogOidIndex {
     table: &'static str,
-    name: &'static str,
-    oid: i32,
+    pub(crate) name: &'static str,
+    pub(crate) oid: i32,
 }
 
-const BUILTIN_CATALOG_OID_INDEXES: &[BuiltinCatalogOidIndex] = &[
+pub(crate) const BUILTIN_CATALOG_OID_INDEXES: &[BuiltinCatalogOidIndex] = &[
     BuiltinCatalogOidIndex {
         table: "pg_namespace",
         name: "pg_namespace_oid_index",
@@ -17881,7 +18344,10 @@ fn pg_index_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 // a primary key or a unique constraint.
                 Datum::Bool(index.exclusion_operators().is_some()),
                 Datum::Bool(true),
-                Datum::Bool(false),
+                // `indisclustered`: the index a bare `CLUSTER <table>` reorders
+                // the heap by, set by `CLUSTER … USING` and by
+                // `ALTER TABLE … CLUSTER ON`.
+                Datum::Bool(index.clustered),
                 // Every crabka index is valid, ready and live the moment it is
                 // in the catalog: there is no concurrent-build state.
                 Datum::Bool(true),
@@ -22862,6 +23328,8 @@ fn alter_table_action_pass(action: &crabka_pgparser::ast::AlterTableAction) -> u
         | Action::NoForceRowSecurity
         | Action::AttachPartition { .. }
         | Action::DetachPartition { .. }
+        | Action::ClusterOn(_)
+        | Action::SetWithoutCluster
         | Action::Unsupported(_) => 6,
     }
 }
@@ -22898,6 +23366,8 @@ fn alter_action_label(action: &crabka_pgparser::ast::AlterTableAction) -> &'stat
         Action::NoForceRowSecurity => "NO FORCE ROW LEVEL SECURITY",
         Action::AttachPartition { .. } => "ATTACH PARTITION",
         Action::DetachPartition { .. } => "DETACH PARTITION",
+        Action::ClusterOn(_) => "CLUSTER ON",
+        Action::SetWithoutCluster => "SET WITHOUT CLUSTER",
         Action::Unsupported(_) => "ALTER",
     }
 }
@@ -23648,10 +24118,38 @@ fn alter_table_action_ops(
                 .extend(crate::partition::detach_ops(&parent, partition));
             Ok(())
         }
+        Action::ClusterOn(index) => {
+            reject_cluster_mark_on_partitioned(kv, &state.table)?;
+            let index = cluster_index_named(kv, &state.table, index)?;
+            state.ops.extend(record_clustered_index_ops(
+                kv,
+                &state.table,
+                Some(&index.name),
+            )?);
+            Ok(())
+        }
+        Action::SetWithoutCluster => {
+            reject_cluster_mark_on_partitioned(kv, &state.table)?;
+            state
+                .ops
+                .extend(record_clustered_index_ops(kv, &state.table, None)?);
+            Ok(())
+        }
         Action::Unsupported(label) => Err(ExecError::Unsupported(format!(
             "ALTER TABLE subcommand is not supported: {label}"
         ))),
     }
+}
+
+/// A partitioned relation has no heap of its own, so neither of its indexes can
+/// carry the clustered mark — `PostgreSQL` reports both spellings the same way.
+fn reject_cluster_mark_on_partitioned(kv: &dyn Kv, table: &Table) -> Result<(), ExecError> {
+    if crate::partition::is_partitioned(kv, &table.name)? {
+        return Err(ExecError::Unsupported(
+            "cannot mark index clustered in partitioned table".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Validate and record `ALTER TABLE parent ATTACH PARTITION child <bound>`.
@@ -30227,6 +30725,7 @@ mod tests {
                     method: crabka_pgcatalog::IndexMethod::Btree,
                     constraint: constraint.then_some(crabka_pgcatalog::IndexConstraint::Unique),
                     without_overlaps: false,
+                    clustered: false,
                 },
             )
             .collect();
@@ -30676,6 +31175,332 @@ mod tests {
         assert!(
             error.message
                 == "foreign key constraint \"part_a_fkey\" on a partitioned table is not supported"
+        );
+    }
+
+    /// The unqualified scan order after `CLUSTER`, in each of `PostgreSQL`'s
+    /// three spellings. A bare `SELECT` reads the heap in rowid order, so this
+    /// is the observable form of "the heap was rewritten in index order".
+    #[tokio::test]
+    async fn cluster_reorders_the_heap_into_index_order() {
+        use assert2::assert;
+        // (the CLUSTER spelling, the scan order it must produce)
+        // Every expectation differs from the insertion order 3, 1, 2, so a
+        // CLUSTER that did nothing would fail each of them.
+        let cases: &[(&str, &[&str])] = &[
+            ("CLUSTER t USING t_b", &["2", "3", "1"]),
+            ("CLUSTER t_b ON t", &["2", "3", "1"]),
+            ("CLUSTER t USING t_pkey", &["1", "2", "3"]),
+            ("CLUSTER t USING t_c", &["1", "3", "2"]),
+        ];
+        for (sql, expected) in cases {
+            let engine = SqlEngine::new();
+            let mut session = engine.connect();
+            run_s(
+                &mut session,
+                "CREATE TABLE t (a int4 PRIMARY KEY, b text, c int4)",
+            )
+            .await;
+            run_s(&mut session, "CREATE INDEX t_b ON t (b)").await;
+            run_s(&mut session, "CREATE INDEX t_c ON t (c)").await;
+            run_s(
+                &mut session,
+                "INSERT INTO t VALUES (3, 'b', 2), (1, 'c', 1), (2, 'a', 3)",
+            )
+            .await;
+            // Insertion order, which is what an unclustered heap reads back as.
+            assert!(
+                text_rows_of(&mut session, "SELECT a FROM t").await
+                    == vec![text_row(&["3"]), text_row(&["1"]), text_row(&["2"])],
+                "{sql}"
+            );
+            run_s(&mut session, sql).await;
+            let want: Vec<_> = expected.iter().map(|a| text_row(&[a])).collect();
+            assert!(
+                text_rows_of(&mut session, "SELECT a FROM t").await == want,
+                "{sql}"
+            );
+        }
+    }
+
+    /// `CLUSTER` moves rows to new rowids, and everything that reaches a row by
+    /// rowid has to follow: the secondary indexes, the row count, and the rows
+    /// themselves. A row that lost its index entry would still be found by a
+    /// sequential scan, so both scan shapes are asserted.
+    #[tokio::test]
+    async fn cluster_preserves_rows_and_their_index_entries() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        run_s(
+            &mut session,
+            "CREATE TABLE t (a int4 PRIMARY KEY, b text UNIQUE, c int4)",
+        )
+        .await;
+        run_s(&mut session, "CREATE INDEX t_c ON t (c)").await;
+        run_s(
+            &mut session,
+            "INSERT INTO t VALUES (3, 'c', 30), (1, 'a', 10), (2, 'b', 20)",
+        )
+        .await;
+        run_s(&mut session, "CLUSTER t USING t_pkey").await;
+
+        assert!(
+            text_rows_of(&mut session, "SELECT count(*) FROM t").await == vec![text_row(&["3"])]
+        );
+        assert!(
+            text_rows_of(&mut session, "SELECT a, b, c FROM t ORDER BY a").await
+                == vec![
+                    text_row(&["1", "a", "10"]),
+                    text_row(&["2", "b", "20"]),
+                    text_row(&["3", "c", "30"]),
+                ]
+        );
+        // Each index still resolves to exactly the row it named, and to only
+        // one of it — a stale entry pointing at a vacated rowid would either
+        // vanish or double up here.
+        for (sql, expected) in [
+            ("SELECT a FROM t WHERE c = 20", "2"),
+            ("SELECT a FROM t WHERE b = 'a'", "1"),
+            ("SELECT b FROM t WHERE a = 3", "c"),
+        ] {
+            assert!(
+                text_rows_of(&mut session, sql).await == vec![text_row(&[expected])],
+                "{sql}"
+            );
+        }
+        // The unique keys are still enforced, and still free for the values the
+        // rewrite did not use.
+        assert!(sqlstate_of(&mut session, "INSERT INTO t VALUES (4, 'a', 40)").await == "23505");
+        assert!(sqlstate_of(&mut session, "INSERT INTO t VALUES (1, 'd', 40)").await == "23505");
+        run_s(&mut session, "INSERT INTO t VALUES (4, 'd', 40)").await;
+        // A row inserted after the rewrite lands past it, as it does in
+        // PostgreSQL: the rowid counter only ever moves forward.
+        assert!(
+            text_rows_of(&mut session, "SELECT a FROM t").await
+                == vec![
+                    text_row(&["1"]),
+                    text_row(&["2"]),
+                    text_row(&["3"]),
+                    text_row(&["4"]),
+                ]
+        );
+    }
+
+    /// `pg_index.indisclustered` records the index a later bare `CLUSTER
+    /// <table>` reorders by. At most one index per relation carries it.
+    #[tokio::test]
+    async fn cluster_records_the_index_it_ordered_by() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        run_s(&mut session, "CREATE TABLE t (a int4 PRIMARY KEY, b text)").await;
+        run_s(&mut session, "CREATE INDEX t_b ON t (b)").await;
+        run_s(&mut session, "INSERT INTO t VALUES (2, 'b'), (1, 'a')").await;
+        let marks = "SELECT indexrelid::regclass::text, indisclustered FROM pg_index \
+                     WHERE indrelid = 't'::regclass ORDER BY 1";
+
+        // Nothing is clustered until something says so, and the bare spelling
+        // has nothing to reuse.
+        assert!(
+            text_rows_of(&mut session, marks).await
+                == vec![text_row(&["t_b", "f"]), text_row(&["t_pkey", "f"])]
+        );
+        assert!(sqlstate_of(&mut session, "CLUSTER t").await == "42704");
+
+        // (statement, the index left marked afterwards)
+        let cases: &[(&str, Option<&str>)] = &[
+            ("CLUSTER t USING t_b", Some("t_b")),
+            ("CLUSTER t_pkey ON t", Some("t_pkey")),
+            ("ALTER TABLE t CLUSTER ON t_b", Some("t_b")),
+            // The bare spelling reuses the mark without moving it.
+            ("CLUSTER t", Some("t_b")),
+            ("ALTER TABLE t SET WITHOUT CLUSTER", None),
+        ];
+        for (sql, marked) in cases {
+            run_s(&mut session, sql).await;
+            let want = vec![
+                text_row(&["t_b", if *marked == Some("t_b") { "t" } else { "f" }]),
+                text_row(&["t_pkey", if *marked == Some("t_pkey") { "t" } else { "f" }]),
+            ];
+            assert!(text_rows_of(&mut session, marks).await == want, "{sql}");
+        }
+        // Cleared again, so the bare spelling has nothing to reuse.
+        assert!(sqlstate_of(&mut session, "CLUSTER t").await == "42704");
+    }
+
+    /// `CLUSTER` is transactional: `ROLLBACK` restores both halves of it — the
+    /// heap order, which rides MVCC, and the `indisclustered` mark, which is a
+    /// catalog record and has to be undone from a before-image.
+    #[tokio::test]
+    async fn cluster_rolls_back_with_its_transaction() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        run_s(&mut session, "CREATE TABLE t (a int4 PRIMARY KEY)").await;
+        run_s(&mut session, "INSERT INTO t VALUES (2), (1)").await;
+        let marked = "SELECT indisclustered FROM pg_index WHERE indrelid = 't'::regclass";
+
+        run_s(&mut session, "BEGIN").await;
+        run_s(&mut session, "CLUSTER t USING t_pkey").await;
+        assert!(
+            text_rows_of(&mut session, "SELECT a FROM t").await
+                == vec![text_row(&["1"]), text_row(&["2"])]
+        );
+        assert!(text_rows_of(&mut session, marked).await == vec![text_row(&["t"])]);
+        run_s(&mut session, "ROLLBACK").await;
+
+        assert!(
+            text_rows_of(&mut session, "SELECT a FROM t").await
+                == vec![text_row(&["2"]), text_row(&["1"])]
+        );
+        assert!(text_rows_of(&mut session, marked).await == vec![text_row(&["f"])]);
+
+        // And it commits as one, so the same statement under COMMIT keeps both.
+        run_s(&mut session, "BEGIN").await;
+        run_s(&mut session, "CLUSTER t USING t_pkey").await;
+        run_s(&mut session, "COMMIT").await;
+        assert!(
+            text_rows_of(&mut session, "SELECT a FROM t").await
+                == vec![text_row(&["1"]), text_row(&["2"])]
+        );
+        assert!(text_rows_of(&mut session, marked).await == vec![text_row(&["t"])]);
+    }
+
+    /// The refusals `PostgreSQL` raises, with its SQLSTATEs.
+    #[tokio::test]
+    async fn cluster_refuses_what_postgresql_refuses() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        run_s(&mut session, "CREATE TABLE t (a int4 PRIMARY KEY)").await;
+        run_s(
+            &mut session,
+            "CREATE TABLE p (a int4) PARTITION BY RANGE (a)",
+        )
+        .await;
+        run_s(&mut session, "CREATE INDEX p_a ON p (a)").await;
+
+        // (statement, SQLSTATE)
+        let cases: &[(&str, &str)] = &[
+            ("CLUSTER nosuch USING t_pkey", "42P01"),
+            ("CLUSTER t USING nosuch", "42704"),
+            ("CLUSTER t", "42704"),
+            ("CLUSTER p", "42704"),
+            // A partitioned relation has no heap of its own to mark.
+            ("ALTER TABLE p CLUSTER ON p_a", "0A000"),
+            ("ALTER TABLE p SET WITHOUT CLUSTER", "0A000"),
+        ];
+        for (sql, code) in cases {
+            assert!(sqlstate_of(&mut session, sql).await == *code, "{sql}");
+        }
+    }
+
+    /// A deferred referential check names its row by rowid and re-derives the
+    /// key at `COMMIT`. Reordering the relation moves the row, so the check
+    /// would read no version, conclude the row is gone, and let the violation
+    /// commit. `PostgreSQL` refuses the reorder instead (55006), on either side
+    /// of the constraint.
+    #[tokio::test]
+    async fn cluster_refuses_a_relation_that_owes_a_deferred_check() {
+        use assert2::assert;
+        // (the statement that defers a check, the relation CLUSTER then names)
+        let cases: &[(&str, &str, &str)] = &[
+            // Child side: the referencing row has no parent yet.
+            ("INSERT INTO ch VALUES (9, 999)", "ch", "ch_pkey"),
+            // Parent side: the referenced key is going away.
+            ("DELETE FROM par WHERE id = 1", "par", "par_pkey"),
+        ];
+        for (defer, relation, index) in cases {
+            let engine = SqlEngine::new();
+            let mut session = engine.connect();
+            run_s(&mut session, "CREATE TABLE par (id int4 PRIMARY KEY)").await;
+            run_s(&mut session, "INSERT INTO par VALUES (1)").await;
+            run_s(
+                &mut session,
+                "CREATE TABLE ch (id int4 PRIMARY KEY, p int4 REFERENCES par (id) \
+                 DEFERRABLE INITIALLY DEFERRED)",
+            )
+            .await;
+            run_s(&mut session, "INSERT INTO ch VALUES (5, 1), (4, 1)").await;
+
+            run_s(&mut session, "BEGIN").await;
+            run_s(&mut session, defer).await;
+            let sql = format!("CLUSTER {relation} USING {index}");
+            assert!(sqlstate_of(&mut session, &sql).await == "55006", "{sql}");
+            run_s(&mut session, "ROLLBACK").await;
+
+            // The constraint still bites when the reorder is not in the way, so
+            // the refusal is protecting a check that really would have fired.
+            run_s(&mut session, "BEGIN").await;
+            run_s(&mut session, defer).await;
+            assert!(
+                sqlstate_of(&mut session, "COMMIT").await == "23503",
+                "{sql}"
+            );
+        }
+    }
+
+    /// The bare `CLUSTER` reclusters every marked relation, so its target list
+    /// is not written down and cannot be locked for longer than one statement.
+    /// `PostgreSQL` refuses it inside a transaction block for the same reason.
+    #[tokio::test]
+    async fn bare_cluster_is_refused_inside_a_transaction_block() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        run_s(&mut session, "CREATE TABLE t (a int4 PRIMARY KEY)").await;
+        run_s(&mut session, "INSERT INTO t VALUES (2), (1)").await;
+        run_s(&mut session, "CLUSTER t USING t_pkey").await;
+        run_s(&mut session, "INSERT INTO t VALUES (0)").await;
+
+        run_s(&mut session, "BEGIN").await;
+        assert!(sqlstate_of(&mut session, "CLUSTER").await == "25001");
+        run_s(&mut session, "ROLLBACK").await;
+
+        // Outside a block it runs, and reaches the relation it marked earlier.
+        run_s(&mut session, "CLUSTER").await;
+        assert!(
+            text_rows_of(&mut session, "SELECT a FROM t").await
+                == vec![text_row(&["0"]), text_row(&["1"]), text_row(&["2"])]
+        );
+    }
+
+    /// An expression index orders the heap by the expression's value, not by
+    /// any stored column, and NULLs sort last as they do in a btree.
+    #[tokio::test]
+    async fn cluster_orders_by_expression_keys_and_sorts_nulls_last() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        run_s(&mut session, "CREATE TABLE t (a int4, b int4)").await;
+        run_s(&mut session, "CREATE INDEX t_minus_a ON t ((-a))").await;
+        run_s(&mut session, "CREATE INDEX t_a ON t (a)").await;
+        run_s(
+            &mut session,
+            "INSERT INTO t VALUES (1, 10), (3, 30), (NULL, 40), (2, 20)",
+        )
+        .await;
+
+        run_s(&mut session, "CLUSTER t USING t_minus_a").await;
+        assert!(
+            text_rows_of(&mut session, "SELECT b FROM t").await
+                == vec![
+                    text_row(&["30"]),
+                    text_row(&["20"]),
+                    text_row(&["10"]),
+                    text_row(&["40"]),
+                ]
+        );
+        run_s(&mut session, "CLUSTER t USING t_a").await;
+        assert!(
+            text_rows_of(&mut session, "SELECT b FROM t").await
+                == vec![
+                    text_row(&["10"]),
+                    text_row(&["20"]),
+                    text_row(&["30"]),
+                    text_row(&["40"]),
+                ]
         );
     }
 }

@@ -275,6 +275,20 @@ pub struct TruncateTarget {
     pub only: bool,
 }
 
+/// The relation `CLUSTER` was pointed at, plus the index to order it by.
+///
+/// `PostgreSQL` accepts three spellings that all land here: `CLUSTER t USING i`,
+/// the pre-8.3 `CLUSTER i ON t`, and `CLUSTER t`, which reuses whichever index
+/// the relation already records as clustered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusterTarget {
+    pub table: RelationRef,
+    /// `None` for the bare `CLUSTER <table>` spelling; the executor then looks
+    /// up the recorded `pg_index.indisclustered` index and refuses when the
+    /// relation has none.
+    pub index: Option<String>,
+}
+
 /// The reloptions a view carries, gathered from wherever they were written:
 /// the `WITH (…)` list on `CREATE VIEW`, and — for `check_option` alone — the
 /// trailing `WITH … CHECK OPTION` clause, which is the same setting under a
@@ -654,6 +668,10 @@ pub enum Statement {
         /// `ON DELETE` actions; it only enlarges the set.
         cascade: bool,
     },
+    /// `CLUSTER` — rewrite a table's heap in the order of one of its indexes.
+    /// `None` is the bare `CLUSTER`, which reclusters every table the current
+    /// role owns that already records a clustered index.
+    Cluster(Option<ClusterTarget>),
     /// SP37: `SET [LOCAL] <name> = <value>` / `SET <name> TO <value>` / `SET TIME ZONE ...`.
     Set {
         local: bool,
@@ -1066,8 +1084,6 @@ pub enum AlterDomainAction {
 pub enum UtilityStatement {
     /// `ANALYZE [ ( option … ) ] [VERBOSE] [table [(cols)] [, …]]`.
     Analyze,
-    /// `CLUSTER [VERBOSE] [table [USING index]]`.
-    Cluster,
     /// `REINDEX [ ( option … ) ] { INDEX | TABLE | SCHEMA | DATABASE | SYSTEM } [CONCURRENTLY] [name]`.
     Reindex,
     /// `CHECKPOINT`.
@@ -1932,9 +1948,13 @@ pub enum AlterTableAction {
     ForceRowSecurity,
     /// `NO FORCE ROW LEVEL SECURITY`.
     NoForceRowSecurity,
-    /// `SET SCHEMA name`, `SET {LOGGED|UNLOGGED}`,
-    /// `CLUSTER ON`, `SET WITHOUT CLUSTER`, `{EN,DIS}ABLE TRIGGER`, … — the
-    /// subcommands that parse but have no counterpart in Crabka's storage
+    /// `CLUSTER ON <index>` — record the index a later bare `CLUSTER <table>`
+    /// reorders by (`pg_index.indisclustered`).
+    ClusterOn(String),
+    /// `SET WITHOUT CLUSTER` — clear the recorded clustered index.
+    SetWithoutCluster,
+    /// `SET SCHEMA name`, `SET {LOGGED|UNLOGGED}`, `{EN,DIS}ABLE TRIGGER`, … —
+    /// the subcommands that parse but have no counterpart in Crabka's storage
     /// model. `label` is the `PostgreSQL` subcommand text for the refusal.
     Unsupported(String),
 }

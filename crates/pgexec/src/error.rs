@@ -241,6 +241,9 @@ pub enum ExecError {
     UndefinedPreparedStatement(String),
     /// S3: the engine could not take a lock without a wait (55P03).
     LockNotAvailable(String),
+    /// A relation cannot be rewritten while the transaction still owes checks
+    /// that identify its rows by position (55006).
+    ObjectInUse(String),
     /// A command forbidden inside an explicit transaction block (25001).
     ActiveSqlTransaction(String),
     /// A write conflicted with a concurrently-committed change under REPEATABLE
@@ -1117,6 +1120,7 @@ impl ExecError {
                 format!("prepared statement \"{name}\" does not exist"),
             ),
             ExecError::LockNotAvailable(message) => PgError::error("55P03", message),
+            ExecError::ObjectInUse(message) => PgError::error("55006", message),
             ExecError::SerializationFailure => PgError::error(
                 "40001",
                 "could not serialize access due to concurrent update",

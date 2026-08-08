@@ -1063,10 +1063,10 @@ fn statement_shape(statement: &Statement) -> &'static str {
         Statement::ExecuteStatement { .. } => "ExecuteStatement",
         Statement::Deallocate { .. } => "Deallocate",
         Statement::LockTable { .. } => "LockTable",
+        Statement::Cluster(_) => "Cluster",
         Statement::Explain { .. } => "Explain",
         Statement::Utility(utility) => match utility {
             crabka_pgparser::ast::UtilityStatement::Analyze => "Analyze",
-            crabka_pgparser::ast::UtilityStatement::Cluster => "Cluster",
             crabka_pgparser::ast::UtilityStatement::Reindex => "Reindex",
             crabka_pgparser::ast::UtilityStatement::Checkpoint => "Checkpoint",
             crabka_pgparser::ast::UtilityStatement::Load { .. } => "Load",

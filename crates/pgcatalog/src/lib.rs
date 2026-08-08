@@ -332,6 +332,11 @@ pub struct Index {
     /// is catalogued as a primary key or unique constraint
     /// (`pg_constraint.conperiod`).
     pub without_overlaps: bool,
+    /// `pg_index.indisclustered`: this is the index a bare `CLUSTER <table>`
+    /// reorders the heap by. At most one index per relation carries it —
+    /// `CLUSTER … USING` and `ALTER TABLE … CLUSTER ON` clear it from the
+    /// relation's other indexes as they set it here.
+    pub clustered: bool,
 }
 
 impl Index {
@@ -3088,6 +3093,7 @@ pub fn create_index_with_method_ops(
         method,
         constraint: None,
         without_overlaps: false,
+        clustered: false,
     };
     let value = serialize_index(&index);
     let ops = vec![
@@ -3141,6 +3147,7 @@ pub fn create_index_on_table_ops(
         method: IndexMethod::Btree,
         constraint: None,
         without_overlaps: false,
+        clustered: false,
     };
     let value = serialize_index(&index);
     let ops = vec![
@@ -3198,6 +3205,7 @@ pub fn create_constraint_index_ops(
         method: new_index.method,
         constraint: new_index.constraint.clone(),
         without_overlaps: new_index.without_overlaps,
+        clustered: false,
     };
     let value = serialize_index(&index);
     let ops = vec![
@@ -3296,6 +3304,7 @@ pub fn create_indexes_on_table_ops(
             method: new_index.method,
             constraint: new_index.constraint.clone(),
             without_overlaps: new_index.without_overlaps,
+            clustered: false,
         };
         let value = serialize_index(&index);
         ops.push(WriteOp::Put {
@@ -6614,6 +6623,7 @@ mod tests {
             method: IndexMethod::Btree,
             constraint: None,
             without_overlaps: false,
+            clustered: false,
         };
         assert_eq!(
             get_index(&kv, &rel("users_name_idx")).expect("index"),

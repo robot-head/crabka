@@ -2133,6 +2133,7 @@ fn read_only_command_tag(stmt: &Statement) -> &'static str {
         Statement::Delete { .. } => "DELETE",
         Statement::Merge { .. } => "MERGE",
         Statement::Truncate { .. } => "TRUNCATE TABLE",
+        Statement::Cluster(_) => "CLUSTER",
         Statement::CreateTable { .. } | Statement::CreateTableAs { .. } => "CREATE TABLE",
         Statement::CreateIndex { .. } => "CREATE INDEX",
         Statement::AlterIndexTablespace { .. } => "ALTER INDEX",
@@ -2223,6 +2224,7 @@ fn establishes_transaction_activity(stmt: &Statement) -> bool {
         | Statement::Merge { .. }
         | Statement::CreateTableAs { .. }
         | Statement::Truncate { .. }
+        | Statement::Cluster(_)
         | Statement::CreateTable { .. }
         | Statement::CreateIndex { .. }
         | Statement::AlterIndexTablespace { .. }
@@ -4784,6 +4786,76 @@ impl SqlSession {
         })
     }
 
+    /// `CLUSTER` — take `PostgreSQL`'s relation lock, then run the reordering
+    /// through the ordinary write path.
+    ///
+    /// `PostgreSQL` holds ACCESS EXCLUSIVE for the whole rewrite. It is taken
+    /// here rather than in the executor because relation locks are held by
+    /// *sessions*, not transactions, and the session is what owns them. It does
+    /// not stand in for the MVCC work the reordering itself does: Gres's
+    /// relation locks are consulted only by `LOCK TABLE`, ordinary DML
+    /// serializing on row locks instead, so what this buys is that an explicit
+    /// `LOCK TABLE` in another session conflicts with a `CLUSTER` exactly as it
+    /// does in `PostgreSQL`.
+    async fn run_cluster(
+        &mut self,
+        stmt: &Statement,
+        target: Option<&crabka_pgparser::ast::ClusterTarget>,
+    ) -> Result<QueryResult, ExecError> {
+        // Every relation the statement will reach, resolved before any of them
+        // is locked, the way `LOCK TABLE` resolves its whole list first.
+        let locked = match target {
+            Some(target) => {
+                let name = crate::relname::resolve_relation(
+                    &*self.catalog_kv,
+                    &self.resolution_scope(),
+                    &target.table,
+                    crate::relname::SchemaDisposition::Utility,
+                )?;
+                let table = crabka_pgcatalog::get_table(&*self.catalog_kv, &name)?;
+                vec![(name, table.id)]
+            }
+            None => {
+                // The bare spelling reclusters every marked relation, so it is
+                // the one spelling whose target list is not written down.
+                // `PostgreSQL` refuses it inside a block, which is also what
+                // keeps this open-ended lock set from outliving one statement.
+                if !matches!(self.state, TxnState::Idle) {
+                    return Err(ExecError::ActiveSqlTransaction(
+                        "CLUSTER cannot run inside a transaction block".into(),
+                    ));
+                }
+                let mut relations = Vec::new();
+                for index in crate::exec::marked_clustered_indexes(&*self.catalog_kv)? {
+                    let table = crabka_pgcatalog::get_table(&*self.catalog_kv, &index.table)?;
+                    relations.push((index.table, table.id));
+                }
+                relations
+            }
+        };
+        for (name, id) in locked {
+            self.session_locks
+                .tables
+                .acquire(id, self.session_lock_id, TableLockMode::AccessExclusive)
+                .map_err(|_| {
+                    ExecError::LockNotAvailable(format!(
+                        "could not obtain lock on relation \"{name}\" (Gres never waits)"
+                    ))
+                })?;
+        }
+        let result = self.run_write(stmt).await?;
+        // The mark lands only once the reordering has: `PostgreSQL` rolls both
+        // back together, and this statement is the only place the two halves
+        // can be sequenced, because a catalog record has no MVCC header to
+        // carry it through the row batch's abort.
+        if let Some(target) = target {
+            let ops =
+                crate::exec::cluster_mark_ops(&*self.catalog_kv, &self.resolution_scope(), target)?;
+            self.commit_catalog_ops(ops).await?;
+        }
+        Ok(result)
+    }
+
     // ---- S6: EXPLAIN ----------------------------------------------------
 
     /// `EXPLAIN [ (options) ] <statement>`.
@@ -4884,9 +4956,6 @@ impl SqlSession {
             // are no planner statistics to collect, so these are accepted hints.
             UtilityStatement::Analyze => Ok(QueryResult::Command {
                 tag: "ANALYZE".into(),
-            }),
-            UtilityStatement::Cluster => Ok(QueryResult::Command {
-                tag: "CLUSTER".into(),
             }),
             UtilityStatement::Reindex => Ok(QueryResult::Command {
                 tag: "REINDEX".into(),
@@ -6156,6 +6225,7 @@ impl SqlSession {
             | Statement::Delete { .. }
             | Statement::Merge { .. }
             | Statement::Truncate { .. } => self.run_write(stmt).await,
+            Statement::Cluster(target) => self.run_cluster(stmt, target.as_ref()).await,
             Statement::CreateTableAs { .. } => self.run_create_table_as(stmt).await,
             Statement::Vacuum => {
                 // PostgreSQL refuses VACUUM inside a transaction block. The
@@ -7875,6 +7945,73 @@ impl SqlSession {
         }
     }
 
+    /// The stored value of every key a catalog batch is about to overwrite.
+    ///
+    /// A catalog record carries no MVCC header, so the batch that writes one
+    /// lands the moment it is committed. These images are the only thing
+    /// `ROLLBACK` and `ROLLBACK TO SAVEPOINT` have to undo it with.
+    fn catalog_before_images(
+        &self,
+        ops: &[WriteOp],
+    ) -> Result<BTreeMap<Vec<u8>, Option<Vec<u8>>>, ExecError> {
+        let mut before = BTreeMap::new();
+        for op in ops {
+            let key = match op {
+                WriteOp::Put { key, .. }
+                | WriteOp::ConditionalPut { key, .. }
+                | WriteOp::Delete { key } => key,
+            };
+            if !before.contains_key(key) {
+                before.insert(key.clone(), self.catalog_kv.get(key)?);
+            }
+        }
+        Ok(before)
+    }
+
+    /// File before-images against the open block and its innermost savepoint,
+    /// keeping whichever image was recorded first: the undo has to reach back
+    /// to the state the block or the frame opened in, not to the state before
+    /// the most recent statement.
+    fn record_catalog_undo(&mut self, before: &BTreeMap<Vec<u8>, Option<Vec<u8>>>) {
+        if let Some(frame) = self.savepoints.last_mut() {
+            for (key, value) in before {
+                frame
+                    .catalog_undo
+                    .entry(key.clone())
+                    .or_insert_with(|| value.clone());
+            }
+        }
+        if let TxnState::InTransaction(context) | TxnState::Failed(context) = &mut self.state {
+            for (key, value) in before {
+                context
+                    .catalog_undo
+                    .entry(key.clone())
+                    .or_insert_with(|| value.clone());
+            }
+        }
+    }
+
+    /// Commit a catalog batch raised outside [`Self::run_ddl`], recording the
+    /// undo images an open block needs.
+    async fn commit_catalog_ops(&mut self, ops: Vec<WriteOp>) -> Result<(), ExecError> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+        // Under the same lock DDL commits its batches under, so a catalog
+        // record this batch rewrote cannot have been re-read and rewritten by a
+        // concurrent statement in between.
+        let guard = self.catalog_lock.lock().await;
+        let before = self.catalog_before_images(&ops)?;
+        if Arc::ptr_eq(&self.kv, &self.catalog_kv) {
+            self.committer.commit(ops).await?;
+        } else {
+            self.catalog_kv.write_batch(&ops)?;
+        }
+        drop(guard);
+        self.record_catalog_undo(&before);
+        Ok(())
+    }
+
     async fn run_ddl(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
         let fires_event_triggers = !crate::trigger::event_trigger_ddl_is_excluded(stmt);
         let publishes_user_types = matches!(
@@ -8047,18 +8184,7 @@ impl SqlSession {
             if self.savepoints.is_empty() && !fires_event_triggers && !in_transaction_block {
                 BTreeMap::new()
             } else {
-                let mut before = BTreeMap::new();
-                for op in &ops {
-                    let key = match op {
-                        WriteOp::Put { key, .. }
-                        | WriteOp::ConditionalPut { key, .. }
-                        | WriteOp::Delete { key } => key,
-                    };
-                    if !before.contains_key(key) {
-                        before.insert(key.clone(), self.catalog_kv.get(key)?);
-                    }
-                }
-                before
+                self.catalog_before_images(&ops)?
             };
         // A data-range session reads schema metadata from range 0. Its committer
         // targets the local data range, so applying a catalog batch through it
@@ -8109,25 +8235,10 @@ impl SqlSession {
         // frame's images — its effects are meant to survive to COMMIT — and a
         // block that read its undo out of the frames would lose exactly the DDL
         // a released savepoint performed.
-        if let Some(frame) = self.savepoints.last_mut() {
-            for (key, value) in &catalog_before {
-                frame
-                    .catalog_undo
-                    .entry(key.clone())
-                    .or_insert_with(|| value.clone());
-            }
-        }
-        if let TxnState::InTransaction(context) | TxnState::Failed(context) = &mut self.state {
-            for (key, value) in &catalog_before {
-                context
-                    .catalog_undo
-                    .entry(key.clone())
-                    .or_insert_with(|| value.clone());
-            }
-        }
         drop(_g);
         drop(_id_guard);
         drop(_unique_guard);
+        self.record_catalog_undo(&catalog_before);
         let event_result = async {
             let ddl_end_context = if let Some(dropped) = &drop_event_context {
                 Some(Arc::new(crate::clock::EventTriggerContext {

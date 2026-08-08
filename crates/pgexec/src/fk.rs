@@ -821,7 +821,7 @@ pub enum PendingCheck {
 }
 
 impl PendingCheck {
-    fn fk(&self) -> &Arc<ForeignKey> {
+    pub(crate) fn fk(&self) -> &Arc<ForeignKey> {
         match self {
             PendingCheck::Child { fk, .. } | PendingCheck::Parent { fk, .. } => fk,
         }
@@ -1136,6 +1136,22 @@ impl DeferredConstraints {
             .partition(|check| !self.modes.is_deferred(check.fk()));
         self.pending = still_deferred;
         ready
+    }
+
+    /// Whether any deferred check still names `table`, on either side of its
+    /// constraint.
+    ///
+    /// A check waiting here identifies its row by rowid, so a statement that
+    /// moves the relation's rows to different rowids would leave the check
+    /// pointing at a version it can no longer see — and `PostgreSQL` refuses
+    /// exactly that with `cannot CLUSTER "…" because it has pending trigger
+    /// events`.
+    #[must_use]
+    pub fn touches_table(&self, table: crabka_pgcatalog::TableId) -> bool {
+        self.pending.iter().any(|check| {
+            let fk = check.fk();
+            fk.table_id == table || fk.referenced_table_id == table
+        })
     }
 
     /// Discard everything, for transaction teardown.
@@ -2535,6 +2551,7 @@ mod tests {
             placement: IndexPlacement::Local,
             constraint: Some(IndexConstraint::PrimaryKey),
             without_overlaps: false,
+            clustered: false,
         }];
         let relation = FkRelation {
             id: 9,
