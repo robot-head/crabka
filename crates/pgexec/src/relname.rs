@@ -102,6 +102,25 @@ impl ResolutionScope {
         &DEFAULT_SCOPE
     }
 
+    /// The scope a relation's *stored body* resolves its unqualified names in:
+    /// this one, with the relation's own schema searched first.
+    ///
+    /// A view keeps its body as SQL text, so every read, every write rewritten
+    /// through it, and every catalog predicate asked about it re-resolves the
+    /// names that body writes. Doing that in the reader's scope makes a view
+    /// mean different relations to different sessions — and, for a view outside
+    /// the reader's `search_path`, makes it mean nothing at all. Every one of
+    /// those callers therefore resolves in this scope instead, so they agree
+    /// with each other and the answer belongs to the view.
+    #[must_use]
+    pub fn for_stored_body(&self, schema: &str) -> Self {
+        Self {
+            search_path: self.search_path.searching_first(schema),
+            user: self.user.clone(),
+            backend_id: self.backend_id,
+        }
+    }
+
     /// This session's temporary namespace, whether or not it exists yet.
     #[must_use]
     pub fn temp_schema(&self) -> String {

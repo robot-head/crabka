@@ -443,3 +443,282 @@ async fn copy_from_refuses_an_option_it_cannot_honour_before_entering_copy_in() 
             .is_some()
     );
 }
+
+/// The `CONTEXT` a failing `COPY … FROM` row carries.
+///
+/// `PostgreSQL` writes one of three lines and this pins all three, plus the two
+/// rules that are easy to get wrong: a `HEADER` line is counted, so the first
+/// data row of a copy with one is line 2; and a field or line longer than 100
+/// characters is quoted only that far, with `...` for the rest. Every string
+/// here was captured from `PostgreSQL` 18.4 running the same statements.
+#[tokio::test]
+async fn a_failing_copy_from_row_reports_the_line_it_came_from() {
+    struct Case {
+        name: &'static str,
+        sql: &'static str,
+        data: String,
+        code: &'static str,
+        message: String,
+        context: String,
+    }
+
+    let long = "x".repeat(200);
+    let cases = vec![
+        Case {
+            name: "a value too long for its type names the column and quotes the field",
+            sql: "COPY t (a, c) FROM STDIN",
+            data: "1\ttoolong\n".into(),
+            code: "22001",
+            message: "value too long for type character varying(3)".into(),
+            context: "COPY t, line 1, column c: \"toolong\"".into(),
+        },
+        Case {
+            name: "a malformed integer names the column it was being read for",
+            sql: "COPY t (a, c) FROM STDIN",
+            data: "notanint\tab\n".into(),
+            code: "22P02",
+            message: "invalid input syntax for type integer: \"notanint\"".into(),
+            context: "COPY t, line 1, column a: \"notanint\"".into(),
+        },
+        Case {
+            name: "the line counted is the failing one, not the first",
+            sql: "COPY t (a, c) FROM STDIN",
+            data: "1\tab\n2\tcd\n3\ttoolong\n".into(),
+            code: "22001",
+            message: "value too long for type character varying(3)".into(),
+            context: "COPY t, line 3, column c: \"toolong\"".into(),
+        },
+        Case {
+            name: "a HEADER line is counted, so the first data row is line 2",
+            sql: "COPY t (a, c) FROM STDIN WITH (HEADER true)",
+            data: "a\tc\n1\ttoolong\n".into(),
+            code: "22001",
+            message: "value too long for type character varying(3)".into(),
+            context: "COPY t, line 2, column c: \"toolong\"".into(),
+        },
+        Case {
+            name: "too few fields name the first column left unsupplied, and quote the line",
+            sql: "COPY t (a, c) FROM STDIN",
+            data: "1\n".into(),
+            code: "22P04",
+            message: "missing data for column \"c\"".into(),
+            context: "COPY t, line 1: \"1\"".into(),
+        },
+        Case {
+            name: "too many fields say only that, and quote the line",
+            sql: "COPY t (a, c) FROM STDIN",
+            data: "1\tab\textra\n".into(),
+            code: "22P04",
+            message: "extra data after last expected column".into(),
+            context: "COPY t, line 1: \"1\tab\textra\"".into(),
+        },
+        Case {
+            name: "a constraint judges the assembled row, so it reports the line alone",
+            sql: "COPY nn FROM STDIN",
+            data: "\\N\t2\n".into(),
+            code: "23502",
+            message: "null value in column \"a\" of relation \"nn\" \
+                      violates not-null constraint"
+                .into(),
+            context: "COPY nn, line 1: \"\\N\t2\"".into(),
+        },
+        Case {
+            name: "a CHECK constraint reports the line too",
+            sql: "COPY ck FROM STDIN",
+            data: "-5\n".into(),
+            code: "23514",
+            message: "new row for relation \"ck\" violates check constraint \"ck_a_check\"".into(),
+            context: "COPY ck, line 1: \"-5\"".into(),
+        },
+        Case {
+            name: "an over-long field is quoted to 100 characters and then elided",
+            sql: "COPY big FROM STDIN",
+            data: format!("{long}\n"),
+            code: "22P02",
+            message: format!("invalid input syntax for type integer: \"{long}\""),
+            context: (format!("COPY big, line 1, column a: \"{}...\"", "x".repeat(100))),
+        },
+        Case {
+            name: "an over-long line is elided the same way",
+            sql: "COPY big FROM STDIN",
+            data: format!("1\t{}\n", "y".repeat(115)),
+            code: "22P04",
+            message: "extra data after last expected column".into(),
+            context: (format!("COPY big, line 1: \"1\t{}...\"", "y".repeat(98))),
+        },
+        Case {
+            // PostgreSQL reaches its index at a multi-insert flush, by which
+            // point the line buffer no longer describes the row: the counter
+            // survives and the line does not.
+            name: "a duplicate key reports the line number with no line quoted",
+            sql: "COPY u FROM STDIN",
+            data: "2\n1\n".into(),
+            code: "23505",
+            message: "duplicate key value violates unique constraint \"u_pkey\"".into(),
+            context: "COPY u, line 2".into(),
+        },
+    ];
+
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run(&mut session, "CREATE TABLE t (a int, c varchar(3))").await;
+    run(&mut session, "CREATE TABLE nn (a int NOT NULL, b int)").await;
+    run(&mut session, "CREATE TABLE ck (a int CHECK (a > 0))").await;
+    run(&mut session, "CREATE TABLE big (a int)").await;
+    run(&mut session, "CREATE TABLE u (a int PRIMARY KEY)").await;
+    run(&mut session, "INSERT INTO u VALUES (1)").await;
+
+    for case in cases {
+        let error = session
+            .copy_in(case.sql, vec![bytes::Bytes::from(case.data.clone())])
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{} should have failed", case.name));
+        let context = error
+            .diagnostics
+            .as_ref()
+            .and_then(|fields| fields.context.clone());
+        assert!(
+            (
+                error.code.as_str(),
+                error.message.as_str(),
+                context.as_deref()
+            ) == (
+                case.code,
+                case.message.as_str(),
+                Some(case.context.as_str())
+            ),
+            "{}",
+            case.name
+        );
+    }
+}
+
+/// A `COPY` context is *appended* to whatever context the error already
+/// carried, never substituted for it.
+///
+/// `PostgreSQL` stacks error contexts outward, so a row that fails inside a
+/// `plpgsql` `BEFORE` trigger reports the function's frame and the `COPY` line
+/// below it:
+///
+/// ```text
+/// ERROR:  boom on 7
+/// CONTEXT:  PL/pgSQL function boom() line 3 at RAISE
+/// COPY trg, line 1: "7"
+/// ```
+///
+/// That exact case is out of reach here — this engine cannot run a `plpgsql`
+/// trigger from inside `COPY` at all — so the rule is exercised through the one
+/// error a copied row can raise that already carries a frame: the SQL-language
+/// wrapper `numeric + pg_lsn` is implemented as. `PostgreSQL` inlines that
+/// wrapper and so prints only the `COPY` frame for this particular expression;
+/// the two-frame output below is this engine's, and it is the stacking that is
+/// being pinned, not the frame count.
+#[tokio::test]
+async fn a_copy_context_is_appended_below_one_the_error_already_carried() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run(
+        &mut session,
+        "CREATE TABLE lsnck (a numeric CHECK ((a + '0/0'::pg_lsn) > '0/0'::pg_lsn))",
+    )
+    .await;
+
+    let error = session
+        .copy_in(
+            "COPY lsnck FROM STDIN",
+            vec![bytes::Bytes::from_static(b"-5\n")],
+        )
+        .await
+        .expect_err("the check should reject the row");
+    let context = error
+        .diagnostics
+        .as_ref()
+        .and_then(|fields| fields.context.clone())
+        .expect("a context");
+    assert!(error.message == "pg_lsn out of range", "{error:?}");
+    assert!(
+        context
+            == "SQL function \"numeric_pl_pg_lsn\" statement 1\n\
+                COPY lsnck, line 1: \"-5\"",
+        "{context:?}"
+    );
+}
+
+/// A referential check is a *statement*-level check, so it runs after the row
+/// loop and after `PostgreSQL` has popped its per-row error callback: a foreign
+/// key violated by a copied row reports no `COPY` context at all.
+#[tokio::test]
+async fn a_copy_failure_raised_after_the_row_loop_carries_no_context() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run(&mut session, "CREATE TABLE p (a int PRIMARY KEY)").await;
+    run(&mut session, "CREATE TABLE c (a int REFERENCES p(a))").await;
+
+    let error = session
+        .copy_in("COPY c FROM STDIN", vec![bytes::Bytes::from_static(b"9\n")])
+        .await
+        .expect_err("the foreign key should reject the row");
+    let context = error
+        .diagnostics
+        .as_ref()
+        .and_then(|fields| fields.context.as_deref());
+    assert!(error.code == "23503", "{error:?}");
+    assert!(context.is_none(), "{context:?}");
+}
+
+/// A `HEADER MATCH` failure is raised by the decode rather than by a row, and
+/// carries the same `CONTEXT` a failing row does: the header is line 1, and it
+/// is quoted whole. Captured from `PostgreSQL` 18.4.
+#[tokio::test]
+async fn a_header_match_failure_reports_the_header_line() {
+    struct Case {
+        data: &'static [u8],
+        message: &'static str,
+        context: &'static str,
+    }
+
+    let cases = [
+        Case {
+            data: b"a\tb\td\n1\t2\t3\n",
+            message: "column name mismatch in header line field 3: got \"d\", expected \"c\"",
+            context: "COPY header_copytest, line 1: \"a\tb\td\"",
+        },
+        Case {
+            data: b"a\tb\n1\t2\n",
+            message: "wrong number of fields in header line: got 2, expected 3",
+            context: "COPY header_copytest, line 1: \"a\tb\"",
+        },
+        Case {
+            data: b"a\tb\tc\td\n1\t2\t3\t4\n",
+            message: "wrong number of fields in header line: got 4, expected 3",
+            context: "COPY header_copytest, line 1: \"a\tb\tc\td\"",
+        },
+    ];
+
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run(
+        &mut session,
+        "CREATE TABLE header_copytest (a int, b int, c text)",
+    )
+    .await;
+
+    for case in cases {
+        let error = session
+            .copy_in(
+                "COPY header_copytest FROM STDIN WITH (HEADER match)",
+                vec![bytes::Bytes::from_static(case.data)],
+            )
+            .await
+            .expect_err("the header should not match");
+        let context = error
+            .diagnostics
+            .as_ref()
+            .and_then(|fields| fields.context.clone());
+        assert!(
+            (error.message.as_str(), context.as_deref()) == (case.message, Some(case.context)),
+            "{error:?}"
+        );
+    }
+}

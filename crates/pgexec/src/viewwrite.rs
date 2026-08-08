@@ -583,7 +583,7 @@ pub(crate) fn resolve(
             .unwrap_or_else(|_| unreachable!("query_refusal rejects every other FROM shape"));
         let source = crate::relname::resolve_relation(
             ctx.kv,
-            ctx.resolution,
+            &ctx.resolution.for_stored_body(&current.name.schema),
             reference,
             crate::relname::SchemaDisposition::Reference,
         )?;
@@ -919,7 +919,7 @@ fn updatable_shape(kv: &dyn Kv, view: &View) -> Option<(Vec<ColumnMap>, Relation
     let (reference, qualifier) = sole_source(select).ok()?;
     let source = crate::relname::resolve_relation(
         kv,
-        crate::relname::ResolutionScope::default_scope(),
+        &crate::relname::ResolutionScope::default_scope().for_stored_body(&view.name.schema),
         reference,
         crate::relname::SchemaDisposition::Reference,
     )

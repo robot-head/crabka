@@ -100,6 +100,31 @@ impl<'a> SubCtx<'a> {
         }
     }
 
+    /// The same read context, resolving unqualified relation names in `scope`
+    /// instead of the session's.
+    ///
+    /// The one caller is the view-expansion site, for the same reason
+    /// [`Self::with_security_role`] is called there: a stored body is text, and
+    /// what it names has to be decided by the view rather than by whoever is
+    /// reading it. Nesting shadows rather than stacks — each level's body is
+    /// resolved with *that* level's schema first, so a view in one schema over
+    /// a view in another resolves each body where it was written.
+    pub(crate) fn with_resolution<'b>(
+        &'b self,
+        scope: &'b crate::relname::ResolutionScope,
+    ) -> SubCtx<'b>
+    where
+        'a: 'b,
+    {
+        SubCtx {
+            fctx: crate::exec::ForeignCtx {
+                resolution: scope,
+                ..self.fctx
+            },
+            ..*self
+        }
+    }
+
     /// The row-security decision context this read makes its decisions in.
     pub(crate) fn rls(&self) -> crate::rls::RlsCtx<'_> {
         crate::rls::RlsCtx::new(self.catalog_kv, self.security_role, self.fctx.row_security)

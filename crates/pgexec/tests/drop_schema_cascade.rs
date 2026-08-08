@@ -627,3 +627,187 @@ async fn a_cascade_drop_reports_the_objects_it_removes() {
     go(&mut session, "DROP TABLE q CASCADE").await;
     assert!(notices.try_recv().is_err());
 }
+
+/// `DROP SCHEMA … CASCADE` reports what it removed, which is every object the
+/// schema held and everything outside it that depended on one.
+///
+/// Each object is named with *its own* kind word — a sequence is a sequence and
+/// a materialized view is a materialized view, not "view" for all of them — and
+/// is schema-qualified exactly when the search path does not make it visible.
+/// Every string here was captured from `PostgreSQL` 18.4.
+#[tokio::test]
+async fn dropping_a_schema_reports_the_objects_it_removes() {
+    struct Case {
+        name: &'static str,
+        setup: &'static [&'static str],
+        drop: &'static str,
+        message: &'static str,
+        detail: Option<&'static str>,
+    }
+
+    let cases = [
+        Case {
+            name: "each kind is named with its own word, and qualified when not on the path",
+            setup: &[
+                "CREATE SCHEMA a",
+                "CREATE TABLE a.t (x int)",
+                "CREATE SEQUENCE a.q",
+                "CREATE VIEW a.v AS SELECT 1",
+            ],
+            drop: "DROP SCHEMA a CASCADE",
+            message: "drop cascades to 3 other objects",
+            detail: Some(
+                "drop cascades to table a.t\n\
+                 drop cascades to sequence a.q\n\
+                 drop cascades to view a.v",
+            ),
+        },
+        Case {
+            name: "a single object is named inline with no DETAIL",
+            setup: &["CREATE SCHEMA b", "CREATE TABLE b.t1 (x int)"],
+            drop: "DROP SCHEMA b CASCADE",
+            message: "drop cascades to table b.t1",
+            detail: None,
+        },
+        Case {
+            name: "a materialized view keeps its own two-word kind",
+            setup: &[
+                "CREATE SCHEMA c",
+                "CREATE TABLE c.t (x int)",
+                "CREATE MATERIALIZED VIEW c.m AS SELECT x FROM c.t",
+            ],
+            drop: "DROP SCHEMA c CASCADE",
+            message: "drop cascades to 2 other objects",
+            detail: Some("drop cascades to table c.t\ndrop cascades to materialized view c.m"),
+        },
+        Case {
+            name: "a composite, an enum and a domain are all `type`",
+            setup: &[
+                "CREATE SCHEMA d",
+                "CREATE TYPE d.ty AS (x int)",
+                "CREATE TYPE d.en AS ENUM ('a', 'b')",
+                "CREATE DOMAIN d.dm AS int",
+            ],
+            drop: "DROP SCHEMA d CASCADE",
+            message: "drop cascades to 3 other objects",
+            detail: Some(
+                "drop cascades to type d.ty\n\
+                 drop cascades to type d.en\n\
+                 drop cascades to type d.dm",
+            ),
+        },
+        Case {
+            name: "a dependent outside the schema goes with it and is reported",
+            setup: &[
+                "CREATE SCHEMA e",
+                "CREATE SCHEMA f",
+                "CREATE TABLE e.base (x int)",
+                "CREATE VIEW f.over_base AS SELECT x FROM e.base",
+            ],
+            drop: "DROP SCHEMA e CASCADE",
+            message: "drop cascades to 2 other objects",
+            detail: Some("drop cascades to table e.base\ndrop cascades to view f.over_base"),
+        },
+        Case {
+            name: "a name that would not read back bare is quoted, in both parts",
+            setup: &[
+                "CREATE SCHEMA \"g X\"",
+                "CREATE TABLE \"g X\".\"T-1\" (x int)",
+            ],
+            drop: "DROP SCHEMA \"g X\" CASCADE",
+            message: "drop cascades to table \"g X\".\"T-1\"",
+            detail: None,
+        },
+        Case {
+            name: "an empty schema cascades to nothing and says nothing",
+            setup: &["CREATE SCHEMA h"],
+            drop: "DROP SCHEMA h CASCADE",
+            message: "",
+            detail: None,
+        },
+    ];
+
+    for case in cases {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        let mut notices = session.take_notices().expect("notice receiver");
+        for sql in case.setup {
+            session
+                .simple_query(sql)
+                .await
+                .unwrap_or_else(|error| panic!("{}: {sql} failed: {error:?}", case.name));
+        }
+        session
+            .simple_query(case.drop)
+            .await
+            .unwrap_or_else(|error| panic!("{}: {} failed: {error:?}", case.name, case.drop));
+
+        if case.message.is_empty() {
+            assert!(notices.try_recv().is_err(), "{}", case.name);
+            continue;
+        }
+        let notice = notices
+            .try_recv()
+            .unwrap_or_else(|_| panic!("{}: expected a notice", case.name));
+        let detail = notice
+            .diagnostics
+            .as_ref()
+            .and_then(|fields| fields.detail.clone());
+        assert!(
+            (notice.message.as_str(), detail.as_deref()) == (case.message, case.detail),
+            "{}",
+            case.name
+        );
+    }
+}
+
+/// Past a hundred objects the `DETAIL` stops listing and summarizes the rest,
+/// while the count above it still names the *total*. `PostgreSQL` caps the
+/// client-visible list at `MAX_REPORTED_DEPS` because "client software may not
+/// deal well with enormous error strings"; the server log keeps the whole list,
+/// which is what the summary line points at.
+#[tokio::test]
+async fn a_cascade_over_a_hundred_objects_summarizes_the_surplus() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    let mut notices = session.take_notices().expect("notice receiver");
+    session
+        .simple_query("CREATE SCHEMA many")
+        .await
+        .expect("create schema");
+    for index in 1..=102 {
+        let sql = format!("CREATE TABLE many.t{index} (x int)");
+        session
+            .simple_query(&sql)
+            .await
+            .unwrap_or_else(|error| panic!("{sql}: {error:?}"));
+    }
+    session
+        .simple_query("DROP SCHEMA many CASCADE")
+        .await
+        .expect("drop schema");
+
+    let notice = notices.try_recv().expect("a cascade notice");
+    let detail = notice
+        .diagnostics
+        .as_ref()
+        .and_then(|fields| fields.detail.clone())
+        .expect("a detail");
+    assert!(
+        notice.message == "drop cascades to 102 other objects",
+        "{notice:?}"
+    );
+    let lines: Vec<&str> = detail.lines().collect();
+    assert!(lines.len() == 101, "{}", lines.len());
+    assert!(
+        lines[100] == "and 2 other objects (see server log for list)",
+        "{:?}",
+        lines[100]
+    );
+    assert!(
+        lines[..100]
+            .iter()
+            .all(|line| line.starts_with("drop cascades to table many.t")),
+        "{detail}"
+    );
+}

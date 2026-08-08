@@ -823,3 +823,123 @@ async fn row_security_on_the_base_relation_applies_as_the_views_owner() {
     run(&mut session, "INSERT INTO v VALUES (2, 'ok')").await;
     assert!(query(&mut session, "SELECT a, b FROM v ORDER BY a").await == rows(&["1,x", "2,ok"]));
 }
+
+/// A view's body means what it meant where it was written, not what it would
+/// mean to whoever is reading it.
+///
+/// A view is stored as SQL text and re-resolved on every use, so an unqualified
+/// name in `CREATE VIEW s.v AS SELECT … FROM t` has to keep finding `s.t` from
+/// a session whose `search_path` never mentions `s`. Three consumers ask that
+/// question and all three have to give the same answer: the read path, the
+/// write rewrite, and the catalog predicates behind `information_schema`.
+#[tokio::test]
+async fn a_view_body_resolves_in_its_own_schema_whatever_the_reader_s_path_is() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run(
+        &mut session,
+        "CREATE SCHEMA s; SET search_path = s; \
+         CREATE TABLE t (a int PRIMARY KEY, b text NOT NULL); \
+         CREATE VIEW v AS SELECT a, b FROM t WHERE a > 0; \
+         CREATE VIEW v2 AS SELECT * FROM v; \
+         INSERT INTO t VALUES (1, 'x');",
+    )
+    .await;
+    // Everything below runs with `s` off the path entirely.
+    run(&mut session, "RESET search_path").await;
+
+    assert!(query(&mut session, "SELECT a, b FROM s.v").await == rows(&["1,x"]));
+    assert!(query(&mut session, "SELECT a, b FROM s.v2").await == rows(&["1,x"]));
+
+    run(&mut session, "INSERT INTO s.v VALUES (2, 'y')").await;
+    run(&mut session, "UPDATE s.v2 SET b = 'z' WHERE a = 2").await;
+    assert!(
+        query(&mut session, "SELECT a, b FROM s.t ORDER BY a").await == rows(&["1,x", "2,z"]),
+        "a write through the view must reach the table its body names"
+    );
+    run(&mut session, "DELETE FROM s.v WHERE a = 2").await;
+    assert!(query(&mut session, "SELECT a, b FROM s.t ORDER BY a").await == rows(&["1,x"]));
+
+    // 28 is INSERT|UPDATE|DELETE, and it is what PostgreSQL 18.4 answers for
+    // both views from any search path — the answer belongs to the view.
+    assert!(
+        query(
+            &mut session,
+            "SELECT pg_catalog.pg_relation_is_updatable('s.v'::regclass, false), \
+                    pg_catalog.pg_relation_is_updatable('s.v2'::regclass, false)"
+        )
+        .await
+            == rows(&["28,28"])
+    );
+    assert!(
+        query(
+            &mut session,
+            "SELECT table_name, column_name, is_updatable \
+               FROM information_schema.columns WHERE table_schema = 's' \
+              ORDER BY table_name, ordinal_position"
+        )
+        .await
+            == rows(&[
+                "t,a,YES", "t,b,YES", "v,a,YES", "v,b,YES", "v2,a,YES", "v2,b,YES"
+            ])
+    );
+    assert!(
+        query(
+            &mut session,
+            "SELECT table_name, is_insertable_into FROM information_schema.tables \
+              WHERE table_schema = 's' ORDER BY table_name"
+        )
+        .await
+            == rows(&["t,YES", "v,YES", "v2,YES"])
+    );
+    assert!(
+        query(
+            &mut session,
+            "SELECT table_name, is_updatable, is_insertable_into \
+               FROM information_schema.views WHERE table_schema = 's' ORDER BY table_name"
+        )
+        .await
+            == rows(&["v,YES,YES", "v2,YES,YES"])
+    );
+}
+
+/// A view that is *not* automatically updatable still answers `NO`, and a
+/// computed column answers `NO` on its own while its siblings answer `YES`.
+///
+/// The point of the case is that the fix above widened what resolves, not what
+/// qualifies: the per-column answer is still `pg_column_is_updatable`'s.
+#[tokio::test]
+async fn a_column_that_cannot_be_assigned_still_answers_no() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run(
+        &mut session,
+        "CREATE SCHEMA s; SET search_path = s; \
+         CREATE TABLE t (a int PRIMARY KEY, b text NOT NULL); \
+         CREATE VIEW vexpr AS SELECT a, b, a + 1 AS c FROM t; \
+         CREATE VIEW vagg AS SELECT a FROM t GROUP BY a;",
+    )
+    .await;
+    run(&mut session, "RESET search_path").await;
+
+    assert!(
+        query(
+            &mut session,
+            "SELECT table_name, column_name, is_updatable \
+               FROM information_schema.columns \
+              WHERE table_schema = 's' AND table_name IN ('vexpr', 'vagg') \
+              ORDER BY table_name, ordinal_position"
+        )
+        .await
+            == rows(&["vagg,a,NO", "vexpr,a,YES", "vexpr,b,YES", "vexpr,c,NO"])
+    );
+    assert!(
+        query(
+            &mut session,
+            "SELECT table_name, is_insertable_into FROM information_schema.tables \
+              WHERE table_schema = 's' AND table_name IN ('vexpr', 'vagg') ORDER BY table_name"
+        )
+        .await
+            == rows(&["vagg,NO", "vexpr,YES"])
+    );
+}

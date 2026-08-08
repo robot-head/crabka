@@ -19,6 +19,7 @@ use crabka_units::prelude::ByteSizeExt as _;
 use zerocopy::{FromBytes, byteorder::big_endian::U64};
 
 use crate::{
+    copyfmt::CopyContext,
     error::ExecError,
     foreign::{ForeignScanner, ScanBounds},
     join::{
@@ -2701,20 +2702,17 @@ fn build_insert_row(
 fn build_copy_row(
     table: &Table,
     target_idx: &[usize],
-    row_values: &[Option<String>],
+    row: &crate::copyfmt::CopyRow<'_>,
     ctx: &crate::clock::EvalCtx,
 ) -> Result<Vec<Datum>, ExecError> {
-    let mut row = unsupplied_defaults(table, target_idx, ctx)?;
-    for (slot, value) in target_idx.iter().zip(row_values.iter()) {
-        let target = table.columns[*slot].ty;
-        row[*slot] = match value {
+    let mut built = unsupplied_defaults(table, target_idx, ctx)?;
+    for (slot, value) in target_idx.iter().zip(row.values.iter()) {
+        let column = &table.columns[*slot];
+        let target = column.ty;
+        let converted = match value {
             Some(value) if let Some(base) = jsonpath_assignment_base(target) => {
-                let value = crate::eval::cast_value_in(
-                    &Datum::Text(value.clone()),
-                    base,
-                    ctx.output_style(),
-                )?;
-                coerce(value, target, ctx)?
+                crate::eval::cast_value_in(&Datum::Text(value.clone()), base, ctx.output_style())
+                    .and_then(|value| coerce(value, target, ctx))
             }
             // A COPY field runs the column type's input function under
             // *assignment* rules, so an over-long `varchar(n)` is 22001 rather
@@ -2724,12 +2722,101 @@ fn build_copy_row(
                 &Datum::Text(value.clone()),
                 target,
                 ctx.output_style(),
-            )?,
-            None => coerce(Datum::Null, target, ctx)?,
+            )
+            .map_err(ExecError::from),
+            None => coerce(Datum::Null, target, ctx),
         };
+        // An input conversion is the one failure PostgreSQL can name a column
+        // for: it is running that column's input function and holds the field
+        // it was handed. Everything after this loop judges the assembled row,
+        // and reports the line alone.
+        built[*slot] = converted.map_err(|error| {
+            copy_row_context(
+                error,
+                &table.name.name,
+                row,
+                crate::copyfmt::CopyContext::Column {
+                    name: &column.name,
+                    value: value.as_deref(),
+                },
+            )
+        })?;
     }
-    finish_written_row(table, &mut row, ctx)?;
-    Ok(row)
+    finish_written_row(table, &mut built, ctx).map_err(|error| {
+        copy_row_context(
+            error,
+            &table.name.name,
+            row,
+            crate::copyfmt::CopyContext::Line { raw: row.raw },
+        )
+    })?;
+    Ok(built)
+}
+
+/// Refuse a row whose field count does not match the columns being copied into.
+///
+/// `PostgreSQL` reports the two directions differently and gives both 22P04:
+/// too few fields names the first column left unsupplied, too many says only
+/// that there were more. Both carry the whole line as `CONTEXT`, because
+/// neither failure belongs to a column that was read.
+fn copy_row_width(
+    table: &Table,
+    target_idx: &[usize],
+    row: &crate::copyfmt::CopyRow<'_>,
+) -> Result<(), ExecError> {
+    if row.values.len() == target_idx.len() {
+        return Ok(());
+    }
+    let error = match target_idx.get(row.values.len()) {
+        Some(slot) => ExecError::Remote(crabka_pgwire::error::PgError::error(
+            "22P04",
+            format!(
+                "missing data for column \"{}\"",
+                table.columns[*slot].name.clone()
+            ),
+        )),
+        None => ExecError::Remote(crabka_pgwire::error::PgError::error(
+            "22P04",
+            "extra data after last expected column",
+        )),
+    };
+    Err(copy_row_context(
+        error,
+        &table.name.name,
+        row,
+        crate::copyfmt::CopyContext::Line { raw: row.raw },
+    ))
+}
+
+/// Attach the `CONTEXT` a per-row `COPY … FROM` failure carries.
+///
+/// The relation is named unqualified whatever the statement wrote, because this
+/// is `RelationGetRelationName` and not a regclass.
+///
+/// A context already on the error is kept and this line goes *below* it, which
+/// is how a `plpgsql` trigger firing on a copied row reports both its own frame
+/// and the row that reached it. Contexts stack outward, so each frame appends.
+fn copy_row_context(
+    error: ExecError,
+    relation: &str,
+    row: &crate::copyfmt::CopyRow<'_>,
+    at: CopyContext<'_>,
+) -> ExecError {
+    with_copy_context(error, crate::copyfmt::copy_context(relation, row.line, at))
+}
+
+/// Add `context` below whatever context `error` already carried.
+pub(crate) fn with_copy_context(error: ExecError, context: String) -> ExecError {
+    let reported = error.into_pg();
+    let stacked = match reported
+        .diagnostics
+        .as_ref()
+        .and_then(|fields| fields.context.clone())
+    {
+        Some(existing) => format!("{existing}\n{context}"),
+        None => context,
+    };
+    ExecError::Remote(reported.with_context(stacked))
 }
 
 /// The per-row work every write path shares once the target values are in
@@ -2770,7 +2857,10 @@ fn enforce_not_null(table: &Table, row: &[Datum]) -> Result<(), ExecError> {
         if column.not_null && value.is_null() {
             return Err(ExecError::NotNullViolation {
                 column: column.name.clone(),
-                table: table.name.to_string(),
+                // Unqualified whatever schema the relation is in and whatever
+                // the statement wrote: PostgreSQL builds this message from
+                // `RelationGetRelationName`, which is the bare `relname`.
+                table: table.name.name.clone(),
             });
         }
     }
@@ -6645,7 +6735,7 @@ pub(crate) struct CopyIntoTarget<'a> {
 pub(crate) async fn execute_copy_write(
     write_ctx: &WriteContext<'_>,
     target: CopyIntoTarget<'_>,
-    rows: &[Vec<Option<String>>],
+    rows: &[crate::copyfmt::CopyRow<'_>],
 ) -> Result<(QueryResult, Vec<crabka_pgkv::WriteOp>), ExecError> {
     let catalog_kv = write_ctx.catalog_kv;
     let kv = write_ctx.kv;
@@ -6706,25 +6796,48 @@ pub(crate) async fn execute_copy_write(
     }
     let partitioned = crate::partition::is_partitioned(catalog_kv, &table.name)?;
     let mut copied = 0_u64;
-    for (rowid, row_values) in (start..).zip(rows.iter()) {
-        if row_values.len() != target_idx.len() {
-            return Err(ExecError::TypeMismatch(
-                "COPY row has the wrong number of fields for the target columns".into(),
-            ));
-        }
-        let full = build_copy_row(&table, &target_idx, row_values, ctx)?;
+    // The relation every `CONTEXT` line names, which is the one the statement
+    // copied into even for a row that routes to a partition leaf.
+    let copied_into = table.name.name.clone();
+    // Each of these borrows nothing, so it is one branch and one clone of a
+    // short name per *failing* row and nothing at all per successful one.
+    let at_line = |error, row: &crate::copyfmt::CopyRow<'_>| {
+        copy_row_context(
+            error,
+            &copied_into,
+            row,
+            crate::copyfmt::CopyContext::Line { raw: row.raw },
+        )
+    };
+    let at_line_number = |error, row: &crate::copyfmt::CopyRow<'_>| {
+        copy_row_context(
+            error,
+            &copied_into,
+            row,
+            crate::copyfmt::CopyContext::LineNumber,
+        )
+    };
+    for (rowid, row) in (start..).zip(rows.iter()) {
+        copy_row_width(&table, &target_idx, row)?;
+        let full = build_copy_row(&table, &target_idx, row, ctx)?;
         // COPY into a partitioned parent routes each row exactly as INSERT
         // does; the reserved rowid block belongs to the parent, so a routed row
         // takes one from its own leaf instead.
         let (table, rowid, full, routed) = if partitioned {
-            let Some((leaf, leaf_row)) = route_row_to_leaf(catalog_kv, &table, &full)? else {
-                return Err(ExecError::NoPartitionForRow(table.name.to_string()));
+            let Some((leaf, leaf_row)) = route_row_to_leaf(catalog_kv, &table, &full)
+                .map_err(|error| at_line(error, row))?
+            else {
+                return Err(at_line(
+                    ExecError::NoPartitionForRow(table.name.to_string()),
+                    row,
+                ));
             };
             let (leaf_rowid, seq_op) = seq.alloc(kv, leaf.id, 1)?;
             ops.extend(seq_op);
             (leaf, leaf_rowid, leaf_row, true)
         } else {
-            check_partition_constraint(catalog_kv, &table, &full)?;
+            check_partition_constraint(catalog_kv, &table, &full)
+                .map_err(|error| at_line(error, row))?;
             (table.clone(), rowid, full, false)
         };
         let Some(full) = crate::trigger::fire_before_row(
@@ -6738,7 +6851,8 @@ pub(crate) async fn execute_copy_write(
             None,
             Some(full),
             ctx,
-        )?
+        )
+        .map_err(|error| at_line(error, row))?
         else {
             continue;
         };
@@ -6758,8 +6872,12 @@ pub(crate) async fn execute_copy_write(
         } else {
             &parent_fk
         };
+        // A duplicate key is raised where PostgreSQL raises it — at the point
+        // the row reaches the index — and by then its line buffer has been
+        // flushed, so the context is the line *number* with no line quoted.
         enforce_unique_local_indexes(write_ctx, &table, local_indexes, rowid, &full, &mut writes)
-            .await?;
+            .await
+            .map_err(|error| at_line_number(error, row))?;
         if !fk_ctx.is_empty() {
             writes.fk_checks.after_insert(fk_ctx, rowid, &full)?;
         }
@@ -6799,7 +6917,7 @@ pub(crate) fn execute_timestamp_copy_write(
     kv: &dyn Kv,
     seq: &crate::seq::SequenceManager,
     target: CopyIntoTarget<'_>,
-    rows: &[Vec<Option<String>>],
+    rows: &[crate::copyfmt::CopyRow<'_>],
     ctx: &crate::clock::EvalCtx,
 ) -> Result<TimestampWritePlan, ExecError> {
     let resolution = ctx.resolution();
@@ -6841,13 +6959,9 @@ pub(crate) fn execute_timestamp_copy_write(
     }
     let (start, seq_op) = seq.alloc(kv, table.id, n_rows)?;
     let mut writes = Vec::with_capacity(rows.len());
-    for (rowid, row_values) in (start..).zip(rows.iter()) {
-        if row_values.len() != target_idx.len() {
-            return Err(ExecError::TypeMismatch(
-                "COPY row has the wrong number of fields for the target columns".into(),
-            ));
-        }
-        let row = build_copy_row(&table, &target_idx, row_values, ctx)?;
+    for (rowid, copied) in (start..).zip(rows.iter()) {
+        copy_row_width(&table, &target_idx, copied)?;
+        let row = build_copy_row(&table, &target_idx, copied, ctx)?;
         writes.push(TimestampWrite {
             table_id: table.id,
             bucket: hash_bucket_for_row(&table, &row)?,
@@ -7723,31 +7837,182 @@ pub(crate) fn cascade_drop_notice(
             [only] => only,
             _ => return Ok(None),
         },
+        // `DROP SCHEMA … CASCADE` reports the schema's own contents as well as
+        // whatever outside it goes with them, so it collects its objects rather
+        // than walking out from one target.
+        Statement::DropSchema {
+            names,
+            cascade: true,
+            ..
+        } => {
+            let mut lines = Vec::new();
+            for schema in names {
+                lines.extend(schema_cascade_lines(kv, resolution, schema)?);
+            }
+            return Ok(cascade_notice(lines));
+        }
         _ => return Ok(None),
     };
     let column = None;
     let Ok(name) = resolve_relation(kv, resolution, reference, SchemaDisposition::Reference) else {
         return Ok(None);
     };
-    let dependents = dependent_view_chain(kv, &name, column)?;
-    let mut lines: Vec<String> = dependents
+    let lines = dependent_view_chain(kv, &name, column)?
         .iter()
-        .map(|(view, _)| {
-            format!(
-                "drop cascades to {} {}",
-                relation_kind(kv, view).unwrap_or("view"),
-                view.name
-            )
-        })
+        .map(|(view, _)| cascade_line(kv, resolution, view))
         .collect();
-    match lines.len() {
-        0 => Ok(None),
-        1 => Ok(Some((lines.remove(0), None))),
-        n => Ok(Some((
-            format!("drop cascades to {n} other objects"),
-            Some(lines.join("\n")),
-        ))),
+    Ok(cascade_notice(lines))
+}
+
+/// The most dependent objects a `CASCADE` names to the client before the rest
+/// become a count. `PostgreSQL`'s `MAX_REPORTED_DEPS`, which exists because
+/// "client software may not deal well with enormous error strings".
+const MAX_REPORTED_DEPS: usize = 100;
+
+/// Fold the per-object lines into the `(message, detail)` a `CASCADE` reports.
+///
+/// Three shapes, all `PostgreSQL`'s: nothing dropped says nothing; a single
+/// object is named inline with no `DETAIL` at all; and several become a count
+/// with one `DETAIL` line each. Past [`MAX_REPORTED_DEPS`] the surplus is
+/// summarized on a final line and the count still names the *total*, so
+/// dropping 102 objects reads `drop cascades to 102 other objects` above 100
+/// lines and `and 2 other objects (see server log for list)`.
+fn cascade_notice(mut lines: Vec<String>) -> Option<(String, Option<String>)> {
+    let total = lines.len();
+    match total {
+        0 => None,
+        1 => Some((lines.remove(0), None)),
+        _ => {
+            let withheld = total.saturating_sub(MAX_REPORTED_DEPS);
+            lines.truncate(MAX_REPORTED_DEPS);
+            let mut detail = lines.join("\n");
+            if withheld > 0 {
+                use std::fmt::Write as _;
+                let plural = if withheld == 1 { "object" } else { "objects" };
+                write!(
+                    detail,
+                    "\nand {withheld} other {plural} (see server log for list)"
+                )
+                .expect("writing to a String cannot fail");
+            }
+            Some((
+                format!("drop cascades to {total} other objects"),
+                Some(detail),
+            ))
+        }
     }
+}
+
+/// One `drop cascades to <kind> <name>` line for a relation.
+fn cascade_line(
+    kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
+    name: &crabka_pgcatalog::RelationName,
+) -> String {
+    format!(
+        "drop cascades to {} {}",
+        relation_kind(kv, name).unwrap_or("view"),
+        message_relation_name(kv, resolution, name),
+    )
+}
+
+/// A relation's name as a message writes it: bare when the search path makes it
+/// visible, schema-qualified when it does not, and each part quoted where a
+/// bare identifier would not read back as itself — `PostgreSQL`'s
+/// `quote_qualified_identifier` over `RelationIsVisible`.
+pub(crate) fn message_relation_name(
+    kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
+    name: &crabka_pgcatalog::RelationName,
+) -> String {
+    let bare = crabka_pgparser::ast::RelationRef::bare(name.name.clone());
+    let visible = resolve_relation(kv, resolution, &bare, SchemaDisposition::Reference)
+        .is_ok_and(|resolved| resolved == *name);
+    let printed = crate::catalog_fn::quote_identifier(&name.name);
+    if visible {
+        printed
+    } else {
+        format!(
+            "{}.{printed}",
+            crate::catalog_fn::quote_identifier(&name.schema)
+        )
+    }
+}
+
+/// Every object `DROP SCHEMA … CASCADE` takes with it, as the lines it reports.
+///
+/// `PostgreSQL` walks its dependency graph out from each of the schema's own
+/// objects in the order `pg_depend` recorded them — creation order — reporting
+/// everything that depends on one directly after it. This reproduces that shape
+/// from what the catalog here keeps: a table records the monotonic id it was
+/// created with, so the schema's tables lead in creation order, each followed
+/// depth-first by the views and materialized views over it, wherever those
+/// live. A view or sequence that no table in the schema feeds carries no
+/// creation-order record at all, so those follow in name order — the one place
+/// this diverges, and it diverges only in the order of the `DETAIL` lines,
+/// never in which objects appear.
+fn schema_cascade_lines(
+    kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
+    schema: &str,
+) -> Result<Vec<String>, ExecError> {
+    if !crabka_pgcatalog::schema_exists(kv, schema)? {
+        return Ok(Vec::new());
+    }
+    let contents = crabka_pgcatalog::schema_contents(kv, schema)?;
+    let mut tables: Vec<(crabka_pgcatalog::TableId, crabka_pgcatalog::RelationName)> = Vec::new();
+    let mut others: Vec<crabka_pgcatalog::RelationName> = Vec::new();
+    for name in contents {
+        match crabka_pgcatalog::get_table(kv, &name) {
+            Ok(table) => tables.push((table.id, name)),
+            Err(_) => others.push(name),
+        }
+    }
+    tables.sort_by_key(|(id, _)| *id);
+    let roots = tables
+        .into_iter()
+        .map(|(_, name)| name)
+        .chain(others)
+        .collect::<Vec<_>>();
+    let mut seen: HashSet<crabka_pgcatalog::RelationName> = HashSet::new();
+    let mut lines = Vec::new();
+    for root in roots {
+        if seen.insert(root.clone()) {
+            lines.push(cascade_line(kv, resolution, &root));
+        }
+        for (dependent, _) in dependent_view_chain(kv, &root, None)? {
+            if seen.insert(dependent.clone()) {
+                lines.push(cascade_line(kv, resolution, &dependent));
+            }
+        }
+    }
+    // A composite, enum or domain type goes with its schema too, and every one
+    // of the three is `type` in this message — `DROP SCHEMA` over a domain
+    // reports `drop cascades to type s.d`, not `domain`.
+    let types = crabka_pgcatalog::list_user_types(kv)?;
+    let visible = resolution.visible_schemas(kv)?;
+    for user_type in types.iter().filter(|ty| ty.schema == schema) {
+        // Type visibility is its own question — the search path is the same,
+        // but what shadows a type is another *type* of that name, not a
+        // relation. A type is written bare when its schema is the first visible
+        // one holding a type by that name.
+        let shadowing = visible.iter().find(|candidate| {
+            types
+                .iter()
+                .any(|other| other.name == user_type.name && other.schema == **candidate)
+        });
+        let printed = crate::catalog_fn::quote_identifier(&user_type.name);
+        let name = if shadowing.is_some_and(|first| first == schema) {
+            printed
+        } else {
+            format!(
+                "{}.{printed}",
+                crate::catalog_fn::quote_identifier(&user_type.schema)
+            )
+        };
+        lines.push(format!("drop cascades to type {name}"));
+    }
+    Ok(lines)
 }
 
 pub(crate) fn inheritance_merge_notices(
@@ -14832,7 +15097,14 @@ fn build_base_table(
             } else {
                 view.owner.as_str()
             };
-            let body_ctx = read_ctx.with_security_role(body_role);
+            // The body's unqualified names resolve with the view's own schema
+            // searched first, not in the reader's scope. `CREATE VIEW s.v AS
+            // SELECT … FROM t` records `t` as text, so reading `s.v` from a
+            // session whose `search_path` does not name `s` would otherwise
+            // fail to find the very relation the view was built on.
+            let body_scope = read_ctx.fctx.resolution.for_stored_body(&view.name.schema);
+            let role_ctx = read_ctx.with_security_role(body_role);
+            let body_ctx = role_ctx.with_resolution(&body_scope);
             let relation = crate::query::query_to_relation(&body_ctx, query)?;
             let qualifier = alias.as_deref().unwrap_or(&view.name.name);
             return requalify_view_relation(relation, &view, qualifier);
@@ -17596,9 +17868,7 @@ impl<'a> PgClassRow<'a> {
             // relacl, reloptions.
             Datum::Null,
             Datum::Null,
-            self.relpartbound
-                .as_deref()
-                .map_or(Datum::Null, text),
+            self.relpartbound.as_deref().map_or(Datum::Null, text),
         ])
     }
 }
@@ -22662,7 +22932,7 @@ pub(crate) fn enforce_check_constraints(
         let value = crate::eval::eval(&check.expr, &scope, row, ctx)?;
         if matches!(value, Datum::Bool(false)) {
             return Err(ExecError::CheckViolation {
-                table: table.name.to_string(),
+                table: table.name.name.clone(),
                 constraint: check.name.clone(),
             });
         }

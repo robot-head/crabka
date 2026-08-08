@@ -400,16 +400,117 @@ fn split_text_fields(line: &str, delimiter: u8) -> Vec<&str> {
     fields
 }
 
+/// The longest `COPY` field or line a message quotes before it is elided —
+/// `PostgreSQL`'s `MAX_COPY_DATA_DISPLAY`.
+const MAX_COPY_DATA_DISPLAY: usize = 100;
+
+/// One quoted value in a `COPY` `CONTEXT` line, cut to
+/// [`MAX_COPY_DATA_DISPLAY`] characters with `...` in place of the rest.
+///
+/// The cut is by character, not by byte, so a multi-byte character is never
+/// split — `PostgreSQL` clips to a character boundary for the same reason.
+pub(crate) fn copy_printout(value: &str) -> String {
+    match value.char_indices().nth(MAX_COPY_DATA_DISPLAY) {
+        None => value.to_string(),
+        Some((cut, _)) => format!("{}...", &value[..cut]),
+    }
+}
+
+/// Which `CONTEXT` line a failing `COPY … FROM` row carries.
+///
+/// `PostgreSQL` installs one error-context callback over the whole per-row
+/// loop, and what that callback can still say narrows as the row travels. All
+/// three spellings, and the fourth case of saying nothing at all, are
+/// observable:
+///
+/// ```text
+/// CONTEXT:  COPY t, line 1, column c: "toolong"
+/// CONTEXT:  COPY dn, line 1, column a: null input
+/// CONTEXT:  COPY t, line 1: "1<TAB>ab<TAB>extra"
+/// CONTEXT:  COPY u, line 2
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum CopyContext<'a> {
+    /// A failure inside one column's input function, which is the only point
+    /// that knows both the column and the field it was handed. A field that was
+    /// the null representation has no text to quote and says `null input`.
+    Column {
+        name: &'a str,
+        value: Option<&'a str>,
+    },
+    /// A failure judging the assembled row — a constraint, a partition route, a
+    /// `BEFORE` row trigger. The line is still in hand, so it is quoted whole.
+    Line { raw: &'a str },
+    /// A failure raised once the row has been handed on and the line buffer no
+    /// longer describes it: the unique-index check, which `PostgreSQL` runs at
+    /// its multi-insert flush. Only the counter survives.
+    LineNumber,
+}
+
+/// The `CONTEXT` line a failing `COPY … FROM` reports.
+///
+/// The relation is named unqualified whatever the statement wrote, because this
+/// is `RelationGetRelationName` and not a regclass.
+pub(crate) fn copy_context(relation: &str, line: u64, at: CopyContext<'_>) -> String {
+    match at {
+        CopyContext::Column {
+            name,
+            value: Some(value),
+        } => format!(
+            "COPY {relation}, line {line}, column {name}: \"{}\"",
+            copy_printout(value)
+        ),
+        CopyContext::Column { name, value: None } => {
+            format!("COPY {relation}, line {line}, column {name}: null input")
+        }
+        CopyContext::Line { raw } => {
+            format!("COPY {relation}, line {line}: \"{}\"", copy_printout(raw))
+        }
+        CopyContext::LineNumber => format!("COPY {relation}, line {line}"),
+    }
+}
+
+/// One decoded `COPY … FROM` row, with where in the payload it came from.
+///
+/// The origin travels with the row because a failure anywhere in the write —
+/// an input conversion, a constraint, a trigger — reports it as `CONTEXT`, and
+/// by then the payload has been left behind. It costs no allocation to carry:
+/// [`Self::raw`] borrows the line out of the payload the decode read, and is
+/// copied only when a row actually fails.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CopyRow<'a> {
+    /// The row's fields, de-escaped, `None` for the null representation.
+    pub(crate) values: Vec<Option<String>>,
+    /// The one-based input line this row was read from. A `HEADER` line counts,
+    /// so the first row of a `COPY … WITH (HEADER)` is line 2 — `PostgreSQL`
+    /// counts the lines it read, not the rows it kept.
+    pub(crate) line: u64,
+    /// The line as it arrived, before the fields were split or de-escaped.
+    pub(crate) raw: &'a str,
+}
+
+/// The header line of a `COPY … FROM` payload, when the copy has one.
+///
+/// Only a `HEADER MATCH` failure asks, so this re-reads the first line rather
+/// than the decode carrying it: the decode that would have returned it is the
+/// one that just failed.
+pub(crate) fn header_line_of<'a>(data: &'a [u8], format: &CopyInFormat) -> Option<&'a str> {
+    format.header?;
+    let text = std::str::from_utf8(data).ok()?;
+    let line = text.split('\n').next()?;
+    Some(line.strip_suffix('\r').unwrap_or(line))
+}
+
 /// Decode a `COPY … FROM` text-format payload into per-row raw values.
 ///
 /// The NULL comparison is against the field *before* de-escaping, as
 /// `PostgreSQL`'s `CopyReadAttributesText` does it: with `NULL 'NUL'` an
 /// incoming `\N` is not a null but the one-character string `N`.
-pub(crate) fn decode_copy_text(
-    data: &[u8],
+pub(crate) fn decode_copy_text<'a>(
+    data: &'a [u8],
     format: &CopyInFormat,
     columns: &[String],
-) -> Result<Vec<Vec<Option<String>>>, ExecError> {
+) -> Result<Vec<CopyRow<'a>>, ExecError> {
     let text = std::str::from_utf8(data)
         .map_err(|_| ExecError::Syntax("invalid byte sequence for encoding \"UTF8\"".into()))?;
     if text.is_empty() {
@@ -418,8 +519,10 @@ pub(crate) fn decode_copy_text(
     let mut rows = Vec::new();
     let mut header_pending = format.header.is_some();
     let mut lines = text.split('\n').peekable();
+    let mut number = 0_u64;
     while let Some(raw_line) = lines.next() {
         let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+        number += 1;
         // PostgreSQL's text-format end-of-data marker: clients on the old
         // PQputline/PQendcopy API (pgbench -i among them) send a final `\.`
         // line; it terminates the data and everything after it is ignored.
@@ -436,8 +539,8 @@ pub(crate) fn decode_copy_text(
             }
             continue;
         }
-        rows.push(
-            split_text_fields(line, format.framing.delimiter)
+        rows.push(CopyRow {
+            values: split_text_fields(line, format.framing.delimiter)
                 .into_iter()
                 .map(|field| {
                     if field == format.framing.null {
@@ -446,7 +549,9 @@ pub(crate) fn decode_copy_text(
                     decode_copy_text_field(field).map(Some)
                 })
                 .collect::<Result<_, _>>()?,
-        );
+            line: number,
+            raw: line,
+        });
     }
     Ok(rows)
 }
@@ -991,12 +1096,12 @@ mod tests {
         let columns = ["s".to_string(), "n".to_string()];
         for case in cases {
             let format = CopyInFormat::resolve(&case.options).expect("options resolve");
-            assert!(
-                decode_copy_text(case.data.as_bytes(), &format, &columns).expect("decode")
-                    == case.expected,
-                "{}",
-                case.name
-            );
+            let decoded = decode_copy_text(case.data.as_bytes(), &format, &columns)
+                .expect("decode")
+                .into_iter()
+                .map(|row| row.values)
+                .collect::<Vec<_>>();
+            assert!(decoded == case.expected, "{}", case.name);
         }
     }
 
@@ -1005,7 +1110,13 @@ mod tests {
     #[test]
     fn copy_from_stops_at_the_end_of_data_marker() {
         let format = CopyInFormat::resolve(&CopyOptions::default()).expect("options resolve");
-        let decode = |data: &[u8]| decode_copy_text(data, &format, &[]).expect("decode");
+        let decode = |data: &[u8]| {
+            decode_copy_text(data, &format, &[])
+                .expect("decode")
+                .into_iter()
+                .map(|row| row.values)
+                .collect::<Vec<_>>()
+        };
         assert!(
             decode(b"1\t0\t\\N\n\\.\n") == vec![vec![Some("1".into()), Some("0".into()), None]]
         );

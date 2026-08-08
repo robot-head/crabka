@@ -9565,7 +9565,23 @@ impl SqlSession {
         } else {
             Vec::new()
         };
-        let rows = crate::copyfmt::decode_copy_text(&data, &format, &header_columns)?;
+        // A `HEADER MATCH` failure is raised by the decode rather than by a row,
+        // and PostgreSQL reports it with the same `CONTEXT` a failing row gets:
+        // the header is line 1, and it is quoted whole.
+        let rows =
+            crate::copyfmt::decode_copy_text(&data, &format, &header_columns).map_err(|error| {
+                match crate::copyfmt::header_line_of(&data, &format) {
+                    Some(header) => crate::exec::with_copy_context(
+                        error,
+                        crate::copyfmt::copy_context(
+                            &target.name.name,
+                            1,
+                            crate::copyfmt::CopyContext::Line { raw: header },
+                        ),
+                    ),
+                    None => error,
+                }
+            })?;
         match &self.state {
             TxnState::InTransaction(_) => {
                 self.ensure_table_write_guard().await;
