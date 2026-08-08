@@ -133,9 +133,29 @@ const COMMAND_PROBES: &[CommandProbe] = &[
         refusal: None,
     },
     CommandProbe {
+        command: "CREATE MATERIALIZED VIEW",
+        sql: "CREATE MATERIALIZED VIEW parser_commands_matview AS SELECT 1",
+        expected_statement: "CreateMaterializedView",
+        refusal: None,
+    },
+    CommandProbe {
         command: "ALTER VIEW",
         sql: "ALTER VIEW parser_commands_view SET (security_invoker = true)",
         expected_statement: "AlterView",
+        refusal: None,
+    },
+    CommandProbe {
+        // Routed onto the `ALTER TABLE` action set, so the whole ordinary
+        // subcommand family applies to a materialized view for free.
+        command: "ALTER MATERIALIZED VIEW",
+        sql: "ALTER MATERIALIZED VIEW parser_commands_matview OWNER TO postgres",
+        expected_statement: "AlterTable",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "REFRESH MATERIALIZED VIEW",
+        sql: "REFRESH MATERIALIZED VIEW parser_commands_matview",
+        expected_statement: "RefreshMaterializedView",
         refusal: None,
     },
     CommandProbe {
@@ -220,6 +240,12 @@ const COMMAND_PROBES: &[CommandProbe] = &[
         command: "DROP VIEW",
         sql: "DROP VIEW parser_commands_view",
         expected_statement: "DropView",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "DROP MATERIALIZED VIEW",
+        sql: "DROP MATERIALIZED VIEW parser_commands_matview",
+        expected_statement: "DropMaterializedView",
         refusal: None,
     },
     CommandProbe {
@@ -1183,7 +1209,7 @@ mod tests {
 
         assert!(report.format_version == PARSER_COMMAND_REPORT_FORMAT_VERSION);
         assert!(
-            report.commands.len() == 163,
+            report.commands.len() == 167,
             "all resolved command rows need probes"
         );
         assert!(report.commands.windows(2).all(|pair| pair[0] < pair[1]));
@@ -1241,7 +1267,7 @@ mod tests {
 
         assert!(json["format_version"] == PARSER_COMMAND_REPORT_FORMAT_VERSION);
         assert!(json["commands"][0] == "ABORT");
-        assert!(json["probes"].as_array().map(Vec::len) == Some(163));
+        assert!(json["probes"].as_array().map(Vec::len) == Some(167));
         let refusal = json["probes"]
             .as_array()
             .expect("probe array")

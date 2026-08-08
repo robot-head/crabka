@@ -115,6 +115,9 @@ fn probe_setup(command: &str) -> &'static [&'static str] {
             "CREATE USER MAPPING FOR PUBLIC SERVER parser_commands_server",
         ],
         "ALTER VIEW" | "DROP VIEW" => &["CREATE VIEW parser_commands_view AS SELECT 1"],
+        "ALTER MATERIALIZED VIEW" | "DROP MATERIALIZED VIEW" | "REFRESH MATERIALIZED VIEW" => {
+            &["CREATE MATERIALIZED VIEW parser_commands_matview AS SELECT 1"]
+        }
         // P2: routine lifecycle probes need the routine they name.
         "ALTER FUNCTION" | "ALTER ROUTINE" | "DROP FUNCTION" | "DROP ROUTINE" => {
             &["CREATE FUNCTION parser_commands_fn(a int) RETURNS int AS 'SELECT $1' LANGUAGE sql"]
@@ -187,7 +190,7 @@ async fn execute_probe(command: &str, sql: &str) {
 #[tokio::test]
 async fn every_resolved_behavior_probe_reaches_the_session_contract() {
     let report = parser_command_report().expect("behavior manifest parses");
-    assert!(report.probes.len() == 163);
+    assert!(report.probes.len() == 167);
     let mut executed = 0;
     let mut refused = 0;
     for probe in report.probes {
@@ -223,7 +226,7 @@ async fn every_resolved_behavior_probe_reaches_the_session_contract() {
         );
         refused += 1;
     }
-    assert!(executed == 120);
+    assert!(executed == 124);
     assert!(refused == 43);
 }
 
