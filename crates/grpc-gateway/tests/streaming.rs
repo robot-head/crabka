@@ -54,6 +54,7 @@ async fn state_for(bootstrap: &str) -> Arc<AppState> {
             crabka_authz::AllowAllAuthorizer,
         ))),
         codec: Arc::new(RawCodec),
+        queue: Arc::default(),
     })
 }
 

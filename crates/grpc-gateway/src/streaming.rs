@@ -150,7 +150,11 @@ fn inbound_from_decoded_record(record: crate::consume::DecodedConsumerRecord) ->
         offset: record.offset.into(),
         key: record.key.map(|b| b.to_vec()),
         value: record.value.to_vec(),
-        headers: std::collections::HashMap::new(),
+        headers: record
+            .headers
+            .into_iter()
+            .map(|header| (header.key, header.value.unwrap_or_default().to_vec()))
+            .collect(),
         timestamp_ms: record.timestamp.into(),
         structured: record.json.map(|json| pb::StructuredValue {
             json: json.to_vec(),
@@ -466,6 +470,10 @@ mod tests {
             timestamp: crate::ids::Timestamp(1234),
             key: Some(Bytes::from_static(b"k")),
             value: Bytes::from_static(b"\x08\x07"),
+            headers: vec![crabka_client_consumer::Header {
+                key: "ce_type".to_string(),
+                value: Some(Bytes::from_static(b"order.created")),
+            }],
             schema: Some(SchemaMeta {
                 subject: "metadata-value".to_string(),
                 id: 17,
@@ -484,7 +492,10 @@ mod tests {
                     offset: 9,
                     key: Some(b"k".to_vec()),
                     value: b"\x08\x07".to_vec(),
-                    headers: std::collections::HashMap::new(),
+                    headers: std::collections::HashMap::from([(
+                        "ce_type".to_string(),
+                        b"order.created".to_vec(),
+                    )]),
                     timestamp_ms: 1234,
                     structured: Some(pb::StructuredValue {
                         json: br#"{"entity_type":"NETWORK_NODE"}"#.to_vec(),

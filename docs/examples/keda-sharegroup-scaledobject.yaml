@@ -1,0 +1,29 @@
+# Scale a KIP-932 share-group worker deployment from Crabka's fleet-complete
+# backlog gauge. Point serverAddress at the Prometheus instance scraping every
+# broker; sum() is required because the active group-coordinator broker can move.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: order-worker
+spec:
+  scaleTargetRef:
+    name: order-worker
+  pollingInterval: 15
+  cooldownPeriod: 60
+  minReplicaCount: 0
+  maxReplicaCount: 50
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring.svc:9090
+        metricName: crabka_share_group_backlog
+        query: sum(crabka_broker_share_group_backlog{group_id="order-workers"})
+        threshold: "100"
+        activationThreshold: "1"
+
+# Crabka emits zero only after every initialized partition is drained and never
+# exposes an uninitialized start offset as -1, so activationThreshold=1 supports
+# scale-to-zero without hiding queued records. Conventional consumer groups can
+# use KEDA's stock kafka scaler instead; this metric is specifically for KIP-932
+# share groups. Older KEDA releases may require metricName to be unique per
+# ScaledObject.

@@ -312,6 +312,12 @@ struct AcquireContext<'a> {
     config: &'a crate::coordinator::unified::share::config::ShareGroupConfig,
 }
 
+fn remaining_record_budget(max_records: i32, acquired: i64) -> i32 {
+    max_records
+        .saturating_sub(i32::try_from(acquired).unwrap_or(i32::MAX))
+        .max(0)
+}
+
 async fn acquire_pass(
     context: &AcquireContext<'_>,
     pending: &mut [PendingPartition],
@@ -400,14 +406,19 @@ async fn acquire_pass(
         // aborted region's end offset, so precise per-offset archival needs
         // the control-batch markers.
         st.materialize(upper, cfg.max_inflight_records);
-        let acquired = st.acquire(
-            member,
-            max_records,
-            max_bytes,
-            now,
-            cfg.record_lock_duration,
-            cfg.max_delivery_attempts,
-        );
+        let remaining_records = remaining_record_budget(max_records, total);
+        let acquired = if remaining_records > 0 {
+            st.acquire(
+                member,
+                remaining_records,
+                max_bytes,
+                now,
+                cfg.record_lock_duration,
+                cfg.max_delivery_attempts,
+            )
+        } else {
+            Vec::new()
+        };
 
         if !acquired.is_empty() {
             total += populate_acquired_response(p, &part, &acquired, upper, max_bytes).await?;
@@ -664,6 +675,13 @@ mod tests {
         let batches = collect_ack_batches(&partition);
 
         assert!(batches == vec![(10, 12, vec![0, 1, 1]), (30, 30, Vec::new())]);
+    }
+
+    #[test]
+    fn remaining_record_budget_is_request_wide_and_saturating() {
+        assert_eq!(remaining_record_budget(500, 300), 200);
+        assert_eq!(remaining_record_budget(500, 500), 0);
+        assert_eq!(remaining_record_budget(500, i64::MAX), 0);
     }
 
     #[test]

@@ -17,4 +17,6 @@ pub struct AppState {
     /// `GatewayConfig::schema_registry_url`: `SchemaRegistryCodec` when a URL
     /// is configured, `RawCodec` (identity pass-through) otherwise.
     pub codec: Arc<dyn RecordCodec>,
+    /// Process-local handles for unary share-group queue sessions.
+    pub queue: Arc<crate::queue::QueueSessionTable>,
 }

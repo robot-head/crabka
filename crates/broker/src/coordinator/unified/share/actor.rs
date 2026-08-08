@@ -310,8 +310,8 @@ async fn handle_session_tick(
         );
         return Err(e);
     }
-    // KIP-932 lifecycle: eviction may have dropped a member's partitions (or
-    // emptied the group); Delete share-state no longer assigned.
+    // Eviction may drop subscriptions owned by remaining members. Preserve
+    // state when the last member leaves so the durable queue cursor survives.
     reconcile_share_state(state, offsets_log, coordinator, now_ms).await;
     Ok(())
 }
@@ -409,14 +409,11 @@ async fn reconcile_share_state(
         .copied()
         .filter(|tp| !state.initialized.contains(tp))
         .collect();
-    // Partitions previously Initialized but no longer assigned (a topic left
-    // the subscription, or the group emptied) get their share-state Deleted.
-    let to_delete: Vec<(Uuid, i32)> = state
-        .initialized
-        .iter()
-        .copied()
-        .filter(|tp| !assigned.contains(tp))
-        .collect();
+    // Keep initialized state while the group is empty. Its SPSO is the durable
+    // queue cursor and its backlog metric is what lets KEDA scale consumers
+    // back up from zero. With live members, an unassigned partition really did
+    // leave the subscription and can be deleted.
+    let to_delete = share_states_to_delete(state, &assigned);
     if to_init.is_empty() && to_delete.is_empty() {
         return;
     }
@@ -487,6 +484,21 @@ async fn reconcile_share_state(
     }
 }
 
+fn share_states_to_delete(
+    state: &ShareGroupState,
+    assigned: &HashSet<(Uuid, i32)>,
+) -> Vec<(Uuid, i32)> {
+    if state.members.is_empty() {
+        return Vec::new();
+    }
+    state
+        .initialized
+        .iter()
+        .copied()
+        .filter(|tp| !assigned.contains(tp))
+        .collect()
+}
+
 /// Apply steady-state member updates and run reconciliation. Returns `true`
 /// if anything changed that requires a log write.
 fn update_member_state(
@@ -542,8 +554,8 @@ async fn handle_leave(
         epoch: state.group_epoch,
     });
     flush_pending(state, pending, offsets_log, coordinator, now_ms).await?;
-    // KIP-932 lifecycle: a leave can empty the group (or drop a member's
-    // partitions), so Delete any share-state that is no longer assigned.
+    // Delete state for subscriptions dropped by remaining members. If the
+    // group became empty, preserve its durable cursor for future consumers.
     reconcile_share_state(state, offsets_log, coordinator, now_ms).await;
     Ok(base_resp(0, req.member_epoch, config))
 }
@@ -1251,6 +1263,28 @@ mod tests {
         let batch = p.into_batch("g", 0);
         assert!(batch.records.len() == 1);
         assert!(batch.records[0].value.is_none());
+    }
+
+    #[test]
+    fn empty_group_preserves_initialized_share_state() {
+        let topic = Uuid([8; 16]);
+        let mut state = ShareGroupState::new("g");
+        state.initialized.insert((topic, 0));
+
+        assert!(share_states_to_delete(&state, &HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn live_group_deletes_share_state_removed_from_subscription() {
+        let topic = Uuid([9; 16]);
+        let mut state = ShareGroupState::new("g");
+        state.initialized.insert((topic, 0));
+        state.members.insert(
+            "m1".into(),
+            ShareMemberState::joining("m1", "client", "host", HashSet::new()),
+        );
+
+        assert!(share_states_to_delete(&state, &HashSet::new()) == vec![(topic, 0)]);
     }
 
     #[test]

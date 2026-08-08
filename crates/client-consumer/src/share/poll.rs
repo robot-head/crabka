@@ -32,6 +32,7 @@ use crabka_protocol::{
             AcknowledgePartition, AcknowledgeTopic, AcknowledgementBatch as AckAckBatch,
             ShareAcknowledgeRequest,
         },
+        share_acknowledge_response::ShareAcknowledgeResponse,
         share_fetch_request::{
             AcknowledgementBatch as FetchAckBatch, FetchPartition, FetchTopic, ShareFetchRequest,
         },
@@ -127,6 +128,15 @@ fn build_share_ack_request(
 
 fn response_has_error(error_code: i16) -> bool {
     error_code != 0
+}
+
+fn first_share_ack_partition_error(response: &ShareAcknowledgeResponse) -> Option<i16> {
+    response
+        .responses
+        .iter()
+        .flat_map(|topic| &topic.partitions)
+        .map(|partition| partition.error_code)
+        .find(|code| response_has_error(*code))
 }
 
 fn range_len(first: i64, last: i64) -> usize {
@@ -277,6 +287,11 @@ impl ShareConsumer {
                             timestamp: record_timestamp(batch.base_timestamp, r.timestamp_delta),
                             key: r.key.clone(),
                             value: r.value.clone(),
+                            headers: r
+                                .headers
+                                .iter()
+                                .map(|header| (header.key.clone(), header.value.clone()))
+                                .collect(),
                             delivery_count,
                         });
                     }
@@ -383,6 +398,9 @@ impl ShareConsumer {
             return Err(ConsumerError::Server(resp.error_code));
         }
         self.share_session_epoch = self.share_session_epoch.wrapping_add(1);
+        if let Some(error_code) = first_share_ack_partition_error(&resp) {
+            return Err(ConsumerError::Server(error_code));
+        }
         Ok(())
     }
 
@@ -436,6 +454,9 @@ impl ShareConsumer {
             return Err(ConsumerError::Server(resp.error_code));
         }
         self.share_session_epoch = self.share_session_epoch.wrapping_add(1);
+        if let Some(error_code) = first_share_ack_partition_error(&resp) {
+            return Err(ConsumerError::Server(error_code));
+        }
         Ok(())
     }
 
@@ -554,6 +575,26 @@ mod tests {
         let mut b = [0u8; 16];
         b[15] = n;
         WireUuid(b)
+    }
+
+    #[test]
+    fn standalone_ack_surfaces_partition_error() {
+        use crabka_protocol::owned::share_acknowledge_response::{
+            PartitionData, ShareAcknowledgeTopicResponse,
+        };
+
+        let response = ShareAcknowledgeResponse {
+            responses: vec![ShareAcknowledgeTopicResponse {
+                partitions: vec![PartitionData {
+                    error_code: 121,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        assert2::assert!(first_share_ack_partition_error(&response) == Some(121));
     }
 
     async fn test_consumer(ack_mode: ShareAckMode) -> ShareConsumer {
@@ -787,6 +828,7 @@ mod tests {
             timestamp: 0,
             key: None,
             value: None,
+            headers: Vec::new(),
             delivery_count: 1,
         };
 
@@ -817,6 +859,7 @@ mod tests {
             timestamp: 0,
             key: None,
             value: None,
+            headers: Vec::new(),
             delivery_count: 1,
         };
         let mut consumer = test_consumer(ShareAckMode::Implicit).await;

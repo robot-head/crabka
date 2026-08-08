@@ -5,6 +5,9 @@ service Gateway {
   rpc Send(SendRequest) returns (SendResponse);
   rpc SendStream(stream SendRequest) returns (stream SendAck);
   rpc Subscribe(stream SubscribeFrame) returns (stream Inbound);
+  rpc QueueAcquire(QueueAcquireRequest) returns (QueueAcquireResponse);
+  rpc QueueAcknowledge(QueueAcknowledgeRequest) returns (QueueAcknowledgeResponse);
+  rpc QueueRenew(QueueRenewRequest) returns (QueueRenewResponse);
 }
 
 enum Acks {
@@ -134,4 +137,72 @@ message Inbound {
   // RawCodec).
   optional StructuredValue structured = 8;
   optional SchemaSelector schema = 9;
+}
+
+// Acquire work from a KIP-932 share group. Leave `session_id` empty on the
+// first call; subsequent calls reuse the returned `session_id`.
+message QueueAcquireRequest {
+  string group_id = 1;
+  repeated string topics = 2;
+  uint32 max_messages = 3;
+  uint32 wait_ms = 4;
+  string session_id = 5;
+}
+
+message QueuedMessage {
+  string topic = 1;
+  int32 partition = 2;
+  int64 offset = 3;
+  optional bytes key = 4;
+  optional bytes value = 5;
+  repeated QueueHeader headers = 6;
+  int64 timestamp_ms = 7;
+  int32 delivery_count = 8;
+}
+
+message QueueHeader {
+  string key = 1;
+  optional bytes value = 2;
+}
+
+message QueueAcquireResponse {
+  string session_id = 1;
+  repeated QueuedMessage messages = 2;
+}
+
+enum QueueAckType {
+  QUEUE_ACK_TYPE_UNSPECIFIED = 0;
+  ACCEPT = 1;
+  RELEASE = 2;
+  REJECT = 3;
+}
+
+message QueueAckEntry {
+  string topic = 1;
+  int32 partition = 2;
+  int64 offset = 3;
+  QueueAckType type = 4;
+}
+
+message QueueAcknowledgeRequest {
+  string session_id = 1;
+  repeated QueueAckEntry entries = 2;
+}
+
+message QueueAckResult {
+  QueueAckEntry entry = 1;
+  optional ErrorInfo error = 2;
+}
+
+message QueueAcknowledgeResponse {
+  repeated QueueAckResult results = 1;
+}
+
+message QueueRenewRequest {
+  string session_id = 1;
+  repeated QueueAckEntry entries = 2;
+}
+
+message QueueRenewResponse {
+  repeated QueueAckResult results = 1;
 }

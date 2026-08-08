@@ -192,6 +192,7 @@ async fn forward_handler_error_arm_returns_retriable() {
             crabka_authz::AllowAllAuthorizer,
         ))),
         codec: Arc::new(RawCodec),
+        queue: Arc::default(),
     });
 
     // Drive the REAL forward_router in-process via tower::ServiceExt::oneshot —
@@ -306,6 +307,7 @@ async fn forward_handler_rejects_anonymous_when_tls_enabled() {
             crabka_authz::AllowAllAuthorizer,
         ))),
         codec: Arc::new(RawCodec),
+        queue: Arc::default(),
     });
 
     let app = forward_router(state);

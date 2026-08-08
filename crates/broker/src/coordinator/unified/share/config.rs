@@ -26,6 +26,7 @@ pub struct ShareGroupConfig {
     pub record_lock_duration: Duration,
     pub max_delivery_attempts: i16,
     pub max_inflight_records: i32,
+    pub backlog_poll_interval: Duration,
     pub isolation_level: ShareIsolationLevel,
     pub actor_mailbox_capacity: usize,
 }
@@ -45,6 +46,7 @@ impl Default for ShareGroupConfig {
             record_lock_duration: Duration::from_secs(30),
             max_delivery_attempts: 5,
             max_inflight_records: 200,
+            backlog_poll_interval: Duration::from_secs(15),
             isolation_level: ShareIsolationLevel::ReadUncommitted,
             actor_mailbox_capacity: 64,
         }
@@ -71,6 +73,7 @@ mod tests {
         check!(c.record_lock_duration == std::time::Duration::from_secs(30));
         check!(c.max_delivery_attempts == 5);
         check!(c.max_inflight_records == 200);
+        check!(c.backlog_poll_interval == Duration::from_secs(15));
     }
 
     #[test]

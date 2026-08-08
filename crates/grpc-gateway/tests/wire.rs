@@ -150,6 +150,7 @@ async fn send_handler_ok_and_error_arms() {
             crabka_authz::AllowAllAuthorizer,
         ))),
         codec: Arc::new(RawCodec),
+        queue: Arc::default(),
     });
 
     // Constructing the Connect router covers `lib::router`.
