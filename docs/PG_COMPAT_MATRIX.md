@@ -16,7 +16,7 @@ tools/check-pg-compat-matrix.sh
 The implemented rows reflect the current parser/executor surface. The
 authoritative PostgreSQL 18.4 core-schedule score is 31 / 231 exact in serial
 under the runner's explicit 20 MiB blocking-query memory policy, leaving 200
-failures across 160403 changed lines and 4764 hunks. Both PostgreSQL
+failures across 158467 changed lines and 4881 hunks. Both PostgreSQL
 self-checks pass 231 / 231, Gres completes all 231 files with a successful
 postflight probe and an empty infrastructure report. Parallel mode has not been
 re-measured since the type-input wave; its last certified figure was 22 / 231 at
