@@ -6,7 +6,9 @@
 The connector reads `pgoutput` changes from a logical replication slot and emits
 Kafka Connect-style records with Protobuf-framed keys and values. DELETE events
 emit a Protobuf-framed key with a `None` value, which represents a tombstone for
-compacted topics.
+compacted topics. Each record targets its schema-qualified relation name (for
+example, `public.orders`) as the Kafka topic and leaves partition selection to
+the Kafka partitioner.
 
 ## Offsets and acknowledgement
 

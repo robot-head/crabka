@@ -3,6 +3,7 @@
 //! CRD YAML manifest (see `gen_crds`).
 
 pub mod ca;
+pub mod connector;
 pub mod gres;
 pub mod gres_tenant;
 pub mod grpc_gateway;
@@ -18,6 +19,10 @@ pub mod topic;
 pub mod user;
 
 pub use ca::{CertificateAuthority, CertificateAuthorityStatus};
+pub use connector::{
+    ConnectorRuntime, ConnectorSecretKeyRef, ConnectorType, KafkaConnector, KafkaConnectorSpec,
+    KafkaConnectorStatus,
+};
 pub use gres::{
     Gres, GresActivatorSpec, GresBalancerGoal, GresBalancerGoals, GresBalancerOperationKind,
     GresBalancerPlanSnapshot, GresBalancerRegistryLayout, GresBalancerSpec, GresBalancerStatus,

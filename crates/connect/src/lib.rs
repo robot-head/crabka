@@ -28,8 +28,8 @@
 //! (`RecordFetcher` / `RecordProducer`) and the remote-storage
 //! `RemoteStorageManager` SPI; the converter layer mirrors Kafka Connect's
 //! `Converter`. All records carry an optional key, optional value (a `None`
-//! value is a tombstone), an optional timestamp, and ordered headers — see
-//! [`ConnectRecord`].
+//! value is a tombstone), optional Kafka destination routing, an optional
+//! timestamp, and ordered headers — see [`ConnectRecord`].
 
 pub mod config;
 pub mod convert;

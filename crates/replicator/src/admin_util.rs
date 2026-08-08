@@ -67,6 +67,34 @@ pub async fn ensure_topic_with_policy(
     .await
 }
 
+/// Ensure a topic with an explicit replication factor.
+///
+/// # Errors
+///
+/// Returns an error when the admin client cannot create or inspect the topic.
+pub async fn ensure_topic_with_replication_factor(
+    bootstrap: &str,
+    topic: &str,
+    partitions: i32,
+    security: Option<ClientSecurity>,
+    replication_factor: ReplicationFactor,
+) -> Result<(), String> {
+    let runtime_policy = ReplicatorRuntimePolicy {
+        data_topic_replication_factor: replication_factor,
+        ..ReplicatorRuntimePolicy::default()
+    };
+    ensure_topic_with_runtime_policy(
+        bootstrap,
+        topic,
+        partitions,
+        security,
+        ClientResourcePolicy::default(),
+        &runtime_policy,
+        replication_factor,
+    )
+    .await
+}
+
 /// Ensure a topic using explicit process and replication policy.
 pub(crate) async fn ensure_topic_with_runtime_policy(
     bootstrap: &str,
@@ -147,6 +175,31 @@ pub async fn ensure_compacted_topic_with_policy(
         topic,
         security,
         client_resource_policy,
+        &runtime_policy,
+    )
+    .await
+}
+
+/// Ensure a compacted topic with an explicit replication factor.
+///
+/// # Errors
+///
+/// Returns an error when the admin client cannot create or inspect the topic.
+pub async fn ensure_compacted_topic_with_replication_factor(
+    bootstrap: &str,
+    topic: &str,
+    security: Option<ClientSecurity>,
+    replication_factor: ReplicationFactor,
+) -> Result<(), String> {
+    let runtime_policy = ReplicatorRuntimePolicy {
+        internal_topic_replication_factor: replication_factor,
+        ..ReplicatorRuntimePolicy::default()
+    };
+    ensure_compacted_topic_with_runtime_policy(
+        bootstrap,
+        topic,
+        security,
+        ClientResourcePolicy::default(),
         &runtime_policy,
     )
     .await

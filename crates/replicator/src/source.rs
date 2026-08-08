@@ -19,7 +19,8 @@ use crate::{
 /// Wraps a [`Consumer`] and translates each [`crabka_client_consumer::ConsumerRecord`]
 /// into a [`ReplicatedRecord`] that carries the full envelope (topic, partition,
 /// offset, timestamp, headers) alongside the raw payload. The connect runtime
-/// never sees topic/partition directly — only the `ReplicatedRecord` value.
+/// receives the full `ReplicatedRecord` value, including source coordinates
+/// needed for offset-sync generation.
 pub struct SourceConsumer {
     consumer: Option<Consumer>,
     buf: VecDeque<ReplicatedRecord>,

@@ -107,6 +107,9 @@ pub struct OperatorConfig {
     /// Default gateway image used when `KafkaGrpcGateway.spec.image` is unset.
     #[arg(long, env = "DEFAULT_GATEWAY_IMAGE")]
     pub default_gateway_image: Option<String>,
+    /// Default connector worker image used when `KafkaConnector.spec.image` is unset.
+    #[arg(long, env = "DEFAULT_CONNECTOR_IMAGE")]
+    pub default_connector_image: Option<String>,
     /// Default schema-registry image used when `SchemaRegistry.spec.image` is unset.
     #[arg(long, env = "DEFAULT_SCHEMA_REGISTRY_IMAGE")]
     pub default_schema_registry_image: Option<String>,

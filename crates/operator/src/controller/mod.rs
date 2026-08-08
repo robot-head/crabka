@@ -4,6 +4,7 @@
 
 pub mod cluster_ca;
 pub mod common;
+pub mod connector;
 pub mod gres;
 pub mod gres_split_operation;
 pub mod gres_tenant;

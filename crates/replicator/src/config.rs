@@ -22,6 +22,12 @@ type RefinedReplicationFactor = GreaterI16<0>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReplicationFactor(i16);
 
+impl Default for ReplicationFactor {
+    fn default() -> Self {
+        Self(1)
+    }
+}
+
 impl ReplicationFactor {
     /// Validate a Kafka replication factor.
     ///

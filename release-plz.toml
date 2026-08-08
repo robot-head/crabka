@@ -160,6 +160,11 @@ publish = false
 release = false
 
 [[package]]
+name = "crabka-connect-worker"
+publish = false
+release = false
+
+[[package]]
 name = "crabka-protocol-codegen"
 publish = false
 release = false

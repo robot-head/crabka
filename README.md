@@ -73,11 +73,13 @@ implementation internals are not compatibility goals.
 | Schema Registry-compatible REST service | Implemented |
 | Kubernetes operator | Implemented; external listener surfaces are still maturing |
 | Rust Streams client | Partial versus the full JVM Kafka Streams library |
-| Kafka Connect-equivalent runtime | Partial; connector SPI exists and continues to evolve |
+| Kafka Connect-equivalent runtime | Partial; managed Postgres CDC workers, durable offsets, connector SPI, and `KafkaConnector` CRD are implemented |
 | ZooKeeper mode and ZooKeeper-to-KRaft migration | Out of scope |
 
 For the detailed per-KIP breakdown, see
 [docs/KIP_MATRIX.md](docs/KIP_MATRIX.md).
+
+For managed Postgres CDC setup, see [docs/connect.md](docs/connect.md).
 
 ## Install
 

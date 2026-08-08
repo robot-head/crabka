@@ -1,8 +1,8 @@
 use std::{fs, path::Path};
 
 use crate::crd::{
-    Gres, GresTenant, Kafka, KafkaGrpcGateway, KafkaNodePool, KafkaRebalance, KafkaTopic,
-    KafkaUser, SchemaRegistry,
+    Gres, GresTenant, Kafka, KafkaConnector, KafkaGrpcGateway, KafkaNodePool, KafkaRebalance,
+    KafkaTopic, KafkaUser, SchemaRegistry,
 };
 
 /// Write every CRD this operator owns into `out_dir` as
@@ -16,6 +16,7 @@ pub fn write_all(out_dir: &Path) -> anyhow::Result<()> {
     write_one::<KafkaTopic>(out_dir)?;
     write_one::<KafkaUser>(out_dir)?;
     write_one::<KafkaRebalance>(out_dir)?;
+    write_one::<KafkaConnector>(out_dir)?;
     write_one::<KafkaGrpcGateway>(out_dir)?;
     write_one::<SchemaRegistry>(out_dir)?;
     write_one::<Gres>(out_dir)?;
@@ -74,6 +75,11 @@ mod tests {
                 "crabka.io_kafkagrpcgateways.yaml",
                 "plural: kafkagrpcgateways",
                 Some("- kgg"),
+            ),
+            (
+                "crabka.io_kafkaconnectors.yaml",
+                "plural: kafkaconnectors",
+                Some("- kc"),
             ),
             (
                 "crabka.io_schemaregistries.yaml",

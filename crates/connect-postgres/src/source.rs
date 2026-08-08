@@ -292,6 +292,7 @@ impl Source<Bytes, Bytes> for PostgresWalSource {
                         continue;
                     }
 
+                    let transaction_lsn = row.commit_lsn;
                     let diff = self.relation_cache.translate(row)?;
                     let span = tracing::Span::current();
                     span.record("table", diff.table.as_str());
@@ -302,9 +303,8 @@ impl Source<Bytes, Bytes> for PostgresWalSource {
                     } else {
                         Some(self.encoder.encode_value(&diff)?)
                     };
-                    self.checkpoint = Some(diff.lsn);
-
                     let mut record = ConnectRecord::new(Some(key), value)
+                        .with_topic(diff.table.clone())
                         .with_header("crabka.pg.table", Some(Bytes::from(diff.table.clone())))
                         .with_header("crabka.pg.lsn", Some(Bytes::from(diff.lsn.to_string())))
                         .with_header(
@@ -316,6 +316,14 @@ impl Source<Bytes, Bytes> for PostgresWalSource {
                     }
 
                     self.pending.pop_front();
+                    let transaction_has_more_rows = transaction_lsn.is_some_and(|lsn| {
+                        self.pending.iter().any(|event| {
+                            matches!(event, LogicalEvent::Row(row) if row.commit_lsn == Some(lsn))
+                        })
+                    });
+                    if !transaction_has_more_rows {
+                        self.checkpoint = Some(diff.lsn);
+                    }
                     return Ok(Some(record));
                 }
             }
@@ -408,7 +416,9 @@ pub(crate) fn create_logical_slot_sql() -> &'static str {
 }
 
 pub(crate) fn advance_slot_sql() -> &'static str {
-    "SELECT pg_replication_slot_advance($1, $2::pg_lsn)"
+    // `tokio-postgres` can serialize `&str` as text, but not directly as the
+    // PostgreSQL-specific `pg_lsn` type inferred by a single cast.
+    "SELECT pg_replication_slot_advance($1, $2::text::pg_lsn)"
 }
 
 /// Run the one-time connection setup against `catalog`: resolve the database
@@ -638,14 +648,14 @@ mod sql_tests {
                 replication_slot_sql(),
                 "SELECT slot_name, plugin, slot_type, database FROM pg_replication_slots WHERE slot_name = $1",
             ),
-            (
-                "advance_slot",
-                advance_slot_sql(),
-                "SELECT pg_replication_slot_advance($1, $2::pg_lsn)",
-            ),
         ] {
             assert2::assert!(actual == expected);
         }
+    }
+
+    #[test]
+    fn advance_slot_binds_lsn_as_text_before_server_cast() {
+        check!(advance_slot_sql() == "SELECT pg_replication_slot_advance($1, $2::text::pg_lsn)");
     }
 
     #[test]
@@ -822,6 +832,8 @@ mod tests {
             (
                 record.key.as_ref().map(|key| key[0]),
                 record.value.as_ref().map(|value| value[0]),
+                record.topic.as_deref(),
+                record.partition,
                 record.timestamp,
                 header_value(&record, "crabka.pg.table"),
                 header_value(&record, "crabka.pg.lsn"),
@@ -830,6 +842,8 @@ mod tests {
             ) == (
                 Some(MAGIC),
                 Some(MAGIC),
+                Some("public.orders"),
+                None,
                 Some(1_700_000_000_000),
                 Bytes::from_static(b"public.orders"),
                 Bytes::from_static(b"0/2A"),
@@ -861,6 +875,8 @@ mod tests {
             (
                 record.key.is_some(),
                 record.value.is_some(),
+                record.topic.as_deref(),
+                record.partition,
                 record.timestamp,
                 header_value(&record, "crabka.pg.table"),
                 header_value(&record, "crabka.pg.lsn"),
@@ -868,6 +884,8 @@ mod tests {
             ) == (
                 true,
                 false,
+                Some("public.orders"),
+                None,
                 None,
                 Bytes::from_static(b"public.orders"),
                 Bytes::from_static(b"0/2B"),
@@ -1079,6 +1097,7 @@ mod tests {
             .await
             .expect("first poll succeeds")
             .expect("first row emits");
+        check!(source.checkpoint().is_none());
         let second = source
             .poll()
             .await

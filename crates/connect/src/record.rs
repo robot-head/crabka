@@ -19,6 +19,11 @@ use crate::ids::{PartitionMap, PositionMap};
 /// and a `None` value is a tombstone (KIP-87 / compacted-topic delete).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ConnectRecord<K, V> {
+    /// The destination Kafka topic, or `None` when the sink supplies it.
+    pub topic: Option<String>,
+    /// The destination Kafka partition, or `None` to use the sink's
+    /// partitioner.
+    pub partition: Option<i32>,
     /// The record key, or `None` for a null key.
     pub key: Option<K>,
     /// The record value, or `None` for a tombstone.
@@ -36,11 +41,27 @@ impl<K, V> ConnectRecord<K, V> {
     /// A record carrying just a key and value, with no timestamp or headers.
     pub fn new(key: Option<K>, value: Option<V>) -> Self {
         Self {
+            topic: None,
+            partition: None,
             key,
             value,
             timestamp: None,
             headers: Vec::new(),
         }
+    }
+
+    /// Set the destination Kafka topic.
+    #[must_use]
+    pub fn with_topic(mut self, topic: impl Into<String>) -> Self {
+        self.topic = Some(topic.into());
+        self
+    }
+
+    /// Set the destination Kafka partition, bypassing the sink's partitioner.
+    #[must_use]
+    pub fn with_partition(mut self, partition: i32) -> Self {
+        self.partition = Some(partition);
+        self
     }
 
     /// Set the record timestamp (epoch millis).
@@ -164,22 +185,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builder_sets_timestamp_and_headers() {
+    fn builder_sets_destination_timestamp_and_headers() {
         let r = ConnectRecord::new(
             Some(Bytes::from_static(b"k")),
             Some(Bytes::from_static(b"v")),
         )
+        .with_topic("orders")
+        .with_partition(3)
         .with_timestamp(42)
         .with_header("h", Some(Bytes::from_static(b"hv")));
         check!(
-            (
-                r.timestamp,
-                r.headers
-                    .iter()
-                    .map(|header| (header.key.as_str(), header.value.clone()))
-                    .collect::<Vec<_>>(),
-            ) == (Some(42), vec![("h", Some(Bytes::from_static(b"hv")))])
+            r == ConnectRecord {
+                topic: Some("orders".to_owned()),
+                partition: Some(3),
+                key: Some(Bytes::from_static(b"k")),
+                value: Some(Bytes::from_static(b"v")),
+                timestamp: Some(42),
+                headers: vec![Header {
+                    key: "h".to_owned(),
+                    value: Some(Bytes::from_static(b"hv")),
+                }],
+            }
         );
+    }
+
+    #[test]
+    fn new_and_default_leave_destination_unset() {
+        let records: [ConnectRecord<Bytes, Bytes>; 2] =
+            [ConnectRecord::new(None, None), ConnectRecord::default()];
+
+        for record in records {
+            check!((record.topic, record.partition) == (None, None));
+        }
     }
 
     #[test]
